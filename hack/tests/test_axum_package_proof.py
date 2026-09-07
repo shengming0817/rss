@@ -112,3 +112,102 @@ class ProtocolIsolation(unittest.TestCase):
             PROOF.verify_example_failure(0, guidance)
         with self.assertRaisesRegex(ValueError, "must fail"):
             PROOF.verify_example_failure(1, "unrelated failure")
+
+
+class PlatformExecution(unittest.TestCase):
+    @staticmethod
+    def receipt():
+        return {"completed": 42, "deadlineExceeded": True, "handlerStarted": True,
+                "foreignAdmissionRejected": True, "drainingRejected": True,
+                "descriptorMismatchRejected": True, "duplicateModule": "inventory",
+                "duplicateContract": "example.add"}
+
+    def test_only_successful_behavior_receipt_passes(self):
+        import json
+        good = self.receipt()
+        self.assertEqual(PROOF.platform_receipt(0, json.dumps(good)), good)
+        for code, output in [(1, json.dumps(good)), (0, "passed"), (0, "{}"),
+                             (0, json.dumps({**good, "deadlineExceeded": False})),
+                             (0, json.dumps({**good, "completed": True})),
+                             (0, json.dumps({**good, "extra": True}))]:
+            with self.subTest(code=code, output=output), self.assertRaises(ValueError):
+                PROOF.platform_receipt(code, output)
+
+    def test_platform_manifest_supports_real_run_without_axum(self):
+        import tomllib
+        versions = {"rss-contract": "0.1.0", "rss-platform": "0.3.0", "rss-request-context": "0.1.0"}
+        manifest = tomllib.loads(PROOF.consumer_manifest("platform", versions, []))
+        self.assertEqual(set(manifest["dependencies"]), {*versions, "tokio", "serde_json"})
+        self.assertTrue({"rt", "macros", "time"} <= set(manifest["dependencies"]["tokio"]["features"]))
+
+    def test_scenario_is_the_readme_source(self):
+        PROOF.platform_source()
+
+    def test_platform_runs_and_never_accepts_a_compile_only_result(self):
+        import json
+        from unittest.mock import patch
+        import subprocess
+        with patch.object(PROOF.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps(self.receipt()), "")) as run:
+            self.assertEqual(PROOF.run_platform(Path("consumer"), {}), self.receipt())
+            self.assertEqual(run.call_args.args[0], ["cargo", "run", "--locked", "--offline", "--quiet"])
+        with patch.object(PROOF.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "failed")):
+            with self.assertRaisesRegex(ValueError, "execution failed"):
+                PROOF.run_platform(Path("consumer"), {})
+
+    def test_revision_and_scenario_drift_are_rejected(self):
+        from unittest.mock import patch
+        with patch.object(PROOF.subprocess, "check_output", return_value="different"):
+            with self.assertRaisesRegex(ValueError, "revision mismatch"):
+                PROOF.platform_source("candidate")
+        with patch.object(PROOF.subprocess, "check_output", side_effect=["candidate", b"changed"]):
+            with self.assertRaisesRegex(ValueError, "differs from candidate"):
+                PROOF.platform_source("candidate")
+
+    def test_readme_drift_is_detected_and_sync_is_exact(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            scenario = root / PROOF.SCENARIO / "src/main.rs"
+            scenario.parent.mkdir(parents=True)
+            scenario.write_text("fn main() {}\n")
+            readme = root / "crates/platform/README.md"
+            readme.parent.mkdir(parents=True)
+            readme.write_text(PROOF.README_START + "\nold\n" + PROOF.README_END)
+            with patch.object(PROOF, "ROOT", root):
+                with self.assertRaisesRegex(ValueError, "README drift"):
+                    PROOF.platform_source()
+                PROOF.platform_source(sync=True)
+                self.assertEqual(PROOF.platform_source(), scenario.read_text())
+
+    def test_resolution_cannot_escape_to_source_or_registry_rss(self):
+        consumer = Path("/isolated/consumer")
+        allowed = {"rss-platform": Path("/isolated/artifacts/rss-platform/Cargo.toml")}
+        row = {"name": "rss-platform", "source": None, "manifest_path": str(allowed["rss-platform"])}
+        PROOF.verify_platform_resolution({"packages": [row]}, consumer, allowed)
+        for changed in [{**row, "manifest_path": "/workspace/crates/platform/Cargo.toml"},
+                        {**row, "source": "registry+crates.io"}, {**row, "name": "rss-internal"}]:
+            with self.subTest(row=changed), self.assertRaisesRegex(ValueError, "closure"):
+                PROOF.verify_platform_resolution({"packages": [changed]}, consumer, allowed)
+
+    def test_platform_rejects_other_aggregate_artifacts(self):
+        consumer = Path("/isolated/consumer")
+        names = ["rss-contract", "rss-platform", "rss-request-context", "rss-axum", "rss-runtime", "rss-redact", "rss-redact-derive"]
+        allowed = {name: Path("/isolated/artifacts") / name / "Cargo.toml" for name in names}
+        for name in names[3:]:
+            facts = {"packages": [{"name": name, "source": None, "manifest_path": str(allowed[name])}]}
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "closure"):
+                PROOF.verify_platform_resolution(facts, consumer, allowed)
+
+    def test_source_does_not_depend_on_aggregate_release_metadata(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp, patch.object(PROOF, "ROOT", Path(temp)), \
+                patch("sys.argv", ["proof", "--source"]), \
+                patch.object(PROOF, "platform_source", return_value="fn main() {}"), \
+                patch.object(PROOF, "source_consumer", return_value=self.receipt()) as consumer, \
+                patch.object(PROOF, "closure", side_effect=RuntimeError("unrelated release failure")):
+            with redirect_stdout(StringIO()):
+                PROOF.main()
+            consumer.assert_called_once()

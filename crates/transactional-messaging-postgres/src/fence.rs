@@ -1,10 +1,8 @@
 //! Common execution admission, held by PostgreSQL through commit/rollback.
 use crate::{PgError, PgRuntime, transaction::Profile};
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
-use rss_transactional_messaging::{
-    fence::ExecutionBinding,
-    policy::{AbsoluteDeadline, within},
-};
+use rss_transactional_messaging::{fence::ExecutionBinding, policy::within};
 use sqlx::PgConnection;
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -34,7 +32,7 @@ pub(crate) async fn setup(
 pub(crate) async fn probe(
     runtime: &PgRuntime,
     profile: Profile,
-    cutoff: AbsoluteDeadline,
+    cutoff: Deadline,
 ) -> Result<(), PgError> {
     let operator = false;
     #[cfg(feature = "recovery")]

@@ -3,12 +3,11 @@ use crate::PgConfig;
 use futures::future::BoxFuture;
 use rss_redact::RedactedSource;
 use rss_request_context::TenantId;
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
-    policy::{
-        AbsoluteDeadline, Clock, ExecutionTimer, MonotonicInstant, OperationDeadline, within,
-    },
+    policy::{OperationDeadline, within},
     transaction::{LocalTxAttempt, LocalTxDeadlineStage},
 };
 use sqlx::{
@@ -231,25 +230,25 @@ impl From<MessagingError> for PgError {
 
 // Internal type erasure keeps clock injection independent of public store/effect type parameters.
 trait Timer: Send + Sync {
-    fn now(&self) -> MonotonicInstant;
-    fn sleep(&self, deadline: AbsoluteDeadline) -> BoxFuture<'_, ()>;
+    fn observe(&self) -> std::time::Instant;
+    fn sleep(&self, deadline: Deadline) -> BoxFuture<'_, ()>;
 }
 impl<C: ExecutionTimer> Timer for C {
-    fn now(&self) -> MonotonicInstant {
+    fn observe(&self) -> std::time::Instant {
         Clock::now(self)
     }
-    fn sleep(&self, deadline: AbsoluteDeadline) -> BoxFuture<'_, ()> {
+    fn sleep(&self, deadline: Deadline) -> BoxFuture<'_, ()> {
         Box::pin(self.sleep_until(deadline))
     }
 }
 pub(crate) struct PgTimer(Arc<dyn Timer>);
 impl Clock for PgTimer {
-    fn now(&self) -> MonotonicInstant {
-        self.0.now()
+    fn now(&self) -> std::time::Instant {
+        self.0.observe()
     }
 }
 impl ExecutionTimer for PgTimer {
-    fn sleep_until(&self, deadline: AbsoluteDeadline) -> impl Future<Output = ()> + Send {
+    fn sleep_until(&self, deadline: Deadline) -> impl Future<Output = ()> + Send {
         self.0.sleep(deadline)
     }
 }
@@ -257,7 +256,7 @@ impl ExecutionTimer for PgTimer {
 /// One private I/O watchdog and redacted phase diagnostic shared by all transaction owners.
 pub(crate) async fn stage<T: Send, F>(
     timer: &PgTimer,
-    cutoff: AbsoluteDeadline,
+    cutoff: Deadline,
     phase: LocalTxDeadlineStage,
     future: F,
 ) -> Result<T, PgError>
@@ -325,7 +324,7 @@ impl PgRuntime {
     ) -> Result<Self, PgError> {
         config.validate()?;
         let timer = PgTimer(Arc::new(timer));
-        let cutoff = AbsoluteDeadline::from_timeout(&timer, config.acquire_timeout)
+        let cutoff = Deadline::from_timeout(&timer, config.acquire_timeout)
             .map_err(|_| PgError::invariant())?;
         let pool = within(&timer, cutoff, |_| async {
             PgPoolOptions::new()
@@ -352,7 +351,11 @@ impl PgRuntime {
             }
             #[cfg(feature = "recovery")]
             if profile == Profile::Archive {
-                crate::archive::check(&runtime, cutoff.operation(&runtime.timer)).await?;
+                crate::archive::check(
+                    &runtime,
+                    OperationDeadline::from_cutoff(cutoff, &runtime.timer),
+                )
+                .await?;
                 return Ok(());
             }
             let recovery_operator = profile == Profile::Recovery;
@@ -376,7 +379,12 @@ impl PgRuntime {
             }
             #[cfg(feature = "recovery")]
             if recovery_operator {
-                crate::recovery::check(&runtime, true, cutoff.operation(&runtime.timer)).await?;
+                crate::recovery::check(
+                    &runtime,
+                    true,
+                    OperationDeadline::from_cutoff(cutoff, &runtime.timer),
+                )
+                .await?;
             }
             Ok(())
         }
@@ -443,7 +451,7 @@ impl PgRuntime {
             ) -> BoxFuture<'a, Result<T, PgError>>
             + Send,
     {
-        let cutoff = match AbsoluteDeadline::from_timeout(&self.timer, deadline.timeout()) {
+        let cutoff = match Deadline::from_timeout(&self.timer, deadline.timeout()) {
             Ok(value) => value,
             Err(_) => return LocalTxAttempt::not_started(PgError::invariant()),
         };
@@ -479,7 +487,11 @@ impl PgRuntime {
             Ok(result) => result,
             Err(error) => return LocalTxAttempt::commit_unknown(error.into()),
         };
-        if cutoff.remaining(&self.timer).is_zero() {
+        if cutoff
+            .remaining(self.timer.now())
+            .unwrap_or_default()
+            .is_zero()
+        {
             return LocalTxAttempt::commit_unknown(PgError::classified(
                 MessagingErrorKind::DeadlineElapsed,
                 std::io::Error::other("transaction deadline elapsed"),
@@ -562,7 +574,7 @@ impl PgRuntime {
     pub(crate) async fn relay<T: Send, F>(
         &self,
         tenant: TenantId,
-        cutoff: AbsoluteDeadline,
+        cutoff: Deadline,
         operation: F,
     ) -> Result<T, PgError>
     where
@@ -583,7 +595,11 @@ impl PgRuntime {
         )
         .await?;
         let result = within(&self.timer, cutoff, |_| async {
-            let millis = cutoff.remaining(&self.timer).as_millis().max(1);
+            let millis = cutoff
+                .remaining(self.timer.now())
+                .unwrap_or_default()
+                .as_millis()
+                .max(1);
             sqlx::query("SELECT set_config('statement_timeout', $1, true)")
                 .bind(format!("{millis}ms"))
                 .execute(transaction.connection())
@@ -646,7 +662,7 @@ impl rss_runtime::ManagedResource for PgRuntime {
 pub struct PgTransaction<'tx> {
     pub(crate) connection: &'tx mut PgConnection,
     tenant: TenantId,
-    cutoff: AbsoluteDeadline,
+    cutoff: Deadline,
     timer: &'tx PgTimer,
     owner: &'tx PgRuntime,
 }
@@ -654,7 +670,7 @@ impl PgTransaction<'_> {
     pub(crate) fn new<'a>(
         connection: &'a mut PgConnection,
         tenant: TenantId,
-        cutoff: AbsoluteDeadline,
+        cutoff: Deadline,
         owner: &'a PgRuntime,
     ) -> PgTransaction<'a> {
         PgTransaction {
@@ -675,7 +691,12 @@ impl PgTransaction<'_> {
         self.setup_context(true).await
     }
     async fn setup_context(&mut self, lock: bool) -> Result<(), PgError> {
-        let millis = self.cutoff.remaining(self.timer).as_millis().max(1);
+        let millis = self
+            .cutoff
+            .remaining(self.timer.now())
+            .unwrap_or_default()
+            .as_millis()
+            .max(1);
         stage(self.timer, self.cutoff, LocalTxDeadlineStage::Setup,
             sqlx::query("SELECT set_config('rss.tenant_id', $1, true), set_config('statement_timeout', $2, true)")
                 .bind(self.tenant.to_string()).bind(format!("{millis}ms")).execute(&mut *self.connection)).await?;
@@ -690,7 +711,7 @@ impl PgTransaction<'_> {
     /// Current remaining budget, never a fresh timeout.
     #[must_use]
     pub fn deadline(&self) -> OperationDeadline {
-        self.cutoff.operation(self.timer)
+        OperationDeadline::from_cutoff(self.cutoff, self.timer)
     }
     /// Borrow the connection for a bounded SQL operation. No lifecycle authority is transferred.
     pub async fn with_connection<T: Send, F>(&mut self, operation: F) -> Result<T, PgError>
@@ -787,14 +808,23 @@ mod tests {
     async fn archive_probe_preserves_execution_failure() -> Result<(), Box<dyn std::error::Error>> {
         struct Frozen;
         impl Clock for Frozen {
-            fn now(&self) -> rss_transactional_messaging::policy::MonotonicInstant {
-                rss_transactional_messaging::policy::MonotonicInstant::from_elapsed(
-                    std::time::Duration::ZERO,
-                )
+            fn now(&self) -> std::time::Instant {
+                {
+                    #[allow(
+                        clippy::disallowed_methods,
+                        reason = "the fixed injected test clock owns its epoch"
+                    )]
+                    fn epoch() -> std::time::Instant {
+                        std::time::Instant::now()
+                    }
+                    static ORIGIN: std::sync::OnceLock<std::time::Instant> =
+                        std::sync::OnceLock::new();
+                    *ORIGIN.get_or_init(epoch)
+                }
             }
         }
         impl ExecutionTimer for Frozen {
-            async fn sleep_until(&self, _: AbsoluteDeadline) {
+            async fn sleep_until(&self, _: Deadline) {
                 std::future::pending::<()>().await
             }
         }
@@ -814,8 +844,10 @@ mod tests {
             #[cfg(feature = "integration")]
             fault: std::sync::atomic::AtomicU8::new(0),
         };
-        let deadline = AbsoluteDeadline::from_timeout(&runtime.timer, std::time::Duration::ZERO)?
-            .operation(&runtime.timer);
+        let deadline = OperationDeadline::from_cutoff(
+            Deadline::from_timeout(&runtime.timer, std::time::Duration::ZERO)?,
+            &runtime.timer,
+        );
         let result = crate::archive::check(&runtime, deadline).await;
         assert!(
             matches!(
@@ -827,9 +859,10 @@ mod tests {
             ),
             "{result:?}"
         );
-        let deadline =
-            AbsoluteDeadline::from_timeout(&runtime.timer, std::time::Duration::from_secs(1))?
-                .operation(&runtime.timer);
+        let deadline = OperationDeadline::from_cutoff(
+            Deadline::from_timeout(&runtime.timer, std::time::Duration::from_secs(1))?,
+            &runtime.timer,
+        );
         let result = crate::archive::check(&runtime, deadline).await;
         assert!(
             matches!(

@@ -6,35 +6,39 @@ use rdkafka::{
 };
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::TenantId;
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::{message::*, policy::*};
 use rss_transactional_messaging_kafka::*;
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
-pub struct Timer(Instant);
+use std::{collections::BTreeMap, time::Duration};
+pub struct Timer;
 impl Timer {
     #[allow(clippy::disallowed_methods)]
     // reason: injected test clock owns its real monotonic source.
     pub fn new() -> Self {
-        Self(Instant::now())
+        Self
     }
 }
 impl Clock for Timer {
     #[allow(clippy::disallowed_methods)]
     // reason: concrete injected clock reads its monotonic source.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.elapsed())
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 impl ExecutionTimer for Timer {
-    async fn sleep_until(&self, end: AbsoluteDeadline) {
-        tokio::time::sleep(end.remaining(self)).await;
+    async fn sleep_until(&self, end: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep(end.remaining(self.now()).unwrap_or_default()).await;
+        })
+        .await;
     }
 }
 pub fn deadline(duration: Duration) -> anyhow::Result<OperationDeadline> {
     let clock = Timer::new();
-    Ok(AbsoluteDeadline::from_timeout(&clock, duration)?.operation(&clock))
+    Ok(OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&clock, duration)?,
+        &clock,
+    ))
 }
 pub fn message(id: &str) -> anyhow::Result<MessageEnvelope<Vec<u8>>> {
     Ok(MessageEnvelope::new(
@@ -104,8 +108,8 @@ pub async fn read_records(
         consumer.assign(&assignments)?;
         let timer = Timer::new();
         let mut records = Vec::new();
-        let end = AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(8))?;
-        while !end.remaining(&timer).is_zero() {
+        let end = Deadline::from_timeout(&timer, Duration::from_secs(8))?;
+        while !end.remaining(timer.now()).unwrap_or_default().is_zero() {
             if let Some(record) = consumer.poll(Duration::from_millis(100)) {
                 let record = record?;
                 if record.headers().is_some_and(|hs| {

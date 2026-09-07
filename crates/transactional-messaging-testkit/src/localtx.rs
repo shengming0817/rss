@@ -1,8 +1,9 @@
 //! Local transaction settlement and no-replay conformance.
 
+use rss_request_context::ExecutionTimer;
 use std::future::Future;
 
-use rss_transactional_messaging::policy::{ExecutionBudget, ExecutionTimer};
+use rss_transactional_messaging::policy::ExecutionBudget;
 use rss_transactional_messaging::transaction::{FailureClass, LocalTxAttempt};
 
 use crate::{ConformanceError, suite_deadline, within_budget};

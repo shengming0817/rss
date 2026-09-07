@@ -1,5 +1,6 @@
 use super::fence_fixture;
 use super::{Effect, Timer, binding, deadline, message};
+use rss_request_context::Deadline;
 use rss_transactional_messaging::{inbox::*, message::MessageEnvelope, policy::*, transaction::*};
 use rss_transactional_messaging_postgres::*;
 use rss_transactional_messaging_testkit::memory::FakeClock;
@@ -202,9 +203,10 @@ async fn cancellation(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::Result
         let mut operation = Box::pin(async move {
             let tenant = message(mode).metadata().tenant_id();
             let clock = operation_clock;
-            let bound = AbsoluteDeadline::from_timeout(&clock, Duration::from_millis(150))
-                .expect("deadline")
-                .operation(&clock);
+            let bound = OperationDeadline::from_cutoff(
+                Deadline::from_timeout(&clock, Duration::from_millis(150)).expect("deadline"),
+                &clock,
+            );
             task_runtime.local_tx(tenant, bound, move |tx| Box::pin(async move {
                 let backend = tx.with_connection(move |connection| Box::pin(async move {
                     sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,$2)").bind(tenant.to_string()).bind(mode).execute(&mut *connection).await?;
@@ -229,7 +231,9 @@ async fn cancellation(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::Result
         if mode == "cancel-effect" {
             drop(operation);
         } else {
-            clock.advance(Duration::from_millis(150));
+            clock
+                .advance(Duration::from_millis(150))
+                .expect("fixture time fits");
             let status = tokio::time::timeout(Duration::from_secs(5), operation)
                 .await
                 .expect("transaction must observe deadline")

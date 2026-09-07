@@ -1,14 +1,11 @@
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ExecutionTimer, MonotonicInstant,
-};
-
 pub struct AdvancingTimer {
     now: Mutex<Duration>,
-    sleeps: Mutex<Vec<Duration>>,
+    sleeps: Mutex<Vec<std::time::Instant>>,
     wake: tokio::sync::watch::Sender<Duration>,
 }
 
@@ -30,7 +27,10 @@ impl AdvancingTimer {
     }
 
     pub fn registered(&self, deadline: Duration) -> bool {
-        self.sleeps.lock().expect("sleeps").contains(&deadline)
+        self.sleeps
+            .lock()
+            .expect("sleeps")
+            .contains(&(epoch() + deadline))
     }
 
     pub async fn wait_registered(&self, deadline: Duration) {
@@ -41,20 +41,17 @@ impl AdvancingTimer {
 }
 
 impl Clock for AdvancingTimer {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(*self.now.lock().expect("clock"))
+    fn now(&self) -> std::time::Instant {
+        epoch() + *self.now.lock().expect("clock")
     }
 }
 
 impl ExecutionTimer for AdvancingTimer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
+    async fn sleep_until(&self, deadline: Deadline) {
         let mut wake = self.wake.subscribe();
-        self.sleeps
-            .lock()
-            .expect("sleeps")
-            .push(deadline.instant().elapsed());
-        while !deadline.remaining(self).is_zero() {
-            wake.changed()
+        self.sleeps.lock().expect("sleeps").push(deadline.instant());
+        while !deadline.remaining(self.now()).unwrap_or_default().is_zero() {
+            tokio::task::unconstrained(wake.changed())
                 .await
                 .expect("advancing timer sender remains live");
         }
@@ -76,13 +73,13 @@ impl ScriptedTimer {
 }
 
 impl Clock for ScriptedTimer {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(Duration::ZERO)
+    fn now(&self) -> std::time::Instant {
+        epoch()
     }
 }
 
 impl ExecutionTimer for ScriptedTimer {
-    async fn sleep_until(&self, _deadline: AbsoluteDeadline) {
+    async fn sleep_until(&self, _deadline: Deadline) {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if !self.ready_calls.contains(&call) {
             std::future::pending().await
@@ -100,13 +97,13 @@ pub async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
 pub struct BorrowedTimer<'a, T>(pub &'a T);
 
 impl<T: Clock> Clock for BorrowedTimer<'_, T> {
-    fn now(&self) -> MonotonicInstant {
+    fn now(&self) -> std::time::Instant {
         self.0.now()
     }
 }
 
 impl<T: ExecutionTimer> ExecutionTimer for BorrowedTimer<'_, T> {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
+    async fn sleep_until(&self, deadline: Deadline) {
         self.0.sleep_until(deadline).await;
     }
 }
@@ -125,4 +122,26 @@ pub async fn join_worker(
     result
         .expect("worker completes within host budget")
         .expect("worker does not panic")
+}
+
+#[allow(clippy::disallowed_methods)]
+// reason: the injected deterministic fixtures share one fixed Instant origin.
+pub fn epoch() -> std::time::Instant {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *ORIGIN.get_or_init(std::time::Instant::now)
+}
+
+/// Find the platform's representational boundary to exercise real checked-add overflow.
+pub fn last_instant() -> std::time::Instant {
+    let mut instant = epoch();
+    for make_duration in [Duration::from_secs, Duration::from_nanos] {
+        let mut step = 1_u64 << 63;
+        while step != 0 {
+            if let Some(next) = instant.checked_add(make_duration(step)) {
+                instant = next;
+            }
+            step >>= 1;
+        }
+    }
+    instant
 }

@@ -1,3 +1,4 @@
+use rss_request_context::Deadline;
 mod dr;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
@@ -53,7 +54,7 @@ impl Observer for Observe {
 }
 fn deadline() -> OperationDeadline {
     let t = Timer::new();
-    t.cutoff().operation(&t)
+    OperationDeadline::from_cutoff(t.cutoff(), &t)
 }
 fn settled<T, E: std::fmt::Display>(
     v: rss_transactional_messaging::transaction::LocalTxAttempt<T, E>,
@@ -1116,18 +1117,22 @@ async fn lease_budget(
     let id = seed(owner, "lease-budget").await?;
     let r = request(id, 1, Hold::Release).await?;
     let clock = Timer::new();
-    let cutoff = AbsoluteDeadline::from_timeout(&clock, Duration::from_secs(40))?;
-    settled(repository.claim(&r, cutoff.operation(&clock)).await)?;
+    let cutoff = Deadline::from_timeout(&clock, Duration::from_secs(40))?;
+    settled(
+        repository
+            .claim(&r, OperationDeadline::from_cutoff(cutoff, &clock))
+            .await,
+    )?;
     let remaining:f64=sqlx::query_scalar("SELECT extract(epoch FROM lease_until-clock_timestamp())::double precision FROM rss_transactional_messaging.archive_jobs WHERE operation_id=$1::uuid").bind(r.request().operation().to_string()).fetch_one(owner).await?;
     assert!(
         remaining > 39.0,
         "lease should cover the accepted 40-second operation, got {remaining}"
     );
     let other = request(seed(owner, "lease-too-long").await?, 1, Hold::Release).await?;
-    let cutoff = AbsoluteDeadline::from_timeout(&clock, Duration::from_secs(301))?;
+    let cutoff = Deadline::from_timeout(&clock, Duration::from_secs(301))?;
     assert_eq!(
         repository
-            .claim(&other, cutoff.operation(&clock))
+            .claim(&other, OperationDeadline::from_cutoff(cutoff, &clock))
             .await
             .fold(|_| None, Some, |_| None, |_| None, |_| None, |_| None),
         Some(Error::Invalid)

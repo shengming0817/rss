@@ -1,3 +1,4 @@
+use rss_request_context::Deadline;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
 #[path = "recovery/support.rs"]
@@ -38,7 +39,7 @@ impl IngressValidator<Vec<u8>> for Validator {
 fn deadline() -> OperationDeadline {
     {
         let clock = Timer::new();
-        clock.cutoff().operation(&clock)
+        OperationDeadline::from_cutoff(clock.cutoff(), &clock)
     }
 }
 fn binding(message: &MessageEnvelope<Vec<u8>>) -> anyhow::Result<VerifiedConsumerBinding> {
@@ -667,8 +668,10 @@ async fn concurrent_replay(
     .await?;
     store.inject_next_transaction_fault(PgTransactionFault::CommitPending);
     let clock = Timer::new();
-    let timeout =
-        AbsoluteDeadline::from_timeout(&clock, Duration::from_millis(50))?.operation(&clock);
+    let timeout = OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&clock, Duration::from_millis(50))?,
+        &clock,
+    );
     let result = store.mutate(&pending, timeout).await;
     assert_eq!(
         result.fold(

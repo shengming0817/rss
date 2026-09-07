@@ -1,11 +1,12 @@
 //! Outbox identity, lease, publication and settlement conformance.
 
+use rss_request_context::ExecutionTimer;
 use std::future::Future;
 
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::message::MessageId;
 use rss_transactional_messaging::outbox::{AppendOutcome, OutboxDisposition, OutboxLeaseStatus};
-use rss_transactional_messaging::policy::{ExecutionBudget, ExecutionTimer};
+use rss_transactional_messaging::policy::ExecutionBudget;
 
 use crate::{ConformanceError, suite_deadline, within_budget};
 

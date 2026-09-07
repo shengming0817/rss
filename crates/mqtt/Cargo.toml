@@ -14,12 +14,12 @@ workspace = true
 
 [features]
 default = []
-consumer = ["rss-transactional-messaging/consumer", "dep:futures", "dep:rss-contract", "dep:rss-request-context", "dep:rss-diag-context"]
+consumer = ["rss-transactional-messaging/consumer", "dep:futures", "dep:rss-contract", "dep:rss-diag-context"]
 
 [dependencies]
 futures = { workspace = true, optional = true }
 rss-contract = { workspace = true, optional = true }
-rss-request-context = { workspace = true, optional = true }
+rss-request-context.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0", optional = true }
 backon.workspace = true
 rumqttc-v5-next.workspace = true

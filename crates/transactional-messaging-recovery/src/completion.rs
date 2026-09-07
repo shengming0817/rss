@@ -1,7 +1,8 @@
 //! One owner for bounded execution, exact receipt readback and settlement observation.
 use crate::AttemptStatus;
+use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::{
-    policy::{ExecutionDeadlines, ExecutionTimer, OperationDeadline, within},
+    policy::{ExecutionDeadlines, OperationDeadline, within},
     transaction::LocalTxAttempt,
 };
 
@@ -18,7 +19,12 @@ where
     A: Future<Output = LocalTxAttempt<T, E>> + Send,
     R: Future<Output = Result<Option<T>, E>> + Send,
 {
-    let attempt = if deadlines.operation().remaining(clock).is_zero() {
+    let attempt = if deadlines
+        .operation()
+        .remaining(clock.now())
+        .unwrap_or_default()
+        .is_zero()
+    {
         LocalTxAttempt::not_started(expired)
     } else {
         match within(clock, deadlines.operation(), apply).await {
@@ -73,22 +79,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rss_transactional_messaging::policy::{
-        AbsoluteDeadline, Clock, ExecutionBudget, MonotonicInstant,
-    };
+    use rss_request_context::{Clock, Deadline};
+    use rss_transactional_messaging::policy::ExecutionBudget;
     use std::{
         cell::RefCell,
         sync::atomic::{AtomicUsize, Ordering},
-        time::Duration,
     };
     struct Timer;
     impl Clock for Timer {
-        fn now(&self) -> MonotonicInstant {
-            MonotonicInstant::from_elapsed(Duration::ZERO)
+        fn now(&self) -> std::time::Instant {
+            {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "the fixed injected test clock owns its epoch"
+                )]
+                fn epoch() -> std::time::Instant {
+                    std::time::Instant::now()
+                }
+                static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                *ORIGIN.get_or_init(epoch)
+            }
         }
     }
     impl ExecutionTimer for Timer {
-        async fn sleep_until(&self, _: AbsoluteDeadline) {
+        async fn sleep_until(&self, _: Deadline) {
             std::future::pending::<()>().await;
         }
     }

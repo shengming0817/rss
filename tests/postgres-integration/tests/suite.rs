@@ -1,4 +1,6 @@
 #![allow(clippy::expect_used, clippy::panic)]
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
+use rss_transactional_messaging::policy::OperationDeadline;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
 // reason: integration fixtures fail loudly on invalid static identities and test setup.
@@ -6,18 +8,13 @@ mod adversarial;
 mod conformance;
 mod examples;
 mod lifecycle;
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ExecutionTimer, MonotonicInstant,
-};
+
 use rss_transactional_messaging_postgres::{PgConfig, PgPassword, PgRuntime};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 #[derive(Clone)]
-struct Timer(Instant);
+struct Timer;
 fn outbox_budget(ttl: Duration) -> rss_transactional_messaging::policy::DeliveryBudget {
     let part =
         Duration::from_millis(u64::try_from(ttl.as_millis() / 4).expect("bounded fixture TTL"));
@@ -28,19 +25,22 @@ impl Timer {
     #[allow(clippy::disallowed_methods)]
     // reason: this is the injected real-time clock's single constructor, not provider code.
     fn new() -> Self {
-        Self(Instant::now())
+        Self
     }
 }
 impl Clock for Timer {
     #[allow(clippy::disallowed_methods)]
     // reason: the concrete test clock must read its monotonic source to implement Clock.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.elapsed())
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 impl ExecutionTimer for Timer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        tokio::time::sleep(deadline.remaining(self)).await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep(deadline.remaining(self.now()).unwrap_or_default()).await;
+        })
+        .await;
     }
 }
 
@@ -263,9 +263,10 @@ fn binding(
 }
 fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
     let clock = Timer::new();
-    AbsoluteDeadline::from_timeout(&clock, Duration::from_secs(5))
-        .expect("deadline")
-        .operation(&clock)
+    OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&clock, Duration::from_secs(5)).expect("deadline"),
+        &clock,
+    )
 }
 
 async fn localtx_faults(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
@@ -404,9 +405,10 @@ async fn outbox_roundtrip(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
     ));
     let clock = Timer::new();
     let deadline = || {
-        AbsoluteDeadline::from_timeout(&clock, Duration::from_secs(5))
-            .expect("deadline")
-            .operation(&clock)
+        OperationDeadline::from_cutoff(
+            Deadline::from_timeout(&clock, Duration::from_secs(5)).expect("deadline"),
+            &clock,
+        )
     };
     let append_store = store.clone();
     runtime

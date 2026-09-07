@@ -1,6 +1,7 @@
 use crate::{Action, AuthorizedMutation, AuthorizedQuery, Error, Page, Receipt};
+use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::{
-    policy::{ExecutionDeadlines, ExecutionTimer, OperationDeadline},
+    policy::{ExecutionDeadlines, OperationDeadline},
     transaction::LocalTxAttempt,
 };
 

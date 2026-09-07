@@ -3576,6 +3576,8 @@ version = "0.3.0"
 dependencies = [
  "rss-contract",
  "rss-request-context",
+ "serde_json",
+ "thiserror",
  "tokio",
  "trybuild",
 ]
@@ -3670,6 +3672,7 @@ dependencies = [
 name = "rss-request-context"
 version = "0.1.0"
 dependencies = [
+ "thiserror",
  "uuid",
 ]
 
@@ -3861,6 +3864,7 @@ dependencies = [
  "futures",
  "rss-contract",
  "rss-diag-context",
+ "rss-platform",
  "rss-request-context",
  "rss-runtime",
  "rss-transactional-messaging",

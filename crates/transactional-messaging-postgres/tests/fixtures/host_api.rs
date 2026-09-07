@@ -1,5 +1,6 @@
+use rss_request_context::{ExecutionTimer};
 use adapter::{PgConfig, PgError, PgRuntime};
-use message_core::{policy::{ExecutionTimer, OperationDeadline}, transaction::LocalTxAttempt};
+use message_core::{policy::{OperationDeadline}, transaction::LocalTxAttempt};
 use rss_request_context::TenantId;
 
 pub async fn own_host<C: ExecutionTimer + 'static>(

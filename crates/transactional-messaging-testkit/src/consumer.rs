@@ -1,12 +1,13 @@
 //! Consumer transaction, settlement ordering and uncertainty conformance.
 
+use rss_request_context::ExecutionTimer;
 use std::future::Future;
 
 use rss_transactional_messaging::observability::{
     TransactionalMessagingDisposition, TransactionalMessagingIoOutcome,
     TransactionalMessagingObservation, TransactionalMessagingTransactionStatus,
 };
-use rss_transactional_messaging::policy::{ExecutionBudget, ExecutionTimer};
+use rss_transactional_messaging::policy::ExecutionBudget;
 use rss_transactional_messaging::transaction::{SettlementKind, TerminalDisposition};
 
 use crate::{ConformanceError, suite_deadline, within_budget};

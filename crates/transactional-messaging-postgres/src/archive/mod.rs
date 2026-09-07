@@ -1,10 +1,8 @@
 //! Narrow archive pool. Neither raw SQL nor the underlying runtime escapes this capability.
+use rss_request_context::ExecutionTimer;
 mod repository;
 use crate::{PgConfig, PgError, PgRuntime};
-use rss_transactional_messaging::{
-    policy::{ExecutionTimer, OperationDeadline},
-    transaction::LocalTxAttempt,
-};
+use rss_transactional_messaging::{policy::OperationDeadline, transaction::LocalTxAttempt};
 use rss_transactional_messaging_recovery::archive::Error;
 /// PostgreSQL archive capability with private transaction authority.
 pub struct PgArchiveRepository {
@@ -65,11 +63,8 @@ fn attempt<T>(v: LocalTxAttempt<T, PgError>) -> LocalTxAttempt<T, Error> {
     )
 }
 pub(crate) async fn check(runtime: &PgRuntime, deadline: OperationDeadline) -> Result<(), PgError> {
-    let cutoff = rss_transactional_messaging::policy::AbsoluteDeadline::from_timeout(
-        &runtime.timer,
-        deadline.timeout(),
-    )
-    .map_err(|_| PgError::invariant())?;
+    let cutoff = rss_request_context::Deadline::from_timeout(&runtime.timer, deadline.timeout())
+        .map_err(|_| PgError::invariant())?;
     let valid = rss_transactional_messaging::policy::within(&runtime.timer, cutoff, |_| async {
         sqlx::query_scalar::<_, bool>(include_str!("probe.sql"))
             .fetch_one(&runtime.pool)

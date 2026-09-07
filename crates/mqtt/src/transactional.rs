@@ -1,6 +1,7 @@
 //! Protocol capabilities stay private behind core-issued transaction decisions.
 //! ref: rumqtt client.rs@aa7a694f9b76b17d4c31200cf73d79616acae9b3 (manual ACK).
 use crate::{ConnectionState, MqttError, MqttReceiver, RejectReason, Settlement, codec};
+use rss_request_context::Clock;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind as Kind},
     message::SubscriptionIdentity,
@@ -157,7 +158,11 @@ impl MqttTransactionSettlement {
             .upgrade()
             .ok_or_else(|| messaging(MqttError::Closed))?;
         let cutoff = shared.deadline(deadline.timeout()).map_err(messaging)?;
-        if cutoff.remaining(&shared.clock).is_zero() {
+        if cutoff
+            .remaining(shared.clock.now())
+            .unwrap_or_default()
+            .is_zero()
+        {
             return Err(messaging(MqttError::DeadlineElapsed));
         }
         if shared.generation.load(Ordering::Acquire) != self.0.generation {

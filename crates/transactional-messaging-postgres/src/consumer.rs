@@ -1,9 +1,10 @@
 //! Static trusted effect composition, with private ACK-only commit evidence.
 use crate::{PgInboxClaim, PgRuntime, PgTransaction, transaction::stage};
 use rss_redact::RedactedSource;
+use rss_request_context::{Clock, Deadline};
 use rss_transactional_messaging::{
     message::{MessageEnvelope, MessageFingerprint},
-    policy::{AbsoluteDeadline, OperationDeadline, within},
+    policy::{OperationDeadline, within},
     transaction::{
         ConsumerTx, FailureClass, LocalTxDeadlineStage, ReceiptIntent, TerminalDisposition,
         TransactionOutcome,
@@ -121,7 +122,7 @@ async fn execute_transaction<
     deadline: OperationDeadline,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
     let timer = &runtime.timer;
-    let cutoff = match AbsoluteDeadline::from_timeout(timer, deadline.timeout()) {
+    let cutoff = match Deadline::from_timeout(timer, deadline.timeout()) {
         Ok(value) => value,
         Err(_) => return TransactionOutcome::not_started(FailureClass::Infrastructure),
     };
@@ -158,7 +159,7 @@ async fn execute_transaction<
             return TransactionOutcome::commit_unknown();
         }
     };
-    if cutoff.remaining(timer).is_zero() {
+    if cutoff.remaining(timer.now()).unwrap_or_default().is_zero() {
         return TransactionOutcome::commit_unknown();
     }
     finish(transaction, body, intent, timer, cutoff).await
@@ -181,7 +182,7 @@ async fn finish(
     body: Result<Option<TerminalDisposition>, PgConsumerEffectFailure>,
     intent: ReceiptIntent,
     timer: &crate::transaction::PgTimer,
-    cutoff: AbsoluteDeadline,
+    cutoff: Deadline,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
     match body {
         Ok(Some(disposition)) => match stage(

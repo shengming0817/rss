@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 // reason: fixed policy fixtures must fail loudly if construction unexpectedly regresses.
 
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -11,8 +12,7 @@ use std::time::Duration;
 
 use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ExecutionBudget, ExecutionDeadlines, ExecutionTimer,
-    LeaseRenewalPolicy, LeaseRenewalPolicyError, MonotonicInstant, within,
+    ExecutionBudget, ExecutionDeadlines, LeaseRenewalPolicy, LeaseRenewalPolicyError, within,
 };
 
 struct ManualTimer {
@@ -24,19 +24,19 @@ struct ManualTimer {
 struct SequencedTimer(Mutex<VecDeque<Duration>>);
 
 impl Clock for SequencedTimer {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(
-            self.0
+    fn now(&self) -> std::time::Instant {
+        epoch()
+            + (self
+                .0
                 .lock()
                 .expect("clock script")
                 .pop_front()
-                .expect("clock observation"),
-        )
+                .expect("clock observation"))
     }
 }
 
 impl ExecutionTimer for SequencedTimer {
-    async fn sleep_until(&self, _deadline: AbsoluteDeadline) {
+    async fn sleep_until(&self, _deadline: Deadline) {
         std::future::pending().await
     }
 }
@@ -59,16 +59,16 @@ impl ManualTimer {
 }
 
 impl Clock for ManualTimer {
-    fn now(&self) -> MonotonicInstant {
+    fn now(&self) -> std::time::Instant {
         self.now_calls.fetch_add(1, Ordering::SeqCst);
-        MonotonicInstant::from_elapsed(*self.now.lock().expect("clock lock"))
+        epoch() + (*self.now.lock().expect("clock lock"))
     }
 }
 
 impl ExecutionTimer for ManualTimer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        while !deadline.remaining(self).is_zero() {
-            self.wake.notified().await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        while !deadline.remaining(self.now()).unwrap_or_default().is_zero() {
+            tokio::task::unconstrained(self.wake.notified()).await;
         }
     }
 }
@@ -140,12 +140,12 @@ fn execution_deadlines_are_minted_from_one_clock_read() {
 
     assert_eq!(timer.now_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        deadlines.operation().instant().elapsed(),
-        Duration::from_secs(15)
+        deadlines.operation().instant(),
+        epoch() + Duration::from_secs(15)
     );
     assert_eq!(
-        deadlines.settlement().instant().elapsed(),
-        Duration::from_secs(17)
+        deadlines.settlement().instant(),
+        epoch() + Duration::from_secs(17)
     );
 }
 
@@ -168,7 +168,7 @@ fn messaging_error_labels_are_exhaustive_and_stable() {
 #[tokio::test]
 async fn zero_relative_timeout_is_an_elapsed_deadline() {
     let timer = ManualTimer::new(Duration::ZERO);
-    let deadline = AbsoluteDeadline::from_timeout(&timer, Duration::ZERO).expect("deadline");
+    let deadline = Deadline::from_timeout(&timer, Duration::ZERO).expect("deadline");
     let starts = AtomicUsize::new(0);
 
     let error = within(&timer, deadline, |_| {
@@ -189,8 +189,7 @@ async fn within_uses_one_snapshot_for_start_decision_and_watchdog() {
         Duration::ZERO,
         Duration::from_secs(1),
     ])));
-    let deadline =
-        AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
+    let deadline = Deadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
     let observed = Mutex::new(None);
 
     within(&timer, deadline, |operation| {
@@ -209,8 +208,7 @@ async fn within_uses_one_snapshot_for_start_decision_and_watchdog() {
 #[tokio::test]
 async fn within_returns_ready_provider_output_before_deadline() {
     let timer = ManualTimer::new(Duration::ZERO);
-    let deadline =
-        AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
+    let deadline = Deadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
 
     let output = within(&timer, deadline, |_| async { "ready" })
         .await
@@ -222,8 +220,7 @@ async fn within_returns_ready_provider_output_before_deadline() {
 #[tokio::test]
 async fn elapsed_deadline_does_not_start_provider_future() {
     let timer = ManualTimer::new(Duration::ZERO);
-    let deadline =
-        AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
+    let deadline = Deadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
     timer.advance(Duration::from_secs(1));
     let starts = AtomicUsize::new(0);
 
@@ -242,7 +239,7 @@ async fn elapsed_deadline_does_not_start_provider_future() {
 async fn deadline_wins_a_simultaneously_ready_provider_and_drops_it() {
     let timer = Arc::new(ManualTimer::new(Duration::ZERO));
     let deadline =
-        AbsoluteDeadline::from_timeout(timer.as_ref(), Duration::from_secs(1)).expect("deadline");
+        Deadline::from_timeout(timer.as_ref(), Duration::from_secs(1)).expect("deadline");
     let ready = Arc::new(AtomicBool::new(false));
     let polls = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
@@ -278,21 +275,21 @@ async fn deadline_wins_a_simultaneously_ready_provider_and_drops_it() {
 #[test]
 fn capped_deadline_never_extends_its_parent() {
     let timer = ManualTimer::new(Duration::from_secs(5));
-    let deadline =
-        AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(10)).expect("deadline");
+    let deadline = Deadline::from_timeout(&timer, Duration::from_secs(10)).expect("deadline");
 
     assert_eq!(
-        deadline
-            .capped(&timer, Duration::from_secs(3))
-            .instant()
-            .elapsed(),
-        Duration::from_secs(8)
+        deadline.capped(&timer, Duration::from_secs(3)).instant(),
+        epoch() + Duration::from_secs(8)
     );
     assert_eq!(
-        deadline
-            .capped(&timer, Duration::from_secs(30))
-            .instant()
-            .elapsed(),
-        Duration::from_secs(15)
+        deadline.capped(&timer, Duration::from_secs(30)).instant(),
+        epoch() + Duration::from_secs(15)
     );
+}
+
+#[allow(clippy::disallowed_methods)]
+// reason: fixed origin for the manually advanced and sequenced injected test clocks.
+fn epoch() -> std::time::Instant {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *ORIGIN.get_or_init(std::time::Instant::now)
 }

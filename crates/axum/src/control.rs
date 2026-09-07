@@ -7,8 +7,8 @@ use axum::{
 };
 use rss_contract::{SafeError, SafeErrorCode};
 use rss_request_context::{
-    Cancellation, CancellationFuture, CancellationObserver, CancellationReason, Deadline,
-    RequestContextView, RequestId, TenantId,
+    Cancellation, CancellationFuture, CancellationObserver, Deadline, RequestContextView,
+    RequestId, TenantId,
 };
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -96,26 +96,12 @@ impl RequestControl {
 }
 
 impl CancellationObserver for RequestControl {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "observe the transport-owned deadline using the same monotonic clock"
-    )]
     fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
-            || self
-                .deadline
-                .is_expired(tokio::time::Instant::now().into_std())
     }
 
-    fn cancelled(&self, deadline: Deadline) -> CancellationFuture<'_> {
-        let instant = self.deadline.instant().min(deadline.instant());
-        Box::pin(async move {
-            tokio::select! {
-                biased;
-                () = tokio::time::sleep_until(instant.into()) => CancellationReason::DeadlineExceeded,
-                () = self.cancellation.cancelled() => CancellationReason::Cancelled,
-            }
-        })
+    fn cancelled(&self) -> CancellationFuture<'_> {
+        Box::pin(self.cancellation.cancelled())
     }
 }
 
@@ -131,6 +117,10 @@ impl Drop for EndRequest {
 /// Place outside every middleware whose processing must share this budget. Nested installation
 /// only shortens the inherited deadline. Completion, timeout and future drop end observation;
 /// timeout stops waiting and does not prove rollback. Response-body transmission is not timed.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "HTTP transport enforces its own monotonic request deadline"
+)]
 pub async fn request_control(
     State(budget): State<RequestBudget>,
     mut request: Request,
@@ -141,7 +131,11 @@ pub async fn request_control(
         Err(_) => return HttpError::from(SafeError::new(SafeErrorCode::Internal)).into_response(),
     };
     // Do not admit new downstream work when an inherited control has already ended.
-    if control.is_cancelled() {
+    if control.is_cancelled()
+        || control
+            .deadline
+            .is_expired(tokio::time::Instant::now().into_std())
+    {
         return HttpError::from(SafeError::new(SafeErrorCode::Unavailable)).into_response();
     }
     request.extensions_mut().insert(control.clone());
@@ -150,6 +144,83 @@ pub async fn request_control(
         biased;
         // Preserve a completed result when termination becomes ready in the same poll.
         response = next.run(request) => response,
-        _ = control.cancelled(control.deadline) => HttpError::from(SafeError::new(SafeErrorCode::Unavailable)).into_response(),
+        () = control.cancelled() => HttpError::from(SafeError::new(SafeErrorCode::Unavailable)).into_response(),
+        // Deadline polling must not inherit a budget exhausted by downstream work.
+        () = tokio::task::unconstrained(tokio::time::sleep_until(control.deadline.instant().into())) => HttpError::from(SafeError::new(SafeErrorCode::Unavailable)).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::disallowed_methods,
+        reason = "test controls the transport clock"
+    )]
+    async fn deadline_is_not_a_cancellation_signal() {
+        use std::task::Poll;
+        let control =
+            RequestControl::start(RequestBudget::new(Duration::from_secs(1)).unwrap(), None)
+                .unwrap();
+        let mut cancelled = control.cancelled();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            control
+                .deadline
+                .is_expired(tokio::time::Instant::now().into_std())
+        );
+        assert!(!control.is_cancelled());
+        std::future::poll_fn(|cx| {
+            assert!(cancelled.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        control.cancellation.cancel();
+        cancelled.await;
+        assert!(control.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "test uses validated fixed budgets and an infallible router"
+    )]
+    async fn ended_parent_never_admits_downstream() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use tower::ServiceExt as _;
+        for expired in [false, true] {
+            let parent =
+                RequestControl::start(RequestBudget::new(Duration::from_secs(1)).unwrap(), None)
+                    .unwrap();
+            if expired {
+                tokio::time::advance(Duration::from_secs(1)).await;
+            } else {
+                parent.cancellation.cancel();
+            }
+            let called = Arc::new(AtomicBool::new(false));
+            let observed = called.clone();
+            let router = axum::Router::new()
+                .route(
+                    "/",
+                    axum::routing::get(move || async move {
+                        observed.store(true, Ordering::SeqCst);
+                        "unexpected"
+                    }),
+                )
+                .layer(axum::middleware::from_fn_with_state(
+                    RequestBudget::new(Duration::from_secs(60)).unwrap(),
+                    request_control,
+                ));
+            let mut request = Request::new(axum::body::Body::empty());
+            request.extensions_mut().insert(parent);
+            assert_eq!(router.oneshot(request).await.unwrap().status(), 503);
+            assert!(!called.load(Ordering::SeqCst));
+        }
     }
 }

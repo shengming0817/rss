@@ -1,5 +1,6 @@
 //! Real broker implementations of the public transport suites.
 use super::*;
+use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging::transaction::verify_ingress;
 use rss_transactional_messaging_testkit::transport::{
     CancellationEvidence, DeliveryEvidence, DeliveryTransportDriver, PublishAttempt,
@@ -397,7 +398,8 @@ pub(super) async fn expired_settlement_never_acks_and_redelivers(
     let delivery = next_valid_delivery(&mut stream).await?;
     let (received, settlement) = (*delivery).into_parts();
     let clock = FakeClock::new();
-    let expired = AbsoluteDeadline::from_timeout(&clock, Duration::ZERO)?.operation(&clock);
+    let expired =
+        OperationDeadline::from_cutoff(Deadline::from_timeout(&clock, Duration::ZERO)?, &clock);
     assert!(
         settlement
             .settle(terminal_decision(&received, &subscription, false)?, expired)
@@ -466,9 +468,11 @@ async fn apply_settlement(
         Case::Failure => {
             let (mut entered, _resume) = settlement.pause_before_settlement_for_test();
             let clock = FakeClock::new();
-            let deadline = AbsoluteDeadline::from_timeout(&clock, Duration::from_millis(100))
-                .map_err(evidence_error)?
-                .operation(&clock);
+            let deadline = OperationDeadline::from_cutoff(
+                Deadline::from_timeout(&clock, Duration::from_millis(100))
+                    .map_err(evidence_error)?,
+                &clock,
+            );
             if settlement
                 .settle(terminal_decision(received, subscription, false)?, deadline)
                 .await
@@ -572,8 +576,10 @@ pub(super) async fn confirmation_deadline_retires_generation_and_preserves_retry
     let message = envelope(&route, "confirm-deadline-message");
     let (entered, _resume) = publisher.pause_next_confirmation_for_test();
     let clock = FakeClock::new();
-    let deadline =
-        AbsoluteDeadline::from_timeout(&clock, Duration::from_millis(500))?.operation(&clock);
+    let deadline = OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&clock, Duration::from_millis(500))?,
+        &clock,
+    );
     let publishing = publisher.publish(&message, deadline);
     tokio::pin!(publishing);
     tokio::select! {
@@ -798,7 +804,8 @@ async fn assert_expired_admission(
     stream: &mut ManagedDeliveryStream<AmqpDeliveries>,
 ) -> anyhow::Result<()> {
     let clock = FakeClock::new();
-    let expired = AbsoluteDeadline::from_timeout(&clock, Duration::ZERO)?.operation(&clock);
+    let expired =
+        OperationDeadline::from_cutoff(Deadline::from_timeout(&clock, Duration::ZERO)?, &clock);
     let generation = publisher.transport_generation_for_test();
     assert!(
         matches!(publisher.publish(message, expired).await, PublishOutcome::DefinitelyNotPublished(failure) if failure.stage() == rss_transactional_messaging::transport::PublishFailureStage::Admission)

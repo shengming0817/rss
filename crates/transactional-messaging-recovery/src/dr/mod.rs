@@ -368,11 +368,7 @@ pub trait Store: Send + Sync {
 
 /// Execute one bounded application and recover commit uncertainty only through its exact receipt.
 /// Uses recovery's existing closed observer; plan/member/tenant identifiers never become labels.
-pub async fn execute<
-    S: Store,
-    C: rss_transactional_messaging::policy::ExecutionTimer,
-    O: crate::Observer,
->(
+pub async fn execute<S: Store, C: rss_request_context::ExecutionTimer, O: crate::Observer>(
     store: &S,
     plan: &AuthorizedPlan,
     clock: &C,

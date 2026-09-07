@@ -1,25 +1,27 @@
+use rss_request_context::{Clock as MessageClock, Deadline, ExecutionTimer};
 #[path = "../../../fixtures/message_fence.rs"]
 mod fence_fixture;
 use super::*;
 use rss_transactional_messaging::{
     message::*,
     outbox::{OutboxStore, PendingMessage},
-    policy::{
-        AbsoluteDeadline, Clock as MessageClock, DeliveryBudget, ExecutionTimer, MonotonicInstant,
-    },
+    policy::DeliveryBudget,
 };
 use rss_transactional_messaging_postgres::{
     PgConfig, PgError, PgOutboxStore, PgPassword, PgPrivateCa, PgRuntime, PgTransactionFault,
 };
 struct MClock(Clock);
 impl MessageClock for MClock {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.now())
+    fn now(&self) -> std::time::Instant {
+        self.0.0 + self.0.now()
     }
 }
 impl ExecutionTimer for MClock {
-    async fn sleep_until(&self, d: AbsoluteDeadline) {
-        tokio::time::sleep(d.remaining(self)).await;
+    async fn sleep_until(&self, d: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep(d.remaining(self.now()).unwrap_or_default()).await;
+        })
+        .await;
     }
 }
 fn message(id: &str) -> anyhow::Result<MessageEnvelope<Vec<u8>>> {

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -12,6 +13,10 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOTS = {"rss-axum", "rss-platform"}
+PLATFORM_PACKAGES = ("rss-contract", "rss-platform", "rss-request-context")
+SCENARIO = Path("crates/examples/platform-execution")
+README_START = "<!-- platform-execution:start -->"
+README_END = "<!-- platform-execution:end -->"
 
 
 def run(args, cwd, env):
@@ -127,13 +132,13 @@ def check_unavailable(consumer, mode, env):
 
 def consumer_manifest(mode, versions, features, *, smoke=False):
     manifest = f'[package]\nname="axum-{mode}-consumer"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\n'
-    names = ["rss-contract", "rss-platform", "rss-request-context"] if mode == "platform" else ["rss-axum"]
+    names = list(PLATFORM_PACKAGES) if mode == "platform" else ["rss-axum"]
     if smoke:
         names.append("rss-contract")
     for name in names:
         manifest += f'{name}={{version="={versions[name]}", default-features=false}}\n'
     if mode == "platform":
-        return manifest
+        return manifest + 'tokio={version="1",default-features=false,features=["rt","macros","time"]}\nserde_json="1"\n'
     if smoke:
         manifest += f'rss-runtime={{version="={versions["rss-runtime"]}",default-features=false,optional=true}}\n'
         manifest += 'axum={version="0.8",default-features=false,features=["json"]}\ntokio={version="1",features=["rt","macros","net","time"]}\n'
@@ -172,20 +177,114 @@ def verify_example_failure(returncode, stderr):
         raise ValueError("lifecycle-only example must fail with protocol selection guidance")
 
 
+def platform_source(revision=None, *, sync=False):
+    source = (ROOT / SCENARIO / "src/main.rs").read_text()
+    readme_path = ROOT / "crates/platform/README.md"
+    readme = readme_path.read_text()
+    before, rest = readme.split(README_START)
+    _, after = rest.split(README_END)
+    expected = before + README_START + "\n```rust\n" + source + "```\n" + README_END + after
+    if sync:
+        readme_path.write_text(expected)
+    elif readme != expected:
+        raise ValueError("platform README drift: run --sync-readme")
+    if revision:
+        head = subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        if head != revision:
+            raise ValueError("scenario revision mismatch")
+        for path in (SCENARIO / "src/main.rs", SCENARIO / "Cargo.toml", SCENARIO / "Cargo.lock",
+                     Path("crates/platform/README.md")):
+            committed = subprocess.check_output(["/usr/bin/git", "show", f"{revision}:{path.as_posix()}"], cwd=ROOT)
+            if committed != (ROOT / path).read_bytes():
+                raise ValueError("scenario differs from candidate revision")
+    return source
+
+
+def platform_receipt(returncode, stdout):
+    if returncode:
+        raise ValueError("platform consumer execution failed")
+    try:
+        receipt = json.loads(stdout)
+    except (ValueError, TypeError) as error:
+        raise ValueError("invalid platform behavior receipt") from error
+    expected = {"completed": 42, "deadlineExceeded": True, "handlerStarted": True,
+                "foreignAdmissionRejected": True, "drainingRejected": True,
+                "descriptorMismatchRejected": True, "duplicateModule": "inventory",
+                "duplicateContract": "example.add"}
+    if not isinstance(receipt, dict) or receipt.keys() != expected.keys() or any(
+        type(receipt[key]) is not type(value) or receipt[key] != value for key, value in expected.items()
+    ):
+        raise ValueError("platform behavior receipt did not prove the scenario")
+    return receipt
+
+
+def verify_platform_resolution(facts, consumer, allowed):
+    for package in facts["packages"]:
+        manifest = Path(package["manifest_path"]).resolve()
+        if manifest == (consumer / "Cargo.toml").resolve():
+            continue
+        name = package["name"]
+        if name.startswith("rss-"):
+            if name not in PLATFORM_PACKAGES or name not in allowed or package["source"] is not None or manifest != allowed[name].resolve():
+                raise ValueError("platform consumer escaped selected RSS dependency closure")
+        elif package["source"] is None:
+            raise ValueError("unexpected internal dependency")
+
+
+def run_platform(consumer, env):
+    result = subprocess.run(["cargo", "run", "--locked", "--offline", "--quiet"],
+                            cwd=consumer, env=env, capture_output=True, text=True, timeout=300)
+    if result.returncode:
+        raise ValueError(f"platform consumer execution failed: {result.stderr}")
+    return platform_receipt(result.returncode, result.stdout)
+
+
+def source_consumer(root, source, env):
+    consumer = root / "platform-source"
+    (consumer / "src").mkdir(parents=True)
+    (consumer / "src/main.rs").write_text(source)
+    manifest = (ROOT / SCENARIO / "Cargo.toml").read_text()
+    allowed = {}
+    for name in ("contract", "platform", "request-context"):
+        directory = ROOT / "crates" / name
+        manifest = manifest.replace(f'"../../{name}"', json.dumps(str(directory)))
+        allowed[f"rss-{name}"] = directory / "Cargo.toml"
+    (consumer / "Cargo.toml").write_text(manifest)
+    shutil.copyfile(ROOT / SCENARIO / "Cargo.lock", consumer / "Cargo.lock")
+    env["CARGO_TARGET_DIR"] = str(root / "source-target")
+    facts = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--offline",
+                                              "--format-version", "1"], cwd=consumer, env=env))
+    verify_platform_resolution(facts, consumer, allowed)
+    return run_platform(consumer, env)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--revision")
+    parser.add_argument("--source", action="store_true", help="run the isolated platform source consumer only")
+    parser.add_argument("--sync-readme", action="store_true", help="synchronize the platform README code block")
     args = parser.parse_args()
     if bool(args.artifacts) != bool(args.revision):
         parser.error("--artifacts and --revision must be supplied together")
+    if (args.source or args.sync_readme) and args.artifacts or args.source and args.sync_readme:
+        parser.error("choose source, README sync, or artifact consumption")
+    source = platform_source(args.revision, sync=args.sync_readme)
+    if args.sync_readme:
+        return
     args_revision = args.revision
-    versions = closure()
     env = os.environ.copy()
     for key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
         env.pop(key, None)
-    with tempfile.TemporaryDirectory(prefix="rss-axum-proof-") as temporary:
+    execution_root = ROOT / "rss-external-check"
+    execution_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="axum-platform-", dir=execution_root) as temporary:
         root = Path(temporary).resolve()
+        if args.source:
+            receipt = source_consumer(root, source, env)
+            print(json.dumps({"source": receipt, "scenarioSha256": hashlib.sha256(source.encode()).hexdigest()}, indent=2))
+            return
+        versions = closure()
         if args.artifacts:
             archives = archives_at(args.artifacts.resolve(), args.revision, versions)
         else:
@@ -211,9 +310,9 @@ def main():
             env["CARGO_TARGET_DIR"] = str(root / "target")
             manifest = consumer_manifest(mode, versions, features)
             example_root = extracted / f'rss-axum-{versions["rss-axum"]}/examples'
-            source = (example_root / "platform.rs").read_text() if mode == "platform" else api_source(mode)
+            consumer_source = source if mode == "platform" else api_source(mode)
             (consumer / "Cargo.toml").write_text(manifest + patch)
-            (consumer / "src/main.rs").write_text(source)
+            (consumer / "src/main.rs").write_text(consumer_source)
             args = feature_args(mode)
             run(["cargo", "check", "--offline", *args], consumer, env)
             facts = json.loads(subprocess.check_output(["cargo", "metadata", "--offline", "--format-version", "1", *args], cwd=consumer, env=env))
@@ -223,6 +322,11 @@ def main():
                 if package["source"] is None and package["name"] != f"axum-{mode}-consumer" and package["name"] not in versions:
                     raise ValueError("unexpected internal dependency")
             verify_features(facts, mode)
+            if mode == "platform":
+                allowed = {name: extracted / f"{name}-{versions[name]}" / "Cargo.toml" for name in PLATFORM_PACKAGES}
+                verify_platform_resolution(facts, consumer, allowed)
+                results[mode] = run_platform(consumer, env)
+                continue
             if mode != "platform":
                 check_unavailable(consumer, mode, env)
             if mode in {"base", "managed", "http1", "http2", "auto"}:
@@ -238,7 +342,7 @@ def main():
                     run(["cargo", "run", "--offline", *args], consumer, env)
             results[mode] = ("check/features/API passed; expected example failure passed" if mode == "managed" else
                              "check/features/API passed; run passed" if mode in {"base", "http1", "http2", "auto"} else "check/features/API passed")
-        print(json.dumps({"revision": args_revision, "artifacts": {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in archives.items()}, "consumers": results}, indent=2))
+        print(json.dumps({"revision": args_revision, "scenarioSha256": hashlib.sha256(source.encode()).hexdigest(), "artifacts": {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in archives.items()}, "consumers": results}, indent=2))
 
 
 

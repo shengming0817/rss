@@ -6,6 +6,7 @@ use crate::{
 use rdkafka::message::Headers;
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::TenantId;
+use rss_request_context::{Clock, Deadline};
 use rss_transactional_messaging::{message::*, policy::*, transport::*};
 use std::{
     collections::BTreeMap,
@@ -144,12 +145,25 @@ fn reliable_configuration_cannot_be_overridden_and_debug_is_safe() -> anyhow::Re
 }
 struct Timer;
 impl Clock for Timer {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(Duration::ZERO)
+    fn now(&self) -> std::time::Instant {
+        {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the fixed injected test clock owns its epoch"
+            )]
+            fn epoch() -> std::time::Instant {
+                std::time::Instant::now()
+            }
+            static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            *ORIGIN.get_or_init(epoch)
+        }
     }
 }
 fn deadline(duration: Duration) -> anyhow::Result<OperationDeadline> {
-    Ok(AbsoluteDeadline::from_timeout(&Timer, duration)?.operation(&Timer))
+    Ok(OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&Timer, duration)?,
+        &Timer,
+    ))
 }
 fn isolated() -> anyhow::Result<(
     KafkaPublisher,

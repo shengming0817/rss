@@ -1,3 +1,4 @@
+use rss_transactional_messaging::policy::OperationDeadline;
 mod review;
 pub(super) use review::{
     authority_pages, composition_boundaries, diagnostic_classes, full_outbox_states,
@@ -603,8 +604,10 @@ pub(super) async fn settlement_failures(f: &Fixture) -> anyhow::Result<()> {
         let msg = message(id, s.tenant())?;
         let store = f.store.clone();
         let timer = Timer::new();
-        let deadline =
-            AbsoluteDeadline::from_timeout(&timer, Duration::from_millis(100))?.operation(&timer);
+        let deadline = OperationDeadline::from_cutoff(
+            Deadline::from_timeout(&timer, Duration::from_millis(100))?,
+            &timer,
+        );
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let called = attempts.clone();
         let result = f

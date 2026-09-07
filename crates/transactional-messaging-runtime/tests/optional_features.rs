@@ -58,6 +58,7 @@ impl Drop for Consumer {
 fn worker_hosts_have_independent_feature_closures() -> Result {
     let owner = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core = owner.join("../transactional-messaging");
+    let context = owner.join("../request-context");
     let consumer = Consumer::new("messaging-host-features")?;
     fs::write(
         consumer.0.join("src/lib.rs"),
@@ -92,6 +93,7 @@ producer = ["algorithms/producer", "message_core/producer"]
 managed-runtime = ["algorithms/managed-runtime"]
 registration-probe = []
 [dependencies]
+rss-request-context = {{ path = {context:?} }}
 algorithms = {{ package = "rss-transactional-messaging-runtime", path = {owner:?}{default} }}
 message_core = {{ package = "rss-transactional-messaging", path = {core:?}, default-features = false }}
 tokio-util = {{ version = "0.7", features = ["rt"] }}

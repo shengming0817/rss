@@ -1,6 +1,7 @@
 use crate::{ConnectionState, MqttError, PublishRequest, RejectReason, outcome};
+use rss_request_context::{Clock, Deadline};
 use rss_transactional_messaging::{
-    policy::{AbsoluteDeadline, Clock, MonotonicInstant, OperationDeadline},
+    policy::OperationDeadline,
     transport::{
         PublishFailureKind as Kind, PublishFailureReason as Reason, PublishFailureStage as Stage,
         PublishOutcome,
@@ -20,25 +21,25 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ClockRef(pub Arc<dyn Clock>);
 impl Clock for ClockRef {
-    fn now(&self) -> MonotonicInstant {
+    fn now(&self) -> std::time::Instant {
         self.0.now()
     }
 }
 pub(crate) enum Command {
     Publish {
         request: PublishRequest,
-        deadline: AbsoluteDeadline,
+        deadline: Deadline,
         response: oneshot::Sender<Result<rumqttc::PublishNotice, PublishOutcome<()>>>,
     },
     Settle {
         generation: u64,
         pkid: u16,
         reason: rumqttc::mqttbytes::v5::PubAckReason,
-        deadline: AbsoluteDeadline,
+        deadline: Deadline,
         response: oneshot::Sender<Result<(), MqttError>>,
     },
     Shutdown {
-        deadline: AbsoluteDeadline,
+        deadline: Deadline,
         response: oneshot::Sender<Result<(), MqttError>>,
     },
 }
@@ -57,8 +58,8 @@ pub(crate) struct Shared {
     pub delivered: Notify,
 }
 impl Shared {
-    pub fn deadline(&self, budget: Duration) -> Result<AbsoluteDeadline, MqttError> {
-        AbsoluteDeadline::from_timeout(&self.clock, budget).map_err(|_| MqttError::InvalidConfig)
+    pub fn deadline(&self, budget: Duration) -> Result<Deadline, MqttError> {
+        Deadline::from_timeout(&self.clock, budget).map_err(|_| MqttError::InvalidConfig)
     }
     pub fn abandon(&self, generation: u64) {
         self.retire.fetch_max(generation, Ordering::AcqRel);
@@ -99,7 +100,11 @@ impl MqttPublisher {
         let Ok(cutoff) = self.shared.deadline(deadline.timeout()) else {
             return outcome::definite(Kind::Permanent, Stage::Admission, Reason::InvalidMessage);
         };
-        if cutoff.remaining(&self.shared.clock).is_zero() {
+        if cutoff
+            .remaining(self.shared.clock.now())
+            .unwrap_or_default()
+            .is_zero()
+        {
             return outcome::definite(Kind::Transient, Stage::Admission, Reason::DeadlineElapsed);
         }
         if self.shared.closing.load(Ordering::Acquire) {
@@ -112,7 +117,9 @@ impl MqttPublisher {
         let (tx, rx) = oneshot::channel();
         // reserve is cancellation-safe: until the permit is sent there is no provider request.
         let permit = match tokio::time::timeout(
-            cutoff.remaining(&self.shared.clock),
+            cutoff
+                .remaining(self.shared.clock.now())
+                .unwrap_or_default(),
             self.shared.commands.reserve(),
         )
         .await
@@ -145,16 +152,28 @@ impl MqttPublisher {
             deadline: cutoff,
             response: tx,
         });
-        match tokio::time::timeout(cutoff.remaining(&self.shared.clock), async {
-            match rx.await {
-                Ok(Ok(notice)) => outcome::notice(notice.wait_async().await),
-                Ok(Err(outcome)) => outcome,
-                Err(_) => outcome::ambiguous(Reason::TransportUnavailable),
-            }
-        })
+        match tokio::time::timeout(
+            cutoff
+                .remaining(self.shared.clock.now())
+                .unwrap_or_default(),
+            async {
+                match rx.await {
+                    Ok(Ok(notice)) => outcome::notice(notice.wait_async().await),
+                    Ok(Err(outcome)) => outcome,
+                    Err(_) => outcome::ambiguous(Reason::TransportUnavailable),
+                }
+            },
+        )
         .await
         {
-            Ok(result) if !cutoff.remaining(&self.shared.clock).is_zero() => result,
+            Ok(result)
+                if !cutoff
+                    .remaining(self.shared.clock.now())
+                    .unwrap_or_default()
+                    .is_zero() =>
+            {
+                result
+            }
             Ok(_) | Err(_) => outcome::ambiguous(Reason::DeadlineElapsed),
         }
     }
@@ -300,20 +319,23 @@ impl Settlement {
         }
         let cutoff = shared.deadline(budget.timeout())?;
         let (tx, rx) = oneshot::channel();
-        let result = tokio::time::timeout(cutoff.remaining(&shared.clock), async {
-            shared
-                .commands
-                .send(Command::Settle {
-                    generation: self.generation,
-                    pkid: self.pkid,
-                    reason,
-                    deadline: cutoff,
-                    response: tx,
-                })
-                .await
-                .map_err(|_| MqttError::Closed)?;
-            rx.await.map_err(|_| MqttError::SettlementUnknown)?
-        })
+        let result = tokio::time::timeout(
+            cutoff.remaining(shared.clock.now()).unwrap_or_default(),
+            async {
+                shared
+                    .commands
+                    .send(Command::Settle {
+                        generation: self.generation,
+                        pkid: self.pkid,
+                        reason,
+                        deadline: cutoff,
+                        response: tx,
+                    })
+                    .await
+                    .map_err(|_| MqttError::Closed)?;
+                rx.await.map_err(|_| MqttError::SettlementUnknown)?
+            },
+        )
         .await
         .map_err(|_| MqttError::SettlementUnknown)?;
         if result.is_ok() || matches!(result, Err(MqttError::StaleDelivery)) {

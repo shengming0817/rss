@@ -55,6 +55,12 @@ let router = Endpoint::<Add, App>::new(add).mount(Router::new())
 # Ok::<(), rss_axum::RequestBudgetError>(())
 ```
 
+`RequestControl` observes cancellation only through `is_cancelled()` and `cancelled()`.
+Its absolute `deadline()` is separate: middleware enforces both limits independently, refusing
+already-ended requests before downstream work. The old deadline-taking observer wait is removed.
+Completion, timeout or dropping the request future cancels observers; an elapsed deadline alone
+is not a cancellation signal. Request-future termination does not cover response-body streaming.
+
 Products put authentication/authorization inside the budget layer when that work must share its
 deadline. Decoders can read `RequestControl` from request extensions and carry a clone in their
 own request DTO. Supply previously confirmed identity values explicitly:

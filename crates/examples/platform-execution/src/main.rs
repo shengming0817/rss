@@ -1,52 +1,3 @@
-# rss-platform
-
-`rss-platform` is the provider-free asynchronous application waist for RSS. Applications author
-typed `rss_contract::Contract` markers and async `Handler` implementations; the host supplies a read-only
-`HostView`, while authenticated request values arrive as `rss-request-context` views.
-
-The crate deliberately contains no JWT/JWKS verification, provider catalog, process lifecycle,
-runtime planning, cancellation authority, or inventory publisher. Those remain owned by external
-consumers and their composition roots.
-Building an application yields a dispatcher and an instance-bound `TrustedContextMinter`. The
-integration keeps that non-cloneable minter private and uses it only after validating input. Dispatch
-requires the resulting move-only `AdmittedRequest`; callers cannot enter dispatch by assembling an
-authority-free `RequestContextView`, and a capability minted for another application is rejected.
-
-## Deadline and cancellation
-
-`ApplicationBuilder::new(name, host, timer)` requires an `rss_request_context::ExecutionTimer` from the trusted
-composition. Its clock, request deadlines and waits share one monotonic time domain. Platform
-races this timer independently of cancellation: even a never-cancelled request times out.
-Before starting, cancellation wins over an elapsed deadline. Once running, each poll checks
-handler completion, cancellation, then deadline. A completed result wins a simultaneous race.
-
-The timer must wake at the deadline and the executor must continue scheduling. Every user poll
-must return control: synchronous blocking cannot be preempted. Termination drops the handler
-future and admission permit, but does not roll back external effects or revoke detached work.
-The host owns the admission gate and draining policy; Platform does not authenticate requests,
-select tenant/device authorization policy, or create lifecycle authority.
-
-Duplicate registration reports `BuildError::DuplicateModule(ModuleName)` or
-`BuildError::DuplicateContract(ContractId)` with the safe, exact registration identity.
-The constructor and cancellation observer APIs replace the previous signatures without shims.
-`CancellationObserver::cancelled()` observes cancellation only; `CancellationReason` is removed.
-
-## Runnable independent consumer
-
-The following block is synchronized from the sole scenario source in
-`crates/examples/platform-execution/src/main.rs`. From the repository root, run:
-
-```sh
-python3 hack/axum-package-proof.py --source
-```
-
-This runs an isolated source consumer with its own workspace and lock. The existing candidate
-proof runs the same scenario against exact `.crate` artifacts, checking real results and archive
-identity; neither proof claims publication or product acceptance. Update the block after changing
-the scenario with `python3 hack/axum-package-proof.py --sync-readme`.
-
-<!-- platform-execution:start -->
-```rust
 use rss_contract::{Contract, ContractDescriptor, ContractId};
 use rss_platform::{
     AdmissionPermit, AdmissionState, ApplicationBuilder, ApplicationModule, ApplicationName,
@@ -274,5 +225,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
-```
-<!-- platform-execution:end -->

@@ -1,42 +1,53 @@
 //! Deterministic, non-durable transactional messaging test doubles.
 
+use rss_request_context::{Clock, Deadline, DeadlineOverflow, ExecutionTimer};
 use std::future::{Future, poll_fn};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ExecutionTimer, MonotonicInstant,
-};
-
 /// Manually advanced monotonic clock shared by all cloned handles.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FakeClock {
     inner: Arc<ClockState>,
 }
 
-#[derive(Default)]
 struct ClockState {
-    elapsed: Mutex<Duration>,
+    now: Mutex<std::time::Instant>,
     waiters: Mutex<Vec<Waker>>,
 }
 
+impl Default for FakeClock {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the injected test clock owns its fixed monotonic origin"
+    )]
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(ClockState {
+                now: Mutex::new(std::time::Instant::now()),
+                waiters: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+}
 impl FakeClock {
-    /// Construct a clock at elapsed time zero.
+    /// Construct a clock at a fixed monotonic instant.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Advance monotonically and wake all registered deadline futures.
-    pub fn advance(&self, duration: Duration) {
+    /// Return an overflow error without changing time or waking waiters if the instant cannot fit.
+    pub fn advance(&self, duration: Duration) -> Result<(), DeadlineOverflow> {
         {
-            let mut elapsed = self
+            let mut now = self
                 .inner
-                .elapsed
+                .now
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *elapsed = elapsed.saturating_add(duration);
+            *now = now.checked_add(duration).ok_or(DeadlineOverflow)?;
         }
         let waiters = {
             let mut waiters = self
@@ -49,23 +60,22 @@ impl FakeClock {
         for waiter in waiters {
             waiter.wake();
         }
+        Ok(())
     }
 }
 
 impl Clock for FakeClock {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(
-            *self
-                .inner
-                .elapsed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+    fn now(&self) -> std::time::Instant {
+        *self
+            .inner
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 impl ExecutionTimer for FakeClock {
-    fn sleep_until(&self, deadline: AbsoluteDeadline) -> impl Future<Output = ()> + Send {
+    fn sleep_until(&self, deadline: Deadline) -> impl Future<Output = ()> + Send {
         let clock = self.clone();
         poll_fn(move |context| {
             if clock.now() >= deadline.instant() {

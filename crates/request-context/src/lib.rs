@@ -114,10 +114,49 @@ impl fmt::Debug for RequestId {
     }
 }
 
+/// Monotonic time source shared by in-process execution components.
+/// Observations and deadlines must use the same time domain and never move backwards.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// Supplies deadline wakeups; each execution component owns its arbitration policy.
+/// An elapsed cutoff must be immediately ready, even after executor cooperative budget exhaustion.
+/// Otherwise the wait must wake its task at or after the cutoff. Creating, polling and dropping
+/// the wait must not block. The sleep and Clock observations must use the same monotonic domain.
+pub trait ExecutionTimer: Clock {
+    fn sleep_until(&self, deadline: Deadline) -> impl Future<Output = ()> + Send;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("deadline exceeds the monotonic time range")]
+pub struct DeadlineOverflow;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A cutoff in the injected clock's in-process monotonic domain.
 pub struct Deadline(Instant);
 
 impl Deadline {
+    /// Freeze a relative timeout with one clock observation; zero is already elapsed.
+    pub fn from_timeout(
+        clock: &(impl Clock + ?Sized),
+        timeout: Duration,
+    ) -> Result<Self, DeadlineOverflow> {
+        clock
+            .now()
+            .checked_add(timeout)
+            .map(Self)
+            .ok_or(DeadlineOverflow)
+    }
+    /// Shorten this cutoff to at most `cap` from the current observation, never extending it.
+    #[must_use]
+    pub fn capped(self, clock: &(impl Clock + ?Sized), cap: Duration) -> Self {
+        clock
+            .now()
+            .checked_add(cap)
+            .map_or(self, |instant| self.shortened_to(instant))
+    }
+
     #[must_use]
     pub const fn at(instant: Instant) -> Self {
         Self(instant)
@@ -140,17 +179,17 @@ impl Deadline {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CancellationReason {
-    Cancelled,
-    DeadlineExceeded,
-}
+/// A wait for cancellation only; deadlines are driven by the execution owner.
+pub type CancellationFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
-pub type CancellationFuture<'a> = Pin<Box<dyn Future<Output = CancellationReason> + Send + 'a>>;
-
+/// Read-only cancellation observation, independent of the request deadline.
+///
+/// Cancellation is sticky. A wait must complete immediately if already cancelled and wake all
+/// registered waiters when cancellation occurs, without losing a concurrent cancellation.
+/// Creating, polling and dropping the wait must not block. Never-cancelled sources may stay pending.
 pub trait CancellationObserver: Send + Sync {
     fn is_cancelled(&self) -> bool;
-    fn cancelled(&self, deadline: Deadline) -> CancellationFuture<'_>;
+    fn cancelled(&self) -> CancellationFuture<'_>;
 }
 
 #[derive(Clone, Copy)]
@@ -166,8 +205,8 @@ impl<'a> Cancellation<'a> {
         self.0.is_cancelled()
     }
     #[must_use]
-    pub fn cancelled(self, deadline: Deadline) -> CancellationFuture<'a> {
-        self.0.cancelled(deadline)
+    pub fn cancelled(self) -> CancellationFuture<'a> {
+        self.0.cancelled()
     }
 }
 

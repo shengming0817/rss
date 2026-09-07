@@ -1,3 +1,4 @@
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 #[path = "../../../crates/device-command-postgres/examples/compose.rs"]
 pub mod compose;
 mod crash;
@@ -15,36 +16,39 @@ use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const OTHER: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d478";
 #[derive(Clone)]
-struct Timer(Instant);
+struct Timer;
 impl Timer {
     #[allow(clippy::disallowed_methods)]
     // reason: concrete test clock is the injection boundary.
     fn new() -> Self {
-        Self(Instant::now())
+        Self
     }
 }
 impl Clock for Timer {
     #[allow(clippy::disallowed_methods)]
     // reason: concrete test clock implements the injected monotonic source.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.elapsed())
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 impl ExecutionTimer for Timer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        tokio::time::sleep(deadline.remaining(self)).await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep(deadline.remaining(self.now()).unwrap_or_default()).await;
+        })
+        .await;
     }
 }
 fn budget() -> anyhow::Result<OperationDeadline> {
     let timer = Timer::new();
-    Ok(AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(10))?.operation(&timer))
+    Ok(OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&timer, Duration::from_secs(10))?,
+        &timer,
+    ))
 }
 fn scope(tenant: &str) -> anyhow::Result<Scope> {
     Ok(Scope::new(
@@ -264,13 +268,13 @@ impl Fixture {
         // A claim returns one tenant's committed batch; drain all ready fixture batches.
         // One inherited deadline bounds the whole drain without retrying failed operations.
         let timer = Timer::new();
-        let deadline = AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(10))?;
+        let deadline = Deadline::from_timeout(&timer, Duration::from_secs(10))?;
         loop {
             let claims = self
                 .outbox
                 .claim_partition_heads(
                     std::num::NonZeroUsize::MIN.saturating_add(63),
-                    deadline.operation(&timer),
+                    OperationDeadline::from_cutoff(deadline, &timer),
                 )
                 .await?;
             if claims.is_empty() {
@@ -281,7 +285,7 @@ impl Fixture {
                     .settle(
                         claim,
                         OutboxSettlement::Published(()),
-                        deadline.operation(&timer),
+                        OperationDeadline::from_cutoff(deadline, &timer),
                     )
                     .await?;
             }

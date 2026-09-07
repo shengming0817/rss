@@ -43,7 +43,7 @@ fn binding(epoch: i64) -> anyhow::Result<ExecutionBinding> {
 }
 fn deadline() -> OperationDeadline {
     let timer = Timer::new();
-    timer.cutoff().operation(&timer)
+    OperationDeadline::from_cutoff(timer.cutoff(), &timer)
 }
 fn committed<T, E: std::fmt::Display>(value: LocalTxAttempt<T, E>) -> anyhow::Result<T> {
     value.fold(

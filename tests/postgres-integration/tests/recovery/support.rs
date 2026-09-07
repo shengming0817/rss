@@ -5,11 +5,9 @@ use ring::{
 use rss_data_protection::{
     Aead, AeadError, CipherAlg, CiphertextEnvelope, DerivedAad, EncryptionMode, Plaintext,
 };
-use rss_transactional_messaging::{message::*, policy::*};
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
+use rss_transactional_messaging::message::*;
+use std::{collections::BTreeMap, time::Duration};
 #[allow(dead_code)] // reason: shared fixture also supplies timer/message helpers to receipt-only DR tests.
 pub struct Key(pub u8);
 impl Aead for Key {
@@ -60,26 +58,29 @@ impl Aead for Key {
         Ok(Plaintext::new(plain.to_vec()))
     }
 }
-pub struct Timer(Instant);
+pub struct Timer;
 #[allow(clippy::expect_used)] // reason: fixed test deadline.
 impl Timer {
     #[allow(clippy::disallowed_methods)] // reason: injected test clock reads the real monotonic source.
     pub fn new() -> Self {
-        Self(Instant::now())
+        Self
     }
-    pub fn cutoff(&self) -> AbsoluteDeadline {
-        AbsoluteDeadline::from_timeout(self, Duration::from_secs(5)).expect("fixture cutoff")
+    pub fn cutoff(&self) -> Deadline {
+        Deadline::from_timeout(self, Duration::from_secs(5)).expect("fixture cutoff")
     }
 }
 impl Clock for Timer {
     #[allow(clippy::disallowed_methods)] // reason: implementation of the injected test clock.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.elapsed())
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 impl ExecutionTimer for Timer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        tokio::time::sleep_until((self.0 + deadline.instant().elapsed()).into()).await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep_until(deadline.instant().into()).await;
+        })
+        .await;
     }
 }
 #[allow(clippy::expect_used)] // reason: fixed authored message test fixtures.

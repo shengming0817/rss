@@ -1,6 +1,7 @@
 //! Real MQTT → canonical ingress/Inbox/ConsumerTx → MQTT settlement.
 use super::*;
 use rss_mqtt::{MqttDeliverySource, MqttTransactionSettlement};
+use rss_request_context::Deadline;
 use rss_transactional_messaging::{
     inbox::ConsumerGroup,
     policy::{
@@ -324,13 +325,15 @@ fn assert_deferred(result: ProcessingDisposition) {
 impl TransactionCase {
     async fn expired_retirement(&self, stream: &mut Stream) -> anyhow::Result<()> {
         use rss_transactional_messaging::{
-            error::MessagingErrorKind, policy::AbsoluteDeadline, transport::DeliverySettlement,
+            error::MessagingErrorKind, transport::DeliverySettlement,
         };
         self.publish("expired-retirement").await?;
         let (_, settlement) = next(stream).await?.into_parts();
         let before = support::ready_generation(&self.connection)?;
-        let deadline =
-            AbsoluteDeadline::from_timeout(&*self.clock, Duration::ZERO)?.operation(&*self.clock);
+        let deadline = OperationDeadline::from_cutoff(
+            Deadline::from_timeout(&*self.clock, Duration::ZERO)?,
+            &*self.clock,
+        );
         assert_eq!(
             settlement
                 .abandon(deadline)

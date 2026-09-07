@@ -1,5 +1,6 @@
 //! Bounded outbox relay execution and caller-driven worker ownership.
 
+use rss_request_context::{Deadline, ExecutionTimer};
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -15,9 +16,7 @@ use rss_transactional_messaging::observability::{
 use rss_transactional_messaging::outbox::{
     OutboxDisposition, OutboxLeaseStatus, OutboxSettlement, OutboxStore,
 };
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, DeliveryBudget, ExecutionTimer, within,
-};
+use rss_transactional_messaging::policy::{DeliveryBudget, within};
 use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
     Publisher,
@@ -283,8 +282,8 @@ where
     });
     let publish_started = clock.now();
     let attempt_deadline =
-        AbsoluteDeadline::from_timeout(clock, remaining.saturating_sub(budget.safety_margin()))
-            .map_err(|error| {
+        Deadline::from_timeout(clock, remaining.saturating_sub(budget.safety_margin())).map_err(
+            |error| {
                 let error = MessagingError::new(MessagingErrorKind::Invariant, error);
                 emit_runtime_failure(
                     emitter,
@@ -292,7 +291,8 @@ where
                     &error,
                 );
                 error
-            })?;
+            },
+        )?;
     let settlement = if expired {
         OutboxSettlement::DeadLetter
     } else if budget.can_start_attempt(delivery_budget) {
@@ -357,8 +357,8 @@ fn absolute_deadline(
     clock: &impl ExecutionTimer,
     timeout: Duration,
     emitter: &impl TransactionalMessagingEmitter,
-) -> Result<AbsoluteDeadline, MessagingError> {
-    AbsoluteDeadline::from_timeout(clock, timeout).map_err(|error| {
+) -> Result<Deadline, MessagingError> {
+    Deadline::from_timeout(clock, timeout).map_err(|error| {
         let error = MessagingError::new(MessagingErrorKind::Invariant, error);
         emit_runtime_failure(
             emitter,

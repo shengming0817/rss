@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+use rss_request_context::{Deadline, ExecutionTimer};
 pub mod localtx;
 
 #[cfg(feature = "producer")]
@@ -23,7 +24,7 @@ use std::future::Future;
 use std::task::Poll;
 
 use rss_transactional_messaging::error::MessagingErrorKind;
-use rss_transactional_messaging::policy::{AbsoluteDeadline, ExecutionBudget, ExecutionTimer};
+use rss_transactional_messaging::policy::ExecutionBudget;
 
 /// One provider-neutral conformance assertion failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,8 +217,8 @@ impl std::error::Error for ConformanceError {}
 fn suite_deadline(
     timer: &impl ExecutionTimer,
     budget: ExecutionBudget,
-) -> Result<AbsoluteDeadline, ConformanceError> {
-    AbsoluteDeadline::from_timeout(timer, budget.total()).map_err(|_| {
+) -> Result<Deadline, ConformanceError> {
+    Deadline::from_timeout(timer, budget.total()).map_err(|_| {
         ConformanceError::mismatch(
             "conformance.budget",
             "representable-positive-budget",
@@ -228,14 +229,18 @@ fn suite_deadline(
 
 async fn within_budget<T, F>(
     timer: &impl ExecutionTimer,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
     stage: &'static str,
     future: F,
 ) -> Result<T, ConformanceError>
 where
     F: Future<Output = T>,
 {
-    if deadline.remaining(timer).is_zero() {
+    if deadline
+        .remaining(timer.now())
+        .unwrap_or_default()
+        .is_zero()
+    {
         return Err(ConformanceError::mismatch(
             stage,
             "completed-within-budget",

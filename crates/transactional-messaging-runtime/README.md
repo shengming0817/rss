@@ -61,7 +61,7 @@ For a directly awaited relay (the consumer follows the same pattern):
 # mod direct_example {
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
 use rss_transactional_messaging::outbox::OutboxStore;
-use rss_transactional_messaging::policy::ExecutionTimer;
+use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::transport::Publisher;
 use rss_transactional_messaging_runtime::relay::RelayWorker;
 use tokio_util::sync::CancellationToken;
@@ -88,7 +88,8 @@ A host that spawns the worker must retain its task handle through shutdown:
 # mod spawned_example {
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
 use rss_transactional_messaging::outbox::OutboxStore;
-use rss_transactional_messaging::policy::{ExecutionTimer, ShutdownBudget};
+use rss_request_context::ExecutionTimer;
+use rss_transactional_messaging::policy::ShutdownBudget;
 use rss_transactional_messaging::transport::Publisher;
 use rss_transactional_messaging_runtime::relay::RelayWorker;
 use tokio_util::sync::CancellationToken;
@@ -137,7 +138,8 @@ panic reporting and the final shutdown timeout. Its private lifecycle token is n
 use rss_runtime::{ManagedTaskRegistration, TaskStatus};
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
 use rss_transactional_messaging::outbox::OutboxStore;
-use rss_transactional_messaging::policy::{ExecutionTimer, ShutdownBudget};
+use rss_request_context::ExecutionTimer;
+use rss_transactional_messaging::policy::ShutdownBudget;
 use rss_transactional_messaging::transport::Publisher;
 use rss_transactional_messaging_runtime::relay::RelayWorker;
 

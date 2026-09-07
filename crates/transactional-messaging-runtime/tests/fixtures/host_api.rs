@@ -1,6 +1,7 @@
+use rss_request_context::ExecutionTimer;
 // Compiled as an independent consumer, without workspace feature unification.
 use message_core::{
-    error::MessagingError, observability::TransactionalMessagingEmitter, policy::ExecutionTimer,
+    error::MessagingError, observability::TransactionalMessagingEmitter,
 };
 use tokio_util::sync::CancellationToken;
 

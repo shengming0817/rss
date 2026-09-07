@@ -4,11 +4,12 @@ use crate::{
     envelope::Envelope,
     inbox::{fingerprint, milliseconds},
 };
+use rss_request_context::Deadline;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     message::MessagingDomain,
     outbox::*,
-    policy::{AbsoluteDeadline, DeliveryBudget, OperationDeadline, within},
+    policy::{DeliveryBudget, OperationDeadline, within},
 };
 use sqlx::Row as _;
 use std::{marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration};
@@ -112,7 +113,7 @@ impl<R> PgOutboxStore<R> {
         deadline: OperationDeadline,
         extend_ms: i64,
     ) -> Result<OutboxLeaseStatus, MessagingError> {
-        let cutoff = AbsoluteDeadline::from_timeout(&self.runtime.timer, deadline.timeout())
+        let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         if !self.valid_claim(claim) {
             return Ok(OutboxLeaseStatus::Lost);
@@ -184,7 +185,7 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
         limit: NonZeroUsize,
         deadline: OperationDeadline,
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
-        let cutoff = AbsoluteDeadline::from_timeout(&self.runtime.timer, deadline.timeout())
+        let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         let count = i32::try_from(limit.get()).map_err(|_| PgError::invariant().port())?;
         if count > 64 {
@@ -274,7 +275,7 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
             return Err(PgError::lost().port());
         }
         let tenant = claim.message.envelope().metadata().tenant_id();
-        let cutoff = AbsoluteDeadline::from_timeout(&self.runtime.timer, deadline.timeout())
+        let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         let disposition = match settlement {
             OutboxSettlement::Published(_) => "published",

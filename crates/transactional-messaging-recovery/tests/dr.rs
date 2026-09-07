@@ -1,4 +1,5 @@
 use rss_request_context::TenantId;
+use rss_request_context::{Deadline, ExecutionTimer};
 use rss_transactional_messaging::{
     fence::{Epoch, StorageIdentity},
     message::{MessageFingerprint, MessageId},
@@ -108,13 +109,23 @@ use rss_transactional_messaging_recovery::{
     Authorization, Authorizer, Challenge, Error, authorize_dr,
 };
 struct Clock;
-impl rss_transactional_messaging::policy::Clock for Clock {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(std::time::Duration::ZERO)
+impl rss_request_context::Clock for Clock {
+    fn now(&self) -> std::time::Instant {
+        {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the fixed injected test clock owns its epoch"
+            )]
+            fn epoch() -> std::time::Instant {
+                std::time::Instant::now()
+            }
+            static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            *ORIGIN.get_or_init(epoch)
+        }
     }
 }
 impl ExecutionTimer for Clock {
-    async fn sleep_until(&self, _: AbsoluteDeadline) {
+    async fn sleep_until(&self, _: Deadline) {
         std::future::pending::<()>().await;
     }
 }
@@ -138,7 +149,7 @@ impl Authorizer for StaleProof {
 #[tokio::test]
 async fn authorization_cannot_move_between_exact_plans() -> Result<(), Box<dyn std::error::Error>> {
     let stale = StaleProof(std::sync::Mutex::new(None));
-    let cutoff = AbsoluteDeadline::from_timeout(&Clock, std::time::Duration::from_secs(1))?;
+    let cutoff = Deadline::from_timeout(&Clock, std::time::Duration::from_secs(1))?;
     assert!(
         authorize_dr(
             &stale,
@@ -268,7 +279,7 @@ async fn recovery_authorization_cannot_authorize_termination()
         original.digest(),
     )?;
     let stale = StaleProof(std::sync::Mutex::new(None));
-    let cutoff = AbsoluteDeadline::from_timeout(&Clock, std::time::Duration::from_secs(1))?;
+    let cutoff = Deadline::from_timeout(&Clock, std::time::Duration::from_secs(1))?;
     assert!(
         authorize_dr(&stale, original, &Clock, cutoff)
             .await

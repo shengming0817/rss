@@ -65,3 +65,6 @@ bak/
 
 # 本地镜像脚本（个人用，不入库）
 hack/automation/mirror-to-github.sh
+
+# Regenerable isolated source/artifact consumers
+/rss-external-check/

@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 // reason: fixed canonical fixtures must fail loudly if their identity or protocol invariants drift.
 
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 mod support;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -30,9 +31,8 @@ use rss_transactional_messaging::observability::{
 #[cfg(feature = "producer")]
 use rss_transactional_messaging::outbox::{OutboxDisposition, PartitionHead, PartitionHeadState};
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ConsumerExecutionPolicy, DeliveryBudget, DeliveryBudgetError,
-    ExecutionBudget, ExecutionBudgetError, ExecutionDeadlines, ExecutionTimer, MonotonicInstant,
-    OperationDeadline, RetryPolicy,
+    ConsumerExecutionPolicy, DeliveryBudget, DeliveryBudgetError, ExecutionBudget,
+    ExecutionBudgetError, ExecutionDeadlines, OperationDeadline, RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, FailureClass, LocalTxAttempt, RejectKind, SettlementKind, TerminalDisposition,
@@ -143,60 +143,61 @@ fn fingerprint_hex(value: MessageFingerprint) -> String {
         .collect()
 }
 
-struct FixedClock(MonotonicInstant);
+struct FixedClock(std::time::Instant);
 
 impl Clock for FixedClock {
-    fn now(&self) -> MonotonicInstant {
+    fn now(&self) -> std::time::Instant {
         self.0
     }
 }
 
 impl ExecutionTimer for FixedClock {
-    async fn sleep_until(&self, _deadline: AbsoluteDeadline) {
+    async fn sleep_until(&self, _deadline: Deadline) {
         std::future::pending().await
     }
 }
 
-struct RealtimeClock {
-    origin: tokio::time::Instant,
-}
+struct RealtimeClock;
 
 impl RealtimeClock {
     #[allow(clippy::disallowed_methods)]
     // reason: this test adapter is the injected Clock owner; Tokio time also supports pause/advance.
     fn new() -> Self {
-        Self {
-            origin: tokio::time::Instant::now(),
-        }
+        Self
     }
 }
 
 impl Clock for RealtimeClock {
     #[allow(clippy::disallowed_methods)]
     // reason: the injected adapter projects its single Tokio monotonic origin into core time.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(tokio::time::Instant::now() - self.origin)
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 
 impl ExecutionTimer for RealtimeClock {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        tokio::time::sleep_until(self.origin + deadline.instant().elapsed()).await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep_until(deadline.instant().into()).await;
+        })
+        .await;
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn realtime_clock_sleep_and_now_share_one_monotonic_domain() {
     let timer = RealtimeClock::new();
-    let deadline =
-        AbsoluteDeadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
+    let deadline = Deadline::from_timeout(&timer, Duration::from_secs(1)).expect("deadline");
 
     let sleeping = timer.sleep_until(deadline);
     tokio::pin!(sleeping);
     tokio::time::advance(Duration::from_secs(1)).await;
     sleeping.await;
 
-    assert_eq!(deadline.remaining(&timer), Duration::ZERO);
+    assert_eq!(
+        deadline.remaining(timer.now()).unwrap_or_default(),
+        Duration::ZERO
+    );
 }
 
 struct NoopEmitter;
@@ -243,17 +244,23 @@ fn policy_budgets_are_strict_and_monotonic() {
 
     let execution = ExecutionBudget::new(Duration::from_secs(5), Duration::from_secs(1))
         .expect("execution budget");
-    let clock = FixedClock(MonotonicInstant::from_elapsed(Duration::from_secs(10)));
+    let clock = FixedClock(support::epoch() + Duration::from_secs(10));
     let deadlines = ExecutionDeadlines::from_budget(&clock, execution).expect("deadlines");
     assert_eq!(
-        deadlines.operation().remaining(&clock),
+        deadlines
+            .operation()
+            .remaining(clock.now())
+            .unwrap_or_default(),
         Duration::from_secs(4)
     );
     assert_eq!(
-        deadlines.settlement().remaining(&clock),
+        deadlines
+            .settlement()
+            .remaining(clock.now())
+            .unwrap_or_default(),
         Duration::from_secs(5)
     );
-    let overflow_clock = FixedClock(MonotonicInstant::from_elapsed(Duration::MAX));
+    let overflow_clock = FixedClock(support::last_instant());
     assert_eq!(
         ExecutionDeadlines::from_budget(&overflow_clock, execution),
         Err(ExecutionBudgetError::DeadlineOverflow)
@@ -698,7 +705,7 @@ async fn duplicate_returns_original_terminal_receipt_without_handler_call() {
             group,
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &NoopEmitter,
         ),
@@ -749,7 +756,7 @@ async fn duplicate_authored_drift_rejects_without_handler_call() {
             group,
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &emitter,
         ),
@@ -801,7 +808,7 @@ async fn stale_claim_abandons_without_effect_or_broker_settlement() {
             group,
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &NoopEmitter,
         ),
@@ -839,7 +846,7 @@ async fn lease_check_failure_abandons_without_effect_or_broker_settlement() {
             group,
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &NoopEmitter,
         ),
@@ -878,7 +885,7 @@ async fn provider_lease_shorter_than_the_renewal_schedule_is_a_hard_fence() {
             ConsumerGroup::parse("authoritative-short-lease").expect("group"),
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &NoopEmitter,
         ),
@@ -913,7 +920,7 @@ async fn cleanup_failure_does_not_replace_the_primary_claim_error() {
             ConsumerGroup::parse("primary-error").expect("group"),
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &emitter,
         ),
@@ -959,7 +966,7 @@ async fn deadline_overflow_emits_a_closed_failure_phase() {
             ConsumerGroup::parse("deadline-overflow").expect("group"),
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::MAX)),
+            &FixedClock(support::last_instant()),
             consumer_policy(),
             &emitter,
         ),
@@ -1068,7 +1075,7 @@ async fn rejected_effect_commits_receipt_before_reject_settlement() {
             group,
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &NoopEmitter,
         ),
@@ -1113,7 +1120,7 @@ async fn settlement_io_failure_does_not_reexecute_or_change_durable_outcome() {
             group,
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             consumer_policy(),
             &NoopEmitter,
         ),
@@ -1864,7 +1871,7 @@ async fn backoff_equal_to_operation_budget_does_not_start_another_attempt() {
             ConsumerGroup::parse("backoff-cutoff").expect("group"),
             &TrustedIngress,
             &expected,
-            &FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO)),
+            &FixedClock(support::epoch()),
             deadline_policy(Duration::from_millis(1_200), Duration::from_millis(200)),
             &NoopEmitter,
         ),
@@ -2571,7 +2578,7 @@ async fn forced_shutdown_during_claim_drops_without_settlement_or_cleanup() {
         ConsumerGroup::parse("claim-cancel").expect("group"),
         Arc::new(TrustedIngress),
         expected,
-        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        Arc::new(FixedClock(support::epoch())),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -2885,7 +2892,7 @@ async fn cancellation_during_subscribe_stops_without_admitting_work() {
         ConsumerGroup::parse("cancel-subscribe").expect("group"),
         Arc::new(TrustedIngress),
         subscription(&message),
-        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        Arc::new(FixedClock(support::epoch())),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -2931,7 +2938,7 @@ async fn cancellation_wins_over_a_simultaneously_ready_new_delivery() {
         ConsumerGroup::parse("cancel-admission").expect("group"),
         Arc::new(TrustedIngress),
         expected,
-        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        Arc::new(FixedClock(support::epoch())),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -3012,7 +3019,7 @@ async fn non_transient_subscribe_failure_is_fail_loud() {
         ConsumerGroup::parse("failed-subscribe").expect("group"),
         Arc::new(TrustedIngress),
         subscription(&message),
-        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        Arc::new(FixedClock(support::epoch())),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -3056,7 +3063,7 @@ async fn provider_panic_maps_to_typed_worker_failure() {
         ConsumerGroup::parse("panic-subscribe").expect("group"),
         Arc::new(TrustedIngress),
         subscription(&message),
-        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        Arc::new(FixedClock(support::epoch())),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -3246,17 +3253,17 @@ struct RecordingTimer {
 }
 
 impl Clock for RecordingTimer {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(Duration::ZERO)
+    fn now(&self) -> std::time::Instant {
+        support::epoch()
     }
 }
 
 impl ExecutionTimer for RecordingTimer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
+    async fn sleep_until(&self, deadline: Deadline) {
         self.delays
             .lock()
             .expect("delays")
-            .push(deadline.remaining(self));
+            .push(deadline.remaining(self.now()).unwrap_or_default());
         self.permits
             .acquire()
             .await
@@ -3404,7 +3411,7 @@ async fn host_non_transient_subscribe_failure_is_fail_loud() {
         ConsumerGroup::parse("failed-subscribe").expect("group"),
         Arc::new(TrustedIngress),
         subscription(&message),
-        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        Arc::new(FixedClock(support::epoch())),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -3501,7 +3508,7 @@ async fn host_forced_shutdown_during_claim_drops_without_settlement_or_cleanup()
         ConsumerGroup::parse("claim-cancel").expect("group"),
         Arc::new(TrustedIngress),
         expected,
-        Arc::new(FixedClock(MonotonicInstant::from_elapsed(Duration::ZERO))),
+        Arc::new(FixedClock(support::epoch())),
         consumer_policy(),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,

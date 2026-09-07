@@ -7,8 +7,8 @@ use rss_transactional_messaging::policy::ShutdownBudget;
 use crate::consumer::ConsumerWorker;
 #[cfg(feature = "producer")]
 use crate::relay::RelayWorker;
+use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
-use rss_transactional_messaging::policy::ExecutionTimer;
 #[cfg(feature = "consumer")]
 use rss_transactional_messaging::{
     inbox::InboxStore,

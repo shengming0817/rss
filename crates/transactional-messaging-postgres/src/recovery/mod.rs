@@ -1,12 +1,11 @@
 //! PG implementation of authorized recovery, sharing the original pool and transaction owner.
+use rss_request_context::{Deadline, ExecutionTimer};
 mod capture;
 mod mutation;
 mod query;
 use crate::{PgConfig, PgError, PgRuntime};
 use rss_data_protection::Aead;
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, ExecutionTimer, OperationDeadline, within,
-};
+use rss_transactional_messaging::policy::{OperationDeadline, within};
 use rss_transactional_messaging::transaction::LocalTxAttempt;
 use rss_transactional_messaging_recovery::{
     AuthorizedMutation, AuthorizedQuery, Error, Page, Receipt, RecoveryStore, StoreFailureKind,
@@ -115,8 +114,8 @@ pub(crate) async fn check(
     operator: bool,
     deadline: OperationDeadline,
 ) -> Result<(), Error> {
-    let cutoff = AbsoluteDeadline::from_timeout(&runtime.timer, deadline.timeout())
-        .map_err(|_| Error::Deadline)?;
+    let cutoff =
+        Deadline::from_timeout(&runtime.timer, deadline.timeout()).map_err(|_| Error::Deadline)?;
     let mut connection = within(&runtime.timer, cutoff, |_| runtime.acquire())
         .await
         .map_err(|_| Error::Deadline)?

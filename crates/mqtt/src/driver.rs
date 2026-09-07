@@ -5,11 +5,9 @@ use crate::{
     },
     outcome,
 };
-use rss_transactional_messaging::{
-    policy::{AbsoluteDeadline, Clock},
-    transport::{
-        PublishFailureKind as Kind, PublishFailureReason as Reason, PublishFailureStage as Stage,
-    },
+use rss_request_context::{Clock, Deadline};
+use rss_transactional_messaging::transport::{
+    PublishFailureKind as Kind, PublishFailureReason as Reason, PublishFailureStage as Stage,
 };
 use rumqttc::mqttbytes::v5::{Packet, PubAck, SubscribeReasonCode};
 use rumqttc::{
@@ -94,7 +92,7 @@ type SubscriptionFuture = std::pin::Pin<
 enum DeliveryState {
     Delivered,
     Settling {
-        deadline: AbsoluteDeadline,
+        deadline: Deadline,
         response: oneshot::Sender<Result<(), MqttError>>,
     },
 }
@@ -138,9 +136,11 @@ impl Driver {
         self.outstanding
             .values()
             .filter_map(|v| match v {
-                DeliveryState::Settling { deadline, .. } => {
-                    Some(deadline.remaining(&self.shared.clock))
-                }
+                DeliveryState::Settling { deadline, .. } => Some(
+                    deadline
+                        .remaining(self.shared.clock.now())
+                        .unwrap_or_default(),
+                ),
                 DeliveryState::Delivered => None,
             })
             .min()
@@ -149,7 +149,7 @@ impl Driver {
         &mut self,
         client: &AsyncClient,
         command: Command,
-    ) -> Option<(AbsoluteDeadline, oneshot::Sender<Result<(), MqttError>>)> {
+    ) -> Option<(Deadline, oneshot::Sender<Result<(), MqttError>>)> {
         match command {
             Command::Publish {
                 request,
@@ -167,7 +167,11 @@ impl Driver {
                         Stage::Admission,
                         Reason::TransportUnavailable,
                     ))
-                } else if deadline.remaining(&self.shared.clock).is_zero() {
+                } else if deadline
+                    .remaining(self.shared.clock.now())
+                    .unwrap_or_default()
+                    .is_zero()
+                {
                     Err(outcome::definite(
                         Kind::Transient,
                         Stage::Admission,
@@ -214,7 +218,7 @@ impl Driver {
         generation: u64,
         pkid: u16,
         reason: rumqttc::mqttbytes::v5::PubAckReason,
-        deadline: AbsoluteDeadline,
+        deadline: Deadline,
     ) -> Result<(), MqttError> {
         if generation != self.generation() {
             return Err(MqttError::StaleDelivery);
@@ -222,7 +226,11 @@ impl Driver {
         if self.shared.closing.load(Ordering::Acquire) {
             return Err(MqttError::Closed);
         }
-        if deadline.remaining(&self.shared.clock).is_zero() {
+        if deadline
+            .remaining(self.shared.clock.now())
+            .unwrap_or_default()
+            .is_zero()
+        {
             return Err(MqttError::DeadlineElapsed);
         }
         if !matches!(self.outstanding.get(&pkid), Some(DeliveryState::Delivered)) {
@@ -265,7 +273,11 @@ impl Driver {
                 if let Some(DeliveryState::Settling { response, deadline }) =
                     self.outstanding.remove(&pkid)
                 {
-                    let result = if deadline.remaining(&self.shared.clock).is_zero() {
+                    let result = if deadline
+                        .remaining(self.shared.clock.now())
+                        .unwrap_or_default()
+                        .is_zero()
+                    {
                         self.shared.abandon(self.generation());
                         Err(MqttError::SettlementUnknown)
                     } else {
@@ -374,7 +386,7 @@ enum Next {
     Event(Result<Event, ConnectionError>),
     Retire,
     Stop,
-    Shutdown(AbsoluteDeadline, oneshot::Sender<Result<(), MqttError>>),
+    Shutdown(Deadline, oneshot::Sender<Result<(), MqttError>>),
 }
 
 async fn next(
@@ -420,7 +432,9 @@ async fn run(
                 let result = shutdown(
                     &client,
                     &mut eventloop,
-                    deadline.remaining(&driver.shared.clock),
+                    deadline
+                        .remaining(driver.shared.clock.now())
+                        .unwrap_or_default(),
                 )
                 .await;
                 if let Err(error) = result {

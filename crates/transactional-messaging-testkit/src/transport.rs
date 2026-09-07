@@ -1,9 +1,7 @@
 //! Provider-neutral transport conformance. Fixtures own I/O; evidence uses core protocol types.
 use crate::{ConformanceError, suite_deadline, within_budget};
-use rss_transactional_messaging::{
-    message::MessageId,
-    policy::{ExecutionBudget, ExecutionTimer},
-};
+use rss_request_context::ExecutionTimer;
+use rss_transactional_messaging::{message::MessageId, policy::ExecutionBudget};
 
 #[cfg(feature = "producer")]
 use rss_transactional_messaging::transport::{PublishFailureKind, PublishOutcome};

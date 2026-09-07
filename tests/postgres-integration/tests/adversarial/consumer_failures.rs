@@ -1,5 +1,6 @@
 use super::*;
 use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
+use rss_transactional_messaging::policy::OperationDeadline;
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -149,9 +150,10 @@ pub(super) async fn run(
         let operation_clock = clock.clone();
         let mut operation = Box::pin(async move {
             let clock = operation_clock;
-            let bound = AbsoluteDeadline::from_timeout(&clock, Duration::from_millis(150))
-                .expect("deadline")
-                .operation(&clock);
+            let bound = OperationDeadline::from_cutoff(
+                Deadline::from_timeout(&clock, Duration::from_millis(150)).expect("deadline"),
+                &clock,
+            );
             consumer
                 .execute(&claim, &message, binding.receipt_intent(), bound)
                 .await
@@ -168,7 +170,9 @@ pub(super) async fn run(
         if cancel {
             drop(operation);
         } else {
-            clock.advance(Duration::from_millis(150));
+            clock
+                .advance(Duration::from_millis(150))
+                .expect("fixture time fits");
             let outcome = tokio::time::timeout(Duration::from_secs(5), operation)
                 .await
                 .expect("consumer must observe deadline");

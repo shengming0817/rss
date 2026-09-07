@@ -1,5 +1,6 @@
 //! Transactional consumer execution, lease supervision, and caller-driven worker ownership.
 
+use rss_request_context::{Deadline, ExecutionTimer};
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -15,9 +16,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingIoOutcome, TransactionalMessagingObservation,
     TransactionalMessagingRuntimePhase, TransactionalMessagingSubscribeOutcome,
 };
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, ConsumerExecutionPolicy, ExecutionDeadlines, ExecutionTimer, within,
-};
+use rss_transactional_messaging::policy::{ConsumerExecutionPolicy, ExecutionDeadlines, within};
 use rss_transactional_messaging::transaction::{
     CommittedTransaction, ConsumerTx, EnvelopeValidationFailure, FailureClass, IngressValidator,
     SettlementDecision, SettlementKind, TerminalDisposition, TransactionOutcome,
@@ -371,7 +370,7 @@ async fn renewal_loop<I, V, R, E>(
     inbox: &I,
     execution: &ConsumerExecution<'_, V, R, E>,
     claim: &I::Claim,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
 ) -> Result<RenewalExit, MessagingError>
 where
     I: InboxStore,
@@ -437,7 +436,7 @@ async fn transaction_loop<P, C, T, V, R, E>(
     claim: &C,
     message: &rss_transactional_messaging::message::MessageEnvelope<P>,
     binding: &VerifiedConsumerBinding,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
 ) -> TransactionOutcome<T::CommitProof>
 where
     P: AsRef<[u8]> + Send + Sync,
@@ -448,7 +447,11 @@ where
 {
     let mut attempt = NonZeroU32::MIN;
     loop {
-        if deadline.remaining(execution.timer).is_zero() {
+        if deadline
+            .remaining(execution.timer.now())
+            .unwrap_or_default()
+            .is_zero()
+        {
             return TransactionOutcome::not_started(FailureClass::Infrastructure);
         }
         let outcome = match within(execution.timer, deadline, |deadline| {
@@ -480,7 +483,11 @@ where
             return outcome;
         }
         let delay = execution.policy.retry().delay_after(attempt);
-        if deadline.remaining(execution.timer) <= delay {
+        if deadline
+            .remaining(execution.timer.now())
+            .unwrap_or_default()
+            <= delay
+        {
             return outcome;
         }
         let wake = deadline.capped(execution.timer, delay);
@@ -622,7 +629,7 @@ where
 async fn reject_invalid<S: DeliverySettlement>(
     rejection: rss_transactional_messaging::transaction::DecodeRejection,
     settlement: S,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
     timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
 ) -> Result<(), MessagingError> {
@@ -641,7 +648,7 @@ async fn reject_invalid<S: DeliverySettlement>(
 async fn settle_observed<S: DeliverySettlement>(
     settlement: S,
     decision: SettlementDecision,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
     timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
 ) -> Result<(), MessagingError> {
@@ -675,7 +682,7 @@ async fn settle_observed<S: DeliverySettlement>(
 
 async fn abandon_observed<S: DeliverySettlement>(
     settlement: S,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
     timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
 ) -> Result<(), MessagingError> {
@@ -694,7 +701,7 @@ async fn abandon_observed<S: DeliverySettlement>(
 
 async fn abandon_after_error<S: DeliverySettlement>(
     settlement: S,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
     timer: &impl ExecutionTimer,
     emitter: &impl TransactionalMessagingEmitter,
     primary: MessagingError,
@@ -957,16 +964,15 @@ where
     E: TransactionalMessagingEmitter,
 {
     let delay = worker.subscription_backoff.delay_after(attempt);
-    let deadline =
-        AbsoluteDeadline::from_timeout(worker.timer.as_ref(), delay).map_err(|error| {
-            let error = MessagingError::new(MessagingErrorKind::Invariant, error);
-            emit_runtime_failure(
-                worker.emitter.as_ref(),
-                TransactionalMessagingRuntimePhase::ConsumerDeadline,
-                &error,
-            );
-            error
-        })?;
+    let deadline = Deadline::from_timeout(worker.timer.as_ref(), delay).map_err(|error| {
+        let error = MessagingError::new(MessagingErrorKind::Invariant, error);
+        emit_runtime_failure(
+            worker.emitter.as_ref(),
+            TransactionalMessagingRuntimePhase::ConsumerDeadline,
+            &error,
+        );
+        error
+    })?;
     let waiting = worker.timer.sleep_until(deadline);
     tokio::pin!(waiting);
     Ok(tokio::select! {

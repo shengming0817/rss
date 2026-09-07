@@ -8,22 +8,13 @@ use futures::future::BoxFuture;
 use rss_reconcile::{Control, Error, ErrorKind, Target, Timer};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
-    policy::{AbsoluteDeadline, Clock, MonotonicInstant, OperationDeadline},
+    policy::OperationDeadline,
     transaction::LocalTxAttempt,
 };
 use rss_transactional_messaging_postgres::{PgError, PgRuntime, PgTransaction};
 
-struct BridgeClock<'a, 'b, T>(&'a Control<'b, T>);
-impl<T: Timer> Clock for BridgeClock<'_, '_, T> {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.elapsed())
-    }
-}
-fn deadline<T: Timer>(control: &Control<'_, T>) -> Result<OperationDeadline, MessagingError> {
-    let clock = BridgeClock(control);
-    Ok(AbsoluteDeadline::from_timeout(&clock, control.remaining())
-        .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))?
-        .operation(&clock))
+fn deadline<T: Timer>(control: &Control<'_, T>) -> OperationDeadline {
+    OperationDeadline::from_remaining(control.remaining())
 }
 fn convert(error: Error) -> PgError {
     let kind = match error.kind() {
@@ -51,10 +42,7 @@ where
     if let Err(e) = control.check() {
         return LocalTxAttempt::not_started(convert(e));
     }
-    let deadline = match deadline(control) {
-        Ok(d) => d,
-        Err(e) => return LocalTxAttempt::not_started(PgError::from(e)),
-    };
+    let deadline = deadline(control);
     let state = (Key::from(claim), Key::from(claim), context, Some(operation));
     let transaction = runtime.local_tx_with_context(
         claim.target().scope().tenant(),
@@ -101,10 +89,7 @@ where
     if let Err(e) = control.check() {
         return LocalTxAttempt::not_started(convert(e));
     }
-    let deadline = match deadline(control) {
-        Ok(d) => d,
-        Err(e) => return LocalTxAttempt::not_started(PgError::from(e)),
-    };
+    let deadline = deadline(control);
     let transaction = runtime.local_tx_with_context(
         target.scope().tenant(),
         deadline,

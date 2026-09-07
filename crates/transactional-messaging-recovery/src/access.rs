@@ -1,8 +1,7 @@
 use crate::{Error, Mutation, Query};
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, ExecutionTimer, OperationDeadline, within,
-};
+use rss_request_context::{Deadline, ExecutionTimer};
+use rss_transactional_messaging::policy::{OperationDeadline, within};
 
 /// Borrowed, library-issued authorization challenge. Products authenticate and authorize its exact inputs.
 /// Closed request presented to the trusted product authorizer.
@@ -73,7 +72,7 @@ pub async fn authorize_mutation<A: Authorizer, C: ExecutionTimer>(
     authorizer: &A,
     request: Mutation,
     clock: &C,
-    cutoff: AbsoluteDeadline,
+    cutoff: Deadline,
 ) -> Result<AuthorizedMutation, Error> {
     let digest = request.digest();
     let tenant = request.tenant();
@@ -97,7 +96,7 @@ pub async fn authorize_query<A: Authorizer, C: ExecutionTimer>(
     authorizer: &A,
     request: Query,
     clock: &C,
-    cutoff: AbsoluteDeadline,
+    cutoff: Deadline,
 ) -> Result<AuthorizedQuery, Error> {
     let digest = request.digest();
     let tenant = request.tenant();
@@ -122,7 +121,7 @@ pub async fn authorize_dr<A: Authorizer, C: ExecutionTimer>(
     authorizer: &A,
     request: crate::dr::Plan,
     clock: &C,
-    cutoff: AbsoluteDeadline,
+    cutoff: Deadline,
 ) -> Result<crate::dr::AuthorizedPlan, Error> {
     let digest = request.digest();
     let tenant = request.tenant();

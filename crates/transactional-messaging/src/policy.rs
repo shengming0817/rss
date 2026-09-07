@@ -8,26 +8,24 @@
 //! one origin for both clock observations and sleep; the immediate operation stands in for I/O.
 //!
 //! ```rust
-//! use rss_transactional_messaging::policy::{
-//!     AbsoluteDeadline, Clock, ExecutionBudget, ExecutionDeadlines, ExecutionTimer,
-//!     MonotonicInstant, within,
-//! };
+//! use rss_transactional_messaging::policy::{ExecutionBudget, ExecutionDeadlines, within};
+//! use rss_request_context::{Clock, Deadline, ExecutionTimer};
 //!
-//! struct Timer(tokio::time::Instant);
+//! struct Timer;
 //! impl Clock for Timer {
-//!     fn now(&self) -> MonotonicInstant {
-//!         MonotonicInstant::from_elapsed(self.0.elapsed())
+//!     fn now(&self) -> std::time::Instant {
+//!         tokio::time::Instant::now().into_std()
 //!     }
 //! }
 //! impl ExecutionTimer for Timer {
-//!     async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-//!         tokio::time::sleep_until(self.0 + deadline.instant().elapsed()).await;
+//!     async fn sleep_until(&self, deadline: Deadline) {
+//!         tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
 //!     }
 //! }
 //!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let timer = Timer(tokio::time::Instant::now());
+//!     let timer = Timer;
 //!     let deadlines = ExecutionDeadlines::from_budget(&timer, ExecutionBudget::STANDARD)?;
 //!     let value = within(&timer, deadlines.operation(), |io_deadline| async move {
 //!         tokio::time::timeout(io_deadline.timeout(), async { 42 }).await
@@ -37,6 +35,7 @@
 //! }
 //! ```
 
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use std::future::{Future, poll_fn};
 use std::num::NonZeroU32;
 use std::task::Poll;
@@ -271,51 +270,6 @@ impl ShutdownBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-/// Elapsed duration in one clock's monotonic time domain, not a wall-clock timestamp.
-pub struct MonotonicInstant(Duration);
-
-impl MonotonicInstant {
-    #[must_use]
-    /// Wrap elapsed time from the same origin used by the execution timer.
-    pub const fn from_elapsed(elapsed: Duration) -> Self {
-        Self(elapsed)
-    }
-    #[must_use]
-    /// Duration since this clock's origin.
-    pub const fn elapsed(self) -> Duration {
-        self.0
-    }
-    #[must_use]
-    /// Add a duration, returning `None` on representational overflow.
-    pub fn checked_add(self, duration: Duration) -> Option<Self> {
-        self.0.checked_add(duration).map(Self)
-    }
-    #[must_use]
-    /// Elapsed time since `earlier`, clamped to zero if it lies later.
-    pub fn saturating_duration_since(self, earlier: Self) -> Duration {
-        self.0.saturating_sub(earlier.0)
-    }
-}
-
-/// Monotonic time source; observations must not go backwards or change origin.
-pub trait Clock: Send + Sync {
-    /// Observe elapsed time in this clock's fixed monotonic domain.
-    fn now(&self) -> MonotonicInstant;
-}
-
-/// Monotonic timer used by provider-neutral execution orchestration.
-///
-/// The timer and its [`Clock`] implementation must share one monotonic time domain. Provider
-/// operations are raced by [`within`]; implementations only supply the sleep primitive and cannot
-/// replace the core-owned arbitration.
-pub trait ExecutionTimer: Clock {
-    /// Complete at or after the cutoff, waking the waiting task when it is reached.
-    /// An elapsed deadline must be immediately ready. Dropping the sleep must cancel its wait
-    /// without blocking; use the same origin as [`Clock::now`].
-    fn sleep_until(&self, deadline: AbsoluteDeadline) -> impl Future<Output = ()> + Send;
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Total consumer execution time with a protected settlement interval.
 pub struct ExecutionBudget {
@@ -378,8 +332,8 @@ impl ExecutionBudget {
 ///
 /// Reuse the pair for one delivery; constructing a new pair would start a new budget.
 pub struct ExecutionDeadlines {
-    operation: AbsoluteDeadline,
-    settlement: AbsoluteDeadline,
+    operation: Deadline,
+    settlement: Deadline,
 }
 
 impl ExecutionDeadlines {
@@ -392,11 +346,11 @@ impl ExecutionDeadlines {
         let now = clock.now();
         let operation = now
             .checked_add(budget.total - budget.settlement_reserve)
-            .map(AbsoluteDeadline)
+            .map(Deadline::at)
             .ok_or(ExecutionBudgetError::DeadlineOverflow)?;
         let settlement = now
             .checked_add(budget.total)
-            .map(AbsoluteDeadline)
+            .map(Deadline::at)
             .ok_or(ExecutionBudgetError::DeadlineOverflow)?;
         Ok(Self {
             operation,
@@ -406,20 +360,16 @@ impl ExecutionDeadlines {
 
     /// Return the cutoff for claim, lease, transaction, and retry work.
     #[must_use]
-    pub const fn operation(self) -> AbsoluteDeadline {
+    pub const fn operation(self) -> Deadline {
         self.operation
     }
 
     /// Return the later cutoff reserved for release, settlement, and abandon work.
     #[must_use]
-    pub const fn settlement(self) -> AbsoluteDeadline {
+    pub const fn settlement(self) -> Deadline {
         self.settlement
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Fixed cutoff in the execution timer's monotonic domain.
-pub struct AbsoluteDeadline(MonotonicInstant);
 
 /// Remaining time to the core-owned absolute deadline at one provider call boundary.
 ///
@@ -429,59 +379,22 @@ pub struct AbsoluteDeadline(MonotonicInstant);
 pub struct OperationDeadline(Duration);
 
 impl OperationDeadline {
+    /// Snapshot a caller-owned remaining budget immediately before a provider call.
+    #[must_use]
+    pub const fn from_remaining(remaining: Duration) -> Self {
+        Self(remaining)
+    }
+
+    /// Snapshot the remaining caller budget at a provider boundary; never reuse it later.
+    #[must_use]
+    pub fn from_cutoff(deadline: Deadline, clock: &(impl Clock + ?Sized)) -> Self {
+        Self(deadline.remaining(clock.now()).unwrap_or_default())
+    }
+
     /// Maximum duration this provider future may remain pending.
     #[must_use]
     pub const fn timeout(self) -> Duration {
         self.0
-    }
-}
-
-impl AbsoluteDeadline {
-    /// Freeze a relative timeout against the caller's clock; zero means already elapsed.
-    /// Return [`ExecutionBudgetError::DeadlineOverflow`] if the cutoff cannot be represented.
-    pub fn from_timeout(
-        clock: &impl Clock,
-        timeout: Duration,
-    ) -> Result<Self, ExecutionBudgetError> {
-        clock
-            .now()
-            .checked_add(timeout)
-            .map(Self)
-            .ok_or(ExecutionBudgetError::DeadlineOverflow)
-    }
-
-    #[must_use]
-    /// The monotonic cutoff, suitable for the paired timer's sleep primitive.
-    pub const fn instant(self) -> MonotonicInstant {
-        self.0
-    }
-    #[must_use]
-    /// Time until the cutoff, clamped to zero once elapsed.
-    pub fn remaining(self, clock: &impl Clock) -> Duration {
-        self.0.saturating_duration_since(clock.now())
-    }
-
-    /// Project this absolute deadline into the remaining provider-operation duration.
-    #[must_use]
-    pub fn operation(self, clock: &impl Clock) -> OperationDeadline {
-        OperationDeadline(self.remaining(clock))
-    }
-
-    /// Derive an absolute phase deadline that can only shorten this deadline.
-    #[must_use]
-    pub fn capped(self, clock: &impl Clock, cap: Duration) -> Self {
-        let capped = clock.now().checked_add(cap).map(Self);
-        capped.map_or(self, |capped| self.min(capped))
-    }
-}
-
-impl AbsoluteDeadline {
-    fn min(self, other: Self) -> Self {
-        if self.0.elapsed() <= other.0.elapsed() {
-            self
-        } else {
-            other
-        }
     }
 }
 
@@ -500,7 +413,7 @@ impl AbsoluteDeadline {
 /// provider error. Uncertain commit or publication must remain uncertain in the caller's outcome.
 pub async fn within<'a, T, S, F>(
     timer: &'a T,
-    deadline: AbsoluteDeadline,
+    deadline: Deadline,
     start: S,
 ) -> Result<F::Output, MessagingError>
 where
@@ -509,7 +422,7 @@ where
     F: Future + Send + 'a,
     F::Output: Send + 'a,
 {
-    let operation_deadline = deadline.operation(timer);
+    let operation_deadline = OperationDeadline::from_cutoff(deadline, timer);
     if operation_deadline.timeout().is_zero() {
         return Err(deadline_elapsed());
     }

@@ -1,3 +1,5 @@
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
+use rss_transactional_messaging::policy::OperationDeadline;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -15,7 +17,7 @@ use rss_transactional_messaging::message::{
 use rss_transactional_messaging::outbox::{
     AppendOutcome, OutboxLeaseStatus, OutboxSettlement, OutboxStore, PendingMessage,
 };
-use rss_transactional_messaging::policy::{AbsoluteDeadline, Clock, ExecutionTimer};
+
 use rss_transactional_messaging::transaction::{
     SettlementDecision, SettlementKind, TerminalDisposition,
 };
@@ -65,46 +67,52 @@ fn envelope(
 fn deadline(
     clock: &FakeClock,
 ) -> Result<rss_transactional_messaging::policy::OperationDeadline, Box<dyn std::error::Error>> {
-    Ok(AbsoluteDeadline::from_timeout(clock, Duration::from_secs(30))?.operation(clock))
+    Ok(OperationDeadline::from_cutoff(
+        Deadline::from_timeout(clock, Duration::from_secs(30))?,
+        clock,
+    ))
 }
 
 fn expired_deadline(
     clock: &FakeClock,
 ) -> Result<rss_transactional_messaging::policy::OperationDeadline, Box<dyn std::error::Error>> {
-    Ok(AbsoluteDeadline::from_timeout(clock, Duration::ZERO)?.operation(clock))
+    Ok(OperationDeadline::from_cutoff(
+        Deadline::from_timeout(clock, Duration::ZERO)?,
+        clock,
+    ))
 }
 
 #[tokio::test]
 async fn fake_clock_releases_deadlines_only_after_advance() -> TestResult {
     let clock = FakeClock::new();
-    clock.advance(Duration::from_nanos(1));
-    clock.advance(Duration::from_micros(1));
-    assert_eq!(clock.now().elapsed(), Duration::from_nanos(1_001));
-    let cutoff = AbsoluteDeadline::from_timeout(&clock, Duration::from_secs(5))?;
+    let origin = clock.now();
+    clock.advance(Duration::from_nanos(1))?;
+    clock.advance(Duration::from_micros(1))?;
+    assert_eq!(clock.now(), origin + Duration::from_nanos(1_001));
+    let cutoff = Deadline::from_timeout(&clock, Duration::from_secs(5))?;
     let waiter_clock = clock.clone();
     let handle = tokio::spawn(async move { waiter_clock.sleep_until(cutoff).await });
     tokio::task::yield_now().await;
     assert!(!handle.is_finished());
-    clock.advance(Duration::from_secs(5));
+    clock.advance(Duration::from_secs(5))?;
     handle.await?;
     assert_eq!(
-        clock.now().elapsed(),
-        Duration::from_secs(5) + Duration::from_nanos(1_001)
+        clock.now(),
+        origin + Duration::from_secs(5) + Duration::from_nanos(1_001)
     );
-    clock.advance(Duration::MAX);
-    let saturated = clock.now();
-    clock.advance(Duration::MAX);
+    let before_overflow = clock.now();
+    assert!(clock.advance(Duration::MAX).is_err());
     assert_eq!(
         clock.now(),
-        saturated,
-        "monotonic time must saturate, not wrap"
+        before_overflow,
+        "overflow cannot alter the injected clock"
     );
     for _ in 0..64 {
         let racing_clock = FakeClock::new();
-        let cutoff = AbsoluteDeadline::from_timeout(&racing_clock, Duration::from_millis(1))?;
+        let cutoff = Deadline::from_timeout(&racing_clock, Duration::from_millis(1))?;
         let waiter_clock = racing_clock.clone();
         let waiter = tokio::spawn(async move { waiter_clock.sleep_until(cutoff).await });
-        racing_clock.advance(Duration::from_millis(1));
+        racing_clock.advance(Duration::from_millis(1))?;
         tokio::time::timeout(Duration::from_secs(1), waiter).await??;
     }
     Ok(())

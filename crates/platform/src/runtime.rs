@@ -11,7 +11,7 @@ use std::task::Poll;
 use std::time::Instant;
 
 use rss_contract::{Contract, ContractDescriptor, ContractId};
-use rss_request_context::RequestContextView;
+use rss_request_context::{Clock, Deadline, ExecutionTimer, RequestContextView};
 
 use crate::{ApplicationName, ModuleName};
 
@@ -112,20 +112,27 @@ pub enum DispatchOutcome<T> {
     DeadlineExceeded,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum BuildError {
-    DuplicateModule,
-    DuplicateContract,
+    #[error("duplicate platform module: {name}", name = .0.as_str())]
+    DuplicateModule(ModuleName),
+    #[error("duplicate platform contract: {0}")]
+    DuplicateContract(ContractId),
 }
-impl fmt::Display for BuildError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::DuplicateModule => "duplicate platform module",
-            Self::DuplicateContract => "duplicate platform contract",
-        })
+
+// Private storage erasure; consumers implement only the canonical request-context timer.
+trait Timer: Send + Sync {
+    fn now(&self) -> Instant;
+    fn sleep_until(&self, deadline: Deadline) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+impl<T: ExecutionTimer> Timer for T {
+    fn now(&self) -> Instant {
+        Clock::now(self)
+    }
+    fn sleep_until(&self, deadline: Deadline) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(ExecutionTimer::sleep_until(self, deadline))
     }
 }
-impl Error for BuildError {}
 
 pub struct ApplicationModule {
     name: ModuleName,
@@ -158,15 +165,21 @@ impl ApplicationModule {
 pub struct ApplicationBuilder {
     name: ApplicationName,
     host: Arc<dyn HostView>,
+    timer: Arc<dyn Timer>,
     modules: Vec<ApplicationModule>,
 }
 
 impl ApplicationBuilder {
     #[must_use]
-    pub fn new(name: ApplicationName, host: Arc<dyn HostView>) -> Self {
+    pub fn new(
+        name: ApplicationName,
+        host: Arc<dyn HostView>,
+        timer: Arc<impl ExecutionTimer + 'static>,
+    ) -> Self {
         Self {
             name,
             host,
+            timer,
             modules: Vec::new(),
         }
     }
@@ -179,18 +192,13 @@ impl ApplicationBuilder {
         let mut module_names = HashSet::new();
         let mut handlers = HashMap::new();
         for module in self.modules {
-            if !module_names.insert(module.name) {
-                return Err(BuildError::DuplicateModule);
+            if !module_names.insert(module.name.clone()) {
+                return Err(BuildError::DuplicateModule(module.name));
             }
             for registration in module.registrations {
-                if handlers
-                    .insert(
-                        rss_contract::ContractId::from_static(registration.descriptor.id()),
-                        registration,
-                    )
-                    .is_some()
-                {
-                    return Err(BuildError::DuplicateContract);
+                let id = ContractId::from_static(registration.descriptor.id());
+                if handlers.insert(id.clone(), registration).is_some() {
+                    return Err(BuildError::DuplicateContract(id));
                 }
             }
         }
@@ -199,6 +207,7 @@ impl ApplicationBuilder {
             dispatcher: Dispatcher {
                 application: self.name,
                 host: self.host,
+                timer: self.timer,
                 handlers: Arc::new(handlers),
                 seal,
             },
@@ -255,6 +264,7 @@ pub struct AdmittedRequest<'a, T> {
 pub struct Dispatcher {
     application: ApplicationName,
     host: Arc<dyn HostView>,
+    timer: Arc<dyn Timer>,
     handlers: Arc<HashMap<ContractId, Registration>>,
     seal: u64,
 }
@@ -269,6 +279,13 @@ impl Dispatcher {
         self.host.as_ref()
     }
 
+    /// Dispatch with an independent deadline, even when cancellation never occurs.
+    ///
+    /// Before starting, cancellation wins over an elapsed deadline. During execution, each poll
+    /// checks handler completion, cancellation, then the timer, in that order. Termination drops
+    /// the handler future and admission permit; it does not roll back external effects. The
+    /// executor must keep polling woken tasks, and user code must return control from each poll:
+    /// synchronous blocking cannot be preempted by this provider-neutral boundary.
     pub async fn dispatch<C: Contract>(
         &self,
         descriptor: &ContractDescriptor,
@@ -296,31 +313,28 @@ impl Dispatcher {
         if context.cancellation().is_cancelled() {
             return Ok(DispatchOutcome::Cancelled);
         }
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "dispatcher compares the borrowed absolute deadline before polling user code"
-        )]
-        let deadline_expired = context.deadline().is_expired(Instant::now());
-        if deadline_expired {
+        if context.deadline().is_expired(self.timer.now()) {
             return Ok(DispatchOutcome::DeadlineExceeded);
         }
         let mut operation = registration.handler.handle(Box::new(request), context);
-        let mut termination = context.cancellation().cancelled(context.deadline());
+        let mut cancellation = context.cancellation().cancelled();
+        let mut deadline = self.timer.sleep_until(context.deadline());
         let output = std::future::poll_fn(move |cx| {
             if let Poll::Ready(output) = operation.as_mut().poll(cx) {
                 return Poll::Ready(Ok(output));
             }
-            termination.as_mut().poll(cx).map(Err)
+            if cancellation.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(DispatchOutcome::Cancelled));
+            }
+            deadline
+                .as_mut()
+                .poll(cx)
+                .map(|()| Err(DispatchOutcome::DeadlineExceeded))
         })
         .await;
         let output = match output {
             Ok(output) => output,
-            Err(rss_request_context::CancellationReason::Cancelled) => {
-                return Ok(DispatchOutcome::Cancelled);
-            }
-            Err(rss_request_context::CancellationReason::DeadlineExceeded) => {
-                return Ok(DispatchOutcome::DeadlineExceeded);
-            }
+            Err(outcome) => return Ok(outcome),
         };
         match output {
             Ok(value) => value

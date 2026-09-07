@@ -1,4 +1,5 @@
 use super::*;
+use rss_transactional_messaging::policy::OperationDeadline;
 pub(super) struct Validator;
 impl rss_transactional_messaging::transaction::IngressValidator<Vec<u8>> for Validator {
     fn validate(
@@ -61,7 +62,8 @@ pub(super) fn binding(
 // reason: fixed integration identities and budgets.
 pub(super) fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
     let clock = crate::Clock::new();
-    AbsoluteDeadline::from_timeout(&clock, Duration::from_secs(5))
-        .expect("deadline")
-        .operation(&clock)
+    OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&clock, Duration::from_secs(5)).expect("deadline"),
+        &clock,
+    )
 }

@@ -1,3 +1,4 @@
+use rss_request_context::Deadline;
 mod support;
 use rss_transactional_messaging_recovery::protection::{Capsule, open, seal};
 use support::*;
@@ -122,7 +123,7 @@ fn cursor_cannot_cross_tenant_or_source() {
 }
 
 use rss_transactional_messaging::{
-    policy::{AbsoluteDeadline, ExecutionBudget, ExecutionDeadlines},
+    policy::{ExecutionBudget, ExecutionDeadlines},
     transaction::LocalTxAttempt,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -229,8 +230,8 @@ impl Authorizer for PendingAuthorization {
 #[allow(clippy::expect_used)] // reason: bounded timeout fixture.
 async fn authorization_is_bounded_before_any_storage_access() {
     let clock = Timer::new();
-    let cutoff = AbsoluteDeadline::from_timeout(&clock, std::time::Duration::from_millis(1))
-        .expect("deadline");
+    let cutoff =
+        Deadline::from_timeout(&clock, std::time::Duration::from_millis(1)).expect("deadline");
     let query = Query::list(tenant(), Source::Consumer, 1, None).expect("query");
     assert!(matches!(
         authorize_query(&PendingAuthorization, query, &clock, cutoff).await,

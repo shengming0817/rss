@@ -74,3 +74,6 @@ implement the appropriate capability driver directly; no old-API adapter is supp
 Transport driver failures retain their provider phase and identify the exact scenario through
 `ConformanceError::stage()` (for example `publisher.confirmed` or `delivery.requeue`).
 Budget failures retain the corresponding `.budget` stage.
+
+`FakeClock` implements the canonical `rss_request_context::Clock` and `ExecutionTimer`.
+`advance` returns an error if the new instant cannot be represented and leaves time unchanged.

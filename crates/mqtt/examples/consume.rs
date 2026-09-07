@@ -3,9 +3,9 @@ use rss_mqtt::{
     MqttConfig, MqttError, MqttOutboxPlan, MqttOutboxPublisher, MqttOutboxTopic, MqttReceiver,
     MqttResource,
 };
+use rss_request_context::Clock;
 use rss_transactional_messaging::{
     message::{MessageRoute, MessagingDomain},
-    policy::Clock,
     transport::Publisher,
 };
 use std::sync::Arc;

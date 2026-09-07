@@ -31,7 +31,11 @@ impl LocalTxDriver for Driver {
 
     async fn committed(&self) -> LocalTxAttempt<(), Self::Error> {
         if self.exhaust_budget_on_commit {
-            self.clock.advance(ExecutionBudget::STANDARD.total());
+            assert!(
+                self.clock
+                    .advance(ExecutionBudget::STANDARD.total())
+                    .is_ok()
+            );
         }
         self.writes.store(1, Ordering::SeqCst);
         self.attempts.store(1, Ordering::SeqCst);

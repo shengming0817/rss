@@ -7,9 +7,7 @@ use axum::{
 use http_body_util::BodyExt as _;
 use rss_axum::{HttpError, RequestBudget, RequestControl, request_control};
 use rss_contract::{SafeError, SafeErrorCode};
-use rss_request_context::{
-    CancellationObserver as _, CancellationReason, Deadline, RequestId, TenantId,
-};
+use rss_request_context::{CancellationObserver as _, RequestId, TenantId};
 use tower::ServiceExt as _;
 
 #[tokio::test]
@@ -85,14 +83,7 @@ async fn timeout_drops_handler_and_preserves_earliest_budget() {
     assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
     let control = observed.lock().unwrap().clone().unwrap();
     assert!(control.is_cancelled());
-    assert_eq!(
-        control
-            .cancelled(Deadline::at(
-                control.deadline().instant() + Duration::from_secs(60)
-            ))
-            .await,
-        CancellationReason::DeadlineExceeded
-    );
+    control.cancelled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -189,10 +180,7 @@ async fn dropping_request_future_cancels_observers_and_drops_downstream() {
     assert!(!control.is_cancelled());
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    assert_eq!(
-        control.cancelled(control.deadline()).await,
-        CancellationReason::Cancelled
-    );
+    control.cancelled().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -216,4 +204,47 @@ async fn completed_handler_wins_when_deadline_is_ready_in_the_same_poll() {
         response.into_body().collect().await.unwrap().to_bytes(),
         "committed"
     );
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test asserts a bounded request completion"
+)]
+async fn cooperative_downstream_cannot_starve_request_deadline() {
+    use std::future::Future as _;
+    use std::task::Poll;
+    let app = Router::new()
+        .route(
+            "/",
+            get(|| async {
+                std::future::poll_fn(|cx| {
+                    for _ in 0..256 {
+                        let mut budget = std::pin::pin!(tokio::task::consume_budget());
+                        if budget.as_mut().poll(cx).is_pending() {
+                            break;
+                        }
+                    }
+                    cx.waker().wake_by_ref();
+                    Poll::<&'static str>::Pending
+                })
+                .await
+            }),
+        )
+        .layer(middleware::from_fn_with_state(
+            RequestBudget::new(Duration::from_secs(1)).unwrap(),
+            request_control,
+        ));
+    let mut request = Box::pin(app.oneshot(Request::new(Body::empty())));
+    std::future::poll_fn(|cx| {
+        assert!(request.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let response = tokio::time::timeout(Duration::ZERO, request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), 503);
 }

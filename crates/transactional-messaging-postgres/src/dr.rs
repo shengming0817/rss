@@ -1,8 +1,9 @@
 //! Narrow DR operator. The raw transaction/pool is deliberately private.
 use crate::{PgConfig, PgError, PgRuntime, fence::hex};
+use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::{
     fence::{Epoch, ExecutionBinding},
-    policy::{ExecutionTimer, OperationDeadline},
+    policy::OperationDeadline,
     transaction::LocalTxAttempt,
 };
 use rss_transactional_messaging_recovery::{Error, StoreFailureKind, dr::*};

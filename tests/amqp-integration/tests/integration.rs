@@ -3,6 +3,7 @@
 #![allow(clippy::expect_used)]
 // reason: canonical live-provider fixtures must fail loudly when typed identities drift.
 
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,8 +26,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingEmitter, TransactionalMessagingObservation,
 };
 use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ConsumerExecutionPolicy, ExecutionBudget, ExecutionTimer,
-    MonotonicInstant, OperationDeadline, RetryPolicy,
+    ConsumerExecutionPolicy, ExecutionBudget, OperationDeadline, RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator, SettlementDecision,
@@ -67,9 +67,10 @@ fn isolated_vhost(prefix: &str) -> String {
 
 fn provider_deadline() -> OperationDeadline {
     let clock = FakeClock::new();
-    AbsoluteDeadline::from_timeout(&clock, TIMEOUT)
-        .expect("bounded integration deadline")
-        .operation(&clock)
+    OperationDeadline::from_cutoff(
+        Deadline::from_timeout(&clock, TIMEOUT).expect("bounded integration deadline"),
+        &clock,
+    )
 }
 
 fn consumer_policy() -> ConsumerExecutionPolicy {
@@ -111,31 +112,30 @@ fn envelope_with_payload(
     )
 }
 
-struct TokioClock {
-    origin: tokio::time::Instant,
-}
+struct TokioClock;
 
 impl TokioClock {
     #[allow(clippy::disallowed_methods)]
     // reason: this integration adapter is the injected Clock owner for real Tokio I/O.
     fn new() -> Self {
-        Self {
-            origin: tokio::time::Instant::now(),
-        }
+        Self
     }
 }
 
 impl Clock for TokioClock {
     #[allow(clippy::disallowed_methods)]
     // reason: the injected adapter projects its single Tokio monotonic origin into core time.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(tokio::time::Instant::now() - self.origin)
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 
 impl ExecutionTimer for TokioClock {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        tokio::time::sleep_until(self.origin + deadline.instant().elapsed()).await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep_until(deadline.instant().into()).await;
+        })
+        .await;
     }
 }
 

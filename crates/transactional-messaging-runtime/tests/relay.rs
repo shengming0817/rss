@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 // reason: deterministic in-memory fixtures must fail loudly on poisoned locks or script drift.
 
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 mod support;
 
 use std::collections::BTreeMap;
@@ -26,9 +27,7 @@ use rss_transactional_messaging::outbox::{
 };
 #[cfg(feature = "managed-runtime")]
 use rss_transactional_messaging::policy::ShutdownBudget;
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, DeliveryBudget, ExecutionTimer, MonotonicInstant, OperationDeadline,
-};
+use rss_transactional_messaging::policy::{DeliveryBudget, OperationDeadline};
 use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
     Publisher,
@@ -129,7 +128,7 @@ impl OutboxStore<Vec<u8>> for Store {
         _deadline: OperationDeadline,
     ) -> Result<OutboxLeaseStatus, MessagingError> {
         if let Some((clock, delay)) = &self.extend_delay {
-            clock.advance(*delay);
+            clock.advance(*delay).expect("fixture time fits");
         }
         Ok(self.lease)
     }
@@ -318,13 +317,13 @@ async fn provider_cannot_return_more_claims_than_the_admitted_bound() {
 async fn relay_deadline_overflow_emits_a_closed_failure_phase() {
     struct OverflowClock;
     impl Clock for OverflowClock {
-        fn now(&self) -> MonotonicInstant {
-            MonotonicInstant::from_elapsed(Duration::MAX)
+        fn now(&self) -> std::time::Instant {
+            support::last_instant()
         }
     }
 
     impl ExecutionTimer for OverflowClock {
-        async fn sleep_until(&self, _deadline: AbsoluteDeadline) {
+        async fn sleep_until(&self, _deadline: Deadline) {
             std::future::pending().await
         }
     }

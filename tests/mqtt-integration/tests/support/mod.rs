@@ -1,32 +1,34 @@
-use rss_transactional_messaging::policy::{
-    AbsoluteDeadline, Clock, ExecutionTimer, MonotonicInstant, OperationDeadline,
-};
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
+use rss_transactional_messaging::policy::OperationDeadline;
 use rumqttc::{PersistedSession, SessionStore, SessionStoreKey};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::{sync::Arc, time::Duration};
 
-pub struct Timer(tokio::time::Instant);
+pub struct Timer;
 impl Timer {
     #[allow(clippy::disallowed_methods)] // reason: sole injected real monotonic clock construction.
     pub fn new() -> Self {
-        Self(tokio::time::Instant::now())
+        Self
     }
 }
 impl Clock for Timer {
     #[allow(clippy::disallowed_methods)] // reason: injected clock owns the time origin.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.elapsed())
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 impl ExecutionTimer for Timer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        tokio::time::sleep(deadline.remaining(self)).await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep(deadline.remaining(self.now()).unwrap_or_default()).await;
+        })
+        .await;
     }
 }
 #[allow(clippy::panic)] // reason: bounded constant test deadline cannot overflow a fresh test clock.
 pub fn deadline(clock: &impl Clock) -> OperationDeadline {
-    AbsoluteDeadline::from_timeout(clock, Duration::from_secs(3))
-        .map(|d| d.operation(clock))
+    Deadline::from_timeout(clock, Duration::from_secs(3))
+        .map(|d| OperationDeadline::from_cutoff(d, clock))
         .unwrap_or_else(|_| unreachable!())
 }
 

@@ -1,11 +1,9 @@
 use super::{CancellationToken, Control, Duration, PgLedger, PgPool, auth, committed, request};
+use rss_request_context::{Clock as MessageClock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::{
     inbox::{IdempotencyDisposition, InboxStore},
     message::MessageEnvelope,
-    policy::{
-        AbsoluteDeadline, Clock as MessageClock, ExecutionTimer, LeaseRenewalPolicy,
-        MonotonicInstant, OperationDeadline,
-    },
+    policy::{LeaseRenewalPolicy, OperationDeadline},
     transaction::{ConsumerTx, TerminalDisposition},
 };
 use rss_transactional_messaging_postgres::{
@@ -18,13 +16,16 @@ mod fence_fixture;
 mod helpers;
 use helpers::{binding, deadline, message};
 impl MessageClock for super::Clock {
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(rss_ledger_postgres::Timer::now(self))
+    fn now(&self) -> std::time::Instant {
+        self.0 + rss_ledger_postgres::Timer::now(self)
     }
 }
 impl ExecutionTimer for super::Clock {
-    async fn sleep_until(&self, d: AbsoluteDeadline) {
-        tokio::time::sleep(d.remaining(self)).await;
+    async fn sleep_until(&self, d: Deadline) {
+        tokio::task::unconstrained(async move {
+            tokio::time::sleep(d.remaining(self.now()).unwrap_or_default()).await;
+        })
+        .await;
     }
 }
 struct Effect {

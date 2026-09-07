@@ -13,6 +13,7 @@ publish = ["crates-io"]
 
 [dependencies]
 uuid.workspace = true
+thiserror.workspace = true
 
 [features]
 default = []

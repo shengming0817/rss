@@ -1,10 +1,11 @@
 //! Inbox claim, duplicate, release and fencing conformance.
 
+use rss_request_context::ExecutionTimer;
 use std::future::Future;
 
 use rss_transactional_messaging::error::MessagingError;
 use rss_transactional_messaging::inbox::{IdempotencyDisposition, LeaseStatus};
-use rss_transactional_messaging::policy::{ExecutionBudget, ExecutionTimer};
+use rss_transactional_messaging::policy::ExecutionBudget;
 
 use crate::{ConformanceError, suite_deadline, within_budget};
 

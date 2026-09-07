@@ -95,10 +95,11 @@ the caller retains that same timer to pass to `consume_once` or `relay_once`.
 
 ```rust,no_run
 use std::sync::Arc;
+use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::{
     message::{MessageEnvelope, MessageId, MessagingDomain},
     outbox::{AppendOutcome, OutboxStore, PendingMessage},
-    policy::{DeliveryBudget, ExecutionTimer, OperationDeadline},
+    policy::{DeliveryBudget, OperationDeadline},
     transaction::{LocalTxAttempt, TerminalDisposition},
 };
 use rss_transactional_messaging_postgres::{
