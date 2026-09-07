@@ -100,7 +100,7 @@ fn terminate_compilation(child: &mut std::process::Child) -> std::io::Result<()>
         // Keep the leader unreaped until its whole group has been signalled: its PID cannot
         // be reused as another process group's identity while native compiler children exit.
         let killed = Command::new("/bin/kill")
-            .args(["-KILL", &format!("-{}", child.id())])
+            .args(["-KILL", "--", &format!("-{}", child.id())])
             .stderr(Stdio::null())
             .status();
         if !killed.is_ok_and(|status| status.success()) {
@@ -142,17 +142,20 @@ fn timeout_cleanup_closes_descendant_output() -> anyhow::Result<()> {
     let mut ready = String::new();
     output.read_line(&mut ready)?;
     assert_eq!(ready.trim(), "ready");
-    terminate_compilation(&mut child)?;
     let (send, receive) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let mut rest = Vec::new();
-        let _ = send.send(output.read_to_end(&mut rest));
+        let result = (|| {
+            terminate_compilation(&mut child)?;
+            let mut rest = Vec::new();
+            output.read_to_end(&mut rest)
+        })();
+        let _ = send.send(result);
     });
     let ended = receive.recv_timeout(Duration::from_secs(2));
     if ended.is_err() {
         // Cleanup the deliberately leaked descendant when running the red regression.
         let _ = Command::new("/bin/kill")
-            .args(["-KILL", &format!("-{group}")])
+            .args(["-KILL", "--", &format!("-{group}")])
             .status();
     }
     assert!(

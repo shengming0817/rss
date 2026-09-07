@@ -78,3 +78,5 @@ Run [34076132335](https://github.com/shengming0817/rss/actions/runs/34076132335)
 新增回归覆盖 cancel 前与 cancel-ok 后的关闭 barrier、ACK 后 stream Drop、admission 原子封闭与 permit 排空、多个 waiter 共享一次关闭及错误、通道过渡状态不是成功回执。现有真实 broker 三个套件均已通过（47.890s / 23.656s / 27.196s），包括 private CA、错误 CA、角色权限、结算、重连与关闭期限。新增结构化日志只报告一次 `channel_close/subscription_close/Operation`，聚合保留错误但不重复或错标为 task join。
 
 最终同 SHA/baseline 冷热运行与本地 canonical preflight 以 PR 评论中的可追溯证据为准；本节不预先声明最终 CI 通过。
+
+Linux 容器核查进一步发现 `/bin/kill` 的负进程组参数必须由 `--` 分隔：旧调用在 procps-ng 下可返回成功却未发出期望信号，随后的 wait 因而阻塞。现在使用 `kill -KILL -- -PGID`；回归把整个 terminate 调用与后代 EOF 都纳入2秒接收预算，避免等待子进程自然结束后假绿。相同实际Rust helper提取测试在 Linux（rust:1.96.0-bookworm）先红（2.01秒）后绿（0.00秒），macOS同样通过（0.03秒）。Run 34077325563 的 checks 冷跑完整成功（13m20s），tests 超过20分钟且缺失最终日志，已取消；此轮不计入最终冷热验收。
