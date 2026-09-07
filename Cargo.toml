@@ -113,7 +113,7 @@ axum = { version = "0.8", default-features = false, features = ["json"] }
 tower = { version = "0.5", default-features = false }
 http-body = "1"
 http-body-util = "0.1"
-hyper = { version = "1", default-features = false, features = ["server", "http2"] }
+hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
 rss-transactional-messaging-recovery = { path = "crates/transactional-messaging-recovery", version = "0.1.0" }
 # Versions and sources are declared here; consumers select only their required features.

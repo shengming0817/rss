@@ -2,7 +2,8 @@
 
 Optional Axum integration for RSS public contracts: exact handler binding, request-future
 control, safe HTTP errors, and opt-in managed serving. Version 0.1.0 is experimental.
-Default features are empty; `managed-server` adds `rss-runtime` and an owned Hyper HTTP/2 transport for the Axum Router.
+Default features are empty. Opt-in `http1`, `http2`, and `auto-protocol` add owned Hyper transports
+for the Axum Router; `managed-server` supplies their lifecycle dependencies without selecting a protocol.
 Neither mode depends on the retired HTTP/DI packages or requires `rss-platform::Application`.
 
 ## Typed product routing
@@ -122,12 +123,12 @@ authenticator. The status/body mapper alone does not provide a complete authenti
 ## Optional serving
 
 ```rust,no_run
-# #[cfg(feature = "managed-server")]
+# #[cfg(feature = "http2")]
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use std::time::Duration;
 use rss_runtime::{ShutdownStack, TotalDrainBudget};
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-let registration = rss_axum::serve_registration(
+let registration = rss_axum::serve_http2_registration(
     listener, axum::Router::new(), "http", Duration::from_secs(5));
 let status = registration.status();
 let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?)?;
@@ -142,17 +143,70 @@ let _exit = status.wait_stopped().await;
 ```
 
 Only adoption starts the task. Dropping an unadopted registration closes its socket. The
-managed task directly owns a FuturesUnordered set of Hyper HTTP/2 connection futures; it does
+managed task directly owns a FuturesUnordered set of Hyper connection futures; it does
 not spawn independent connection tasks. Hyper's executor submits stream futures to a private
 connection-owned queue and future set, so HTTP/2 stream work shares the same cancellation owner. Cancellation first stops accept, then requests graceful
 shutdown of all existing connections. The runtime's drain timeout cancels the same owning task
 and its remaining request/response-body futures, so they cannot resume when later dependencies
 shut down. A timeout is still a failed drain, not successful completion of those requests.
 
-This minimal transport supports HTTP/2 prior knowledge without HTTP/1 fallback. HTTP/1, WebSocket and CONNECT tunnels
-are outside this managed transport. TLS/ALPN termination is owned by the product edge. Hyper owns protocol parsing, keep-alive and graceful close;
-RSS only supplies ownership and uses Hyper's Tokio I/O/service adapters. A per-connection panic
-or protocol failure terminates that connection without taking unrelated clients down.
+Cargo features make protocol implementations available; the constructor fixes each listener's
+policy even when another dependency enables additional features.
+
+| Feature | Public constructor | Listener policy |
+| --- | --- | --- |
+| `managed-server` | none | Lifecycle dependencies only |
+| `http1` | `serve_http1_registration` | HTTP/1 only |
+| `http2` | `serve_http2_registration` | HTTP/2 prior knowledge only |
+| `auto-protocol` | `serve_auto_registration` (plus both dedicated constructors) | HTTP/1 and HTTP/2 prior knowledge on the same socket |
+
+`http1` and `http2` each imply `managed-server`; `auto-protocol` implies both. Enabling both
+protocol features alone does not expose the Auto constructor. Hyper owns parsing, keep-alive
+and graceful close; hyper-util owns Auto detection. H1 drain disables keep-alive while allowing
+an active request/response body to finish; Auto drain also cancels unfinished protocol detection.
+H1 request headers have an explicit 30-second read timeout, including later requests on a
+keep-alive connection. Auto additionally allows 30 seconds from connection driving until the
+first decoded request reaches the service, bounding idle/partial protocol detection and initial
+headers without duplicating Hyper's parser. This establishment deadline is disabled before the
+handler runs: it does not bound admitted handlers, request bodies, response bodies or subsequent
+H2 streams. These transport deadlines are independent of the product's RequestBudget.
+A connection panic or protocol failure terminates that connection without taking unrelated
+clients down. H2 stream panics are additionally isolated within the connection-owned executor.
+Managed serving emits DEBUG tracing events under `rss_axum::server` with closed `outcome`
+(`peer_error`, `panic`, `establishment_timeout`) and `scope` (`connection`, `stream`) fields.
+RSS does not record error text, peer input or panic payloads in those events, and installs no
+subscriber; the product owns filtering/export and the process panic hook.
+
+A product can select different policies in the same binary:
+
+```rust,no_run
+# #[cfg(feature = "auto-protocol")]
+# async fn listeners() -> Result<(), Box<dyn std::error::Error>> {
+use std::time::Duration;
+let device = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
+let admin = tokio::net::TcpListener::bind("127.0.0.1:8081").await?;
+let device = rss_axum::serve_auto_registration(
+    device, axum::Router::new(), "device", Duration::from_secs(5));
+let admin = rss_axum::serve_http2_registration(
+    admin, axum::Router::new(), "admin", Duration::from_secs(5));
+// Stage both registrations in the product's ShutdownStack to start them.
+# drop((device, admin));
+# Ok(()) }
+```
+
+Direct deployment can select `auto-protocol`; deployment behind an edge proxy can select only
+`http2` and configure the proxy's upstream accordingly. Proxy downstream negotiation is
+independent of this choice. These are plain TCP transports: TLS/ALPN and the TLS integration
+needed for direct HTTPS remain product responsibilities. Auto does not itself implement HTTPS,
+h2c Upgrade, WebSocket or CONNECT tunnels, or hand upgraded IO to another owner.
+
+### Migration from the initial experimental API
+
+Replace dependency feature `managed-server` with `http2` and calls to the removed
+`serve_registration` with `serve_http2_registration` to retain the initial H2-only behavior.
+Select `http1` or `auto-protocol` and their explicit constructors when those policies are needed.
+There is no compatibility alias or implicit protocol fallback. The current Release Surface
+records an uncommitted Rust API (#2315); this replacement retains the 0.1.0 package version.
 
 Cancellation remains cooperative: handlers must yield and the original Tokio runtime must
 continue being driven. Blocking code, product-spawned tasks and remote effects are not made
@@ -166,12 +220,20 @@ Source: `baseline/pre-community-core-20260902` at
 `5b63e10a1b396b0ff70b7d1e6e55db296cd7a891`, compared with lifecycle extraction at `3e660e2f5`.
 Historical sources are not test evidence. #2299 owns retirement of the old packages; this package
 never forwards to them. Tests cover compile-time binding, budgets, safe errors and real sockets.
-`hack/axum-package-proof.py` verifies actual artifact consumers for base, managed serving and the
-shared contract/platform composition. There are no persisted schemas or production T3 fixtures.
+`hack/axum-package-proof.py` checks isolated artifact consumers for base, lifecycle-only,
+H1-only, H2-only, H1+H2, Auto and all features, plus the shared contract/platform composition.
+It verifies actual protocol feature resolution and missing API boundaries, and runs real requests
+and shutdown for H1, H2 and Auto. Candidate mode binds revision, version and archive digest.
+The managed example is shared with those artifact consumers; component tests own the fault matrix.
+Run it with `--features http1`, `--features http2` or `--features auto-protocol`. Lifecycle-only
+`--features managed-server` deliberately exits with an instruction to select a protocol, which
+the artifact proof also checks. There are no persisted schemas or production T3 fixtures.
 
 ref: tokio-rs/axum axum/src/handler/mod.rs@axum-v0.8.9
 ref: tokio-rs/axum axum/src/serve/mod.rs@axum-v0.8.9
 ref: tokio-rs/axum axum/src/middleware/from_fn.rs@axum-v0.8.9
 
+ref: hyperium/hyper src/server/conn/http1.rs@v1.10.1
 ref: hyperium/hyper src/server/conn/http2.rs@v1.10.1
+ref: hyperium/hyper-util src/server/conn/auto/mod.rs@v0.1.20
 ref: rust-lang/futures-rs futures-util/src/stream/futures_unordered/mod.rs@0.3.32

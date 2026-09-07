@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOTS = {"rss-axum", "rss-platform"}
@@ -58,6 +59,119 @@ def archives_at(directory, revision, versions):
     return result
 
 
+MODES = {
+    "base": [], "managed": ["managed-server"], "http1": ["http1"],
+    "http2": ["http2"], "both": ["http1", "http2"],
+    "auto": ["auto-protocol"], "all": None, "platform": [],
+}
+
+
+def feature_args(mode):
+    features = MODES[mode]
+    return ["--all-features"] if features is None else (["--features", ",".join(features)] if features else [])
+
+
+def expected_protocols(mode):
+    return ({"http1"} if mode == "http1" else {"http2"} if mode == "http2"
+            else {"http1", "http2"} if mode in {"both", "auto", "all"} else set())
+
+
+def verify_features(facts, mode):
+    packages = {p["id"]: p["name"] for p in facts["packages"]}
+    active = {}
+    for node in facts["resolve"]["nodes"]:
+        active.setdefault(packages[node["id"]], set()).update(node["features"])
+    if mode == "platform":
+        return
+    expected = expected_protocols(mode)
+    for name in ("rss-axum", "hyper", "hyper-util"):
+        actual = active.get(name, set()) & {"http1", "http2"}
+        if actual != expected:
+            raise ValueError(f"{mode}: {name} protocol features {actual}, expected {expected}")
+    if ("auto-protocol" in active["rss-axum"]) != (mode in {"auto", "all"}):
+        raise ValueError("unexpected Auto capability")
+    managed = mode != "base"
+    if ("rss-runtime" in active) != managed:
+        raise ValueError("optional runtime capability mismatch")
+    if ("managed-server" in active["rss-axum"]) != managed:
+        raise ValueError("managed-server capability mismatch")
+    if managed and "net" not in active.get("tokio", set()):
+        raise ValueError("missing tokio/net transport foundation")
+    for name, required in (("hyper", {"server"}), ("hyper-util", {"tokio", "service"})):
+        if managed and not required <= active.get(name, set()):
+            raise ValueError(f"missing {name} transport foundation")
+        if not managed and name in active:
+            raise ValueError(f"base acquired optional {name}")
+
+
+def check_unavailable(consumer, mode, env):
+    expected = expected_protocols(mode)
+    unavailable = [f"serve_{p}_registration" for p in ("http1", "http2") if p not in expected]
+    if mode not in {"auto", "all"}:
+        unavailable.append("serve_auto_registration")
+    target = consumer / "src/bin/unavailable.rs"
+    target.parent.mkdir(exist_ok=True)
+    for symbol in unavailable:
+        target.write_text(f"use rss_axum::{symbol};\nfn main() {{}}\n")
+        result = subprocess.run(
+            ["cargo", "check", "--offline", "--bin", "unavailable", "--message-format=json", *feature_args(mode)],
+            cwd=consumer, env=env, text=True, capture_output=True, timeout=300)
+        diagnostics = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+        errors = [d["message"] for d in diagnostics if d.get("reason") == "compiler-message" and d["message"]["level"] == "error"]
+        if result.returncode == 0 or not errors or any(
+            (e.get("code") or {}).get("code") != "E0432" or symbol not in e["message"] for e in errors
+        ):
+            raise ValueError(f"missing capability did not fail as unresolved import: {symbol}: {result.stderr}")
+    target.unlink(missing_ok=True)
+
+
+def consumer_manifest(mode, versions, features, *, smoke=False):
+    manifest = f'[package]\nname="axum-{mode}-consumer"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\n'
+    names = ["rss-contract", "rss-platform", "rss-request-context"] if mode == "platform" else ["rss-axum"]
+    if smoke:
+        names.append("rss-contract")
+    for name in names:
+        manifest += f'{name}={{version="={versions[name]}", default-features=false}}\n'
+    if mode == "platform":
+        return manifest
+    if smoke:
+        manifest += f'rss-runtime={{version="={versions["rss-runtime"]}",default-features=false,optional=true}}\n'
+        manifest += 'axum={version="0.8",default-features=false,features=["json"]}\ntokio={version="1",features=["rt","macros","net","time"]}\n'
+        manifest += 'hyper={version="1",default-features=false,optional=true,features=["client"]}\nhyper-util={version="0.1",default-features=false,optional=true,features=["tokio"]}\nhttp-body-util={version="0.1",optional=true}\n'
+    manifest += '[features]\ndefault=[]\n'
+    for feature in features:
+        if feature == "default":
+            continue
+        deps = [f"rss-axum/{feature}"]
+        # Pure API features forward exactly one capability; no consumer can repair its closure.
+        if smoke:
+            if feature == "managed-server":
+                deps += ["dep:rss-runtime"]
+            elif feature in {"http1", "http2"}:
+                deps += ["managed-server", "dep:hyper", f"hyper/{feature}", "dep:hyper-util", "dep:http-body-util"]
+            elif feature == "auto-protocol":
+                deps += ["http1", "http2"]
+        manifest += f'{feature}={json.dumps(deps)}\n'
+    return manifest
+
+
+def api_source(mode):
+    symbols = [f"serve_{protocol}_registration" for protocol in sorted(expected_protocols(mode))]
+    if mode in {"auto", "all"}:
+        symbols.append("serve_auto_registration")
+    # Infer the external argument/return types without directly depending on their owners.
+    calls = "\n".join(
+        f'let _ = |listener, router| rss_axum::{symbol}(listener, router, "http", std::time::Duration::from_secs(1));'
+        for symbol in symbols)
+    return ('fn main() {\nlet _ = rss_axum::RequestBudget::new(std::time::Duration::from_secs(1));\n'
+            + calls + '\n}\n')
+
+
+def verify_example_failure(returncode, stderr):
+    if returncode == 0 or "enable http1, http2, or auto-protocol" not in stderr:
+        raise ValueError("lifecycle-only example must fail with protocol selection guidance")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", type=Path)
@@ -65,6 +179,7 @@ def main():
     args = parser.parse_args()
     if bool(args.artifacts) != bool(args.revision):
         parser.error("--artifacts and --revision must be supplied together")
+    args_revision = args.revision
     versions = closure()
     env = os.environ.copy()
     for key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
@@ -87,33 +202,44 @@ def main():
         patch = '\n[patch.crates-io]\n' + ''.join(
             f'{n} = {{ path = {json.dumps(str(extracted / (n + "-" + v)))} }}\n'
             for n, v in versions.items())
-        env["CARGO_TARGET_DIR"] = str(root / "target")
-        for mode in ("base", "managed", "platform"):
+        features = tomllib.loads((extracted / f'rss-axum-{versions["rss-axum"]}/Cargo.toml').read_text())["features"]
+        results = {}
+        for mode in MODES:
             consumer = root / mode
             (consumer / "src").mkdir(parents=True)
-            manifest = f'[package]\nname="axum-{mode}-consumer"\nversion="0.0.0"\nedition="2024"\n[workspace]\n[dependencies]\n'
-            names = ["rss-contract", "rss-platform", "rss-request-context"] if mode == "platform" else ["rss-contract", "rss-axum"]
-            if mode == "managed":
-                names.append("rss-runtime")
-            for name in names:
-                feature = ', features=["managed-server"]' if name == "rss-axum" and mode == "managed" else ''
-                manifest += f'{name}={{version="={versions[name]}", default-features=false{feature}}}\n'
-            source = (extracted / f'rss-axum-{versions["rss-axum"]}/examples/{mode}.rs').read_text()
-            if mode != "platform":
-                manifest += 'axum={version="0.8",default-features=false,features=["json"]}\ntokio={version="1",features=["rt","macros","net"]}\n'
+            # Separate manifests/locks/resolution; artifacts share only the compiler cache.
+            env["CARGO_TARGET_DIR"] = str(root / "target")
+            manifest = consumer_manifest(mode, versions, features)
+            example_root = extracted / f'rss-axum-{versions["rss-axum"]}/examples'
+            source = (example_root / "platform.rs").read_text() if mode == "platform" else api_source(mode)
             (consumer / "Cargo.toml").write_text(manifest + patch)
             (consumer / "src/main.rs").write_text(source)
-            for features in ([], ["--no-default-features"], ["--all-features"]):
-                run(["cargo", "check", "--offline", *features], consumer, env)
-            facts = json.loads(subprocess.check_output(["cargo", "metadata", "--offline", "--format-version", "1"], cwd=consumer, env=env))
+            args = feature_args(mode)
+            run(["cargo", "check", "--offline", *args], consumer, env)
+            facts = json.loads(subprocess.check_output(["cargo", "metadata", "--offline", "--format-version", "1", *args], cwd=consumer, env=env))
             for package in facts["packages"]:
                 if package["source"] is None and not Path(package["manifest_path"]).resolve().is_relative_to(root):
                     raise ValueError("consumer escaped artifact workspace")
                 if package["source"] is None and package["name"] != f"axum-{mode}-consumer" and package["name"] not in versions:
                     raise ValueError("unexpected internal dependency")
-            if mode == "base" and any(p["name"] == "rss-runtime" for p in facts["packages"]):
-                raise ValueError("base acquired optional runtime")
-        print(json.dumps({"artifacts": {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in archives.items()}, "consumers": "base/managed/platform passed"}, indent=2))
+            verify_features(facts, mode)
+            if mode != "platform":
+                check_unavailable(consumer, mode, env)
+            if mode in {"base", "managed", "http1", "http2", "auto"}:
+                # Client codec features must not participate in the preceding capability proof.
+                (consumer / "Cargo.toml").write_text(consumer_manifest(mode, versions, features, smoke=True) + patch)
+                (consumer / "src/main.rs").write_text((example_root / ("base.rs" if mode == "base" else "managed.rs")).read_text())
+                if mode == "managed":
+                    run(["cargo", "build", "--offline", *args], consumer, env)
+                    executable = Path(env["CARGO_TARGET_DIR"]) / "debug" / (f"axum-{mode}-consumer" + (".exe" if os.name == "nt" else ""))
+                    result = subprocess.run([str(executable)], cwd=consumer, env=env, capture_output=True, text=True, timeout=30)
+                    verify_example_failure(result.returncode, result.stderr)
+                else:
+                    run(["cargo", "run", "--offline", *args], consumer, env)
+            results[mode] = ("check/features/API passed; expected example failure passed" if mode == "managed" else
+                             "check/features/API passed; run passed" if mode in {"base", "http1", "http2", "auto"} else "check/features/API passed")
+        print(json.dumps({"revision": args_revision, "artifacts": {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in archives.items()}, "consumers": results}, indent=2))
+
 
 
 if __name__ == "__main__":

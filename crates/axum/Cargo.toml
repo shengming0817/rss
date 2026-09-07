@@ -13,7 +13,11 @@ publish = ["crates-io"]
 
 [features]
 default = []
-managed-server = ["dep:rss-runtime", "dep:futures", "dep:hyper", "dep:hyper-util", "tokio/net"]
+managed-server = ["dep:rss-runtime", "dep:futures", "dep:hyper", "dep:hyper-util", "dep:tracing", "tokio/net", "hyper/server"]
+
+http1 = ["managed-server", "hyper/http1", "hyper-util/http1"]
+http2 = ["managed-server", "hyper/http2", "hyper-util/http2"]
+auto-protocol = ["http1", "http2", "hyper-util/server-auto"]
 
 [dependencies]
 rss-contract.workspace = true
@@ -22,6 +26,7 @@ rss-runtime = { workspace = true, optional = true }
 futures = { workspace = true, optional = true, features = ["std", "async-await"] }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 axum.workspace = true
 tokio = { workspace = true, features = ["time", "macros"] }
 tokio-util.workspace = true
@@ -29,7 +34,9 @@ serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-hyper = { workspace = true, features = ["client", "http2"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
 rss-platform.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "test-util", "io-util", "net", "sync"] }
 tower = { workspace = true, features = ["util"] }

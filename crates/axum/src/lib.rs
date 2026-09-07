@@ -8,7 +8,11 @@ pub use control::{RequestBudget, RequestBudgetError, RequestControl, request_con
 pub use error::HttpError;
 mod routes;
 pub use routes::{ContractMarker, Endpoint, HttpContract};
-#[cfg(feature = "managed-server")]
+#[cfg(any(feature = "http1", feature = "http2"))]
 mod server;
-#[cfg(feature = "managed-server")]
-pub use server::serve_registration;
+#[cfg(feature = "auto-protocol")]
+pub use server::serve_auto_registration;
+#[cfg(feature = "http1")]
+pub use server::serve_http1_registration;
+#[cfg(feature = "http2")]
+pub use server::serve_http2_registration;
