@@ -178,6 +178,7 @@ jobs:
           PY
           echo 'stopped=true' >> "$GITHUB_OUTPUT"
       - name: Save Cargo downloads from the checks writer
+        id: download_save
         if: >-
           always() && !cancelled() && matrix.part == 'checks' &&
           steps.execution.outcome != 'skipped' && steps.keys.outcome == 'success' &&
@@ -191,6 +192,7 @@ jobs:
             ${{ env.CARGO_HOME }}/git/db
           key: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
       - name: Save stopped compiler snapshot
+        id: compiler_save
         if: >-
           always() && !cancelled() && steps.finish.outputs.stopped == 'true' && steps.finish.outputs.has_objects == 'true' &&
           (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/develop'))
@@ -199,6 +201,20 @@ jobs:
         with:
           path: ${{ env.SCCACHE_DIR }}
           key: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
+
+      - name: Record cache save outcomes
+        if: always() && !cancelled() && steps.execution.outcome != 'skipped'
+        env:
+          DOWNLOAD_SAVE_OUTCOME: ${{ steps.download_save.outcome }}
+          COMPILER_SAVE_OUTCOME: ${{ steps.compiler_save.outcome }}
+          DOWNLOAD_SAVE_KEY: ${{ steps.keys.outputs.download }}${{ steps.keys.outputs.suffix }}
+          COMPILER_SAVE_KEY: ${{ steps.keys.outputs.compiler }}${{ steps.keys.outputs.suffix }}
+        run: |
+          {
+            echo "### $CI_PART save receipts"
+            echo "Cargo save action: $DOWNLOAD_SAVE_OUTCOME; key: $DOWNLOAD_SAVE_KEY"
+            echo "Compiler save action: $COMPILER_SAVE_OUTCOME; key: $COMPILER_SAVE_KEY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   cargo:
     name: cargo

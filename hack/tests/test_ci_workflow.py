@@ -46,6 +46,24 @@ class FinalizerTests(unittest.TestCase):
             self.assertIn('stopped=true', (root / 'outputs').read_text())
             self.assertIn('has_objects=false', (root / 'outputs').read_text())
 
+    def test_save_receipts_distinguish_failure_success_and_skipped(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        step = workflow.split('      - name: Record cache save outcomes\n', 1)[1]
+        body = step.split('        run: |\n', 1)[1].split('\n  cargo:', 1)[0]
+        script = textwrap.dedent(body)
+        with tempfile.TemporaryDirectory(prefix='rss-save-summary-') as temporary:
+            summary = Path(temporary) / 'summary'
+            for download, compiler in [('failure', 'success'), ('skipped', 'skipped')]:
+                env = os.environ | {'GITHUB_STEP_SUMMARY': str(summary), 'CI_PART': 'tests',
+                                    'DOWNLOAD_SAVE_OUTCOME': download, 'COMPILER_SAVE_OUTCOME': compiler,
+                                    'DOWNLOAD_SAVE_KEY': 'download-exact', 'COMPILER_SAVE_KEY': 'compiler-exact'}
+                result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], env=env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = summary.read_text()
+                self.assertIn(f'Cargo save action: {download}; key: download-exact', report)
+                self.assertIn(f'Compiler save action: {compiler}; key: compiler-exact', report)
+
 
 if __name__ == '__main__':
     unittest.main()
