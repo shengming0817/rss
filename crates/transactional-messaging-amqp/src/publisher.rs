@@ -34,7 +34,7 @@ use crate::conn::validate_recovery_timeout;
 #[cfg(test)]
 use crate::conn::{MAX_RECOVERY_TIMEOUT_MILLIS, RecoveryTimeoutConfigError};
 
-/// envelope metadata → [`BasicProperties`]：`MessageId` 盖 `message_id`（去重锚点）；`occurred_at`
+/// envelope metadata → [`BasicProperties`]：`MessageId` 盖 `message_id`（去重锚点）；`occurredAt`
 /// 独占 AMQP typed `timestamp`（unix 秒 u64），不再重复进 headers；其余 pair 进 `FieldTable` LongString。
 ///
 /// Pure metadata projection using normally compiled lapin types; no broker I/O.
@@ -46,7 +46,7 @@ fn build_properties(
     let props = BasicProperties::default()
         .with_message_id(message_id)
         .with_delivery_mode(2);
-    // occurred_at 来自 validated `Timepoint`；畸形或负 wire 值在任何 broker I/O 前已 fail-closed。
+    // occurredAt 来自 validated `Timepoint`；畸形或负 wire 值在任何 broker I/O 前已 fail-closed。
     let props = match u64::try_from(envelope.metadata().occurred_at().unix_seconds()) {
         Ok(timestamp) => props.with_timestamp(timestamp),
         Err(_) => props,
@@ -1708,7 +1708,7 @@ impl Publisher<Vec<u8>> for PublisherInner {
         // 经 confirm 检测为失败——durable publish-ok 语义闭合（不再依赖「subscriber 先启动」运行顺序约定）。
         // message_id = MessageId（去重锚点）：经 broker envelope 流到订阅侧 `Message::id()`（subscriber 的
         // `pick_message_id` 优先读 message_id 再回退 delivery_tag），实现跨进程「至少一次 + 幂等去重」。
-        // envelope metadata 透传：occurred_at → AMQP timestamp；其余 → FieldTable LongString headers。
+        // envelope metadata 透传：occurredAt → AMQP timestamp；其余 → FieldTable LongString headers。
         let topic = message.metadata().route().as_str().to_string();
         let payload = message.payload().clone();
         let inject_post_send_close = self.take_post_send_connection_close_fault();
@@ -1918,7 +1918,7 @@ mod classify_tests {
 }
 
 /// Unit coverage of the normally compiled `build_properties` metadata projection.
-/// 验证 occurred_at → AMQP timestamp（不进 headers）、其余 pair → headers LongString。
+/// 验证 occurredAt → AMQP timestamp（不进 headers）、其余 pair → headers LongString。
 #[cfg(test)]
 mod publish_deadline_tests {
     use std::convert::Infallible;
@@ -1929,6 +1929,50 @@ mod publish_deadline_tests {
         MAX_RECOVERY_TIMEOUT_MILLIS, PublishDeadlineElapsed, PublishPhase, PublisherInner,
         RecoveryTimeoutConfigError, run_publish_pipeline, validate_recovery_timeout,
     };
+
+    #[test]
+    #[allow(clippy::expect_used)] // Typed envelope fixtures and property assertions.
+    fn occurrence_time_uses_only_typed_timestamp() {
+        use rss_transactional_messaging::message::{
+            AuthoredMessageMetadata, ContractIdentity, MessageEnvelope, MessageId, MessageMetadata,
+            MessageMetadataExtensions, MessageRoute, MessagingDomain,
+        };
+
+        for seconds in [0, 42, i64::MAX] {
+            let message = MessageEnvelope::new(
+                MessageId::parse("message-1").expect("message id"),
+                MessageMetadata::new(
+                    AuthoredMessageMetadata::new(
+                        rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000000001")
+                            .expect("tenant"),
+                        rss_contract::Timepoint::try_from(seconds).expect("time"),
+                        MessagingDomain::parse("runtime").expect("domain"),
+                        MessageRoute::parse("runtime.message").expect("route"),
+                        ContractIdentity::new(
+                            rss_contract::ContractId::parse("runtime.message").expect("contract"),
+                            rss_contract::ContractVersion::from_major(1).expect("version"),
+                            rss_contract::SchemaDigest::parse(
+                                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            ).expect("schema"),
+                        ),
+                    ),
+                    MessageMetadataExtensions::default(),
+                ),
+                Vec::new(),
+            );
+            let props =
+                super::build_properties(message.id().as_str(), &message).expect("properties");
+            assert_eq!(*props.timestamp(), Some(seconds as u64));
+            assert!(
+                !props
+                    .headers()
+                    .as_ref()
+                    .expect("headers")
+                    .inner()
+                    .contains_key("occurredAt")
+            );
+        }
+    }
 
     #[test]
     fn deadline_error_is_static_and_ambiguous() {

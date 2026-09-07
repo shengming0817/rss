@@ -299,8 +299,11 @@ impl SubscriberInner {
     }
 }
 
+const KEY_OCCURRED_AT: &str = "occurredAt";
+
 /// AMQP [`lapin::BasicProperties`] → authored metadata attributes（adapter 透传路径）。
-/// - `timestamp` → `occurred_at`（unix 秒，十进制 string）。
+/// - typed `timestamp` 是 `occurredAt` 的唯一来源（unix 秒，十进制 string）。
+/// - 同名 `occurredAt` header 无条件忽略；缺失或越界 timestamp 由解码器拒绝。
 /// - transport-safe `headers` LongString pair → metadata pair（LongString 以 utf8_lossy Display 转 string）。
 /// - 非 LongString header 值跳过（不是本 adapter `build_properties` 产出的；透传外部生产者时静默忽略）。
 ///
@@ -308,10 +311,13 @@ impl SubscriberInner {
 fn extract_metadata(props: &lapin::BasicProperties) -> std::collections::BTreeMap<String, String> {
     let mut metadata = std::collections::BTreeMap::new();
     if let Some(timestamp) = props.timestamp() {
-        metadata.insert("occurredAt".to_owned(), timestamp.to_string());
+        metadata.insert(KEY_OCCURRED_AT.to_owned(), timestamp.to_string());
     }
     if let Some(table) = props.headers() {
         for (k, v) in table.inner() {
+            if k.as_str() == KEY_OCCURRED_AT {
+                continue;
+            }
             if let AMQPValue::LongString(ls) = v {
                 metadata.insert(k.to_string(), ls.to_string());
             }
@@ -369,7 +375,7 @@ fn decode_message(
         MessageId::parse(id).map_err(|_| EnvelopeValidationFailure::MalformedIdentity)?;
     let tenant_id = rss_request_context::TenantId::parse(&take_required(&mut headers, "tenantId")?)
         .map_err(|_| EnvelopeValidationFailure::MalformedMetadata)?;
-    let occurred_at = take_required(&mut headers, "occurredAt")?
+    let occurred_at = take_required(&mut headers, KEY_OCCURRED_AT)?
         .parse::<i64>()
         .ok()
         .and_then(|value| rss_contract::Timepoint::try_from(value).ok())
@@ -907,6 +913,97 @@ mod tests {
     use super::decode_message;
 
     #[test]
+    fn typed_timestamp_is_the_only_occurrence_time_source() {
+        use lapin::types::{AMQPValue, FieldTable};
+        use rss_transactional_messaging::message::{
+            ContractIdentity, MessageRoute, MessagingDomain, SubscriptionIdentity,
+        };
+        use rss_transactional_messaging::transaction::EnvelopeValidationFailure;
+
+        let subscription = SubscriptionIdentity::new(
+            MessagingDomain::parse("runtime").expect("domain"),
+            MessageRoute::parse("runtime.message").expect("route"),
+            ContractIdentity::new(
+                rss_contract::ContractId::parse("runtime.message").expect("contract"),
+                rss_contract::ContractVersion::from_major(1).expect("version"),
+                rss_contract::SchemaDigest::parse(
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .expect("schema"),
+            ),
+        );
+        for timestamp in [
+            None,
+            Some(0),
+            Some(42),
+            Some(i64::MAX as u64),
+            Some(u64::MAX),
+        ] {
+            for header in [
+                None,
+                Some(AMQPValue::LongString("7".into())),
+                Some(AMQPValue::LongString("invalid".into())),
+                Some(AMQPValue::LongLongInt(7)),
+            ] {
+                let mut table = FieldTable::default();
+                for (key, value) in [
+                    ("tenantId", "00000000-0000-0000-0000-000000000001"),
+                    ("domain", "runtime"),
+                    ("route", "runtime.message"),
+                    ("contractId", "runtime.message"),
+                    ("schemaVersion", "v1"),
+                    (
+                        "schemaHash",
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    ),
+                    ("attribute.source", "device"),
+                ] {
+                    table.insert(key.into(), AMQPValue::LongString(value.into()));
+                }
+                table.insert("attribute.numeric".into(), AMQPValue::LongLongInt(7));
+                if let Some(header) = header {
+                    table.insert(super::KEY_OCCURRED_AT.into(), header);
+                }
+                let mut props = lapin::BasicProperties::default().with_headers(table);
+                if let Some(timestamp) = timestamp {
+                    props = props.with_timestamp(timestamp);
+                }
+                let metadata = super::extract_metadata(&props);
+                assert_eq!(
+                    metadata.get("occurredAt"),
+                    timestamp.map(|t| t.to_string()).as_ref()
+                );
+                assert_eq!(
+                    metadata.get("attribute.source").map(String::as_str),
+                    Some("device")
+                );
+                assert!(!metadata.contains_key("attribute.numeric"));
+                let message = decode_message(
+                    "message-1",
+                    Vec::new(),
+                    metadata,
+                    &subscription,
+                    "runtime.message",
+                );
+                match timestamp.and_then(|value| i64::try_from(value).ok()) {
+                    Some(expected) => assert_eq!(
+                        message
+                            .expect("valid timestamp")
+                            .metadata()
+                            .occurred_at()
+                            .unix_seconds(),
+                        expected,
+                    ),
+                    None => assert!(matches!(
+                        message,
+                        Err(EnvelopeValidationFailure::MalformedMetadata)
+                    )),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn subscription_errors_preserve_non_retryable_classification() {
         use rss_transactional_messaging::error::MessagingErrorKind;
         for (code, expected) in [
@@ -991,7 +1088,7 @@ mod tests {
                     "tenantId".to_owned(),
                     "00000000-0000-0000-0000-000000000001".to_owned(),
                 ),
-                ("occurredAt".to_owned(), "1".to_owned()),
+                (super::KEY_OCCURRED_AT.to_owned(), "1".to_owned()),
                 ("domain".to_owned(), "runtime".to_owned()),
                 ("route".to_owned(), "runtime.message".to_owned()),
                 ("contractId".to_owned(), "runtime.message".to_owned()),

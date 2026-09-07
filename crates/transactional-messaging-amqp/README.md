@@ -127,6 +127,19 @@ Production retention management and application replay remain external. See
 [RabbitMQ policies](https://www.rabbitmq.com/docs/policies) and
 [dead-letter configuration](https://www.rabbitmq.com/docs/dlx).
 
+## Occurrence time on AMQP
+
+AMQP typed `timestamp` is the only source of the envelope's `occurredAt` value, in Unix seconds
+from zero through `i64::MAX`. The publisher writes it only to `timestamp`, never to headers.
+The subscriber always ignores an `occurredAt` header, regardless of its value or AMQP type.
+A missing or out-of-range timestamp produces `EnvelopeValidationFailure::MalformedMetadata`;
+a header cannot supply or repair it. Other LongString headers retain their normal mapping.
+
+This intentionally removes support for header-only occurrence times (#1417). External producers
+must set the typed `timestamp`; there is no header fallback or snake_case alias. Rust metadata
+accessors keep their snake_case names. Timestamp selection does not authenticate the producer or
+replace tenant and ingress validation.
+
 ## Verification and features
 
 Default and no-default dependency closures do not contain `rss-runtime`. The additive
