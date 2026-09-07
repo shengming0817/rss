@@ -64,6 +64,22 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'matched no runnable tests'):
                 pipeline.build(self.plan | {'coverage': False, 'filter': 'test(typo)'})
 
+    def test_consumer_prepares_downloads_and_records_fetch_failure(self):
+        for fetched in (0, 17):
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                if kwargs.get('capture'): return 'rustc'
+                return fetched if command[:2] == ['cargo', 'fetch'] else 0
+            with self.subTest(fetched=fetched), patch.object(pipeline, 'run', run):
+                self.assertEqual(pipeline.execute(self.plan, 'consumer'), fetched)
+                fetch = calls.index(['cargo', 'fetch', '--locked'])
+                tests = [i for i, c in enumerate(calls) if c[:3] == ['cargo', 'nextest', 'run']]
+                self.assertEqual(len(tests), int(fetched == 0))
+                if tests: self.assertGreater(tests[0], fetch)
+                result = json.loads((self.root / 'results/consumer/result.json').read_text())
+                self.assertEqual(result['exit'], fetched)
+
     def test_complete_and_failed_groups_still_generate_report(self):
         self.results()
         self.assertEqual(self.report(), 0)

@@ -143,6 +143,7 @@ async fn scenario() -> anyhow::Result<()> {
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
     let case = TransactionCase {
+        connection: source.connection_state(),
         database,
         clock,
         adapter,
@@ -167,6 +168,7 @@ async fn scenario() -> anyhow::Result<()> {
     Ok(())
 }
 struct TransactionCase {
+    connection: tokio::sync::watch::Receiver<rss_mqtt::ConnectionState>,
     database: Database,
     clock: Arc<Timer>,
     adapter: rss_mqtt::MqttOutboxPublisher,
@@ -236,11 +238,21 @@ impl TransactionCase {
             ("unknown", PgTransactionFault::CommitUnknownAfterAck)
         };
         self.publish(id).await?;
+        let before = support::ready_generation(&self.connection)?;
         assert_deferred(
             self.process(next(stream).await?, Some(fault), rollback, true)
                 .await?,
         );
         assert_eq!(count(&self.database, id).await?, i64::from(!rollback));
+        support::wait_reconnected(&self.connection, before).await?;
+        self.settle_replay(stream, id, rollback).await
+    }
+    async fn settle_replay(
+        &self,
+        stream: &mut Stream,
+        id: &str,
+        rollback: bool,
+    ) -> anyhow::Result<()> {
         // No application republish: broker must return the original after session retirement.
         let (envelope, settlement) = next(stream).await?.into_parts();
         assert_eq!(envelope.id().as_str(), id);
@@ -248,8 +260,14 @@ impl TransactionCase {
         if rollback {
             self.expire_claim(id).await?;
         }
-        self.process(Delivery::new(envelope, settlement), None, false, true)
+        let outcome = self
+            .process(Delivery::new(envelope, settlement), None, false, true)
             .await?;
+        if rollback {
+            assert_committed(outcome);
+        } else {
+            assert!(matches!(outcome, ProcessingDisposition::Duplicate(_)));
+        }
         assert_eq!(count(&self.database, id).await?, 1);
         Ok(())
     }
@@ -310,6 +328,7 @@ impl TransactionCase {
         };
         self.publish("expired-retirement").await?;
         let (_, settlement) = next(stream).await?.into_parts();
+        let before = support::ready_generation(&self.connection)?;
         let deadline =
             AbsoluteDeadline::from_timeout(&*self.clock, Duration::ZERO)?.operation(&*self.clock);
         assert_eq!(
@@ -321,6 +340,7 @@ impl TransactionCase {
                 .kind(),
             MessagingErrorKind::DeadlineElapsed
         );
+        support::wait_reconnected(&self.connection, before).await?;
         let delivery = next(stream).await?;
         let (message, settlement) = delivery.into_parts();
         assert_eq!(message.id().as_str(), "expired-retirement");

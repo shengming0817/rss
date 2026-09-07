@@ -18,7 +18,8 @@ make ci CI_PART=tests CI_FILTER='package(=amqp-integration) and test(=shared_amq
 显式 `CI_FILTER` 独立于 affected 范围，零匹配即失败；筛选表达式同样写入 plan。
 `CI_PART=select` 写出绑定 SHA 的 plan。GitHub 后续阶段通过 `CI_PLAN` 读取该产物，不能自行重新选择。
 `CI_PART=build` 生成 nextest archive，验证所有非 ignored 测试恰好分到 unit、consumer、amqp、kafka、
-providers 之一。consumer 保留独立 workspace/依赖解析/target；组内串行并使用独立编译缓存。
+providers 之一。consumer 先通过 `cargo fetch --locked` 准备冷 runner 的依赖下载，再运行 offline 证明；
+保留独立 workspace/依赖解析/target，组内串行并使用独立编译缓存，不重新构建工作区。
 三个 provider 组最多同时使用三个 runner，组内串行。doctest 使用独立 `cargo test --doc` 命令。
 
 本地产物位于 `.local-ci-runs/current`，被 Git 忽略。普通和插桩构建使用不同 target 子目录与缓存身份。

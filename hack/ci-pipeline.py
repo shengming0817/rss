@@ -206,7 +206,12 @@ def execute(plan, group):
             launcher = bundle / 'rss-test-launcher'
             launcher.chmod(0o755)
             command = [str(launcher), *providers, '--', *command]
-        code = run(command, env=env)
+        # Consumer proofs resolve/build independently and intentionally use offline Cargo.
+        # A fresh execution runner needs source downloads, not a second workspace build.
+        if group == 'consumer':
+            code = run(['cargo', 'fetch', '--locked'], env=env)
+        if code == 0:
+            code = run(command, env=env)
     metrics = output / 'fixtures.jsonl'
     if metrics.exists():
         totals = {}

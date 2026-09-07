@@ -1,4 +1,5 @@
 use super::support::{self, FileStore, Timer};
+use anyhow::Context as _;
 use rss_mqtt::{ConnectionState, PublishRequest, RejectReason};
 use rss_transactional_messaging::transport::PublishOutcome;
 use std::{sync::Arc, time::Duration};
@@ -42,11 +43,23 @@ async fn persistent_receive_settlement_and_reconstruction() -> anyhow::Result<()
             if reject {
                 settlement
                     .reject_terminal(RejectReason::Unspecified, support::deadline(&*clock))
-                    .await?;
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "reject {body}; state={:?}",
+                            *publisher.connection_state().borrow()
+                        )
+                    })?;
             } else {
                 settlement
                     .ack_after_durable_handoff(support::deadline(&*clock))
-                    .await?;
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "ack {body}; state={:?}",
+                            *publisher.connection_state().borrow()
+                        )
+                    })?;
             }
         }
         assert!(matches!(
@@ -90,7 +103,10 @@ async fn persistent_receive_settlement_and_reconstruction() -> anyhow::Result<()
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing replay"))?;
         assert_eq!(redelivered.payload(), b"unsettled");
+        let state = publisher.connection_state();
+        let before = support::ready_generation(&state)?;
         redelivered.into_parts().1.abandon();
+        support::wait_reconnected(&state, before).await?;
         let replay = receiver
             .next()
             .await?
@@ -100,7 +116,13 @@ async fn persistent_receive_settlement_and_reconstruction() -> anyhow::Result<()
             .into_parts()
             .1
             .ack_after_durable_handoff(support::deadline(&*clock))
-            .await?;
+            .await
+            .with_context(|| {
+                format!(
+                    "ack abandoned replay; state={:?}",
+                    *publisher.connection_state().borrow()
+                )
+            })?;
         let mut recovered = publisher.connection_state();
         let before = match *recovered.borrow() {
             ConnectionState::Ready { generation, .. } => generation,
@@ -136,7 +158,13 @@ async fn persistent_receive_settlement_and_reconstruction() -> anyhow::Result<()
             .into_parts()
             .1
             .ack_after_durable_handoff(support::deadline(&*clock))
-            .await?;
+            .await
+            .with_context(|| {
+                format!(
+                    "ack restart barrier; state={:?}",
+                    *publisher.connection_state().borrow()
+                )
+            })?;
         resource.shutdown(Duration::from_secs(5)).await?;
         Ok::<_, anyhow::Error>(())
     })
