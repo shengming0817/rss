@@ -152,7 +152,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 ### 3.3 详细修复计划
 
-文件级改动清单。收尾统一运行 10 分钟有界 `make ci CI_BASE=<remote>/develop`；workspace/feature/integration 全量重门交 develop/release 或显式 full，skill 不重复或追加低层门；每日 security-audit 只刷新 advisory，不运行测试。
+文件级改动清单。收尾验证统一按§4.6 第 6 步执行；验证政策遵循[验证规则](../../../docs/rules/verification-scope.md)。
 
 ### 3.4 执行决策
 
@@ -220,7 +220,7 @@ scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-t
 
 ### 4.3 编辑循环收敛
 
-确认每条 finding 的复现测试与适用的 Edit-Test Loop 已通过；不在此重复跑最终本地漏斗。canonical `make ci CI_BASE=<remote>/develop` 统一在 4.6 **切 label 后**执行。
+确认每条 finding 的复现测试与适用的 Edit-Test Loop 已通过；最终本地验证统一按§4.6 第 6 步在**切 label 后**执行。
 
 ### 4.4 测试失败处理（分层回退）
 
@@ -246,10 +246,9 @@ scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-t
 3. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
 4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 5. **切 label**：按 `PROJECT.md` §5 执行 `forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
-6. **本地验证（label 后执行）**：运行 `make ci CI_BASE=<remote>/develop`。该入口分析
-   `<remote>/develop...HEAD` 的已提交差异并执行 Cargo package reverse closure；unknown/global/异常输入
-   fail-full。10 分钟预算由调用方承担。每日 security-audit 只刷新 advisory。失败则回阶段 1-4，集中修复
-   后重新执行冲突预检、pm 评论与 label 流转，再重跑本步骤。
+6. **本地验证（label 后执行）**：运行 `make ci CI_BASE=<remote>/develop`，验证政策遵循
+   [验证规则](../../../docs/rules/verification-scope.md)。失败则回阶段 1-4，集中修复后重新执行冲突预检、
+   pm 评论与 label 流转，再重跑本步骤。
 7. **延迟启监控（必做）**：本地验证结束后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 可在 `needs-check-fix` 后先行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）请求用户决策。

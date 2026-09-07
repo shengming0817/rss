@@ -16,4 +16,4 @@
 
 ## Test plan
 
-- [ ] `make ci CI_BASE=<remote>/develop` 在调用方 10 分钟预算内通过（unknown/global/异常输入会 fail-full）
+- [ ] 已按仓库 `docs/rules/verification-scope.md` 执行 `make ci CI_BASE=<remote>/develop`，并记录实际验证范围与结果。

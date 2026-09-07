@@ -176,7 +176,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 /ship <issue>
   实施 → PR 创建 → 贴 pr-status/in-progress
   → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）→ 内置修复 Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
-  → 切 pr-status/needs-review-again（首审唯一使用点）→ 10 分钟有界 `make ci CI_BASE=<remote>/develop`（重型门交 develop/release 或显式 full）；外部 app 可先行 review
+  → 切 pr-status/needs-review-again（首审唯一使用点）→ `make ci CI_BASE=<remote>/develop`；外部 app 可先行 review
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
@@ -187,7 +187,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 /fix <PR#>（pr-status/needs-fix 时；可多次跑，≤3 轮自动循环）
   → bash hack/automation/pr-comments.sh latest <N> pr-review（最新 pm:pr-review findings）→ 过滤最新一轮
   → triage + IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → push/冲突预检 → deferred 留痕 + pm:fix
-  → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → 10 分钟有界 `make ci CI_BASE=<remote>/develop`（不追加 `make ci-full`）
+  → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → `make ci CI_BASE=<remote>/develop`
   → 外部 app 可在 label 后先行执行 /pr-review --check
   → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听 check 交接
 
@@ -200,8 +200,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 > 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
-> 本地 canonical `make ci` 执行 Cargo package reverse closure；unknown/global/异常输入 fail-full。
-> 10 分钟预算由调用方承担，完整 workspace 门由 develop/release 或显式 `make ci-full` 承接。
+> 本地验证政策遵循[验证规则](../../docs/rules/verification-scope.md)；本节只拥有 PR 状态流转与交接顺序。
 > **IN_SCOPE Cx3/Cx4 批量处置门**：ship/fix 切触发 label 前，先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由：属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。如果存在这类 finding，**只发起一次批量处置请求**，用户可全盘采纳建议，或按 finding ID 覆盖个别项；没有 IN_SCOPE Cx3/Cx4 时不发起沟通。**判 defer 后自动建 issue 跟踪（机器可判定 artifact，不再二次确认）**，与 OOS artifact-before-trigger 同序；全部 deferred issue 已建方可切 label。
 > **输出纪律**（ship/review/fix/check 各阶段共用单源）：每阶段**窗口完整打印是主输出、PR 评论是无损留痕，两者都做缺一不可**——评论是 `/fix` 与再审（codex / `/pr-review`）提取 findings 的唯一来源（每条带 `file:line`、无损详表入 `<details>`，无损约定见 `pr-comment.md`）。skill 不重述此纪律，引用本条。
 > 评论格式模板单源 = `.github/project-template/pr-comment.md`。
