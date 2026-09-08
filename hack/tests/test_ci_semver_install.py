@@ -9,6 +9,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+# Bound orchestration hangs without treating shared-host process startup as a 10-second SLO.
+PROCESS_TIMEOUT = 60
 
 
 class InstallTests(unittest.TestCase):
@@ -51,7 +53,7 @@ print('http=200 redirects=1 seconds=0.01')
             'SEMVER_BIN_DIR': str(self.root / 'installed'), 'GITHUB_OUTPUT': str(self.root / 'output'), 'GITHUB_PATH': str(self.root / 'path')}
 
     def run_install(self, **env):
-        return subprocess.run(['bash', str(self.script)], env=self.env | env, capture_output=True, text=True, timeout=10)
+        return subprocess.run(['bash', str(self.script)], env=self.env | env, capture_output=True, text=True, timeout=PROCESS_TIMEOUT)
 
     def test_reset_retries_then_installs_and_cache_avoids_network(self):
         result = self.run_install(FAIL_DOWNLOADS='1')

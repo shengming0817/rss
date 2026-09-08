@@ -1,8 +1,10 @@
 //! ref: baseline 5b63e10 crates/eventexec/src/projection.rs; ordered resume algorithm only.
+use crate::observation::Publisher;
 use crate::{
     ApplyOutcome, BatchLimit, Checkpoint, Control, Error, ErrorKind, Event, Execution, Position,
-    ReplayBound, Source, Timer,
+    ReplayBound, RunObservation, Source, Timer,
 };
+use std::future::{Future, IntoFuture};
 
 /// Bound work independently of elapsed time.
 #[derive(Debug, Clone, Copy)]
@@ -54,25 +56,6 @@ impl Report {
         }
     }
 }
-/// Explicit post-run observation. Called by the application only after it owns the report;
-/// callbacks are outside the execution deadline and cannot prevent run from returning.
-pub trait Observer {
-    /// Aggregate acknowledged progress with a closed outcome label.
-    fn settled(&self, outcome: ApplyOutcome, count: u64);
-    /// The closed stop classification.
-    fn stopped(&self, reason: Stop);
-}
-impl Report {
-    /// Publish aggregate observations under the caller's own execution policy. This borrows
-    /// rather than consumes the report; observer failure cannot erase acknowledged progress.
-    pub fn observe(&self, observer: &impl Observer) {
-        observer.settled(ApplyOutcome::Applied, self.applied);
-        observer.settled(ApplyOutcome::Duplicate, self.duplicates);
-        observer.settled(ApplyOutcome::Filtered, self.filtered);
-        observer.stopped(self.stop.clone());
-    }
-}
-
 pub(crate) fn validate_next(checkpoint: Checkpoint, event: &Event) -> Result<(), Error> {
     if checkpoint.position.is_some_and(|p| event.position() <= p) {
         return Err(Error::new(ErrorKind::OutOfOrder));
@@ -106,26 +89,66 @@ fn validate_batch(
     }
     Ok(())
 }
-/// Run until caught up, interrupted, failed or bounded. No task is spawned and no implicit
-/// retry or epoch takeover occurs. The caller controls subsequent invocations.
-pub async fn run<S: Source, E: Execution, T: Timer>(
-    source: &S,
-    execution: &E,
-    control: &Control<'_, T>,
+/// One bounded invocation. Obtain its read-only handle before awaiting it, or use
+/// `IntoFuture::into_future` where an API requires a `Future`. No task is spawned.
+#[must_use = "await the run to execute it; dropping it marks observation unavailable"]
+pub struct Run<F> {
+    future: F,
+    observation: RunObservation,
+}
+impl<F> Run<F> {
+    /// Retain a read-only handle to this exact invocation.
+    pub fn observation(&self) -> RunObservation {
+        self.observation.clone()
+    }
+}
+impl<F: Future<Output = Report>> IntoFuture for Run<F> {
+    type Output = Report;
+    type IntoFuture = F;
+    fn into_future(self) -> F {
+        self.future
+    }
+}
+
+/// Prepare a run until caught up, interrupted, failed or bounded. Execution begins when awaited;
+/// only local observation state is allocated here. No implicit retry or epoch takeover occurs.
+/// Dropping the run or its future before a final report latches an unavailable observation.
+pub fn run<'a, S: Source, E: Execution, T: Timer>(
+    source: &'a S,
+    execution: &'a E,
+    control: &'a Control<'_, T>,
     limit: RunLimit,
-) -> Report {
-    let mut report = Report {
-        position: None,
-        applied: 0,
-        duplicates: 0,
-        filtered: 0,
-        stop: Stop::CaughtUp,
+) -> Run<impl Future<Output = Report> + Send + 'a> {
+    let mut publisher = Publisher::new(execution.scope().clone(), *execution.definition_identity());
+    let observation = publisher.observation();
+    let future = async move {
+        let mut report = Report {
+            position: None,
+            applied: 0,
+            duplicates: 0,
+            filtered: 0,
+            stop: Stop::CaughtUp,
+        };
+        report.stop = match drive(
+            source,
+            execution,
+            control,
+            limit,
+            &mut report,
+            &mut publisher,
+        )
+        .await
+        {
+            Ok(stop) => stop,
+            Err(error) => Stop::Failed(error),
+        };
+        publisher.finish(&report);
+        report
     };
-    report.stop = match drive(source, execution, control, limit, &mut report).await {
-        Ok(stop) => stop,
-        Err(error) => Stop::Failed(error),
-    };
-    report
+    Run {
+        future,
+        observation,
+    }
 }
 async fn drive<S: Source, E: Execution, T: Timer>(
     source: &S,
@@ -133,9 +156,11 @@ async fn drive<S: Source, E: Execution, T: Timer>(
     control: &Control<'_, T>,
     limit: RunLimit,
     report: &mut Report,
+    publisher: &mut Publisher,
 ) -> Result<Stop, Error> {
     let mut checkpoint = control.run(execution.checkpoint()).await?;
     report.position = checkpoint.position;
+    publisher.confirmed(report);
     let mut remaining = limit.events;
     loop {
         control.check()?;
@@ -173,6 +198,7 @@ async fn drive<S: Source, E: Execution, T: Timer>(
             }
             checkpoint.position = Some(event.position());
             report.position = checkpoint.position;
+            publisher.confirmed(report);
             remaining -= 1;
             if replay_done(checkpoint) {
                 return Ok(Stop::CaughtUp);

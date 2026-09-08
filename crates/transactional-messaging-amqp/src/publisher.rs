@@ -1745,13 +1745,16 @@ impl Publisher<Vec<u8>> for PublisherInner {
                 Ok(pending)
             },
             // confirm_select 已启用 ⇒ await PublisherConfirm 拿到真实 Ack/Nack/返回消息。
-            |pending| async move {
+            |pending| {
                 #[cfg(feature = "test-support")]
-                if let Some(pause) = pause {
-                    let _ = pause.entered.send(());
-                    let _ = pause.resume.await;
-                }
-                pending.await
+                let pending = async move {
+                    if let Some(pause) = pause {
+                        let _ = pause.entered.send(());
+                        let _ = pause.resume.await;
+                    }
+                    pending.await
+                };
+                pending
             },
         )
         .await;

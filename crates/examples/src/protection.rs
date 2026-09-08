@@ -76,7 +76,7 @@ pub(super) fn run() -> anyhow::Result<()> {
     let key = EphemeralKey(aead::LessSafeKey::new(
         aead::UnboundKey::new(&aead::AES_256_GCM, &bytes).map_err(|_| AeadError::Seal)?,
     ));
-    // These identities represent already authenticated input; this example does not authenticate.
+    // Fixture coordinates only; the application must authorize them before constructing context.
     let tenant = TenantId::parse("11111111-2222-4333-8444-555555555555")?;
     let other = TenantId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")?;
     let context = ProtectionContext::new(tenant, "db.dsn", "password", 1)?.derive();

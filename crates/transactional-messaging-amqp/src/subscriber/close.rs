@@ -76,21 +76,18 @@ impl SubscriptionClose {
         let pause: Arc<Mutex<Option<conn::TestPause>>> = Arc::default();
         #[cfg(feature = "test-support")]
         let close_pause = Arc::clone(&pause);
-        let future = async move {
-            #[cfg(feature = "test-support")]
-            {
-                let pause = close_pause
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if let Some(pause) = pause {
-                    pause.wait().await;
-                }
+        #[cfg(feature = "test-support")]
+        let close = async move {
+            let pause = close_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                pause.wait().await;
             }
             close.await
-        }
-        .boxed()
-        .shared();
+        };
+        let future = close.boxed().shared();
         Self {
             future,
             requested: CancellationToken::new(),

@@ -11,7 +11,10 @@ pub(super) async fn run() -> anyhow::Result<()> {
     let clock = FakeClock::new();
     let start = clock.now();
     clock.advance(Duration::from_secs(1))?;
-    assert!(clock.now() > start);
+    assert_eq!(
+        clock.now().checked_duration_since(start),
+        Some(Duration::from_secs(1))
+    );
     #[cfg(feature = "producer")]
     producer(&clock).await?;
     #[cfg(feature = "consumer")]

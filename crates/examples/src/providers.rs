@@ -65,7 +65,6 @@ pub struct FixtureInput {
 #[derive(Clone)]
 struct Timer;
 impl Timer {
-    #[allow(clippy::disallowed_methods)] // reason: this consumer owns the injected monotonic clock.
     fn new() -> Self {
         Self
     }

@@ -60,11 +60,50 @@ Names are 1–128 ASCII alphanumeric/`_.:-` bytes. Payloads are encoded applicat
 not position, so retries at later coordinates remain the same fact. Providers must preserve the
 source contract, and effects must not silently reinterpret an existing generation's definition.
 
-`run` returns a `#[must_use] Report`; `into_result` propagates any failure. Only after receiving it,
-the caller may explicitly use `report.observe(&observer)` to emit aggregate closed outcomes and
-stop reasons. This callback is outside the execution budget; even if it fails, the caller already
-owns its report. No arbitrary observer executes inside the bounded worker. Tenant IDs and names
-are identity values, not authentication evidence.
+## Local execution observation
+
+`run` synchronously prepares a `#[must_use] Run`; awaiting it produces the final
+`#[must_use] Report`. `report.into_result()` propagates any failure. Preparation captures the
+session identity and allocates local state, but provider I/O starts only when the future is polled.
+Every invocation has its own read-only handle; even two runs on the same session are distinct.
+
+```rust
+use rss_projection::{run, Control, Execution, ObservationStatus, RunLimit, Source, Timer};
+# async fn example<S: Source, E: Execution, T: Timer>(
+# source: &S, session: &E, control: &Control<'_, T>, limit: RunLimit,
+# ) {
+let work = run(source, session, control, limit);
+let observation = work.observation();
+assert_eq!(observation.read(), ObservationStatus::Pending);
+// Clone the handle into a caller-owned task to read while this invocation executes.
+let report = work.await;
+assert_eq!(observation.read(), ObservationStatus::Stopped(report.clone()));
+// Export metrics or diagnostics directly from the report under application policy.
+# }
+```
+
+- `Pending` means no checkpoint has been acknowledged, including before first poll.
+  `Running` with `position: None` means a checkpoint *was* acknowledged before the first event.
+- `Running` publishes one consistent local snapshot after checkpoint loading and each successful
+  settlement: position, applied, duplicates and filtered. Counts describe this invocation only.
+  Unknown commits never advance observation. The final `Stopped(Report)` is exactly the returned
+  report and remains terminal, including for cancellation, deadline, fencing and other failures.
+- Dropping the run or its future (including task abort and panic unwinding) before a report
+  latches `Unavailable`, retaining optional last-confirmed progress. This does not prove rollback,
+  the absence of effects, or termination of remote work. Destructors cannot observe a leaked
+  future or process termination; retained snapshot values are historical, not live references.
+- The handle exposes only reads and the bound scope/definition. Equality identifies the same
+  invocation, not the same tenant or generation. Handles grant no authentication, control or write
+  authority; the application owns their distribution. `Running` is not a lease or readiness check.
+- Only the execution future publishes; no user callback, background task, notification queue or
+  additional provider query is introduced. Owned snapshot reads cannot retain a lock that blocks
+  publication. Each publication has allocation/synchronization cost; this is not hard realtime.
+- `Source::high_water` and `Execution::checkpoint` remain separate queries, not an atomic snapshot.
+  Source-local coordinate differences are not necessarily counts of pending events.
+
+For APIs requiring `Future`, import `std::future::IntoFuture` and pass `work.into_future()`.
+The former post-run `Observer`/`Report::observe` API is removed; consume the report directly.
+There is no parallel observed/unobserved execution API or compatibility wrapper.
 
 ## Extraction and compatibility
 

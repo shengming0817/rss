@@ -4,6 +4,7 @@ const DEFINITION: rss_projection::DefinitionIdentity =
 use rss_projection::*;
 use rss_request_context::TenantId;
 use std::{
+    future::IntoFuture,
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -442,7 +443,7 @@ async fn cancellation_interrupts_a_blocked_source() -> anyhow::Result<()> {
         source.entered.notified().await;
         cancel.cancel();
     };
-    let (report, ()) = tokio::join!(work, cancellation);
+    let (report, ()) = tokio::join!(work.into_future(), cancellation);
     assert_eq!(
         report.stop,
         Stop::Failed(Error::new(rss_projection::ErrorKind::Cancelled))
@@ -469,42 +470,6 @@ async fn missing_replay_end_is_not_reported_as_complete() -> anyhow::Result<()> 
         Stop::Failed(Error::new(rss_projection::ErrorKind::SourceContract))
     );
     assert_eq!(report.applied, 1);
-    Ok(())
-}
-
-struct FailingObserver;
-impl Observer for FailingObserver {
-    #[allow(clippy::panic)]
-    // reason: deliberate observer failure after the caller already owns its durable report.
-    fn settled(&self, _: ApplyOutcome, _: u64) {
-        panic!("test observer failed")
-    }
-    fn stopped(&self, _: Stop) {}
-}
-#[tokio::test]
-async fn observer_failure_cannot_prevent_or_erase_the_execution_report() -> anyhow::Result<()> {
-    let s = scope()?;
-    let source = Journal(vec![event(&s, 0)?]);
-    let execution = Memory::new(s, ReplayBound::Live);
-    let clock = Clock(AtomicU64::new(0));
-    let cancel = CancellationToken::new();
-    let report = run(
-        &source,
-        &execution,
-        &Control::new(&clock, Duration::from_secs(10), &cancel),
-        RunLimit::new(BatchLimit::new(10)?, 10)?,
-    )
-    .await
-    .into_result()?;
-    assert_eq!(report.applied, 1);
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || report.observe(&FailingObserver)
-        ))
-        .is_err()
-    );
-    assert_eq!(report.position, execution.checkpoint().await?.position);
-    assert_eq!(report.into_result()?.stop, Stop::CaughtUp);
     Ok(())
 }
 
@@ -558,3 +523,6 @@ async fn filtered_events_advance_and_consume_total_budget() -> anyhow::Result<()
     assert_eq!(execution.checkpoint().await?.position, report.position);
     Ok(())
 }
+
+#[path = "runner/observation.rs"]
+mod observation;

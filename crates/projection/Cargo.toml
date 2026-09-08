@@ -12,6 +12,7 @@ keywords = ["projection", "checkpoint", "cqrs"]
 publish = ["crates-io"]
 
 [dependencies]
+arc-swap.workspace = true
 rss-request-context.workspace = true
 rss-redact.workspace = true
 thiserror.workspace = true

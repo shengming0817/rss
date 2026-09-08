@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 mod control;
 mod model;
+mod observation;
 mod ports;
 mod runner;
 pub use control::{Control, Timer};
@@ -10,9 +11,10 @@ pub use model::{
     ApplyOutcome, BaselineReceipt, BatchLimit, Checkpoint, DefinitionIdentity, Event,
     GenerationStart, Position, ProjectionScope, ReplayBound, SourceScope,
 };
+pub use observation::{ConfirmedProgress, ObservationStatus, RunObservation};
 pub use ports::{AtLeastOnce, Execution, ExternalCheckpoint, ExternalTarget, Source};
 pub(crate) use runner::validate_next;
-pub use runner::{Observer, Report, RunLimit, Stop, run};
+pub use runner::{Report, Run, RunLimit, Stop, run};
 
 mod error;
 pub use error::{Diagnostic, Error, Phase};

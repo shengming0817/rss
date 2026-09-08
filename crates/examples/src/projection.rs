@@ -5,8 +5,8 @@ const DEFINITION: rss_projection::DefinitionIdentity = rss_projection::Definitio
     56, 173, 45, 32, 8, 173, 6, 218, 162, 142, 19, 36,
 ]);
 use rss_projection::{
-    BatchLimit, Control, Event, GenerationStart, ProjectionScope, ReplayBound, RunLimit, Source,
-    SourceScope, Timer,
+    BatchLimit, Control, Event, GenerationStart, ObservationStatus, ProjectionScope, ReplayBound,
+    RunLimit, Source, SourceScope, Timer,
 };
 use rss_projection_postgres::{
     PgEffect, PgEffectOutcome, PgOperationError, PgStore, PgTransaction,
@@ -87,11 +87,17 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
     use rss_projection::Execution as _;
     let high_water = control.run(store.high_water(&source)).await?;
     let limits = RunLimit::new(BatchLimit::new(100)?, 1000)?;
-    let first = rss_projection::run(store, &worker, &control, limits)
-        .await
-        .into_result()?;
+    let work = rss_projection::run(store, &worker, &control, limits);
+    let observation = work.observation();
+    assert_eq!(observation.read(), ObservationStatus::Pending);
+    let report = work.await.into_result()?;
+    assert_eq!(
+        observation.read(),
+        ObservationStatus::Stopped(report.clone())
+    );
+    println!("live: {report:?}");
     anyhow::ensure!(
-        first.applied == 2,
+        report.applied == 2,
         "initial projection did not apply both events"
     );
     anyhow::ensure!(

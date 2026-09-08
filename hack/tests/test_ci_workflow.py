@@ -9,6 +9,8 @@ import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+# Bound orchestration hangs without treating shared-host process startup as a 10-second SLO.
+PROCESS_TIMEOUT = 60
 
 
 class FinalizerTests(unittest.TestCase):
@@ -119,7 +121,7 @@ class FinalizerTests(unittest.TestCase):
                                 'COMPILER_OUTCOME': 'skipped', 'DOWNLOAD_SAVE_KEY': 'download-cold',
                                 'COMPILER_SAVE_KEY': 'compiler-cold'}
             result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], env=env,
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=PROCESS_TIMEOUT)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((root / 'stopped').exists())
             summary = (root / 'summary').read_text()
@@ -146,7 +148,7 @@ class FinalizerTests(unittest.TestCase):
                                     'DOWNLOAD_SAVE_OUTCOME': download, 'COMPILER_SAVE_OUTCOME': compiler,
                                     'DOWNLOAD_SAVE_KEY': 'download-exact', 'COMPILER_SAVE_KEY': 'compiler-exact'}
                 result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], env=env,
-                                        capture_output=True, text=True, timeout=10)
+                                        capture_output=True, text=True, timeout=PROCESS_TIMEOUT)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 report = summary.read_text()
                 self.assertIn(f'Cargo save action: {download}; key: download-exact', report)

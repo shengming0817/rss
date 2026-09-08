@@ -265,7 +265,15 @@ pub(super) async fn replay(
     let projection = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
     append(store, &s, "later", b"3", control).await?;
     let limit = RunLimit::new(BatchLimit::new(10)?, 1)?;
-    let report = run(store, &projection, control, limit).await;
+    let work = run(store, &projection, control, limit);
+    let observation = work.observation();
+    assert_eq!(observation.scope(), &s);
+    assert_eq!(observation.definition_identity(), &DEFINITION);
+    let report = work.await;
+    assert_eq!(
+        observation.read(),
+        ObservationStatus::Stopped(report.clone())
+    );
     assert_eq!(report.applied, 1);
     replay_resume(store, owner, &s, control).await?;
     replay_new_generation(store, owner, &s, control).await
