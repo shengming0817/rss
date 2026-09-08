@@ -2,6 +2,7 @@
 mod boundaries;
 #[path = "../../../crates/saga/tests/support/mod.rs"]
 mod common;
+mod examples;
 mod process;
 #[path = "support/redis_effect.rs"]
 mod redis_effect;

@@ -30,3 +30,6 @@ pub enum TestkitError {
     )]
     WaitTimeout { waited_ms: u64 },
 }
+
+#[cfg(feature = "containers")]
+pub mod example_process;

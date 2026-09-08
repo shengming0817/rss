@@ -90,7 +90,7 @@ jobs:
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_ci_extract_package_proof.py
+          python3 -m unittest discover -s hack/tests -p test_ci_package_proof.py
           cargo test --locked -p rss-examples --all-features
           for features in '' rss-runtime; do
             RSS_TEST_RUN_ID="extract-internal-${features:-self-host}" \
@@ -100,18 +100,6 @@ jobs:
           done
           python3 hack/extract-package-proof.py --source
           python3 hack/extract-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
-
-      - name: Preserve extraction consumer commands and resolved graphs
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: extraction-consumers-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            rss-external-check/**/commands.log
-            rss-external-check/**/resolved.json
-            rss-external-check/**/provider-integration.log
-            rss-external-check/**/Cargo.lock
-          if-no-files-found: error
 
       - name: Run independent Contract public behavior
         env:
@@ -140,7 +128,7 @@ jobs:
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_projection_package_proof.py
+          python3 hack/projection-package-proof.py --source
           python3 hack/projection-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
 
       - name: Consume ledger candidate artifacts
@@ -154,19 +142,19 @@ jobs:
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_saga_package_proof.py
+          python3 hack/saga-package-proof.py --source
           python3 hack/saga-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
       - name: Verify independent Device Command artifact consumption
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_device_command_package_proof.py
+          python3 hack/device-command-package-proof.py --source
           python3 hack/device-command-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
       - name: Verify independent Reconcile artifact consumption
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_reconcile_package_proof.py
+          python3 hack/reconcile-package-proof.py --source
           python3 hack/reconcile-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
       - name: Verify independent Observation artifact consumption
         env:
@@ -180,6 +168,19 @@ jobs:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
           python3 hack/recovery-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
+
+      - name: Preserve independent consumer commands and resolved graphs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extraction-consumers-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            rss-external-check/**/metadata.log
+            rss-external-check/**/commands.log
+            rss-external-check/**/resolved.json
+            rss-external-check/**/provider-integration.log
+            rss-external-check/**/Cargo.lock
+          if-no-files-found: error
 
       - name: Verify package digest inventory before upload
         env:

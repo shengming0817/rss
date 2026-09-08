@@ -1,4 +1,4 @@
-//! Application composition example. Provision examples/setup.sql first; see README.
+//! The owning integration test provisions the application fixture; see rss-examples README.
 // SHA-256 of the application declaration "counter:sum-first-payload-byte:schema-v1".
 const DEFINITION: rss_projection::DefinitionIdentity = rss_projection::DefinitionIdentity::new([
     189, 214, 58, 242, 104, 235, 47, 212, 61, 133, 205, 45, 244, 157, 158, 222, 11, 5, 102, 165,
@@ -6,7 +6,7 @@ const DEFINITION: rss_projection::DefinitionIdentity = rss_projection::Definitio
 ]);
 use rss_projection::{
     BatchLimit, Control, Event, GenerationStart, ProjectionScope, ReplayBound, RunLimit, Source,
-    SourceScope, Timer, run,
+    SourceScope, Timer,
 };
 use rss_projection_postgres::{
     PgEffect, PgEffectOutcome, PgOperationError, PgStore, PgTransaction,
@@ -15,11 +15,11 @@ use rss_request_context::TenantId;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-pub(super) struct Clock(Instant);
+struct Clock(Instant);
 impl Clock {
     #[allow(clippy::disallowed_methods)]
     // reason: concrete application clock owns its injected monotonic time origin.
-    pub(super) fn new() -> Self {
+    fn new() -> Self {
         Self(Instant::now())
     }
 }
@@ -56,14 +56,11 @@ impl PgEffect for Counter {
         Ok(PgEffectOutcome::Applied)
     }
 }
-pub async fn demo(store: &PgStore) -> anyhow::Result<()> {
+pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
-    let source = SourceScope::new(
-        TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
-        "demo",
-    )?;
+    let source = SourceScope::new(tenant, "demo")?;
     for id in ["one", "two", "one"] {
         let source = source.clone();
         let tenant = source.tenant();
@@ -87,10 +84,25 @@ pub async fn demo(store: &PgStore) -> anyhow::Result<()> {
         )
         .await?;
     let worker = store.projection(store.takeover(&live, &DEFINITION, &control).await?, Counter)?;
+    use rss_projection::Execution as _;
+    let high_water = control.run(store.high_water(&source)).await?;
     let limits = RunLimit::new(BatchLimit::new(100)?, 1000)?;
-    println!("live: {:?}", run(store, &worker, &control, limits).await);
+    let first = rss_projection::run(store, &worker, &control, limits)
+        .await
+        .into_result()?;
+    anyhow::ensure!(
+        first.applied == 2,
+        "initial projection did not apply both events"
+    );
+    anyhow::ensure!(
+        control.run(worker.checkpoint()).await?.position == high_water,
+        "checkpoint not persisted"
+    );
     // A second invocation resumes the same checkpoint and produces no extra effect.
-    println!("resume: {:?}", run(store, &worker, &control, limits).await);
+    let resumed = rss_projection::run(store, &worker, &control, limits)
+        .await
+        .into_result()?;
+    anyhow::ensure!(resumed.applied == 0, "resume duplicated effects");
     let replay = ProjectionScope::new(source.clone(), "counter", "v2")?;
     let bound = control.run(store.high_water(&source)).await?;
     store
@@ -106,7 +118,14 @@ pub async fn demo(store: &PgStore) -> anyhow::Result<()> {
         store.takeover(&replay, &DEFINITION, &control).await?,
         Counter,
     )?;
-    println!("replay: {:?}", run(store, &worker, &control, limits).await);
+    let replayed = rss_projection::run(store, &worker, &control, limits)
+        .await
+        .into_result()?;
+    anyhow::ensure!(replayed.applied == 2, "replay did not apply both facts");
+    anyhow::ensure!(
+        control.run(worker.checkpoint()).await?.position == bound,
+        "replay checkpoint missing"
+    );
     let tenant = source.tenant();
     let totals=store.local_tx(&source,&control,move |tx| Box::pin(async move {
         tx.with_connection(move |conn| Box::pin(async move {
@@ -118,6 +137,24 @@ pub async fn demo(store: &PgStore) -> anyhow::Result<()> {
     anyhow::ensure!(
         totals == vec![("v1".into(), 2), ("v2".into(), 2)],
         "unexpected demo totals"
+    );
+    Ok(())
+}
+
+/// Application fixture, installed by the non-consumer test owner.
+pub const FIXTURE_SQL: &str = include_str!("../fixtures/projection.sql");
+
+pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
+    let store = PgStore::new(input.pool().await?).await?;
+    let result = demo(&store, TenantId::parse(&input.tenant)?).await;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(5), &cancel);
+    let closed = store.close(&control).await;
+    result?;
+    anyhow::ensure!(
+        closed == rss_projection_postgres::CloseOutcome::Drained,
+        "projection close failed"
     );
     Ok(())
 }

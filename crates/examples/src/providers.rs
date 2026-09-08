@@ -1,6 +1,6 @@
 //! Real PG outbox → AMQP → PG effect/receipt → ACK, with caller-owned resource shutdown.
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
-use rss_request_context::TenantId;
+use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::{
     fence::{Epoch, ExecutionBinding, StorageIdentity},
     inbox::ConsumerGroup,
@@ -63,25 +63,28 @@ pub struct FixtureInput {
 }
 
 #[derive(Clone)]
-struct Timer(tokio::time::Instant);
+struct Timer;
 impl Timer {
     #[allow(clippy::disallowed_methods)] // reason: this consumer owns the injected monotonic clock.
     fn new() -> Self {
-        Self(tokio::time::Instant::now())
+        Self
     }
     fn deadline(&self) -> anyhow::Result<OperationDeadline> {
-        Ok(AbsoluteDeadline::from_timeout(self, Duration::from_secs(10))?.operation(self))
+        Ok(OperationDeadline::from_cutoff(
+            Deadline::from_timeout(self, Duration::from_secs(10))?,
+            self,
+        ))
     }
 }
 impl Clock for Timer {
     #[allow(clippy::disallowed_methods)] // reason: the concrete clock reads its own monotonic origin.
-    fn now(&self) -> MonotonicInstant {
-        MonotonicInstant::from_elapsed(self.0.elapsed())
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
     }
 }
 impl ExecutionTimer for Timer {
-    async fn sleep_until(&self, deadline: AbsoluteDeadline) {
-        tokio::time::sleep(deadline.remaining(self)).await;
+    async fn sleep_until(&self, deadline: Deadline) {
+        tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
     }
 }
 

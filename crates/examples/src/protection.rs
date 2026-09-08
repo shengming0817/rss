@@ -79,14 +79,13 @@ pub(super) fn run() -> anyhow::Result<()> {
     // These identities represent already authenticated input; this example does not authenticate.
     let tenant = TenantId::parse("11111111-2222-4333-8444-555555555555")?;
     let other = TenantId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")?;
-    let context =
-        ProtectionContext::authenticated_request(tenant, "db.dsn", "password", 1)?.derive();
+    let context = ProtectionContext::new(tenant, "db.dsn", "password", 1)?.derive();
     let envelope = key.seal(b"do-not-log", &context)?;
     let plaintext = key.open(&envelope, &context)?;
     assert_eq!(plaintext.expose(), b"do-not-log");
     assert!(!format!("{plaintext:?}").contains("do-not-log"));
     for (tenant, field) in [(other, "password"), (tenant, "other-field")] {
-        let wrong = ProtectionContext::authenticated_request(tenant, "db.dsn", field, 1)?.derive();
+        let wrong = ProtectionContext::new(tenant, "db.dsn", field, 1)?.derive();
         assert!(matches!(key.open(&envelope, &wrong), Err(AeadError::Open)));
     }
     let corrupted = CiphertextEnvelope::new(

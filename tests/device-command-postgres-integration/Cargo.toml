@@ -7,6 +7,8 @@ publish = false
 [lints]
 workspace = true
 [dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["device-command-pg"] }
+
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
 serde_json.workspace = true

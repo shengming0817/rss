@@ -15,3 +15,6 @@
 core 没有 provider、消息引擎、设备命令或产品运行框架依赖。PostgreSQL 实现见 `rss-reconcile-postgres`。
 
 源码参考：kube-rs `kube-runtime/src/controller/runner.rs` 和 `scheduler.rs`，commit `f2774b13d66910a8a0fe456cc8e6e52414eb1d0e`。采用实体去重与有界执行；持久恢复由本组件 port 实现。
+
+
+最小可运行使用流程及独立源码/候选 artifact 命令见 [rss-examples](../examples/README.md)。

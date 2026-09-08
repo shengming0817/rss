@@ -9,6 +9,8 @@ publish = false
 workspace = true
 
 [dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["projection-pg"] }
+
 rss-projection.workspace = true
 rss-projection-postgres = { workspace = true, features = ["integration"] }
 rss-request-context.workspace = true
@@ -19,3 +21,4 @@ sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"
 uuid.workspace = true
 anyhow.workspace = true
 futures = { workspace = true, features = ["std", "async-await", "executor"] }
+serde_json.workspace = true

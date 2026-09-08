@@ -1,3 +1,4 @@
+mod examples;
 mod messaging;
 mod process;
 mod scenarios;

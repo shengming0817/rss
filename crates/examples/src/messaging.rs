@@ -1,14 +1,17 @@
 //! Non-durable custom-provider example. Durability is verified separately with PostgreSQL.
+use rss_request_context::Clock;
 #[cfg(feature = "consumer")]
-use rss_transactional_messaging::policy::AbsoluteDeadline;
-use rss_transactional_messaging::policy::Clock;
+use rss_request_context::Deadline;
+#[cfg(feature = "consumer")]
+use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging_testkit::memory::FakeClock;
 use std::time::Duration;
 
 pub(super) async fn run() -> anyhow::Result<()> {
     let clock = FakeClock::new();
-    clock.advance(Duration::from_secs(1));
-    assert_eq!(clock.now().elapsed(), Duration::from_secs(1));
+    let start = clock.now();
+    clock.advance(Duration::from_secs(1))?;
+    assert!(clock.now() > start);
     #[cfg(feature = "producer")]
     producer(&clock).await?;
     #[cfg(feature = "consumer")]
@@ -147,7 +150,10 @@ async fn consumer(clock: &FakeClock) -> anyhow::Result<()> {
         message.metadata().contract().clone(),
     );
     let store = MemoryInboxStore::new();
-    let deadline = AbsoluteDeadline::from_timeout(clock, Duration::from_secs(5))?.operation(clock);
+    let deadline = OperationDeadline::from_cutoff(
+        Deadline::from_timeout(clock, Duration::from_secs(5))?,
+        clock,
+    );
     let IdempotencyDisposition::Acquired(claim) = store.claim(&identity, deadline).await? else {
         anyhow::bail!("initial claim was not acquired")
     };

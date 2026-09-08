@@ -114,8 +114,3 @@ pub async fn takeover(
         })
         .await
 }
-pub fn main() {
-    println!(
-        "Use enqueue/recover/ReportEffect with your configured PgRuntime; see README for installation."
-    );
-}

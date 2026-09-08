@@ -6,6 +6,17 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Execution consumer proofs (#2318 / #2294)
+
+- Consolidate Reconcile, Device Command, Projection and Saga public examples in rss-examples;
+  retire adapter-local compose/counter entrypoints and implicit dirty package-proof mode.
+- Independently run core/PG and necessary bridge consumers from source and exact candidate archives.
+  Verify durable convergence, command status boundaries, atomic projection/checkpoint recovery,
+  and compensation after reconstructing a Saga executor. No public API/schema/version changes.
+- Device Command's original extraction (#2291) owns command/outbox atomicity and strict
+  scope/generation/epoch transitions; publication and device application remain distinct facts.
+  This traceability entry and the example instructions do not declare release acceptance.
+
 ### Original extraction consumer proofs (#2286 / #2266)
 
 - Add non-publishable public consumers in `crates/examples`, independently resolved source and

@@ -9,6 +9,8 @@ publish = false
 workspace = true
 
 [dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["reconcile-pg"] }
+
 rss-reconcile.workspace = true
 rss-reconcile-postgres = { workspace = true, features = ["integration", "transactional-messaging"] }
 rss-request-context.workspace = true
@@ -22,3 +24,5 @@ futures = { workspace = true, features = ["std", "async-await", "executor"] }
 rss-transactional-messaging.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
 rss-contract.workspace = true
+
+serde_json.workspace = true

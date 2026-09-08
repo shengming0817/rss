@@ -76,3 +76,6 @@ are removed. The new public owner has no aliases or legacy schema/data import pa
 
 Version 0.1.0 is experimental. Defaults are empty; there are no alternate consistency features.
 See `rss-projection-postgres` for the atomic PostgreSQL implementation and executable example.
+
+
+最小可运行使用流程及独立源码/候选 artifact 命令见 [rss-examples](../examples/README.md)。

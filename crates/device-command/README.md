@@ -77,3 +77,6 @@ commands, generic device-state containers, certificates and old ingress receipts
 Private test fixtures and the exhaustive state/event matrix validate the new owner.
 
 ref: mdeloof/statig statig/src/awaitable/state_machine.rs@3780eecdbcf4326051c38676d592c6c2b4a3bab5
+
+
+最小可运行使用流程及独立源码/候选 artifact 命令见 [rss-examples](../examples/README.md)。

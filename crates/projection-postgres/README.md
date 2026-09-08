@@ -81,18 +81,10 @@ its caller's total deadline. Public mutating operations require `Control`.
 
 ## Source-checkout runnable example
 
-The following commands run from this source repository checkout. Against an empty PostgreSQL demo database, provision the example using psql as an administrator:
-
-```sh
-psql "$ADMIN_DATABASE_URL" -f crates/projection-postgres/examples/setup.sql
-# Set projection_runtime's password separately, e.g. with psql's \password command.
-# DATABASE_URL identifies projection_runtime; PG_CA_FILE is the trusted server CA PEM path.
-cargo run -p rss-projection-postgres --example counter
-```
-
-The example requires verified TLS, writes two application facts with journal entries in the same
-transaction, retries one append, runs/resumes v1, and replays into v2. Both totals must be 2.
-All application tables and role provisioning remain in the example, outside component migrations.
+The counter scenario and its application fixture have moved to [`rss-examples`](../examples/README.md).
+Its owning integration test provisions temporary verified-TLS PostgreSQL, invokes the public consumer,
+and verifies model/checkpoint persistence and recovery. The old adapter-local counter/setup entrypoints
+are removed; follow the linked launcher command instead.
 
 ## Independent consumers
 
@@ -115,9 +107,7 @@ An external migrator can execute `sqlx::raw_sql(rss_projection_postgres::MIGRATI
 separately provisioned owner connection; do not pass that connection to `PgStore::new`. Application
 code provides an owned `PgEffect`, adopts its runtime pool with `PgStore::new`, then calls
 `initialize`, `takeover`, `projection` and core `run`. Compose business SQL and append through
-`local_tx`, or use `append_in_transaction` in an existing tenant-bound SQLx transaction. The source
-example files are shipped inside the crate archive for copying into an application, not installed
-as commands by adding a Cargo dependency.
+`local_tx`, or use `append_in_transaction` in an existing tenant-bound SQLx transaction. The example source is maintained in the non-publishable rss-examples package and copied into isolated consumers; library archives contain the component implementation.
 
 For example, an independent migrator can consume the version-matched SQL directly:
 
@@ -169,3 +159,10 @@ there are no old overloads, aliases, defaults or compatibility features.
 
 ref: serverlesstechnology/cqrs persistence/postgres-es/src/view_repository.rs (version CAS;
 this adapter retains effect, receipt and checkpoint in its own single transaction)
+
+
+执行示例和输入/结果说明见 [rss-examples](../examples/README.md)。独立源码使用
+`python3 hack/projection-package-proof.py --source`；固定 artifact 使用
+`python3 hack/projection-package-proof.py --artifacts DIR --revision SHA`。
+两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
+完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。

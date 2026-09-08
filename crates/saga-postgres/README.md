@@ -67,8 +67,15 @@ application manifest; pass this adopted `PgStore` as that example's `S`.
 rejection, lease takeover, compensation pause/resume, commit ACK loss, pending commit interruption,
 receipt corruption, and killing an executor process both before and after its remote effect becomes durable. Restart uses the short lease expiry, not an administrator edit.
 Settlement loss is injected by a private test protocol proxy, never a production API or feature; defaults remain empty. Actual `.crate`
-artifacts are independently consumed by `hack/saga-package-proof.py`. The candidate workflow passes its existing archive directory and exact revision to that script; checksum/revision checks precede consumption. Default, no-default, standalone `rss-runtime`, and all-feature combinations are verified.
+artifacts are independently consumed by `hack/saga-package-proof.py`. The candidate workflow passes its existing archive directory and exact revision to that script; checksum/revision checks precede consumption. Core-only, PostgreSQL and standalone `rss-runtime` selections resolve independently; both PostgreSQL selections execute the recovery scenario.
 
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
 ref: baseline/pre-community-core-20260902 adapters/postgres/src/saga.rs@5b63e10a1
 ref: baseline/pre-community-core-20260902 adapters/postgres/migrations/0083_create_saga_step_receipts.sql@5b63e10a1
+
+
+执行示例和输入/结果说明见 [rss-examples](../examples/README.md)。独立源码使用
+`python3 hack/saga-package-proof.py --source`；固定 artifact 使用
+`python3 hack/saga-package-proof.py --artifacts DIR --revision SHA`。
+两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
+完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。

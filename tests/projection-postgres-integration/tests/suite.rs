@@ -1,8 +1,8 @@
+mod examples;
 // Application-owned declaration for this example/test projection mapping.
 const DEFINITION: rss_projection::DefinitionIdentity =
     rss_projection::DefinitionIdentity::new([1; 32]);
-#[path = "../../../crates/projection-postgres/examples/counter/model.rs"]
-mod counter_example;
+use rss_examples::projection as counter_example;
 mod process;
 mod scenarios;
 use rss_projection::*;
@@ -158,8 +158,8 @@ async fn projection_postgres_suite() -> anyhow::Result<()> {
         scenarios::cancel_after_apply_discards_the_transaction(&store, &owner).await?;
         scenarios::interruption(&store, &owner).await?;
         process::crash(&store, &owner, &fixture, &control).await?;
-        sqlx::raw_sql(include_str!("../../../crates/projection-postgres/examples/counter/read-model.sql")).execute(&owner).await?;
-        counter_example::demo(&store).await?;
+        sqlx::raw_sql(rss_examples::projection::FIXTURE_SQL).execute(&owner).await?;
+        counter_example::demo(&store, TenantId::parse(TENANT)?).await?;
         scenarios::store_identity(&pool, &store, &control).await?;
         scenarios::bounded_close(&pool, &store, &control).await?;
         owner.close().await;

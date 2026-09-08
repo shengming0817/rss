@@ -1,6 +1,6 @@
+mod examples;
+use rss_examples::device_command::compose;
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
-#[path = "../../../crates/device-command-postgres/examples/compose.rs"]
-pub mod compose;
 mod crash;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;

@@ -34,7 +34,7 @@ setting, issue transaction control, or bypass the typed repository operations.
 
 ## Use and uncertainty
 
-See the compile-checked `examples/compose.rs`. The application supplies the configured runtime,
+See the runnable composition in [`rss-examples`](../examples/README.md). The application supplies the configured runtime,
 exact command identity, authenticated report, and immutable authored message. The store verifies
 scope and persists the complete message domain/identity/fingerprint. Protocol encoding and the mapping
 between payload and command intent remain product responsibilities.
@@ -80,8 +80,7 @@ process kills before/after commit. The outbox settlement fixture supplies simula
 it proves database recovery, not a real broker or device deployment. No new fault-injection
 public feature is added; tests reuse the messaging adapter's integration hooks.
 
-`python3 hack/device-command-package-proof.py` consumes actual `.crate` artifacts outside the
-workspace, including a core-only consumer and the PostgreSQL composition example. With
+`python3 hack/device-command-package-proof.py --source` runs independent core-only and PostgreSQL source consumers. With
 `--artifacts DIR --revision SHA` it consumes the exact candidate bundle and checks its identities.
 Defaults are empty. Runtime hosting, production migrations and product T3 remain external.
 
@@ -89,3 +88,10 @@ Source: `5b63e10a1b396b0ff70b7d1e6e55db296cd7a891`, historical device_command.rs
 0082/0087/0103; they are extraction sources, not proof that this implementation passed.
 
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
+
+
+执行示例和输入/结果说明见 [rss-examples](../examples/README.md)。独立源码使用
+`python3 hack/device-command-package-proof.py --source`；固定 artifact 使用
+`python3 hack/device-command-package-proof.py --artifacts DIR --revision SHA`。
+两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
+完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。

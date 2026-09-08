@@ -193,3 +193,6 @@ async fn checkout<S: Store>(store: S, scope: Scope, encryption_key: aead::Unboun
     Ok((report, receipt))
 }
 ```
+
+
+最小可运行使用流程及独立源码/候选 artifact 命令见 [rss-examples](../examples/README.md)。

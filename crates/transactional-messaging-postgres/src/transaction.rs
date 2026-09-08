@@ -401,7 +401,7 @@ impl PgRuntime {
     }
 
     // All public profiles share this definer, including those that skip the ordinary schema probe.
-    async fn check_relay_role(&self, cutoff: AbsoluteDeadline) -> Result<(), PgError> {
+    async fn check_relay_role(&self, cutoff: Deadline) -> Result<(), PgError> {
         let valid = within(&self.timer, cutoff, |_| async {
             sqlx::query_scalar::<_, bool>(include_str!("relay_role.sql"))
                 .fetch_one(&self.pool)

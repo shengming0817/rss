@@ -19,12 +19,26 @@ derive = ["redact", "rss-redact/derive"]
 protection = ["dep:rss-data-protection", "dep:rss-request-context", "dep:ring"]
 lifecycle = ["dep:rss-runtime", "dep:tokio"]
 core = ["dep:rss-transactional-messaging"]
-memory = ["core", "dep:rss-transactional-messaging-testkit", "dep:rss-transactional-messaging-runtime", "dep:tokio"]
+memory = ["core", "dep:rss-request-context", "dep:rss-transactional-messaging-testkit", "dep:rss-transactional-messaging-runtime", "dep:tokio"]
 producer = ["memory", "rss-transactional-messaging/producer", "rss-transactional-messaging-testkit/producer", "rss-transactional-messaging-runtime/producer", "dep:rss-contract", "dep:rss-request-context"]
 consumer = ["memory", "rss-transactional-messaging/consumer", "rss-transactional-messaging-testkit/consumer", "rss-transactional-messaging-runtime/consumer", "dep:rss-contract", "dep:rss-request-context"]
 providers = ["core", "rss-transactional-messaging/producer", "rss-transactional-messaging/consumer", "dep:rss-transactional-messaging-postgres", "dep:rss-transactional-messaging-amqp", "rss-transactional-messaging-runtime/producer", "rss-transactional-messaging-runtime/consumer", "dep:tokio", "dep:rss-contract", "dep:rss-request-context", "dep:serde", "dep:serde_json", "dep:sqlx"]
 managed = ["providers", "dep:rss-runtime", "rss-transactional-messaging-postgres/rss-runtime", "rss-transactional-messaging-amqp/managed-runtime", "rss-transactional-messaging-runtime/managed-runtime"]
 managed-worker = ["producer", "lifecycle", "rss-transactional-messaging-runtime/managed-runtime"]
+
+execution-pg = ["dep:sqlx", "dep:tokio", "dep:tokio-util", "dep:serde", "dep:serde_json", "dep:rss-request-context"]
+reconcile-pg = ["execution-pg", "dep:rss-reconcile", "dep:rss-reconcile-postgres"]
+device-command-pg = ["execution-pg", "dep:rss-device-command", "dep:rss-device-command-postgres", "dep:rss-contract", "dep:rss-transactional-messaging", "rss-transactional-messaging/producer", "rss-transactional-messaging/consumer", "dep:rss-transactional-messaging-postgres"]
+projection-pg = ["execution-pg", "dep:rss-projection", "dep:rss-projection-postgres"]
+saga-pg = ["execution-pg", "dep:rss-saga", "dep:rss-saga-postgres", "dep:rss-contract", "dep:rss-data-protection", "dep:ring", "dep:uuid"]
+
+reconcile-messaging = ["reconcile-pg", "rss-reconcile-postgres/transactional-messaging", "dep:rss-transactional-messaging", "dep:rss-transactional-messaging-postgres"]
+saga-runtime = ["saga-pg", "rss-saga/rss-runtime", "rss-saga-postgres/rss-runtime", "dep:rss-runtime"]
+
+reconcile-core = ["dep:rss-reconcile", "dep:rss-request-context"]
+device-command-core = ["dep:rss-device-command", "dep:rss-request-context"]
+projection-core = ["dep:rss-projection", "dep:rss-request-context"]
+saga-core = ["dep:rss-saga", "dep:rss-request-context", "dep:rss-contract"]
 
 [dependencies]
 anyhow.workspace = true
@@ -51,7 +65,39 @@ tracing-opentelemetry = { version = "0.33", default-features = false, optional =
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 
+
+tokio-util = { workspace = true, optional = true }
+uuid = { workspace = true, features = ["v4"], optional = true }
+rss-reconcile = { workspace = true, optional = true }
+rss-reconcile-postgres = { workspace = true, optional = true }
+rss-device-command = { workspace = true, optional = true }
+rss-device-command-postgres = { workspace = true, optional = true }
+rss-projection = { workspace = true, optional = true }
+rss-projection-postgres = { workspace = true, optional = true }
+rss-saga = { workspace = true, optional = true }
+rss-saga-postgres = { workspace = true, optional = true }
+
 [[bin]]
 name = "providers"
 path = "src/bin/providers.rs"
 required-features = ["providers"]
+
+[[bin]]
+name = "reconcile"
+path = "src/bin/reconcile.rs"
+required-features = ["reconcile-pg"]
+
+[[bin]]
+name = "device-command"
+path = "src/bin/device-command.rs"
+required-features = ["device-command-pg"]
+
+[[bin]]
+name = "projection"
+path = "src/bin/projection.rs"
+required-features = ["projection-pg"]
+
+[[bin]]
+name = "saga"
+path = "src/bin/saga.rs"
+required-features = ["saga-pg"]

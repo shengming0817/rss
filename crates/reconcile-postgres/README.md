@@ -52,6 +52,13 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 `cargo test -p rss-reconcile`；真实 provider 运行 `make ci CI_PART=tests CI_FILTER='package(=reconcile-postgres-integration)'`（Docker、PostgreSQL TLS fixture）。该 suite 包含真实 COMMIT/ROLLBACK I/O 期间终止 backend、关闭取消/超时的行为证明，以及由父测试启动并 kill 的 worker 子进程；子测试单独标记 ignored，不代表恢复场景跳过。
 
-`python3 hack/reconcile-package-proof.py` 验证真实 `.crate` 的独立解析、core-only、默认 PostgreSQL 和消息组合。candidate workflow 验证同提交上传 artifact 的 hash 与版本。
+`python3 hack/reconcile-package-proof.py --source` 验证独立源码 consumer 的解析与运行，包括 core-only、默认 PostgreSQL 和消息组合。candidate workflow 验证同提交上传 artifact 的 hash 与版本。
 
 ref: launchbadge/sqlx `sqlx-core/src/transaction.rs@v0.9.0`；PostgreSQL 16 explicit-locking；固定历史 `5b63e10` 的 0041/0044/0084 仅提取通用 claim/wake 不变量。
+
+
+执行示例和输入/结果说明见 [rss-examples](../examples/README.md)。独立源码使用
+`python3 hack/reconcile-package-proof.py --source`；固定 artifact 使用
+`python3 hack/reconcile-package-proof.py --artifacts DIR --revision SHA`。
+两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
+完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。

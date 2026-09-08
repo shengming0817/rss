@@ -1,7 +1,7 @@
 # RSS public consumers
 
-本 package 不发布、不进入 Release Surface。它持有 #2286 的最小可运行场景，
-#2266 回读这些场景及原组件 T1/T2 的运行证据完成原提取阶段验收。
+本 package 不发布、不进入 Release Surface。它持有 #2286 的基础场景和 #2318 的执行组件场景；
+#2266 / #2294 分别回读对应场景及原组件 T1/T2 的运行证据完成阶段验收。
 源码在此维护；`rss-external-check/` 只保存可再生的独立 consumer、lock、构建和执行日志。
 
 ## 仓内运行
@@ -80,3 +80,48 @@ rss-incubator 保留产品孵化、自有 pin/lock、产品 CI 和接入验收�
   （Cargo 0.97.0）：`sha1` 与仅 dirty 时出现的标志由 Cargo 实际打包实现持有。
 - ref: ring `src/aead/less_safe_key.rs` @ 0.17.14：使用真实 seal/open 和 canonical AAD，
   消费方显式拥有短命密钥及随机 nonce；不实现密码原语。
+
+## 执行组件（#2318 / #2294）
+
+四个 bin 分别由 `reconcile-pg`、`device-command-pg`、`projection-pg`、`saga-pg` 启用。
+它们从 stdin 接收短命 fixture JSON（TLS host/port/database、受限 username/password、CA PEM、tenant）；
+Device Command 额外要求独立提供 target/lineage/epoch。数据不写入 argv 或日志。
+各组件 integration package 负责安装公开 migration、测试业务表和最小角色，运行结束清理临时后端。
+需要可用 Docker；以下仓内命令直接运行进程内场景，验证业务行为。下方 package-proof 命令则构建并启动独立 bin，额外验证 stdin 合同和子进程边界。均从仓库根目录运行，不需要自行部署或配置生产数据库：
+
+```sh
+RSS_TEST_RUN_ID=execution-examples cargo run --locked -p testkit --features containers --bin rss-test-launcher -- \
+  -- cargo test --locked -p reconcile-postgres-integration -p device-command-postgres-integration \
+  -p projection-postgres-integration -p saga-postgres-integration --test suite \
+  examples::example_consumer -- --exact --nocapture
+```
+
+| 场景 | 结果断言 |
+|---|---|
+| Reconcile | wake 后由真实 worker claim、执行业务写入、重新观察，reobserve/converged 各一次，持久结果为 converged |
+| Device Command | command/outbox 原子落库，Queued/Published/Received/Applied 分开，旧 generation/epoch 不推进 |
+| Projection | 同事务写读模型/checkpoint，持久位置到达 high-water；resume 无重复，v1/v2 均为 2 |
+| Saga | exact definition、补偿失败持久化、销毁并重建 store/executor 后 resume；逆序补偿，journal/receipt 完整 |
+
+Device Command 的 publisher 是显式模拟确认，只证明 PG 命令状态与 outbox 组合；不声称真实 broker 或设备执行。
+Saga 使用短命独立 AEAD/HMAC 密钥和进程内 effect fixture，重建执行器时 effect 服务保持存活；
+进程崩溃、Unknown/probe、完整租户/fencing/commit-unknown 矩阵仍由原 T1/T2 负责。
+原 adapter 中的 compose/counter/setup 已迁移退出，此处是唯一场景来源。
+
+```sh
+python3 hack/reconcile-package-proof.py --source
+python3 hack/device-command-package-proof.py --source
+python3 hack/projection-package-proof.py --source
+python3 hack/saga-package-proof.py --source
+# 对以上任一入口，固定候选验收采用相同参数：
+python3 hack/saga-package-proof.py --artifacts /absolute/candidate-bundle --revision COMMIT_SHA
+```
+
+四入口均拒绝无参数隐式打包。每项默认运行独立 core-only 和 PG consumer；Reconcile 另选消息 bridge，
+Saga 另选 rss-runtime bridge，不用全 feature 编译替代独立选择。`--scenario core|pg` 可用于开发定位，
+Reconcile 还支持 `messaging`，Saga 还支持 `runtime`；正式完整验收不缩小选择。
+consumer 复制场景及 fixture，独立 manifest/lock/target；所有 PG 组合均实际执行 binary 并核对持久结果。
+祖先和用户 Cargo source/patch/paths 覆盖拒绝，解析图继续验证精确来源及 feature。
+纯工具由 `hack/package_proof.py` 单独持有；组件入口仅选择自己的场景，不新增 runner 或 receipt registry。
+候选流水线复用既有 packages.tsv/SHA256SUMS，并上传 commands.log、resolved.json、Cargo.lock 与后端运行日志。
+这些说明不是通过记录；精确最终 SHA、包/版本/digest、环境与运行结果在 issue/PR 签署。
