@@ -815,6 +815,14 @@ async fn temporary_table_shadow(raw: &sqlx::PgPool) -> anyhow::Result<()> {
 async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let cases = [
         (
+            "CREATE ROLE archive_relay_parent NOLOGIN; GRANT archive_relay_parent TO rss_tmsg_relay",
+            "REVOKE archive_relay_parent FROM rss_tmsg_relay; DROP ROLE archive_relay_parent",
+        ),
+        (
+            "ALTER ROLE rss_tmsg_relay CREATEDB",
+            "ALTER ROLE rss_tmsg_relay NOCREATEDB",
+        ),
+        (
             "CREATE FUNCTION rss_transactional_messaging.rogue_archive() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT NULL::void'",
             "DROP FUNCTION rss_transactional_messaging.rogue_archive()",
         ),

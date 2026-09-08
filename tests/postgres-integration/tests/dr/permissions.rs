@@ -18,6 +18,16 @@ pub async fn check(
     let cases = [
         (
             true,
+            "ALTER ROLE rss_tmsg_relay CREATEDB",
+            "ALTER ROLE rss_tmsg_relay NOCREATEDB",
+        ),
+        (
+            true,
+            "CREATE ROLE dr_relay_parent NOLOGIN; GRANT dr_relay_parent TO rss_tmsg_relay",
+            "REVOKE dr_relay_parent FROM rss_tmsg_relay; DROP ROLE dr_relay_parent",
+        ),
+        (
+            true,
             "ALTER TABLE rss_transactional_messaging.dr_plans DROP CONSTRAINT dr_plan_action; ALTER TABLE rss_transactional_messaging.dr_plans ADD CONSTRAINT dr_plan_action CHECK(true)",
             "ALTER TABLE rss_transactional_messaging.dr_plans DROP CONSTRAINT dr_plan_action; ALTER TABLE rss_transactional_messaging.dr_plans ADD CONSTRAINT dr_plan_action CHECK ((((kind <> 'terminate'::text) AND (evidence IS NOT NULL) AND (target_operation IS NULL) AND (target_digest IS NULL)) OR ((kind = 'terminate'::text) AND (evidence IS NULL) AND (target_operation IS NOT NULL) AND (target_digest IS NOT NULL) AND (octet_length(target_digest) = 32))))",
         ),

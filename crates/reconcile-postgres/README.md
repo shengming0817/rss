@@ -12,6 +12,26 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 唯一目标表持有 due time、wake version、失败状态、token 与递增 epoch。没有产品 snapshot、设备策略或历史审计账本。扫描用数据库时间和 `SKIP LOCKED`，claim、renew、release、finish 都限定 tenant/target/token/epoch。租户 setting 在可信应用内提供隔离，不认证持有数据库凭据的调用方。
 
+## 存储损坏与恢复边界
+
+准入精确校验组件八项 CHECK 的定义集合及 validated 状态；缺失、弱化、额外约束或
+`NOT VALID` 均返回 `StorageContract`。定义顺序和约束名称不影响语义匹配。运行池每次实际借出
+连接同样检查，不保留旧的仅数量判定。规范 schema 禁止负数/超出 u32 的 failures、非法目标身份、
+非正 wake version、负 epoch 和不合法 lease 形状；它不能证明任意外部存储破坏从未发生。
+
+准入失败发生在 claim/业务回调前。若 claim SQL 或行转换失败，整批事务回滚，不返回部分成功 claim；
+提交或回滚结果未知仍按原结算类别处理。worker 对 `StorageContract`、`Invariant` 和 `InvalidInput`
+扫描错误直接返回，不热重试，也不自动跳过、删除或隔离目标。外部 owner 修复数据及规范约束后，
+消费方重新构造所需 store 并重启 worker；正常邻接目标和后续扫描的恢复由真实 PG suite 验证。
+
+计数耗尽是明确限制：schema 允许 `epoch=i64::MAX`，下一次批量 claim 的自增溢出返回
+`InvalidInput`，整批回滚并阻断该 scope 的 worker，其他租户的独立 scope 仍可执行。
+`wake_version=i64::MAX` 的下一次 wake 同样不能自增。库不重置 fencing 计数、不把耗尽目标
+标为成功；外部 owner 负责处置。该证明不声称任意坏行均已自动隔离。
+
+对标：Kubernetes v1.34.0 的 etcd3 `store.go` 在 LIST 解码失败时返回错误；`reflector.go`
+由外层退避重试。RSS 返回非瞬态 worker 错误，将修复后重启交给消费方，不引入集群控制器。
+
 ## 受保护写入
 
 `PgStore::protect(claim, control, context, callback)` 在一个事务内锁住并检查 claim，执行可信业务 SQL，再次检查租约并标记 Applied/需要重新观察，最后提交。它不释放 claim，worker 后续结算或 TTL 接管继续观察。`wake_with` 将业务写和登记工作原子组合；`local_tx` 可提供 tenant-scoped 观察查询。

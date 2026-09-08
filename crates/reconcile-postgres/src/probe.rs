@@ -1,8 +1,18 @@
 //! Validate the dedicated schema and reachable role posture on the actual connection.
 use rss_reconcile::{Error, ErrorKind};
 use sqlx::{PgConnection, PgPool, Row};
+// CHECK definitions are the catalog projection of MIGRATION_SQL, verified by real PG tests.
 const PROBE: &str = r#"
-WITH reachable AS (
+WITH expected_checks(definition) AS (VALUES
+    ('CHECK (((failures >= 0) AND (failures <= ''4294967295''::bigint)))'),
+    ('CHECK (((token IS NULL) = (lease_until IS NULL)))'),
+    ('CHECK (((token IS NULL) OR (next_run IS NOT NULL)))'),
+    ('CHECK ((entity ~ ''^[A-Za-z0-9_.:-]{1,128}$''::text))'),
+    ('CHECK ((epoch >= 0))'),
+    ('CHECK ((reconciler ~ ''^[A-Za-z0-9_.:-]{1,128}$''::text))'),
+    ('CHECK ((result = ANY (ARRAY[''pending''::text, ''running''::text, ''applied''::text, ''converged''::text, ''retry''::text, ''suspended''::text])))'),
+    ('CHECK ((wake_version > 0))')
+), reachable AS (
     SELECT * FROM pg_roles WHERE rolname = current_user OR pg_has_role(current_user, oid, 'SET')
 ), relations AS (
     SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -41,7 +51,10 @@ SELECT
          AND array_agg(attnotnull ORDER BY attnum)=ARRAY[true,true,true,true,true,false,false,false,true,true]
          FROM pg_attribute WHERE attrelid='rss_reconcile.targets'::regclass AND attnum>0 AND NOT attisdropped)
     AND (SELECT count(*)=1 AND bool_and(pg_get_constraintdef(oid)='PRIMARY KEY (tenant_id, reconciler, entity)') FROM pg_constraint WHERE conrelid='rss_reconcile.targets'::regclass AND contype='p')
-    AND (SELECT count(*)=8 AND bool_and(convalidated) FROM pg_constraint WHERE conrelid='rss_reconcile.targets'::regclass AND contype='c')
+    AND (SELECT bool_and(convalidated) AND
+         array_agg(pg_get_constraintdef(oid) ORDER BY pg_get_constraintdef(oid)) =
+             (SELECT array_agg(definition ORDER BY definition) FROM expected_checks)
+         FROM pg_constraint WHERE conrelid='rss_reconcile.targets'::regclass AND contype='c')
     AND (SELECT count(*)=1 AND bool_and(polcmd='*' AND polpermissive AND polroles=ARRAY[0::oid]
          AND pg_get_expr(polqual,polrelid)=pg_get_expr(polwithcheck,polrelid)
          AND pg_get_expr(polqual,polrelid) = '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)')

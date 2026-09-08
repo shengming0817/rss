@@ -1,10 +1,12 @@
 use super::*;
+mod corruption;
 pub async fn run(
     store: &PgStore,
     pool: &PgPool,
     owner: &PgPool,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    corruption::run(store, pool, owner, c).await?;
     scheduling(store, owner, c).await?;
     isolation(store, pool, owner, c).await?;
     fencing(store, owner, c).await?;

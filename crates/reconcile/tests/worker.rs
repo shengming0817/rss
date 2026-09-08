@@ -689,3 +689,32 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
     assert_eq!(report?.reobserve, 1);
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn nontransient_scan_failure_returns_without_retry_or_settlement() -> anyhow::Result<()> {
+    for kind in [
+        ErrorKind::StorageContract,
+        ErrorKind::Invariant,
+        ErrorKind::InvalidInput,
+    ] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let c = Control::new(&clock, Duration::from_secs(1), &cancel);
+        let store = Store {
+            rows: Mutex::new(vec![]),
+            clock: Clock::new(),
+            lost: false,
+            scans: AtomicUsize::new(0),
+            scan_delay: None,
+            scan_failure: Some(kind),
+            finishes: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        };
+        let result = run(&store, &business(0), &scope()?, policy()?, &c, |_| {}).await;
+        assert!(matches!(result, Err(e) if e.kind()==kind));
+        assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
+        assert_eq!(store.releases.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}

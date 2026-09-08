@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::Notify;
 mod consumer_failures;
 mod relay;
+mod roles;
 
 async fn count(owner: &sqlx::PgPool, id: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM public.business_effects WHERE id=$1")
@@ -319,6 +320,7 @@ pub(super) async fn run(
     // SQL safety: The definition comes from pg_get_constraintdef in this fixture-owned schema.
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_transactional_messaging.inbox DROP CONSTRAINT inbox_receipt_shape, ADD CONSTRAINT inbox_receipt_shape {original}"))).execute(owner).await?;
     assert!(!accepted, "same-name weakened constraint must fail connect");
+    roles::run(owner, &config).await?;
     storage_mutations(owner, &config).await?;
     eprintln!("pg-suite phase=consumer_failures");
     consumer_failures::run(runtime.clone(), owner, &config).await?;

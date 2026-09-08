@@ -14,8 +14,9 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 
 ## Installation and privileges
 
-Use an external migrator to provision a `rss_tmsg_relay` role with `NOLOGIN NOBYPASSRLS`, then
-execute `migrations/0001_create_transactional_messaging.sql`. The migrator must be able to transfer
+Use an external migrator to provision a `rss_tmsg_relay` role with
+`NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION` and no membership
+in any other role, then execute `migrations/0001_create_transactional_messaging.sql`. The migrator must be able to transfer
 function ownership to that role. Do not run migrations through the application pool.
 
 Registry consumers obtain the same versioned SQL through
@@ -28,6 +29,25 @@ relay role. Grant it schema USAGE; policy SELECT; Inbox SELECT/INSERT/UPDATE/DEL
 SELECT/INSERT; Outbox sequence USAGE; and EXECUTE on the three package functions. Grant no schema
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
+
+The relay definer is a closed component identity: it must not receive any parent role membership,
+including grants with INHERIT/SET disabled or an ADMIN option. A direct membership is the first edge
+of every indirect permission path, so rejecting those edges closes inherited, SET ROLE and role-grant
+authority without a global catalog scan. `INHERIT` or `NOINHERIT` alone is accepted when no membership
+exists. Role attributes such as CREATEDB/CREATEROLE are distinct from inherited object privileges;
+SET ROLE reachability is separate again. Runtime-to-relay membership remains independently forbidden.
+
+Runtime, Recovery, DR and Archive all check this one relay posture after the shared fencing probe,
+before any profile-specific early return. Extra relay attributes/memberships are rejected through
+the existing closed storage-contract categories. The relay check reports `RelayRole`; the preceding
+shared fencing probe reports `Functions` for relay SUPERUSER or runtime-to-relay membership.
+The external operator must correct the role before reconnecting. This is connection admission, not continuous role-drift monitoring; existing runtimes must be stopped/replaced by their
+owner when external role provisioning changes. No library operation executes production ALTER ROLE,
+REVOKE or migrations, and no permissive compatibility mode is provided.
+
+Role semantics reference: [PostgreSQL 16 acl.c](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/backend/utils/adt/acl.c)
+(`pg_has_role` and membership traversal). The PG TLS suite exercises attribute drift and direct/indirect
+MEMBER/USAGE/SET capability combinations, then reconnects after restoring each fixture.
 
 Construct `PgRuntime::connect(config, timer, binding)` with the same monotonic `ExecutionTimer` used by the
 consumer/relay. `PgInboxStore` takes a core `LeaseRenewalPolicy`; `PgOutboxStore<R>` takes a

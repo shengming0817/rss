@@ -345,6 +345,7 @@ impl PgRuntime {
         };
         let probe_result: Result<(), PgError> = async {
             crate::fence::probe(&runtime, profile, cutoff).await?;
+            runtime.check_relay_role(cutoff).await?;
             #[cfg(feature = "recovery")]
             if profile == Profile::Dr {
                 return Ok(());
@@ -397,6 +398,27 @@ impl PgRuntime {
         }
 
         Ok(runtime)
+    }
+
+    // All public profiles share this definer, including those that skip the ordinary schema probe.
+    async fn check_relay_role(&self, cutoff: AbsoluteDeadline) -> Result<(), PgError> {
+        let valid = within(&self.timer, cutoff, |_| async {
+            sqlx::query_scalar::<_, bool>(include_str!("relay_role.sql"))
+                .fetch_one(&self.pool)
+                .await
+        })
+        .await?
+        .map_err(PgError::probe)?;
+        if !valid {
+            let reason = PgStorageContractFailure::RelayRole;
+            tracing::warn!(
+                phase = "probe",
+                reason = reason.as_label(),
+                "PostgreSQL storage contract rejected"
+            );
+            return Err(PgError::IncompatibleStorageContract(reason));
+        }
+        Ok(())
     }
 
     /// Execute one tenant-bound transaction under one cutoff, including settlement.

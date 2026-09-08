@@ -2,7 +2,7 @@
 WITH runtime_role AS (
   SELECT oid, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user
 ), relay_role AS (
-  SELECT oid, rolcanlogin, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'rss_tmsg_relay'
+  SELECT oid FROM pg_roles WHERE rolname = 'rss_tmsg_relay'
 ), required(name, privileges) AS (VALUES ('inbox','SELECT,INSERT,UPDATE,DELETE'), ('outbox',CASE WHEN $1 THEN 'SELECT,INSERT,UPDATE' ELSE 'SELECT,INSERT' END)),
 columns(relation, name, type, nullable) AS (VALUES
  ('policy','revision','integer',false), ('policy','automatic_window_seconds','bigint',false),
@@ -53,7 +53,6 @@ expected_policies(relation, name, roles, predicate) AS (
  ('runtime_role', (NOT EXISTS (SELECT 1 FROM runtime_role WHERE rolsuper OR rolbypassrls))),
  ('runtime_role', (NOT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls)
     AND (pg_has_role(current_user, r.oid, 'USAGE') OR pg_has_role(current_user, r.oid, 'SET'))))),
- ('relay_role', (EXISTS (SELECT 1 FROM relay_role WHERE NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls))),
  ('runtime_role', (NOT pg_has_role(current_user, 'rss_tmsg_relay', 'MEMBER'))),
  ('columns', (NOT EXISTS (SELECT 1 FROM columns expected LEFT JOIN information_schema.columns actual
     ON actual.table_schema = 'rss_transactional_messaging' AND actual.table_name = expected.relation
