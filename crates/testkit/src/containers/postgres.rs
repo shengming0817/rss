@@ -3,7 +3,7 @@ use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage, ImageExt a
 
 use super::{
     NetworkAttachment, PUBLISHED_PORT_MAX_ATTEMPTS, PUBLISHED_PORT_RETRY_BACKOFF_MS, Result,
-    attach_network, copied_tls_image, runtime, wait_published_port,
+    copied_tls_image, start_on_network, wait_published_port,
 };
 
 const PG_PORT: u16 = 5432;
@@ -80,8 +80,11 @@ pub async fn postgres_tls(
         .with_exposed_port(PG_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",
+        ))
+        .with_wait_for(WaitFor::message_on_stdout(
+            "database system is ready to accept connections",
         ));
-    let request = attach_network(
+    let container = start_on_network(
         copied_tls_image(image, &material)
             .with_env_var("POSTGRES_DB", PG_DB)
             .with_env_var("POSTGRES_USER", PG_USER)
@@ -97,10 +100,10 @@ pub async fn postgres_tls(
             )
             .with_cmd(["/rss-tls/start-postgres.sh"]),
         attachment,
-    )?;
-    let container = runtime::start(request).await?;
+    )
+    .await?;
     let host = container.get_host().await?.to_string();
-    // Docker Desktop can publish port metadata after readiness; retry this same container.
+    // Query this same final server; on failure retain state before ordinary cleanup.
     let port = wait_published_port(
         &container,
         PG_PORT,

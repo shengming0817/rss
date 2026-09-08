@@ -9,8 +9,8 @@ use tokio::sync::OnceCell;
 use super::runtime::run_container_command;
 use super::{
     NetworkAttachment, PUBLISHED_PORT_MAX_ATTEMPTS, PUBLISHED_PORT_RETRY_BACKOFF_MS,
-    RABBITMQCTL_BACKOFF_MS, RABBITMQCTL_MAX_ATTEMPTS, Result, attach_network, copied_tls_image,
-    runtime, tls_material, wait_published_port,
+    RABBITMQCTL_BACKOFF_MS, RABBITMQCTL_MAX_ATTEMPTS, Result, copied_tls_image, runtime,
+    start_on_network, tls_material, wait_published_port,
 };
 
 const AMQP_PORT: u16 = 5672;
@@ -609,12 +609,12 @@ pub async fn rabbitmq_tls(
     let image = GenericImage::new("rabbitmq", "3.13.6-management-alpine")
         .with_exposed_port(AMQPS_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Server startup complete"));
-    let request = attach_network(
+    let container = start_on_network(
         copied_tls_image(image, &material)
             .with_copy_to("/etc/rabbitmq/rabbitmq.conf", config.into_bytes()),
         attachment,
-    )?;
-    let container = runtime::start(request).await?;
+    )
+    .await?;
     run_rabbitmqctl(&container, &["await_startup"]).await?;
     run_rabbitmqctl(&container, &["add_vhost", TLS_VHOST]).await?;
     provision_adjacent_rabbit_queue(&container, &adjacent_queue).await?;

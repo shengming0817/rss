@@ -2,7 +2,7 @@ use testcontainers::core::{IntoContainerPort as _, WaitFor};
 use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage, ImageExt as _};
 
 use super::runtime::{run_container_command, run_container_command_output};
-use super::{NetworkAttachment, Result, attach_network, runtime, tls_material};
+use super::{NetworkAttachment, Result, start_on_network, tls_material};
 const MINIO_ARCHIVE_BUCKET: &str = "archive";
 const MINIO_UNVERSIONED_BUCKET: &str = "archive-unversioned";
 const MINIO_UNLOCKED_BUCKET: &str = "archive-unlocked";
@@ -156,7 +156,7 @@ pub async fn minio_tls_archive(attachment: NetworkAttachment<'_>) -> Result<Mini
     let image = GenericImage::new("minio/minio", "RELEASE.2025-02-28T09-55-16Z")
         .with_exposed_port(MINIO_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("API:"));
-    let request = attach_network(
+    let container = start_on_network(
         image
             .with_env_var("MINIO_ROOT_USER", MINIO_ROOT_USER)
             .with_env_var("MINIO_ROOT_PASSWORD", MINIO_ROOT_PASSWORD)
@@ -182,8 +182,8 @@ pub async fn minio_tls_archive(attachment: NetworkAttachment<'_>) -> Result<Mini
                 ":9001",
             ]),
         attachment,
-    )?;
-    let container = runtime::start(request).await?;
+    )
+    .await?;
     run_container_command(
         &container,
         "configure admin alias",

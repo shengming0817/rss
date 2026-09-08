@@ -36,7 +36,7 @@ class PoolTests(unittest.TestCase):
 
     def hold(self, work=None, **env):
         ready = self.root / str(time.monotonic_ns())
-        code = f"from pathlib import Path; import time; Path({str(ready)!r}).touch(); time.sleep(30)"
+        code = f"from pathlib import Path; import os, time; p=Path({str(ready)!r}); p.with_suffix('.tmp').write_text(str(os.getpid())); p.with_suffix('.tmp').replace(p); time.sleep(30)"
         p = subprocess.Popen([sys.executable, str(SCRIPT), "--", sys.executable, "-c", code],
                              cwd=work or self.work, env=self.env | env,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -45,6 +45,7 @@ class PoolTests(unittest.TestCase):
         while not ready.exists() and time.monotonic() < deadline and p.poll() is None:
             time.sleep(.02)
         self.assertTrue(ready.exists(), f"holder failed: {p.poll()}")
+        p.fixture_child_pid = int(ready.read_text())
         return p
 
     @staticmethod
@@ -85,15 +86,17 @@ class PoolTests(unittest.TestCase):
 
     def test_orphan_keeps_lock(self):
         p = self.hold(RSS_TARGET_POOL_N="1")
-        # The command PID is diagnostic; the kernel lock owns liveness.
-        lease = json.loads((self.pool / "slot-0.json").read_text())
-        child = lease["pid"]
+        self.addCleanup(os.killpg, p.fixture_child_pid, signal.SIGTERM)
         p.kill()
         p.wait(timeout=5)
-        try:
-            self.assertNotEqual(self.run_cmd("pass", RSS_TARGET_POOL_N="1").returncode, 0)
-        finally:
-            os.killpg(child, signal.SIGTERM)
+        # Reproduce child readiness preceding the parent's diagnostic PID publication.
+        path = self.pool / "slot-0.json"
+        metadata = json.loads(path.read_text())
+        metadata["pid"] = None
+        path.write_text(json.dumps(metadata))
+        # The child handshake owns cleanup identity; only the inherited kernel lock
+        # owns liveness, even if diagnostic metadata still has no PID.
+        self.assertNotEqual(self.run_cmd("pass", RSS_TARGET_POOL_N="1").returncode, 0)
 
     def test_missing_and_corrupt_metadata_wipe(self):
         self.assertEqual(self.run_cmd("pass").returncode, 0)

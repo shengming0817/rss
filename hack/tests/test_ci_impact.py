@@ -255,6 +255,48 @@ class CiImpactContract(unittest.TestCase):
         _, decision = self.repo.select(head=head)
         self.assert_decision(decision, full=False, packages=[], reason="docs-only")
 
+    def test_skill_markdown_skips_packages_but_executable_inputs_do_not(self) -> None:
+        for prefix in (".claude/skills/", ".codex/skills/"):
+            with self.subTest(prefix=prefix):
+                head = self.repo.change(prefix + "ship/SKILL.md", "workflow instructions\n")
+                _, decision = self.repo.select(head=head)
+                self.assert_decision(decision, full=False, packages=[], reason="docs-only")
+        for prefix in (".claude/skills/", ".codex/skills/"):
+            with self.subTest(executable_prefix=prefix):
+                head = self.repo.change(prefix + "ship/check.sh", "#!/bin/sh\nexit 1\n")
+                _, decision = self.repo.select(head=head)
+                self.assert_decision(decision, full=True, packages=[], reason="unknown-path")
+                self.repo.git("reset", "--hard", self.repo.base)
+
+    def test_skill_rename_copy_and_mixed_unknown_remain_full(self) -> None:
+        for operation in ("rename", "copy", "unknown"):
+            with self.subTest(operation=operation):
+                self.repo.git("reset", "--hard", self.repo.base)
+                source = ".codex/skills/ship/SKILL.md"
+                base = self.repo.change(source, "specific workflow instructions\n")
+                self.repo.change("README.md", "updated guide\n")
+                if operation == "unknown":
+                    head = self.repo.change("unowned/check.py", "raise RuntimeError()\n")
+                else:
+                    head = getattr(self.repo, operation)(source, ".codex/skills/fix/SKILL.md")
+                _, decision = self.repo.select(base=base, head=head)
+                self.assert_decision(decision, full=True, packages=[],
+                    reason="unknown-path" if operation == "unknown" else "rename-or-copy")
+
+    def test_documentation_is_neutral_in_package_changes(self) -> None:
+        self.repo.change("README.md", "new public API\n")
+        self.repo.change(".claude/skills/ship/SKILL.md", "instructions\n")
+        self.repo.delete("docs/guide.md")
+        head = self.repo.change("crates/core/src/lib.rs")
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=False, packages=[
+            "build-consumer", "core", "dev-consumer", "leaf",
+            "leaf-integration", "optional-consumer",
+        ], reason="package-change")
+        head = self.repo.change("Makefile", "ci:\n\tfalse\n")
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=True, packages=[], reason="global-input")
+
     def test_every_controlled_root_document_is_docs_only(self) -> None:
         for relative in sorted(
             {

@@ -1142,7 +1142,10 @@ async fn assert_subscriber_close_order(
         prepare_close_barrier(settlement, &message, &subscription, after_cancel).await?;
     drop(stream);
     tokio::time::timeout(TIMEOUT, entered).await??;
-    let closing = resource.shutdown(Duration::from_secs(5));
+    // This order proof deliberately holds cancellation while observing the broker.
+    // Reserve the observation budget before the normal close budget; deadline
+    // behavior is covered separately by the zero-budget shutdown scenarios.
+    let closing = resource.shutdown(TIMEOUT + Duration::from_secs(5));
     tokio::pin!(closing);
     assert_open_during_shutdown(rabbit, vhost, &mut closing).await?;
     assert!(resume.send(()).is_ok());
@@ -1172,8 +1175,8 @@ async fn assert_open_during_shutdown(
     tokio::pin!(closing);
     tokio::select! {
         result = &mut closing => anyhow::bail!("shutdown crossed pending cancel: {result:?}"),
-        count = rabbit.broker_connection_count(vhost) => {
-            assert_eq!(count?, 1, "connection closed before subscription cancellation completed");
+        count = tokio::time::timeout(TIMEOUT, rabbit.broker_connection_count(vhost)) => {
+            assert_eq!(count??, 1, "connection closed before subscription cancellation completed");
         }
     }
     Ok(())

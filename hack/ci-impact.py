@@ -136,7 +136,12 @@ def is_global(path: str) -> bool:
 
 
 def is_docs(path: str) -> bool:
-    return path.startswith("docs/") or path.startswith(".github/project-template/") or path in ROOT_DOCS
+    return (
+        path.startswith("docs/")
+        or path.startswith(".github/project-template/")
+        or path in ROOT_DOCS
+        or (path.endswith(".md") and path.startswith((".claude/skills/", ".codex/skills/")))
+    )
 
 
 def metadata(root: Path) -> dict:
@@ -247,6 +252,8 @@ def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
     roots, reverse = workspace_graph(root, metadata(root))
     seeds: set[str] = set()
     for status, path in changes:
+        if is_docs(path):
+            continue
         package = owner(path, roots)
         if package is None:
             reason = "unowned-deletion" if status == "D" else "unknown-path"

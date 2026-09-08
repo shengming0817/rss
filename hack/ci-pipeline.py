@@ -328,7 +328,7 @@ def fixture_summary(output):
                     if not all(type(item[k]) is str and item[k] and re.fullmatch(r'[A-Za-z0-9_./:-]+', item[k])
                                for k in ('provider', 'phase', 'outcome')):
                         raise ValueError('invalid labels')
-                    if item['phase'] not in ('image', 'start-ready', 'cleanup') or item['outcome'] not in ('success', 'error', 'cancelled'):
+                    if item['phase'] not in ('image', 'start-ready', 'network-attach', 'cleanup') or item['outcome'] not in ('success', 'error', 'cancelled'):
                         raise ValueError('invalid metric kind')
                     if type(item['seconds']) not in (int, float) or not math.isfinite(item['seconds']) or item['seconds'] < 0:
                         raise ValueError('invalid duration')

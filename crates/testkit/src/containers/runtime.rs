@@ -166,9 +166,20 @@ pub(super) async fn run_container_command_output(
     operation: &'static str,
     command: &[&str],
 ) -> Result<ContainerCommandOutput> {
-    let mut child = tokio::process::Command::new("docker")
-        .args(["exec", container.container_id()])
-        .args(command)
+    run_command_output(
+        tokio::process::Command::new("docker")
+            .args(["exec", container.container_id()])
+            .args(command),
+        operation,
+    )
+    .await
+}
+
+pub(super) async fn run_command_output(
+    command: &mut tokio::process::Command,
+    operation: &'static str,
+) -> Result<ContainerCommandOutput> {
+    let mut child = command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)

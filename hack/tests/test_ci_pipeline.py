@@ -127,6 +127,20 @@ class PipelineTests(unittest.TestCase):
                         summary = json.loads((self.root / 'results/unit/fixture-summary.json').read_text())
                         self.assertEqual(summary['status'], 'incomplete')
 
+    def test_attachment_phase_is_complete_without_inventing_container_starts(self):
+        folder = self.root / 'fixture-metrics'
+        folder.mkdir()
+        rows = [dict(provider='postgres', phase='network-attach', outcome=outcome,
+                     seconds=0.1, starts=0, attempts=0)
+                for outcome in ('success', 'error', 'cancelled')]
+        (folder / '123.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        pipeline.fixture_summary(self.root)
+        summary = json.loads((self.root / 'fixture-summary.json').read_text())
+        self.assertEqual(summary['status'], 'complete')
+        self.assertEqual(summary['records'], 3)
+        self.assertEqual({row['outcome'] for row in summary['totals']}, {'success', 'error', 'cancelled'})
+        self.assertEqual(sum(row['starts'] for row in summary['totals']), 0)
+
     def test_profile_failure_keeps_test_exit_but_blocks_gate(self):
         def run(command, **kwargs):
             if kwargs.get('capture'): return 'rustc'

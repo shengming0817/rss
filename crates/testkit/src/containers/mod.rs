@@ -29,8 +29,8 @@ static BRIDGE_NETWORK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Fixture-owned Docker network membership for TLS provider containers.
 ///
-/// `network` is the user-defined bridge name; `dns_name` becomes the container name and therefore
-/// the Docker DNS name on that network. Host-side callers still consume mapped endpoints.
+/// `network` is the user-defined bridge name; `dns_name` is an alias scoped to that network.
+/// Docker assigns the global container identity. Host callers consume mapped endpoints.
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkAttachment<'a> {
     pub network: &'a str,
@@ -140,14 +140,66 @@ fn validate_network_attachment(attachment: NetworkAttachment<'_>) -> Result<()> 
     Ok(())
 }
 
-fn attach_network<I: testcontainers::Image>(
+async fn start_on_network<I: testcontainers::Image>(
     request: testcontainers::ContainerRequest<I>,
     attachment: NetworkAttachment<'_>,
-) -> Result<testcontainers::ContainerRequest<I>> {
+) -> Result<ContainerAsync<I>> {
     validate_network_attachment(attachment)?;
-    Ok(request
-        .with_network(attachment.network)
-        .with_container_name(attachment.dns_name))
+    // testcontainers 0.27 has no network-alias request API. Keep the default bridge
+    // and host-port publication, then attach the private network before exposing
+    // the fixture. An attachment failure drops only this owned container.
+    let provider = request.image().name().to_owned();
+    let container = runtime::start(request).await?;
+    let mut stage = runtime::Stage::new("network-attach", &provider, 0);
+    let output = runtime::run_command_output(
+        tokio::process::Command::new("docker").args([
+            "network",
+            "connect",
+            "--alias",
+            attachment.dns_name,
+            attachment.network,
+            container.id(),
+        ]),
+        "network-attach",
+    )
+    .await;
+    stage.finish(matches!(&output, Ok(output) if output.exit_code == Some(0)));
+    let output = output?;
+    anyhow::ensure!(
+        output.exit_code == Some(0),
+        "fixture network attachment failed (category={}, exit={:?}, stderr_bytes={})",
+        network_attachment_category(&output.stderr),
+        output.exit_code,
+        output.stderr.len()
+    );
+    Ok(container)
+}
+
+fn network_attachment_category(stderr: &str) -> &'static str {
+    let message = stderr.to_ascii_lowercase();
+    if message.contains("network") && message.contains("not found") {
+        "network-missing"
+    } else if message.contains("permission denied")
+        || message.contains("cannot connect to the docker daemon")
+    {
+        "daemon-or-permission"
+    } else if message.contains("endpoint") && message.contains("already exists") {
+        "endpoint-conflict"
+    } else {
+        "unknown"
+    }
+}
+
+#[test]
+fn network_attachment_diagnostics_do_not_echo_daemon_secrets() {
+    for (message, expected) in [
+        ("network secret-network not found", "network-missing"),
+        ("permission denied at secret-socket", "daemon-or-permission"),
+        ("endpoint secret-name already exists", "endpoint-conflict"),
+        ("unexpected secret-password", "unknown"),
+    ] {
+        assert_eq!(network_attachment_category(message), expected);
+    }
 }
 
 fn retry_published_port_resolution(
@@ -179,7 +231,18 @@ async fn wait_published_port<I: testcontainers::Image>(
                 last = Some(error);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                if matches!(
+                    error,
+                    testcontainers::TestcontainersError::PortNotExposed { .. }
+                ) {
+                    let state = port_diagnostic::snapshot(container, port).await;
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "published port lookup failed after {attempt} attempts: {state}"
+                    )));
+                }
+                return Err(error.into());
+            }
         }
     }
     Err(anyhow::anyhow!(
@@ -200,6 +263,7 @@ fn is_safe_label_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+mod port_diagnostic;
 mod runtime;
 mod tls;
 use tls::*;
