@@ -162,10 +162,10 @@ async fn serve_owned(
                 record_connection(result);
             },
             accepted = listener.accept() => {
-                let (stream, _) = accepted.map_err(ShutdownError::new)?;
+                let (stream, peer) = accepted.map_err(ShutdownError::new)?;
                 // H1 handlers run inside the connection future. Isolate their panics too.
                 connections.push(AssertUnwindSafe(connection(
-                    stream, router.clone(), token.clone(), protocol,
+                    stream, router.clone(), peer, token.clone(), protocol,
                 )).catch_unwind());
             }
         }
@@ -180,11 +180,13 @@ async fn serve_owned(
 async fn connection(
     stream: TcpStream,
     router: Router,
+    peer: std::net::SocketAddr,
     token: CancellationToken,
     protocol: Protocol,
 ) -> ConnectionExit {
     let io = TokioIo::new(stream);
-    let service = TowerToHyperService::new(router);
+    let service =
+        TowerToHyperService::new(router.layer(axum::Extension(axum::extract::ConnectInfo(peer))));
     match protocol {
         #[cfg(feature = "http1")]
         Protocol::Http1 => {

@@ -41,6 +41,7 @@ async fn start(register: Register, router: Router, drain: Duration) -> (SocketAd
 }
 
 struct Client {
+    local_addr: SocketAddr,
     sender: hyper::client::conn::http1::SendRequest<Empty<Bytes>>,
     driver: tokio::task::JoinHandle<()>,
 }
@@ -53,10 +54,12 @@ impl Client {
     #[allow(clippy::unwrap_used)]
     async fn connect(addr: SocketAddr) -> Self {
         let stream = TcpStream::connect(addr).await.unwrap();
+        let local_addr = stream.local_addr().unwrap();
         let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .unwrap();
         Self {
+            local_addr,
             sender,
             driver: tokio::spawn(async move {
                 let _ = connection.await;
@@ -541,11 +544,11 @@ async fn establishment_deadline_closes_partial_headers_without_stopping_listener
                 .unwrap();
             tokio::time::pause();
             tokio::time::advance(Duration::from_secs(31)).await;
+            tokio::time::resume(); // Observe real socket closure without auto-advancing its wait budget.
             let mut bytes = Vec::new();
             let _ = tokio::time::timeout(WAIT, slow.read_to_end(&mut bytes))
                 .await
                 .unwrap();
-            tokio::time::resume();
             let mut healthy = Client::connect(addr).await;
             let response = healthy.request("/").await.unwrap();
             assert_eq!(
@@ -576,12 +579,12 @@ async fn establishment_deadline_closes_partial_exact_h2_preface() {
             .unwrap();
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::time::resume(); // Socket readiness is a real I/O event.
         let mut bytes = Vec::new();
         let _ = tokio::time::timeout(WAIT, slow.read_to_end(&mut bytes))
             .await
             .unwrap();
         assert!(owner.shutdown().join().await.unwrap().is_clean());
-        tokio::time::resume();
     }
 }
 
@@ -622,6 +625,25 @@ async fn establishment_deadline_does_not_limit_an_admitted_handler() {
                 .to_bytes(),
             "finished"
         );
+        assert!(owner.shutdown().join().await.unwrap().is_clean());
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn accepted_peer_is_available_to_standard_extractor() {
+    for register in constructors() {
+        let app = Router::new().route("/", get(|axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>| async move { peer.to_string() }));
+        let (address, owner) = start(register, app, WAIT).await;
+        let mut client = Client::connect(address).await;
+        let response = client.request("/").await.unwrap();
+        assert!(response.status().is_success());
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            client.local_addr.to_string()
+        );
+        drop(client);
         assert!(owner.shutdown().join().await.unwrap().is_clean());
     }
 }

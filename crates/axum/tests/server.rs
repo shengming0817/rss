@@ -20,6 +20,7 @@ use tokio::{
 };
 
 struct Client {
+    local_addr: SocketAddr,
     sender: SendRequest<Empty<Bytes>>,
     driver: tokio::task::JoinHandle<()>,
 }
@@ -32,11 +33,13 @@ impl Client {
     #[allow(clippy::unwrap_used)]
     async fn connect(addr: SocketAddr) -> Self {
         let stream = TcpStream::connect(addr).await.unwrap();
+        let local_addr = stream.local_addr().unwrap();
         let (sender, connection) =
             hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
                 .await
                 .unwrap();
         Self {
+            local_addr,
             sender,
             driver: tokio::spawn(async move {
                 let _ = connection.await;
@@ -422,4 +425,29 @@ async fn auto_establishment_deadline_does_not_limit_admitted_h2_streams() {
         "finished"
     );
     assert!(owner.shutdown().join().await.unwrap().is_clean());
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn accepted_peer_is_available_to_standard_extractor() {
+    for register in constructors() {
+        let app = Router::new().route("/", get(|axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>| async move { peer.to_string() }));
+        let (address, owner) = start_with(
+            register,
+            app,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .await;
+        let mut client = Client::connect(address).await;
+        let response = client.request("/").await.unwrap();
+        assert!(response.status().is_success());
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            client.local_addr.to_string()
+        );
+        drop(client);
+        assert!(owner.shutdown().join().await.unwrap().is_clean());
+    }
 }
