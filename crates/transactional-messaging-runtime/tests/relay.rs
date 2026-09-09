@@ -557,6 +557,7 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
     );
     let mut stack = rss_runtime::ShutdownStack::try_new(
         rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total budget"),
+        Arc::new(ShutdownTimer),
     )
     .expect("stack");
     let mut startup = stack.startup().expect("startup");
@@ -1059,4 +1060,20 @@ async fn directly_awaited_relay_accepts_borrowed_timer_and_stops_before_claim() 
     cancellation.cancel();
     worker.run(cancellation).await.expect("cancelled relay");
     assert_eq!(store.claim_calls.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(feature = "managed-runtime")]
+pub struct ShutdownTimer;
+#[cfg(feature = "managed-runtime")]
+impl rss_request_context::Clock for ShutdownTimer {
+    #[allow(clippy::disallowed_methods)] // reason: this concrete test clock owns the Tokio time domain.
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
+    }
+}
+#[cfg(feature = "managed-runtime")]
+impl rss_request_context::ExecutionTimer for ShutdownTimer {
+    async fn sleep_until(&self, deadline: rss_request_context::Deadline) {
+        tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
+    }
 }

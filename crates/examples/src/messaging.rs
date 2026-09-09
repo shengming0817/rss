@@ -127,7 +127,10 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
             "example-relay",
             ShutdownBudget::new(Duration::from_secs(2))?,
         );
-        let mut stack = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(5))?)?;
+        let mut stack = ShutdownStack::try_new(
+            TotalDrainBudget::new(Duration::from_secs(5))?,
+            std::sync::Arc::new(crate::timer::TokioTimer),
+        )?;
         let mut startup = stack.startup()?;
         let _status = startup.stage_task_with_token(registration);
         startup.commit().finish();

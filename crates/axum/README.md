@@ -130,14 +130,14 @@ authenticator. The status/body mapper alone does not provide a complete authenti
 
 ```rust,no_run
 # #[cfg(feature = "http2")]
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(timer: std::sync::Arc<impl rss_request_context::ExecutionTimer + 'static>) -> Result<(), Box<dyn std::error::Error>> {
 use std::time::Duration;
 use rss_runtime::{ShutdownStack, TotalDrainBudget};
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 let registration = rss_axum::serve_http2_registration(
     listener, axum::Router::new(), "http", Duration::from_secs(5));
 let status = registration.status();
-let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?)?;
+let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?, timer)?;
 let mut startup = owner.startup()?;
 startup.stage_task_with_token(registration);
 startup.commit().finish();

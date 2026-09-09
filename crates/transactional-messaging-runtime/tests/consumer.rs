@@ -2590,6 +2590,7 @@ async fn forced_shutdown_during_claim_drops_without_settlement_or_cleanup() {
     );
     let mut stack = rss_runtime::ShutdownStack::try_new(
         rss_runtime::TotalDrainBudget::new(Duration::from_secs(1)).expect("total"),
+        Arc::new(RealtimeClock::new()),
     )
     .expect("stack");
     let mut startup = stack.startup().expect("startup");
@@ -2701,6 +2702,7 @@ async fn forced_worker_shutdown_drops_handler_without_settlement() {
     );
     let mut stack = rss_runtime::ShutdownStack::try_new(
         rss_runtime::TotalDrainBudget::new(Duration::from_secs(1)).expect("total budget"),
+        Arc::new(RealtimeClock::new()),
     )
     .expect("stack");
     let mut startup = stack.startup().expect("startup");
@@ -3031,6 +3033,7 @@ async fn non_transient_subscribe_failure_is_fail_loud() {
     );
     let mut stack = rss_runtime::ShutdownStack::try_new(
         rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
+        Arc::new(RealtimeClock::new()),
     )
     .expect("stack");
     let mut startup = stack.startup().expect("startup");
@@ -3075,6 +3078,7 @@ async fn provider_panic_maps_to_typed_worker_failure() {
     );
     let mut stack = rss_runtime::ShutdownStack::try_new(
         rss_runtime::TotalDrainBudget::new(Duration::from_secs(2)).expect("total"),
+        Arc::new(RealtimeClock::new()),
     )
     .expect("stack");
     let mut startup = stack.startup().expect("startup");

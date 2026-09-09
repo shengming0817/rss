@@ -29,3 +29,7 @@ pub use scope::{
 };
 
 pub use admission::{AdmissionControl, AdmissionError, AdmissionGate, AdmissionPermit};
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;

@@ -613,6 +613,7 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id(
     );
     let mut stack = ShutdownStack::try_new(
         TotalDrainBudget::new(Duration::from_secs(2)).expect("total budget"),
+        Arc::new(TokioClock::new()),
     )
     .map_err(|_| live_failure(LivePhase::Shutdown, MessagingErrorKind::Invariant))?;
     let mut startup = stack
@@ -946,8 +947,10 @@ async fn assert_tls_startup_rollback(
     ca: &AmqpPrivateCa,
     wrong_ca: &AmqpPrivateCa,
 ) -> anyhow::Result<()> {
-    let mut rollback_stack =
-        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?)?;
+    let mut rollback_stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(10))?,
+        Arc::new(TokioClock::new()),
+    )?;
     let mut startup = rollback_stack.startup()?;
     let (rollback_handle, rollback_resource) =
         AmqpPublisher::connect(publisher_endpoint, "rollback-publisher", ca, TIMEOUT).await?;

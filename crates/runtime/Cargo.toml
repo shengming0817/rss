@@ -18,6 +18,7 @@ default = []
 dynosaur = { workspace = true }
 futures = { workspace = true, features = ["std", "async-await", "executor"] }
 rss-redact.workspace = true
+rss-request-context.workspace = true
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }

@@ -39,8 +39,9 @@ use crate::{
     DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ManagedTaskRegistration,
     ShutdownError, ShutdownErrorKind, TaskStatus,
 };
+use rss_request_context::{Deadline, ExecutionTimer};
+use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -207,9 +208,6 @@ pub enum ShutdownStackError {
     /// No current Tokio runtime can own the cancellation-safe background drain.
     #[error("shutdown stack requires an active Tokio runtime")]
     RuntimeUnavailable,
-    /// The current runtime has no Tokio time driver for bounded shutdown.
-    #[error("shutdown stack requires a Tokio time driver; use enable_time or enable_all")]
-    TimeDriverUnavailable,
     /// The originating runtime stopped before the asynchronous drain produced a receipt.
     #[error("shutdown driver stopped before producing a receipt")]
     DriverUnavailable,
@@ -237,6 +235,7 @@ enum RegistrationPhase {
 /// （`INVARIANT: SHUTDOWN-SINGLE-SHOT-01`， { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }编译期 Hard，强于运行期状态机 guard）。
 pub struct ShutdownStack {
     runtime: Handle,
+    timer: Arc<dyn Timer>,
     total_budget: TotalDrainBudget,
     root_token: Option<CancellationToken>,
     resources: Option<Vec<Box<DynManagedResource<'static>>>>,
@@ -291,22 +290,39 @@ impl ManagedResource for DeferredCancellationResource {
     }
 }
 
+// Private storage erasure; the host implements only the canonical Foundation timer.
+// ref: RSS rss-platform runtime.rs Timer adapter; Tokio timeout.rs@tokio-1.52.3.
+trait Timer: Send + Sync {
+    fn sleep(&self, budget: Duration) -> futures::future::BoxFuture<'_, ()>;
+}
+
+impl<T: ExecutionTimer> Timer for T {
+    fn sleep(&self, budget: Duration) -> futures::future::BoxFuture<'_, ()> {
+        match Deadline::from_timeout(self, budget) {
+            Ok(deadline) => Box::pin(self.sleep_until(deadline)),
+            // Fail closed when a duration cannot be represented in the host's time domain.
+            Err(_) => Box::pin(std::future::ready(())),
+        }
+    }
+}
+
 impl ShutdownStack {
-    /// Construct the sole lifecycle owner inside a Tokio runtime with time enabled.
+    /// Construct the sole lifecycle owner with an explicit, host-owned timer.
     ///
-    /// A missing time driver is rejected before registration. Detection catches Tokio's panic
-    /// (the process panic hook still runs); returning that error requires `panic = "unwind"`.
-    pub fn try_new(total_budget: TotalDrainBudget) -> Result<Self, ShutdownStackError> {
+    /// The current Tokio runtime must remain driven for cleanup tasks. Its time driver need not
+    /// be enabled: all owner deadlines use the supplied `ExecutionTimer`. The host must provide
+    /// a valid timer implementation and keep its time source driven until cleanup completes.
+    /// Unrepresentable deadlines are treated as exhausted rather than becoming unbounded waits.
+    pub fn try_new(
+        total_budget: TotalDrainBudget,
+        timer: Arc<impl ExecutionTimer + 'static>,
+    ) -> Result<Self, ShutdownStackError> {
         let runtime = Handle::try_current().map_err(|_| ShutdownStackError::RuntimeUnavailable)?;
-        // Tokio exposes no fallible time-driver query. Probe before taking any resources.
-        // ref: tokio-rs/tokio tokio/src/time/sleep.rs@tokio-1.52.0
-        // Requires unwinding; Tokio's panic hook still runs when time is disabled.
-        std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
-            .map_err(|_| ShutdownStackError::TimeDriverUnavailable)?;
         Ok(Self::with_parts(
             runtime,
             total_budget,
             CancellationToken::new(),
+            timer,
         ))
     }
 
@@ -314,9 +330,11 @@ impl ShutdownStack {
         runtime: Handle,
         total_budget: TotalDrainBudget,
         root_token: CancellationToken,
+        timer: Arc<dyn Timer>,
     ) -> Self {
         Self {
             runtime,
+            timer,
             total_budget,
             root_token: Some(root_token),
             resources: Some(Vec::new()),
@@ -332,6 +350,7 @@ impl ShutdownStack {
             Handle::current(),
             TotalDrainBudget(Duration::from_secs(60)),
             root_token,
+            Arc::new(crate::test_support::TokioTimer),
         )
     }
 
@@ -582,7 +601,8 @@ impl ShutdownStack {
             .take()
             .unwrap_or_else(|| unreachable!("resources transfer exactly once"));
         let total_budget = self.total_budget.duration();
-        self.runtime.spawn(drain_resources(resources, total_budget))
+        self.runtime
+            .spawn(drain_resources(resources, total_budget, self.timer.clone()))
     }
 }
 
@@ -599,16 +619,17 @@ impl Drop for ShutdownStack {
 async fn drain_resources(
     resources: Vec<Box<DynManagedResource<'static>>>,
     total_budget: Duration,
+    timer: Arc<dyn Timer>,
 ) -> ShutdownReceipt {
     let total = resources.len();
     tracing::info!(resource_count = total, "shutdown sequence starting");
-    let deadline = tokio::time::sleep(total_budget);
+    let deadline = timer.sleep(total_budget);
     tokio::pin!(deadline);
     let mut failures = Vec::new();
     let mut completion = DrainCompletion::Complete;
     let mut resources = resources.into_iter().rev();
     while let Some(resource) = resources.next() {
-        match shutdown_one(resource, deadline.as_mut()).await {
+        match shutdown_one(resource, deadline.as_mut(), timer.as_ref()).await {
             ShutdownStep::Exhausted(name) => {
                 completion = DrainCompletion::BudgetExhausted;
                 drain_budget_exhausted(name, &mut resources, &mut failures);
@@ -770,6 +791,7 @@ enum ShutdownStep {
 async fn shutdown_one<D>(
     resource: Box<DynManagedResource<'static>>,
     deadline: Pin<&mut D>,
+    timer: &dyn Timer,
 ) -> ShutdownStep
 where
     D: Future<Output = ()>,
@@ -785,14 +807,16 @@ where
         // panic 隔离：在独立 task 中执行——下游 adapter panic 被 tokio harness 捕获为
         // JoinError，不击穿驱动循环。`Box<DynManagedResource>` 直接 move 进 task（Box: Send，
         // boxed future: Send via trait_variant）——无需 Arc 共享（name/budget 已在前读取）。
+        let resource_deadline = timer.sleep(budget);
         let mut handle = tokio::spawn(async move { resource.shutdown().await });
 
-        // 单 select：整体预算 vs per-resource（timeout 包 task）。biased：先判预算。`&mut handle`
+        // 单 select：共享总预算优先；与 Tokio timeout 一致，已完成 task 优先于同次 per-resource 超时。`&mut handle`
         // 的借用随 select 返回 `resolved` 释放——故后续 match 可再借 handle 做 abort（顺序不重叠）。
         let resolved = tokio::select! {
             biased;
             () = deadline => None,
-            out = timeout(budget, &mut handle) => Some(out),
+            out = &mut handle => Some(Ok(out)),
+            () = resource_deadline => Some(Err(())),
         };
 
         match resolved {
@@ -805,7 +829,7 @@ where
                 );
                 ShutdownStep::Exhausted(name)
             }
-            // timeout → JoinError → shutdown 三层 Result：超时 / task 异常终止 / 业务错误。
+            // 三层 Result 分别记录单资源预算 / task 终止 / 业务结果。
             // 本 shutdown owner 按 typed failure 分类记录：业务 Err 为 warn；超时 / panic 资源状态未知为 error。
             Some(out) => {
                 let kind = match out {

@@ -3704,6 +3704,7 @@ dependencies = [
  "dynosaur",
  "futures",
  "rss-redact",
+ "rss-request-context",
  "thiserror",
  "tokio",
  "tokio-util",
