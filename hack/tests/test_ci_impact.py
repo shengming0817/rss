@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import shlex
@@ -12,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 RSS_ROOT = Path(__file__).resolve().parents[2]
@@ -409,6 +412,34 @@ class CiImpactContract(unittest.TestCase):
                     self.assert_decision(decision, full=True, packages=[], reason="global-input")
                 finally:
                     repo.close()
+
+    def test_shared_fixture_add_modify_delete_are_global(self) -> None:
+        relative = "tests/fixtures/shared.rs"
+        added = self.repo.change(relative, "pub const VALUE: u8 = 1;\n")
+        modified = self.repo.change(relative, "pub const VALUE: u8 = 2;\n")
+        deleted = self.repo.delete(relative)
+        for base, head in ((self.repo.base, added), (added, modified), (modified, deleted)):
+            with self.subTest(base=base, head=head):
+                _, decision = self.repo.select(base=base, head=head)
+                self.assert_decision(decision, full=True, packages=[], reason="global-input")
+
+    def test_actual_archive_shared_input_selects_both_consumers(self) -> None:
+        # Use the actual include and Cargo graph, so moving a fixture back under
+        # one consumer cannot silently reintroduce the missing reverse edge.
+        archive = RSS_ROOT / "tests/archive-integration/tests/archive.rs"
+        include = re.search(r'#\[path = "([^"]+)"\]\s*mod support;', archive.read_text())
+        self.assertIsNotNone(include)
+        source = (archive.parent / include.group(1)).resolve()
+        self.assertTrue(source.is_file())
+        spec = importlib.util.spec_from_file_location("impact", RSS_ROOT / "hack/ci-impact.py")
+        impact = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(impact)
+        document = impact.metadata(RSS_ROOT)
+        with patch.object(impact, "changed_paths", return_value=[("M", source.relative_to(RSS_ROOT).as_posix())]), \
+             patch.object(impact, "metadata", return_value=document):
+            full, packages, _ = impact.select(RSS_ROOT, "base", "head")
+        self.assertTrue(full or {"archive-integration", "postgres-integration"} <= packages,
+                        f"shared input selected only {sorted(packages)}")
 
     def test_unknown_add_and_delete_are_full(self) -> None:
         head = self.repo.change("unknown/source.rs")

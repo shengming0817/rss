@@ -26,7 +26,7 @@ assert_eq!(request.as_str(), "request-42");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Licensed under the Apache License, Version 2.0.
+Licensed under the MIT License.
 
 `Clock`, `ExecutionTimer` and `Deadline` are the shared in-process monotonic time boundary.
 Consumers implement one timer for Platform and transactional messaging; each execution core

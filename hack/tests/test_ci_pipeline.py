@@ -1,4 +1,5 @@
 """Failure boundaries of the archive pipeline, without rebuilding the workspace."""
+from contextlib import ExitStack
 import importlib.util
 import json
 import os
@@ -214,19 +215,50 @@ class PipelineTests(unittest.TestCase):
             checks.assert_not_called()
             build.assert_not_called()
 
-    def test_all_groups_docs_and_report_run_after_test_failure(self):
-        with patch.dict(os.environ, {'CI_PART': 'tests', 'CI_PLAN': ''}), \
-             patch.object(pipeline, 'selection', return_value=self.plan), \
-             patch.object(pipeline, 'semver_selection', return_value={'selected': False}), \
-             patch.object(pipeline, 'run', return_value='sha'), \
-             patch.object(pipeline, 'build', return_value=0), \
-             patch.object(pipeline, 'execute', side_effect=[0, 0, 9, 0, 0]) as execute, \
-             patch.object(pipeline, 'coverage', return_value=0) as report, \
-             patch.object(pipeline, 'docs', return_value=0) as docs:
-            self.assertEqual(pipeline.main(), 9)
-            self.assertEqual([c.args[1] for c in execute.call_args_list], list(pipeline.GROUPS))
-            report.assert_called_once()
-            docs.assert_called_once()
+    def test_tests_all_and_docs_dispatch_and_preserve_failure(self):
+        for part in ('tests', 'all', 'docs'):
+            for failed in (None, 'build', 'execute', 'coverage', 'docs'):
+                with self.subTest(part=part, failed=failed), ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ, {'CI_PART': part, 'CI_PLAN': ''}))
+                    stack.enter_context(patch.object(pipeline, 'selection', return_value=self.plan))
+                    stack.enter_context(patch.object(pipeline, 'run', return_value='sha'))
+                    calls = []
+
+                    def operation(name):
+                        def invoke(*args):
+                            calls.append((name, args))
+                            return 9 if name == failed else 0
+                        return invoke
+
+                    for name in ('semver', 'checks', 'build', 'execute', 'coverage', 'docs'):
+                        stack.enter_context(patch.object(pipeline, name, side_effect=operation(name)))
+                    status = pipeline.main()
+                    expected = ['semver', 'checks'] if part == 'all' else []
+                    if part != 'docs':
+                        expected.append('build')
+                        if failed != 'build':
+                            expected += ['execute'] * len(pipeline.GROUPS) + ['coverage']
+                    if part in ('all', 'docs'):
+                        expected.append('docs')
+                    self.assertEqual([name for name, _ in calls], expected)
+                    self.assertEqual(status, 9 if failed in expected else 0)
+                    groups = [args[1] for name, args in calls if name == 'execute']
+                    self.assertEqual(groups, list(pipeline.GROUPS) if 'execute' in expected else [])
+
+    def test_empty_selection_skips_tests_and_docs(self):
+        for part in ('tests', 'all', 'docs'):
+            with self.subTest(part=part), ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, {'CI_PART': part, 'CI_PLAN': ''}))
+                stack.enter_context(patch.object(pipeline, 'selection',
+                                                return_value=self.plan | {'full': False, 'packages': []}))
+                stack.enter_context(patch.object(pipeline, 'run', return_value='sha'))
+                checks = stack.enter_context(patch.object(pipeline, 'checks', return_value=0))
+                semver = stack.enter_context(patch.object(pipeline, 'semver', return_value=0))
+                for name in ('build', 'execute', 'coverage', 'docs'):
+                    stack.enter_context(patch.object(pipeline, name, side_effect=AssertionError(name)))
+                self.assertEqual(pipeline.main(), 0)
+                self.assertEqual(checks.call_count, int(part == 'all'))
+                self.assertEqual(semver.call_count, int(part == 'all'))
 
     def test_archive_or_toolchain_mismatch_rejected_before_execution(self):
         with patch.object(pipeline, 'run', return_value='wrong-toolchain'):

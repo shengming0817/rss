@@ -181,7 +181,7 @@ and deliberately leaves lapin automatic recovery disabled.
 Task ownership reference: tokio-util 0.7.18 `src/task/abort_on_drop.rs` at
 `9cc02cc88d083113cd9889a74b382e39e430e180`; drop requests abort, while normal await observes completion.
 
-Licensed under the Apache License, Version 2.0.
+Licensed under the MIT License.
 
 ### Diagnostic boundary
 

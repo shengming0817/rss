@@ -1,7 +1,7 @@
 use rss_request_context::Deadline;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
-#[path = "recovery/support.rs"]
+#[path = "../../fixtures/message_recovery.rs"]
 mod support;
 use anyhow::Context;
 use rss_transactional_messaging::{

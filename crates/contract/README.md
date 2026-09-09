@@ -92,4 +92,4 @@ lock digest and executed test counts; commands and test results are in the job l
 behavior of that candidate artifact, not registry publication or product acceptance. Full private
 boundary tests and compile-fail documentation remain component tests, without a second copy.
 
-Licensed under the Apache License, Version 2.0.
+Licensed under the MIT License.

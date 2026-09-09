@@ -11,9 +11,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use rss_transactional_messaging::error::MessagingErrorKind;
-use rss_transactional_messaging::policy::{
-    ExecutionBudget, ExecutionDeadlines, LeaseRenewalPolicy, LeaseRenewalPolicyError, within,
-};
+use rss_transactional_messaging::policy::{ExecutionBudget, ExecutionDeadlines, within};
+
+#[cfg(feature = "consumer")]
+use rss_transactional_messaging::policy::{LeaseRenewalPolicy, LeaseRenewalPolicyError};
 
 struct ManualTimer {
     now: Mutex<Duration>,
@@ -99,6 +100,7 @@ impl Drop for ControlledFuture {
     }
 }
 
+#[cfg(feature = "consumer")]
 #[test]
 fn lease_renewal_is_one_third_of_ttl_with_one_millisecond_floor() {
     assert_eq!(

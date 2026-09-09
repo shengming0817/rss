@@ -463,7 +463,7 @@ def main():
         for group in GROUPS:
             status = attempt(execute, plan, group) or status
         status = attempt(coverage, plan) or status
-    return attempt(docs, plan) or status
+    return (attempt(docs, plan) or status) if part == 'all' else status
 
 
 if __name__ == '__main__':

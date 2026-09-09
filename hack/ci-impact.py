@@ -23,6 +23,7 @@ GLOBAL_PREFIXES = (
     ".github/actions/",
     ".github/scripts/",
     ".github/workflows/",
+    "tests/fixtures/",  # Shared source includes have no single Cargo package owner.
 )
 ROOT_DOCS = {
     "AGENTS.md",

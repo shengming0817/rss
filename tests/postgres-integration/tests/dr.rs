@@ -6,7 +6,7 @@ mod consumer;
 mod permissions;
 #[path = "dr/states.rs"]
 mod states;
-#[path = "recovery/support.rs"]
+#[path = "../../fixtures/message_recovery.rs"]
 mod support;
 #[path = "dr/terminate.rs"]
 mod terminate;
