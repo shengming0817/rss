@@ -32,7 +32,7 @@ Lowercase preserves Unicode default casing (including Final Sigma), with ICU4X c
 Borrowed caller inputs remain the caller’s responsibility; the library cannot erase copies made
 before ownership transfer or guarantee register/stack-spill erasure.
 
-`cargo test -p rss-data-protection --test zeroize` runs the independent allocator probe fixture
+`cargo test -p rss-data-protection --test consumer` runs the independent allocator probe fixture
 against the real public key/index APIs. It inspects initialized tracked buffers before release,
 including spare capacity and reallocation, and calibrates against an ordinary nonzero Vec.
 The fixture alone contains scoped unsafe allocator code; production crates remain unsafe-free.
