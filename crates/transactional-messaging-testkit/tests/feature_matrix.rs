@@ -26,7 +26,7 @@ fn base_api<D: LocalTxDriver>(_: &D, _: FakeClock) {
 "#;
 
 const CORE_PRODUCER_API: &str = r#"
-fn core_producer_api<S: rss_transactional_messaging::outbox::OutboxStore<Vec<u8>>>(_: &S) {}
+fn core_producer_api<S: rss_transactional_messaging::outbox::OutboxWriter<Vec<u8>>>(_: &S) {}
 "#;
 
 const TESTKIT_PRODUCER_API: &str = r#"

@@ -39,3 +39,25 @@ fn independent_host_can_close_without_a_lifecycle_trait() {
     }
     let _ = close;
 }
+
+#[test]
+fn writer_needs_only_the_callers_transaction() {
+    use rss_transactional_messaging::{
+        error::MessagingError,
+        message::MessagingDomain,
+        outbox::{AppendOutcome, OutboxWriter, PendingMessage},
+    };
+    use rss_transactional_messaging_postgres::{PgOutboxWriter, PgRuntime};
+    use std::sync::Arc;
+    fn construct(runtime: Arc<PgRuntime>, domain: MessagingDomain) -> PgOutboxWriter {
+        PgOutboxWriter::new(runtime, domain)
+    }
+    async fn append(
+        writer: &PgOutboxWriter,
+        tx: &mut PgTransaction<'_>,
+        message: PendingMessage<Vec<u8>>,
+    ) -> Result<AppendOutcome, MessagingError> {
+        writer.append(tx, message).await
+    }
+    let _ = (construct, append);
+}

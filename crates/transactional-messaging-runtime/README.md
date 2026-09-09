@@ -60,7 +60,7 @@ For a directly awaited relay (the consumer follows the same pattern):
 # #[cfg(feature = "producer")]
 # mod direct_example {
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
-use rss_transactional_messaging::outbox::OutboxStore;
+use rss_transactional_messaging::outbox::OutboxRelayStore;
 use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::transport::Publisher;
 use rss_transactional_messaging_runtime::relay::RelayWorker;
@@ -69,7 +69,7 @@ use tokio_util::sync::CancellationToken;
 async fn drive<P, S, U, C, E>(worker: RelayWorker<P, S, U, C, E>, stop: CancellationToken)
 where
     P: Send + Sync,
-    S: OutboxStore<P>,
+    S: OutboxRelayStore<P>,
     S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt>,
     C: ExecutionTimer,
@@ -87,7 +87,7 @@ A host that spawns the worker must retain its task handle through shutdown:
 # #[cfg(feature = "producer")]
 # mod spawned_example {
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
-use rss_transactional_messaging::outbox::OutboxStore;
+use rss_transactional_messaging::outbox::OutboxRelayStore;
 use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::policy::ShutdownBudget;
 use rss_transactional_messaging::transport::Publisher;
@@ -101,7 +101,7 @@ async fn host<P, S, U, C, E>(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     P: Send + Sync + 'static,
-    S: OutboxStore<P> + 'static,
+    S: OutboxRelayStore<P> + 'static,
     S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
     C: ExecutionTimer + 'static,
@@ -137,7 +137,7 @@ panic reporting and the final shutdown timeout. Its private lifecycle token is n
 # mod managed_example {
 use rss_runtime::{ManagedTaskRegistration, TaskStatus};
 use rss_transactional_messaging::observability::TransactionalMessagingEmitter;
-use rss_transactional_messaging::outbox::OutboxStore;
+use rss_transactional_messaging::outbox::OutboxRelayStore;
 use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::policy::ShutdownBudget;
 use rss_transactional_messaging::transport::Publisher;
@@ -149,7 +149,7 @@ fn prepare<P, S, U, C, E>(
 ) -> (ManagedTaskRegistration, TaskStatus)
 where
     P: Send + Sync + 'static,
-    S: OutboxStore<P> + 'static,
+    S: OutboxRelayStore<P> + 'static,
     S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
     C: ExecutionTimer + 'static,

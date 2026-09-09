@@ -45,3 +45,14 @@ let status = attempt.fold(
 assert_eq!(status, "commit unknown");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+## Independent Outbox capabilities
+
+`outbox::OutboxWriter<P>` admits a pending message in the caller's transaction. It requires only
+`Transaction<'tx>` and `append`; no publisher, receipt, claim or delivery budget is involved.
+`outbox::OutboxRelayStore<P>` owns claiming, lease checks/renewal and fenced settlement and has no
+transaction or append requirement. Both are enabled by the existing `producer` feature.
+
+This replaces the mixed `OutboxStore` trait without aliases or shims. Import the port actually used;
+combined providers implement both independently. Runtime relays consume only `OutboxRelayStore`.
+This is a Rust API replacement, not a change to persisted message identity or delivery semantics.

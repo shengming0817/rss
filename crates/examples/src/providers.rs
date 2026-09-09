@@ -6,7 +6,7 @@ use rss_transactional_messaging::{
     inbox::ConsumerGroup,
     message::*,
     observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
-    outbox::{AppendOutcome, OutboxStore, PendingMessage},
+    outbox::{AppendOutcome, OutboxWriter, PendingMessage},
     policy::*,
     transaction::{
         EnvelopeValidationFailure, IngressChallenge, IngressValidator, TerminalDisposition,

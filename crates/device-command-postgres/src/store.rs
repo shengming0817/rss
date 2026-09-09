@@ -1,7 +1,7 @@
 //! Same-transaction companion to transactional messaging; caller owns settlement.
 use crate::persistence::*;
 use rss_device_command::*;
-use rss_transactional_messaging::outbox::{OutboxStore, PendingMessage};
+use rss_transactional_messaging::outbox::{OutboxWriter, PendingMessage};
 use rss_transactional_messaging_postgres::{PgError, PgOutboxStore, PgTransaction};
 use std::sync::Arc;
 

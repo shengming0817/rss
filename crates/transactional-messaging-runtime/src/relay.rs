@@ -14,7 +14,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingRuntimePhase,
 };
 use rss_transactional_messaging::outbox::{
-    OutboxDisposition, OutboxLeaseStatus, OutboxSettlement, OutboxStore,
+    OutboxDisposition, OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement,
 };
 use rss_transactional_messaging::policy::{DeliveryBudget, within};
 use rss_transactional_messaging::transport::{
@@ -150,7 +150,7 @@ pub async fn relay_once<P, S, U, C, E>(
 ) -> Result<RelayReport, MessagingError>
 where
     P: Sync,
-    S: OutboxStore<P>,
+    S: OutboxRelayStore<P>,
     U: Publisher<P, Receipt = S::PublishReceipt>,
     C: ExecutionTimer,
     E: TransactionalMessagingEmitter,
@@ -223,7 +223,7 @@ async fn relay_claim<P, S, U, C, E>(
 ) -> Result<Option<OutboxDisposition>, MessagingError>
 where
     P: Sync,
-    S: OutboxStore<P>,
+    S: OutboxRelayStore<P>,
     U: Publisher<P, Receipt = S::PublishReceipt>,
     C: ExecutionTimer,
     E: TransactionalMessagingEmitter,
@@ -393,7 +393,7 @@ pub struct RelayWorker<P, S, U, C, E> {
 impl<P, S, U, C, E> RelayWorker<P, S, U, C, E>
 where
     P: Send + Sync,
-    S: OutboxStore<P>,
+    S: OutboxRelayStore<P>,
     S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt>,
     C: ExecutionTimer,

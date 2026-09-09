@@ -13,7 +13,7 @@ default = []
 rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime", "rss-examples/managed"]
 
 [dev-dependencies]
-rss-examples = { path = "../../crates/examples", features = ["providers"] }
+rss-examples = { path = "../../crates/examples", features = ["providers", "outbox-writer"] }
 rss-projection.workspace = true
 rss-projection-postgres = { workspace = true, features = ["integration"] }
 tokio-util.workspace = true

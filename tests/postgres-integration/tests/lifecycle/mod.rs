@@ -1,18 +1,17 @@
 use super::fence_fixture;
-use super::{Timer, deadline, message, outbox_budget};
+use super::{Timer, deadline, message};
 use rss_transactional_messaging::{
     error::MessagingErrorKind,
-    outbox::{AppendOutcome, OutboxStore, PendingMessage},
+    outbox::{AppendOutcome, OutboxWriter, PendingMessage},
     transaction::LocalTxAttempt,
 };
 use rss_transactional_messaging_postgres::{
-    PgConfig, PgError, PgOutboxStore, PgRuntime, PgTransaction,
+    PgConfig, PgError, PgOutboxWriter, PgRuntime, PgTransaction,
 };
 use std::{
     future::{Future, poll_fn},
     sync::Arc,
     task::Poll,
-    time::Duration,
 };
 
 async fn write_business(tx: &mut PgTransaction<'_>, id: &'static str) -> Result<(), PgError> {
@@ -37,11 +36,7 @@ pub(super) async fn business_outbox_atomicity(
     for (id, rollback) in [("atomic-commit", false), ("atomic-rollback", true)] {
         let envelope = message(id);
         let tenant = envelope.metadata().tenant_id();
-        let store = PgOutboxStore::<()>::new(
-            runtime.clone(),
-            envelope.metadata().domain().clone(),
-            outbox_budget(Duration::from_secs(60)),
-        )?;
+        let store = PgOutboxWriter::new(runtime.clone(), envelope.metadata().domain().clone());
         let attempt = runtime
             .local_tx(tenant, deadline(), move |tx| {
                 Box::pin(async move {

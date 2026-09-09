@@ -12,3 +12,6 @@ pub mod projection;
 pub mod reconcile;
 #[cfg(feature = "saga-pg")]
 pub mod saga;
+
+#[cfg(feature = "outbox-writer")]
+pub mod outbox_writer;

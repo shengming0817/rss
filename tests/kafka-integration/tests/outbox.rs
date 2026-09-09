@@ -4,7 +4,7 @@ mod support;
 use rss_transactional_messaging::{
     message::MessagingDomain,
     observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
-    outbox::{OutboxStore, PendingMessage},
+    outbox::{OutboxWriter, PendingMessage},
     policy::DeliveryBudget,
 };
 use rss_transactional_messaging_kafka::{KafkaPublishReceipt, KafkaPublisher};

@@ -1,0 +1,5 @@
+error[E0599]: no method named `settle` found for reference `&PgOutboxWriter` in the current scope
+ --> tests/ui/writer_settle_fail.rs:5:20
+  |
+5 |     let _ = writer.settle(claim, settlement, deadline);
+  |                    ^^^^^^ method not found in `&PgOutboxWriter`

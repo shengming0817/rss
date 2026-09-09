@@ -15,6 +15,48 @@ use sqlx::Row as _;
 use std::{marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
+/// Tenant-scoped Outbox admission using the caller's existing transaction.
+///
+/// This handle has no delivery methods or publisher receipt/budget parameters. For least-privilege
+/// database admission, construct its shared runtime with [`PgRuntime::connect_producer`].
+pub struct PgOutboxWriter {
+    runtime: Arc<PgRuntime>,
+    domain: MessagingDomain,
+}
+impl PgOutboxWriter {
+    /// Bind one domain to the same runtime used by companion business repositories.
+    pub fn new(runtime: Arc<PgRuntime>, domain: MessagingDomain) -> Self {
+        Self { runtime, domain }
+    }
+    /// Reject a transaction from a different runtime before any companion operation.
+    /// Transaction provenance is private and minted by the enclosing runtime, never caller data.
+    fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
+        if !tx.belongs_to(&self.runtime) {
+            tracing::warn!(
+                phase = "transaction",
+                reason = "runtime_mismatch",
+                "outbox transaction owner rejected"
+            );
+            return Err(PgError::classified(
+                MessagingErrorKind::Invariant,
+                std::io::Error::other("transaction runtime mismatch"),
+            ));
+        }
+        Ok(())
+    }
+}
+impl OutboxWriter<Vec<u8>> for PgOutboxWriter {
+    type Transaction<'tx> = PgTransaction<'tx>;
+    async fn append(
+        &self,
+        tx: &mut Self::Transaction<'_>,
+        message: PendingMessage<Vec<u8>>,
+    ) -> Result<AppendOutcome, MessagingError> {
+        self.validate_transaction(tx).map_err(PgError::port)?;
+        append_message(tx, &self.domain, message).await
+    }
+}
+
 /// Move-only claim with an internally synchronized, renewed persistent deadline.
 pub struct PgOutboxClaim {
     message: PendingMessage<Vec<u8>>,
@@ -27,8 +69,7 @@ pub struct PgOutboxClaim {
 }
 /// PostgreSQL outbox, generic over the selected publisher's receipt evidence.
 pub struct PgOutboxStore<R> {
-    runtime: Arc<PgRuntime>,
-    domain: MessagingDomain,
+    writer: PgOutboxWriter,
     lease_ms: i64,
     budget: DeliveryBudget,
     receipt: PhantomData<fn() -> R>,
@@ -42,8 +83,7 @@ impl<R> PgOutboxStore<R> {
         budget: DeliveryBudget,
     ) -> Result<Self, PgError> {
         Ok(Self {
-            runtime,
-            domain,
+            writer: PgOutboxWriter::new(runtime, domain),
             lease_ms: milliseconds(budget.lease_ttl())?,
             budget,
             receipt: PhantomData,
@@ -51,20 +91,8 @@ impl<R> PgOutboxStore<R> {
         })
     }
     /// Reject a transaction from a different runtime before any companion operation.
-    /// Transaction provenance is private and minted by the enclosing runtime, never caller data.
     pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
-        if !tx.belongs_to(&self.runtime) {
-            tracing::warn!(
-                phase = "transaction",
-                reason = "runtime_mismatch",
-                "outbox transaction owner rejected"
-            );
-            return Err(PgError::classified(
-                MessagingErrorKind::Invariant,
-                std::io::Error::other("transaction runtime mismatch"),
-            ));
-        }
-        Ok(())
+        self.writer.validate_transaction(tx)
     }
     /// Read durable confirmation using the persisted exact domain and message identity.
     /// Readback may cross this store's relay domain, but cannot cross its runtime owner.
@@ -100,8 +128,9 @@ impl<R> PgOutboxStore<R> {
         }
     }
     fn valid_claim(&self, claim: &PgOutboxClaim) -> bool {
-        self.runtime.binding.storage() == claim.storage
+        self.writer.runtime.binding.storage() == claim.storage
             && self
+                .writer
                 .runtime
                 .binding
                 .epoch(claim.message.envelope().metadata().tenant_id())
@@ -113,19 +142,22 @@ impl<R> PgOutboxStore<R> {
         deadline: OperationDeadline,
         extend_ms: i64,
     ) -> Result<OutboxLeaseStatus, MessagingError> {
-        let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
+        let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         if !self.valid_claim(claim) {
             return Ok(OutboxLeaseStatus::Lost);
         }
         let tenant = claim.message.envelope().metadata().tenant_id();
         let dr = claim.dr_operation.clone();
-        let mut lease = within(&self.runtime.timer, cutoff, |_| claim.lease_us.lock()).await?;
+        let mut lease = within(&self.writer.runtime.timer, cutoff, |_| {
+            claim.lease_us.lock()
+        })
+        .await?;
         let previous = *lease;
         let seq = claim.seq;
         let token = claim.token.clone();
         let result = self
-            .runtime
+            .writer.runtime
             .relay(tenant, cutoff, move |connection| {
                 Box::pin(async move {
                     Ok(sqlx::query(
@@ -164,28 +196,28 @@ impl<R> PgOutboxStore<R> {
         }
     }
 }
-impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
-    fn delivery_budget(&self) -> DeliveryBudget {
-        self.budget
-    }
+impl<R> OutboxWriter<Vec<u8>> for PgOutboxStore<R> {
     type Transaction<'tx> = PgTransaction<'tx>;
-    type Claim = PgOutboxClaim;
-    type PublishReceipt = R;
     async fn append(
         &self,
         tx: &mut Self::Transaction<'_>,
         message: PendingMessage<Vec<u8>>,
     ) -> Result<AppendOutcome, MessagingError> {
-        self.validate_transaction(tx).map_err(PgError::port)?;
-        append_message(tx, &self.domain, message).await
+        self.writer.append(tx, message).await
     }
-
+}
+impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
+    fn delivery_budget(&self) -> DeliveryBudget {
+        self.budget
+    }
+    type Claim = PgOutboxClaim;
+    type PublishReceipt = R;
     async fn claim_partition_heads(
         &self,
         limit: NonZeroUsize,
         deadline: OperationDeadline,
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
-        let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
+        let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         let count = i32::try_from(limit.get()).map_err(|_| PgError::invariant().port())?;
         if count > 64 {
@@ -193,16 +225,16 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
         }
         let ttl = self.lease_ms;
         let mut admitted = false;
-        let tenants = self.runtime.binding.tenants();
+        let tenants = self.writer.runtime.binding.tenants();
         let first = self
             .next_tenant
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % tenants.len();
         for offset in 0..tenants.len() {
             let (tenant, epoch) = tenants[(first + offset) % tenants.len()];
-            let storage = self.runtime.binding.storage();
-            let domain = self.domain.as_str().to_owned();
-            let batch = self.runtime.relay(tenant, cutoff, move |connection| Box::pin(async move {
+            let storage = self.writer.runtime.binding.storage();
+            let domain = self.writer.domain.as_str().to_owned();
+            let batch = self.writer.runtime.relay(tenant, cutoff, move |connection| Box::pin(async move {
                 let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
                     .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
                 rows.into_iter().map(|row| {
@@ -275,7 +307,7 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
             return Err(PgError::lost().port());
         }
         let tenant = claim.message.envelope().metadata().tenant_id();
-        let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
+        let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         let disposition = match settlement {
             OutboxSettlement::Published(_) => "published",
@@ -283,7 +315,7 @@ impl<R: Send> OutboxStore<Vec<u8>> for PgOutboxStore<R> {
             OutboxSettlement::DeadLetter => "dead_letter",
         };
         let lease = claim.lease_us.into_inner();
-        self.runtime
+        self.writer.runtime
             .relay(tenant, cutoff, move |connection| {
                 Box::pin(async move {
                     let result: String = sqlx::query_scalar(

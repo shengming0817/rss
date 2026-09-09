@@ -17,7 +17,7 @@ import tomllib
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from package_proof import (archive_digest, bounded_archive, checked_members, candidate_archives,
-    validate_graph, selected_dependencies, cargo, consumer, package_closure, require_candidate_revision, run_command, cargo_environment)
+    validate_graph, selected_dependencies, cargo, consumer, package_closure, require_candidate_revision, run_command, cargo_environment, validate_execution)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = {
@@ -27,6 +27,7 @@ SCENARIOS = {
     "producer": ["producer"], "consumer": ["consumer"], "both": ["producer", "consumer"],
     "self-host": ["providers"], "managed": ["managed"],
     "managed-worker": ["managed-worker"],
+    "outbox-writer": ["outbox-writer"], "relay-only": ["relay-only"],
 }
 
 
@@ -57,7 +58,8 @@ def absent_apis(directory, name, features):
     probes = []
     if "core" in features:
         if "producer" not in features:
-            probes.append(("use rss_transactional_messaging::outbox::OutboxStore;", "outbox"))
+            for port in ("OutboxWriter", "OutboxRelayStore"):
+                probes.append((f"use rss_transactional_messaging::outbox::{port};", "outbox"))
         if "consumer" not in features:
             probes.append(("use rss_transactional_messaging::inbox::InboxStore;", "inbox"))
     if name == "diagnostic":
@@ -74,14 +76,6 @@ def absent_apis(directory, name, features):
                 raise ValueError(f"negative API probe failed for the wrong reason: {directory}")
     finally:
         source.write_text(original)
-
-
-def validate_provider_results(log, binaries):
-    if "test postgres_transactional_messaging_suite ... ok" not in log:
-        raise ValueError("provider suite did not actually run")
-    for binary in binaries:
-        if log.count(f"external-provider-consumer PASS {binary}\n") != 1:
-            raise ValueError(f"provider consumer did not actually run once: {binary}")
 
 
 def validate_optional_features(facts, selected, expected_message):
@@ -135,9 +129,12 @@ def main():
         allowed = {name: extracted / f'{name}-{p["version"]}' for name, p in closure.items()}
     print(f"proof output: {run}", flush=True)
     providers = []
+    writers = []
     for name, (features, dependencies) in selected.items():
         directory = run / name
         consumer(directory, features, dependencies, allowed)
+        if name == "relay-only":
+            shutil.copyfile(ROOT / "crates/examples/probes/relay-only.rs", directory / "src/main.rs")
         facts = json.loads(cargo(["metadata", "--format-version", "1"], directory))
         actual = {p["name"] for p in facts["packages"]}
         if not set(dependencies) <= actual:
@@ -147,6 +144,12 @@ def main():
         if "providers" in features:
             expected = {"producer", "consumer", "default"}
             forbidden = {"testkit", "rss-transactional-messaging-testkit"}
+        if name == "outbox-writer":
+            expected = {"default", "producer", "consumer"}  # PG adapter's existing core closure.
+            forbidden = {"testkit", "rss-transactional-messaging-testkit", "rss-transactional-messaging-amqp", "rss-transactional-messaging-runtime"}
+        if name == "relay-only":
+            expected = {"producer"}
+            forbidden |= {"rss-transactional-messaging-testkit", "rss-transactional-messaging-runtime"}
         if "lifecycle" not in features and "managed" not in features:
             forbidden.add("rss-runtime")
         if name in ("core", "diagnostic", "redact", "derive", "protection"):
@@ -154,7 +157,14 @@ def main():
         validate_graph(facts, directory, allowed, expected, forbidden)
         validate_optional_features(facts, features, expected)
         (directory / "resolved.json").write_text(json.dumps(facts, indent=2) + "\n")
-        if "providers" in features:
+        if name == "outbox-writer":
+            cargo(["build", "--locked", "--bin", "outbox-writer"], directory)
+            writers.append(str(directory / "target/debug/outbox-writer"))
+            print(f"READY {name}: isolated writer binary; runtime result pending", flush=True)
+        elif name == "relay-only":
+            cargo(["check", "--locked", "--bin", "rss-examples"], directory)
+            print("PASS relay-only: independent delivery port without transaction or append", flush=True)
+        elif "providers" in features:
             cargo(["build", "--locked", "--bin", "providers"], directory)
             providers.append(str(directory / "target/debug/providers"))
             print(f"READY {name}: graph + provider binary; runtime result pending", flush=True)
@@ -162,14 +172,18 @@ def main():
             cargo(["run", "--locked", "--quiet"], directory)
             absent_apis(directory, name, features)
             print(f"PASS {name}: graph + cargo run + absent APIs", flush=True)
-    if providers:
-        env = dict(cargo_environment(os.environ), RSS_EXAMPLE_CONSUMERS=json.dumps(providers), RSS_TEST_RUN_ID=f"extract-{run.name}")
+    if providers or writers:
+        env = dict(cargo_environment(os.environ), RSS_TEST_RUN_ID=f"extract-{run.name}")
+        if providers:
+            env["RSS_EXAMPLE_CONSUMERS"] = json.dumps(providers)
+        if writers:
+            env["RSS_OUTBOX_WRITER_CONSUMERS"] = json.dumps(writers)
         command = ["cargo", "test", "--locked", "-p", "postgres-integration", "--test", "suite", "postgres_transactional_messaging_suite", "--", "--exact", "--nocapture"]
         command = ["cargo", "run", "--locked", "-p", "testkit", "--features", "containers", "--bin", "rss-test-launcher", "--", "--", *command]
         with (run / "provider-integration.log").open("w") as log:
             run_command(command, ROOT, env, log, timeout=900).check_returncode()
-        validate_provider_results((run / "provider-integration.log").read_text(), providers)
-        print(f"PASS {len(providers)} provider consumers: real PG/AMQP flow, cancellation and shutdown", flush=True)
+        validate_execution((run / "provider-integration.log").read_text(), "postgres_transactional_messaging_suite", providers + writers)
+        print(f"PASS {len(providers)} provider and {len(writers)} writer consumers: real provider behavior", flush=True)
     for name in selected:
         shutil.rmtree(run / name / "target")
     print(f"PASS {'source' if args.source else args.revision}: {len(selected)} independent scenarios", flush=True)

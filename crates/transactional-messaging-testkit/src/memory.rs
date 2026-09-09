@@ -109,8 +109,8 @@ mod producer {
     use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
     use rss_transactional_messaging::message::{MessageFingerprint, MessageId, PartitionIdentity};
     use rss_transactional_messaging::outbox::{
-        AppendOutcome, OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxSettlement,
-        OutboxStore, PendingMessage,
+        AppendOutcome, OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxRelayStore,
+        OutboxSettlement, OutboxWriter, PendingMessage,
     };
     use rss_transactional_messaging::policy::OperationDeadline;
     use rss_transactional_messaging::transport::{
@@ -234,17 +234,11 @@ mod producer {
         }
     }
 
-    impl<P> OutboxStore<P> for MemoryOutboxStore<P>
+    impl<P> OutboxWriter<P> for MemoryOutboxStore<P>
     where
         P: AsRef<[u8]> + Send + Sync,
     {
-        fn delivery_budget(&self) -> rss_transactional_messaging::policy::DeliveryBudget {
-            self.budget
-        }
         type Transaction<'tx> = ();
-        type Claim = (Arc<PendingMessage<P>>, u64);
-        type PublishReceipt = ();
-
         async fn append(
             &self,
             _transaction: &mut Self::Transaction<'_>,
@@ -271,6 +265,17 @@ mod producer {
             });
             Ok(AppendOutcome::Inserted)
         }
+    }
+
+    impl<P> OutboxRelayStore<P> for MemoryOutboxStore<P>
+    where
+        P: AsRef<[u8]> + Send + Sync,
+    {
+        fn delivery_budget(&self) -> rss_transactional_messaging::policy::DeliveryBudget {
+            self.budget
+        }
+        type Claim = (Arc<PendingMessage<P>>, u64);
+        type PublishReceipt = ();
 
         async fn claim_partition_heads(
             &self,

@@ -4,11 +4,10 @@ mod fence_fixture;
 use super::*;
 use rss_transactional_messaging::{
     message::*,
-    outbox::{OutboxStore, PendingMessage},
-    policy::DeliveryBudget,
+    outbox::{OutboxWriter, PendingMessage},
 };
 use rss_transactional_messaging_postgres::{
-    PgConfig, PgError, PgOutboxStore, PgPassword, PgPrivateCa, PgRuntime, PgTransactionFault,
+    PgConfig, PgError, PgOutboxWriter, PgPassword, PgPrivateCa, PgRuntime, PgTransactionFault,
 };
 struct MClock(Clock);
 impl MessageClock for MClock {
@@ -106,16 +105,7 @@ async fn scenario(
     )
     .await?;
     let envelope = message(&id)?;
-    let outbox = PgOutboxStore::<()>::new(
-        runtime.clone(),
-        envelope.metadata().domain().clone(),
-        DeliveryBudget::new(
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )?,
-    )?;
+    let outbox = PgOutboxWriter::new(runtime.clone(), envelope.metadata().domain().clone());
     let rollback = mode == "rollback";
     let expired = mode == "expired";
     let effect_id = id.clone();
@@ -224,16 +214,7 @@ async fn wake_failure(
     };
     let t = target(&audit.id, TENANT)?;
     let envelope = message(&audit.id)?;
-    let outbox = PgOutboxStore::<()>::new(
-        runtime.clone(),
-        envelope.metadata().domain().clone(),
-        DeliveryBudget::new(
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )?,
-    )?;
+    let outbox = PgOutboxWriter::new(runtime.clone(), envelope.metadata().domain().clone());
     if unknown {
         runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     }
