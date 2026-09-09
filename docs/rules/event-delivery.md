@@ -38,8 +38,10 @@
   再在同一事务提交完整 terminal receipt；显式选择 recovery 的 PostgreSQL consumer 同时提交受保护死信，写入失败不得只提交终态。
 - 本地 retry loop 必须接收一个 `rss_transactional_messaging::policy::RetryPolicy`；尝试上限与指数 backoff 不得拆开传递或
   单独默认。标准值为三次总尝试、1 秒 base、60 秒 cap。
-- TransactionalMessaging worker 构造必须显式接收 `rss_transactional_messaging::policy::ShutdownBudget`；标准值 45 秒，仅在 internal
-  `ManagedResource` 边界投影为 `Duration`。
+- TransactionalMessaging direct worker 的最终关闭预算由 host 持有，构造器和 `run` 不隐式执行关闭超时。
+  可选 managed registration 显式接收 `rss_transactional_messaging::policy::ShutdownBudget`，仅在 lifecycle
+  桥接边界投影为 `Duration`；标准值 45 秒。direct host 可使用同一类型，在自己的关闭边界投影。
+  取消后继续驱动当前 delivery/batch；强制停止 spawned worker 必须 abort 并 join，不能以 drop handle 代替终止。
 - claim、extend、handler transaction、retry delay、settle、release 与 abandon 都消费同一次 clock observation
   mint 的 operation/settlement absolute deadline。algorithm owner 必须通过唯一 `within` funnel race provider
   future；provider 同时消费该 cutoff 投影的 `OperationDeadline` 作为第二层 I/O watchdog，任一层不得重置预算。

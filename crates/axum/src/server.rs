@@ -146,13 +146,66 @@ fn registration(
     start.into_registration(move |token| serve_owned(listener, router, token, protocol))
 }
 
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+fn recoverable_accept_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::TimedOut
+            | ErrorKind::NetworkDown
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::HostUnreachable
+            | ErrorKind::OutOfMemory
+    ) || resource_pressure(error.raw_os_error())
+}
+
+#[cfg(unix)]
+fn resource_pressure(code: Option<i32>) -> bool {
+    matches!(
+        code,
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
+}
+
+#[cfg(windows)]
+fn resource_pressure(code: Option<i32>) -> bool {
+    use windows_sys::Win32::Networking::WinSock::{WSAEMFILE, WSAENOBUFS};
+    matches!(code, Some(WSAEMFILE | WSAENOBUFS))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn resource_pressure(_code: Option<i32>) -> bool {
+    // reason: no known platform errno mapping; unrecognized errors remain terminal.
+    false
+}
+
+// Private transport seam: production ownership stays with TcpListener.
+trait Accept: Send {
+    fn accept(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>> + Send;
+}
+
+impl Accept for TcpListener {
+    async fn accept(&mut self) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+        TcpListener::accept(self).await
+    }
+}
+
 async fn serve_owned(
-    listener: TcpListener,
+    mut listener: impl Accept,
     router: Router,
     token: CancellationToken,
     protocol: Protocol,
 ) -> Result<(), ShutdownError> {
     let mut connections = FuturesUnordered::new();
+    let mut retry_wait: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
         tokio::select! {
             biased;
@@ -161,8 +214,29 @@ async fn serve_owned(
             Some(result) = connections.next(), if !connections.is_empty() => {
                 record_connection(result);
             },
-            accepted = listener.accept() => {
-                let (stream, peer) = accepted.map_err(ShutdownError::new)?;
+            accepted = async {
+                if let Some(delay) = &mut retry_wait {
+                    delay.as_mut().await;
+                }
+                listener.accept().await
+            } => {
+                let (stream, peer) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) if recoverable_accept_error(&error) => {
+                        if retry_wait.is_none() {
+                            tracing::warn!(target: "rss_axum::server", outcome = "accept_retry", "listener recovering");
+                        }
+                        // ref: tokio-rs/axum axum/src/serve/listener.rs@axum-v0.8.9
+                        // Keep the same timer across connection completions. The outer
+                        // select continues polling healthy connections and prioritizes cancellation.
+                        retry_wait = Some(Box::pin(tokio::time::sleep(ACCEPT_RETRY_DELAY)));
+                        continue;
+                    }
+                    Err(error) => return Err(ShutdownError::new(error)),
+                };
+                if retry_wait.take().is_some() {
+                    tracing::info!(target: "rss_axum::server", outcome = "accept_recovered", "listener recovered");
+                }
                 // H1 handlers run inside the connection future. Isolate their panics too.
                 connections.push(AssertUnwindSafe(connection(
                     stream, router.clone(), peer, token.clone(), protocol,
@@ -308,3 +382,6 @@ where
         }
     }
 }
+
+#[cfg(all(test, feature = "http1"))]
+mod accept_tests;

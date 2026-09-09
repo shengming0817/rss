@@ -40,6 +40,12 @@ impl<T> OwnedTask<T> {
 
     /// Await task completion. Cancellation of this future aborts the still-owned task via `Drop`.
     async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        self.join_retained().await
+    }
+
+    // ref: tokio-rs/tokio tokio/src/runtime/task/join.rs@tokio-1.52.0
+    // A cancelled borrow leaves the handle in its long-lived owner.
+    async fn join_retained(&mut self) -> Result<T, tokio::task::JoinError> {
         let result = match self.handle.as_mut() {
             Some(handle) => handle.await,
             None => unreachable!("OwnedTask handle is present until join completes"),
@@ -206,7 +212,7 @@ impl TaskStart {
             name: Arc::clone(&self.name),
             shutdown_timeout: self.shutdown_timeout,
             token,
-            task: Mutex::new(Some(OwnedTask::new(handle))),
+            task: Mutex::new(JoinState::Running(OwnedTask::new(handle))),
             status: self.status.clone(),
         }
     }
@@ -282,8 +288,8 @@ impl<T> Drop for OwnedTask<T> {
 /// - **注册到 RSS 的后台任务由 [`ManagedTask`] 持有**：调用方只保留只读 [`TaskStatus`]。
 ///   adapter 自有的私有 recovery/cleanup 任务可直接使用 Tokio 所有权工具；adapter 必须保证
 ///   admission 封闭、取消安全的 join/abort 和资源清理，不能向调用方泄漏任务控制权。
-/// - **其它需要 `&mut` 的内部状态**：因 `shutdown(&self)`，用 `Mutex<Option<Inner>>` 或
-///   `tokio::sync::Mutex` 包装，在 `shutdown` 中 `take()`。
+/// - **其它需要 `&mut` 的内部状态**：因 `shutdown(&self)`，用异步锁保留内部 owner；
+///   跨 await 借用句柄，完成后缓存真实结果，避免 `take()` 后取消等待丢失所有权。
 #[trait_variant::make(ManagedResource: Send)]
 #[dynosaur(pub DynManagedResource = dyn(box) ManagedResource, bridge(dyn))]
 #[allow(async_fn_in_trait)]
@@ -322,7 +328,7 @@ pub trait ManagedResourceLocal {
 pub struct ShutdownError {
     kind: ShutdownErrorKind,
     #[source]
-    source: RedactedSource,
+    source: Arc<RedactedSource>,
 }
 
 /// Payload-free reason carried by [`ShutdownError`] into the canonical shutdown observer.
@@ -420,15 +426,29 @@ impl ShutdownError {
         self.kind
     }
 
+    pub(crate) fn retained(&self) -> Self {
+        Self {
+            kind: self.kind,
+            source: Arc::clone(&self.source),
+        }
+    }
+
     fn with_kind<E>(kind: ShutdownErrorKind, source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
             kind,
-            source: RedactedSource::new(source),
+            source: Arc::new(RedactedSource::new(source)),
         }
     }
+}
+
+// The async mutex serializes joining without moving ownership across an await.
+// Joined stores the real join result, never a projection of TaskStatus.
+pub(crate) enum JoinState<T> {
+    Running(T),
+    Joined(Result<(), ShutdownError>),
 }
 
 /// Canonical owner for one long-lived Tokio background task.
@@ -436,7 +456,7 @@ pub struct ManagedTask {
     name: Arc<str>,
     shutdown_timeout: Duration,
     token: CancellationToken,
-    task: Mutex<Option<OwnedTask<Result<(), ShutdownError>>>>,
+    task: Mutex<JoinState<OwnedTask<Result<(), ShutdownError>>>>,
     status: TaskStatus,
 }
 
@@ -479,12 +499,23 @@ impl ManagedTask {
     }
 
     /// Cancel and join this externally owned task.
+    ///
+    /// Cancelling a waiter retains the join handle for another call. Concurrent and repeated
+    /// calls observe the same real join result, including failures. Dropping the owner aborts.
     pub async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
-        let task = self.task.lock().await.take();
-        match task {
-            Some(task) => task.join().await.map_err(ShutdownError::from_join_error)?,
-            None => Ok(()),
+        let mut state = self.task.lock().await;
+        if let JoinState::Running(task) = &mut *state {
+            let result = task
+                .join_retained()
+                .await
+                .map_err(ShutdownError::from_join_error)
+                .and_then(|result| result);
+            *state = JoinState::Joined(result);
+        }
+        match &*state {
+            JoinState::Joined(result) => result.as_ref().copied().map_err(ShutdownError::retained),
+            JoinState::Running(_) => unreachable!("join completed before recording its result"),
         }
     }
 }
@@ -500,9 +531,6 @@ pub(crate) fn task_status_channel(
 impl Drop for ManagedTask {
     fn drop(&mut self) {
         self.token.cancel();
-        if let Ok(mut task) = self.task.try_lock() {
-            task.take();
-        }
     }
 }
 
@@ -747,6 +775,10 @@ mod smoke {
         let error = task.shutdown().await.expect_err("panic must fail shutdown");
         assert_eq!(error.kind(), ShutdownErrorKind::TaskPanicked);
         assert!(!format!("{error:?}").contains("managed-task-panic-secret"));
+        assert_eq!(
+            task.shutdown().await.expect_err("panic remains").kind(),
+            ShutdownErrorKind::TaskPanicked
+        );
     }
 
     #[tokio::test]
@@ -776,7 +808,7 @@ mod smoke {
     }
 
     #[tokio::test]
-    async fn cancelled_shutdown_future_aborts_task_and_closes_status() {
+    async fn cancelled_shutdown_waiter_retains_task_until_owner_is_dropped() {
         let dropped = Arc::new(AtomicBool::new(false));
         let started = Arc::new(tokio::sync::Notify::new());
         let (start, status) = ManagedTask::prepare("managed-task-abort", Duration::from_secs(2));
@@ -798,7 +830,8 @@ mod smoke {
         drop(shutdown);
         tokio::task::yield_now().await;
 
-        assert!(dropped.load(Ordering::SeqCst));
+        assert!(!dropped.load(Ordering::SeqCst));
+        drop(task);
         assert_eq!(
             status.wait_stopped().await,
             TaskExit::Failed(ShutdownErrorKind::TaskCancelled)

@@ -207,6 +207,9 @@ pub enum ShutdownStackError {
     /// No current Tokio runtime can own the cancellation-safe background drain.
     #[error("shutdown stack requires an active Tokio runtime")]
     RuntimeUnavailable,
+    /// The current runtime has no Tokio time driver for bounded shutdown.
+    #[error("shutdown stack requires a Tokio time driver; use enable_time or enable_all")]
+    TimeDriverUnavailable,
     /// The originating runtime stopped before the asynchronous drain produced a receipt.
     #[error("shutdown driver stopped before producing a receipt")]
     DriverUnavailable,
@@ -289,9 +292,17 @@ impl ManagedResource for DeferredCancellationResource {
 }
 
 impl ShutdownStack {
-    /// Construct the sole lifecycle owner inside the active Tokio runtime.
+    /// Construct the sole lifecycle owner inside a Tokio runtime with time enabled.
+    ///
+    /// A missing time driver is rejected before registration. Detection catches Tokio's panic
+    /// (the process panic hook still runs); returning that error requires `panic = "unwind"`.
     pub fn try_new(total_budget: TotalDrainBudget) -> Result<Self, ShutdownStackError> {
         let runtime = Handle::try_current().map_err(|_| ShutdownStackError::RuntimeUnavailable)?;
+        // Tokio exposes no fallible time-driver query. Probe before taking any resources.
+        // ref: tokio-rs/tokio tokio/src/time/sleep.rs@tokio-1.52.0
+        // Requires unwinding; Tokio's panic hook still runs when time is disabled.
+        std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
+            .map_err(|_| ShutdownStackError::TimeDriverUnavailable)?;
         Ok(Self::with_parts(
             runtime,
             total_budget,

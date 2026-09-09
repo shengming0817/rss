@@ -3399,6 +3399,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "rss-contract",
  "rss-platform",
  "rss-request-context",
@@ -3412,6 +3413,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trybuild",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

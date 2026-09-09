@@ -49,8 +49,9 @@ uses a Tokio interval with skipped missed ticks.
 
 A cancellation token stops new work; it does not discard an active delivery or batch. Keep driving
 the future so renewal, transaction outcome, and settlement can finish. The operation and settlement
-deadlines still belong to the message algorithm. The host owns the final shutdown budget; after
-that budget expires it can drop the future, or abort **and join** its spawned task. Forced
+deadlines still belong to the message algorithm. The host owns the final shutdown budget; constructors and `run` do not enforce an implicit
+shutdown timeout. Hosts can use `ShutdownBudget` (standard value: 45 seconds) and project it at
+their shutdown boundary. After that budget expires it can drop the future, or abort **and join** its spawned task. Forced
 termination cannot promise asynchronous cleanup and never invents an ACK or durable outcome.
 Dropping a Tokio `JoinHandle` alone detaches its task and does not stop it.
 
@@ -130,7 +131,9 @@ where
 Enable `managed-runtime` explicitly to use `into_registration`. It delegates to `run` and returns
 an opaque `ManagedTaskRegistration` and its same-source `TaskStatus`. Stage the registration once
 through `rss-runtime::StartupTransaction` or `LaunchTransaction`; the RSS host owns task supervision,
-panic reporting and the final shutdown timeout. Its private lifecycle token is not exposed.
+panic reporting and the final shutdown timeout. `into_registration` explicitly requires
+`ShutdownBudget` and projects it to `Duration` at this bridge. The worker algorithm retains its
+operation/settlement deadlines independently. Its private lifecycle token is not exposed.
 
 ```rust,no_run
 # #[cfg(all(feature = "producer", feature = "managed-runtime"))]

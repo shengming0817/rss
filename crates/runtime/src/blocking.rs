@@ -6,12 +6,12 @@
 //!
 //! ref: tokio-rs/tokio d8756916 tokio/src/task/blocking.rs
 
-use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::resource::{TaskTerminalGuard, task_status_channel};
+use crate::resource::{JoinState, TaskTerminalGuard, task_status_channel};
 use crate::{
     DynManagedResource, ManagedResource, ShutdownError, ShutdownErrorKind, TaskExit, TaskState,
     TaskStatus,
@@ -41,10 +41,14 @@ pub struct ManagedBlockingWorker {
     name: String,
     token: CancellationToken,
     shutdown_timeout: Duration,
-    thread: Mutex<Option<std::thread::JoinHandle<Result<(), ShutdownError>>>>,
-    completion: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    join: Mutex<JoinState<ThreadJoin>>,
     status_sender: tokio::sync::watch::Sender<TaskState>,
     status: TaskStatus,
+}
+
+struct ThreadJoin {
+    thread: Option<std::thread::JoinHandle<Result<(), ShutdownError>>>,
+    completion: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// Opaque, unstarted dedicated-thread registration.
@@ -132,8 +136,10 @@ impl ManagedBlockingWorker {
             name,
             token,
             shutdown_timeout,
-            thread: Mutex::new(Some(thread)),
-            completion: Mutex::new(Some(completion)),
+            join: Mutex::new(JoinState::Running(ThreadJoin {
+                thread: Some(thread),
+                completion: Some(completion),
+            })),
             status_sender,
             status,
         })
@@ -154,39 +160,42 @@ impl ManagedBlockingWorker {
         self.shutdown_timeout
     }
 
-    /// Cancel and join the dedicated worker thread.
+    /// Cancel and join the dedicated worker thread, including thread-local destruction.
+    ///
+    /// A cancelled waiter leaves the join in this owner. Repeated or concurrent calls observe
+    /// the same real result. Dropping the owner requests cancellation but cannot stop a thread.
     pub async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
-        let completion = self
-            .completion
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let thread = self
-            .thread
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        match thread {
-            Some(thread) => {
-                if let Some(completion) = completion {
-                    let _ = completion.await;
-                }
-                while !thread.is_finished() {
-                    tokio::task::yield_now().await;
-                }
-                match thread.join() {
-                    Ok(result) => result,
-                    Err(_) => {
-                        self.status_sender
-                            .send_replace(TaskState::Stopped(TaskExit::Failed(
-                                ShutdownErrorKind::TaskPanicked,
-                            )));
-                        Err(ShutdownError::task_panicked(BlockingWorkerJoinPanicked))
-                    }
-                }
+        let mut state = self.join.lock().await;
+        if let JoinState::Running(join) = &mut *state {
+            if let Some(completion) = &mut join.completion {
+                let _ = completion.await;
+                // Record completion before any yield: a ready oneshot must never be repolled.
+                join.completion = None;
             }
-            None => Ok(()),
+            let thread = join
+                .thread
+                .as_ref()
+                .unwrap_or_else(|| unreachable!("running thread retains its handle"));
+            while !thread.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let thread = join
+                .thread
+                .take()
+                .unwrap_or_else(|| unreachable!("finished thread joins exactly once"));
+            let result = thread.join().unwrap_or_else(|_| {
+                self.status_sender
+                    .send_replace(TaskState::Stopped(TaskExit::Failed(
+                        ShutdownErrorKind::TaskPanicked,
+                    )));
+                Err(ShutdownError::task_panicked(BlockingWorkerJoinPanicked))
+            });
+            *state = JoinState::Joined(result);
+        }
+        match &*state {
+            JoinState::Joined(result) => result.as_ref().copied().map_err(ShutdownError::retained),
+            JoinState::Running(_) => unreachable!("thread joined before recording its result"),
         }
     }
 }
@@ -392,7 +401,7 @@ mod tests {
     impl Drop for ThreadExitGuard {
         fn drop(&mut self) {
             let _ = self.entered.send(());
-            let _ = self.release.recv();
+            let _ = self.release.recv_timeout(Duration::from_secs(5));
         }
     }
 
@@ -444,11 +453,15 @@ mod tests {
             .expect_err("panic must fail shutdown");
         assert_eq!(error.kind(), ShutdownErrorKind::TaskPanicked);
         assert!(!format!("{error:?}").contains("secret panic payload"));
+        assert_eq!(
+            worker.shutdown().await.expect_err("panic remains").kind(),
+            ShutdownErrorKind::TaskPanicked
+        );
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)] // reason: expected error paths are the test assertions.
-    async fn runner_error_is_typed_sticky_and_second_shutdown_is_clean() {
+    async fn runner_error_is_retained_by_every_shutdown() {
         let worker = ManagedBlockingWorker::try_spawn(
             "blocking-error",
             CancellationToken::new(),
@@ -466,7 +479,10 @@ mod tests {
             status.current(),
             TaskState::Stopped(TaskExit::Failed(ShutdownErrorKind::Operation))
         );
-        assert!(worker.shutdown().await.is_ok());
+        assert_eq!(
+            worker.shutdown().await.expect_err("failure remains").kind(),
+            ShutdownErrorKind::Operation
+        );
     }
 
     #[tokio::test]
@@ -568,16 +584,23 @@ mod tests {
         )
         .expect("worker thread starts");
 
-        let shutdown = tokio::spawn(async move { worker.shutdown().await });
+        let mut first = Box::pin(worker.shutdown());
+        assert!(futures::poll!(&mut first).is_pending());
         entered_receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("thread-local destructor starts");
-        tokio::task::yield_now().await;
+        drop(first);
+        let mut retry = Box::pin(worker.shutdown());
         assert!(
-            !shutdown.is_finished(),
-            "shutdown must retain ownership until the OS thread exits"
+            futures::poll!(&mut retry).is_pending(),
+            "retry must wait for thread-local destruction"
         );
         release_sender.send(()).expect("release destructor");
-        assert!(shutdown.await.expect("shutdown task joins").is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), retry)
+                .await
+                .expect("thread joins")
+                .is_ok()
+        );
     }
 }

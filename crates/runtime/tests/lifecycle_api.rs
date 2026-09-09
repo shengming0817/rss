@@ -1321,3 +1321,137 @@ async fn bare_stack_critical_monitor_observes_registration_and_empty_closure() {
     drop(empty);
     assert!(monitor.wait().await.is_none());
 }
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: barriers and join results are the regression assertions.
+async fn standalone_task_shutdown_retains_join_after_waiter_cancellation() {
+    for failed in [false, true] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(AtomicUsize::new(0));
+        let (start, _) = ManagedTask::prepare("retained-task", Duration::from_secs(1));
+        let task = start.spawn_detached(tokio_util::sync::CancellationToken::new(), |_| {
+            let release = release.clone();
+            let finished = finished.clone();
+            async move {
+                release.notified().await;
+                finished.fetch_add(1, Ordering::SeqCst);
+                if failed {
+                    Err(ShutdownError::new(std::io::Error::other("private")))
+                } else {
+                    Ok(())
+                }
+            }
+        });
+        let mut first = Box::pin(task.shutdown());
+        assert!(futures::poll!(&mut first).is_pending());
+        drop(first);
+        let mut retry = Box::pin(task.shutdown());
+        let mut concurrent = Box::pin(task.shutdown());
+        assert!(futures::poll!(&mut retry).is_pending());
+        assert!(futures::poll!(&mut concurrent).is_pending());
+        assert_eq!(finished.load(Ordering::SeqCst), 0);
+        release.notify_one();
+        let (a, b) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(retry, concurrent)
+        })
+        .await
+        .expect("both waiters join");
+        for result in [a, b, task.shutdown().await] {
+            assert_eq!(result.is_err(), failed);
+            if let Err(error) = result {
+                assert_eq!(error.kind(), rss_runtime::ShutdownErrorKind::Operation);
+                assert!(!format!("{error:?}").contains("private"));
+            }
+        }
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: the worker has bounded synchronization and each join is asserted.
+async fn standalone_thread_shutdown_retains_join_after_waiter_cancellation() {
+    for failed in [false, true] {
+        let (release, wait) = std::sync::mpsc::channel();
+        let finished = Arc::new(AtomicUsize::new(0));
+        let observed = finished.clone();
+        let worker = rss_runtime::ManagedBlockingWorker::try_spawn(
+            "retained-thread",
+            tokio_util::sync::CancellationToken::new(),
+            Duration::from_secs(1),
+            move |_| {
+                wait.recv_timeout(Duration::from_secs(5))
+                    .expect("release thread");
+                observed.fetch_add(1, Ordering::SeqCst);
+                if failed {
+                    Err(ShutdownError::new(std::io::Error::other("private")))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect("spawn thread");
+        let mut first = Box::pin(worker.shutdown());
+        assert!(futures::poll!(&mut first).is_pending());
+        drop(first);
+        let mut retry = Box::pin(worker.shutdown());
+        let mut concurrent = Box::pin(worker.shutdown());
+        assert!(futures::poll!(&mut retry).is_pending());
+        assert!(futures::poll!(&mut concurrent).is_pending());
+        assert_eq!(finished.load(Ordering::SeqCst), 0);
+        release.send(()).expect("release worker");
+        let (a, b) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(retry, concurrent)
+        })
+        .await
+        .expect("both waiters join");
+        for result in [a, b, worker.shutdown().await] {
+            assert_eq!(result.is_err(), failed);
+            if let Err(error) = result {
+                assert_eq!(error.kind(), rss_runtime::ShutdownErrorKind::Operation);
+                assert!(!format!("{error:?}").contains("private"));
+            }
+        }
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: timerless runtime must be rejected before registration.
+fn shutdown_owner_rejects_timerless_runtime() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("budget");
+        assert!(matches!(
+            ShutdownStack::try_new(budget),
+            Err(ShutdownStackError::TimeDriverUnavailable)
+        ));
+        assert!(matches!(
+            rss_runtime::LifecycleScope::<(), (), ()>::try_new(budget),
+            Err(ShutdownStackError::TimeDriverUnavailable)
+        ));
+    });
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: enable_time must admit resources and execute cleanup.
+fn shutdown_owner_with_time_driver_executes_cleanup() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("budget");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut stack = ShutdownStack::try_new(budget).expect("time enabled");
+        let mut startup = stack.startup().expect("startup");
+        startup.stage_resource(DynManagedResource::new_box(RecordingResource {
+            name: "timer",
+            events: events.clone(),
+        }));
+        startup.commit().finish();
+        assert!(stack.shutdown().join().await.expect("receipt").is_clean());
+        assert_eq!(*events.lock().expect("events"), vec!["timer"]);
+    });
+}

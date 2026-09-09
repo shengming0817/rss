@@ -41,6 +41,20 @@ if !receipt.is_clean() {
 # }
 ```
 
+`ShutdownStack::try_new` and `LifecycleScope::try_new` require an active Tokio runtime built with
+`enable_time()` or `enable_all()`. They reject a missing runtime (`RuntimeUnavailable`) or time
+driver (`TimeDriverUnavailable`) before resource registration. Tokio has no fallible public timer
+capability query: the latter check catches a timer-construction panic, so the process panic hook
+still runs and returning the error requires `panic = "unwind"`.
+
+Standalone `ManagedTask::shutdown` and `ManagedBlockingWorker::shutdown` retain their join handles
+when a waiter is cancelled. Concurrent/repeated calls return the same actual join result, including
+errors and panics; thread success includes thread-local destruction. A task status is not a join
+receipt. Dropping the task owner aborts its task; dropping a thread owner requests cancellation but
+cannot forcibly stop the thread. These standalone shutdown methods do not impose their own timeout.
+Migration: a second shutdown no longer clears a failure, and cancelling only a shutdown waiter no
+longer aborts an independently retained managed task.
+
 There are no default features. The crate deliberately has no compatibility API for former
 lifecycle ownership paths.
 

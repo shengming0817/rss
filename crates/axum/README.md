@@ -247,3 +247,19 @@ ref: rust-lang/futures-rs futures-util/src/stream/futures_unordered/mod.rs@0.3.3
 Managed listeners inject the accepted TCP peer as standard Axum `ConnectInfo<SocketAddr>`
 on every request, for HTTP/1, HTTP/2 and Auto. They never interpret proxy headers;
 products own trusted proxy normalization and client attribution.
+
+### Listener recovery
+
+A recognized transient accept failure pauses new acceptance for one second while existing
+connections continue progressing. Retries retain only one deadline, create no tasks or connection
+queue, and have no cumulative expiry. A successful accept ends recovery; shutdown interrupts the
+wait and uses the existing graceful drain and runtime budget. Unknown and terminal errors return a
+redacted failure instead of retrying forever. Recognized resource pressure includes Unix
+EMFILE/ENFILE/ENOBUFS/ENOMEM and Windows WSAEMFILE/WSAENOBUFS. The first failure and subsequent
+recovery emit closed `accept_retry` / `accept_recovered` events; repeated failures do not grow logs.
+
+This bounds retry overhead, not total server capacity: the current connection set has no explicit
+connection-count limit. Product hosts own readiness, alerting, traffic removal, exit/restart and
+capacity values. A future local connection limit must be enforced by this connection owner; HTTP
+handler concurrency alone cannot bound TCP connections. No automatic restart or fixed listener
+failure window is installed by this adapter.
