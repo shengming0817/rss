@@ -243,3 +243,7 @@ ref: hyperium/hyper src/server/conn/http1.rs@v1.10.1
 ref: hyperium/hyper src/server/conn/http2.rs@v1.10.1
 ref: hyperium/hyper-util src/server/conn/auto/mod.rs@v0.1.20
 ref: rust-lang/futures-rs futures-util/src/stream/futures_unordered/mod.rs@0.3.32
+
+Managed listeners inject the accepted TCP peer as standard Axum `ConnectInfo<SocketAddr>`
+on every request, for HTTP/1, HTTP/2 and Auto. They never interpret proxy headers;
+products own trusted proxy normalization and client attribution.

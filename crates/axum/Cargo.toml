@@ -13,7 +13,7 @@ publish = ["crates-io"]
 
 [features]
 default = []
-managed-server = ["dep:rss-runtime", "dep:futures", "dep:hyper", "dep:hyper-util", "dep:tracing", "tokio/net", "hyper/server"]
+managed-server = ["axum/tokio","dep:rss-runtime", "dep:futures", "dep:hyper", "dep:hyper-util", "dep:tracing", "tokio/net", "hyper/server"]
 
 http1 = ["managed-server", "hyper/http1", "hyper-util/http1"]
 http2 = ["managed-server", "hyper/http2", "hyper-util/http2"]

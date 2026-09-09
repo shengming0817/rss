@@ -56,15 +56,15 @@ impl PgEffect for Counter {
         Ok(PgEffectOutcome::Applied)
     }
 }
-pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
-    let clock = Clock::new();
-    let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
-    let source = SourceScope::new(tenant, "demo")?;
+async fn append_facts(
+    store: &PgStore,
+    source: &SourceScope,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     for id in ["one", "two", "one"] {
         let source = source.clone();
         let tenant = source.tenant();
-        store.local_tx(&source.clone(),&control,move |tx| Box::pin(async move {
+        store.local_tx(&source.clone(),control,move |tx| Box::pin(async move {
             // Acquire the source allocator before business rows. Retries retain the same fact ID.
             tx.append(&source,id,&[1]).await?;
             tx.with_connection(move |conn| Box::pin(async move {
@@ -73,6 +73,48 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
             })).await
         })).await?;
     }
+    Ok(())
+}
+
+async fn replay_snapshot(
+    store: &PgStore,
+    source: &SourceScope,
+    control: &Control<'_, Clock>,
+    limits: RunLimit,
+) -> anyhow::Result<()> {
+    use rss_projection::Execution as _;
+    let replay = ProjectionScope::new(source.clone(), "counter", "v2")?;
+    let bound = control.run(store.high_water(source)).await?;
+    store
+        .initialize(
+            &replay,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Through(bound),
+            control,
+        )
+        .await?;
+    let worker = store.projection(
+        store.takeover(&replay, &DEFINITION, control).await?,
+        Counter,
+    )?;
+    let replayed = rss_projection::run(store, &worker, control, limits)
+        .await
+        .into_result()?;
+    anyhow::ensure!(replayed.applied == 2, "replay did not apply both facts");
+    anyhow::ensure!(
+        control.run(worker.checkpoint()).await?.position == bound,
+        "replay checkpoint missing"
+    );
+    Ok(())
+}
+
+pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let source = SourceScope::new(tenant, "demo")?;
+    append_facts(store, &source, &control).await?;
     let live = ProjectionScope::new(source.clone(), "counter", "v1")?;
     store
         .initialize(
@@ -109,29 +151,7 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
         .await
         .into_result()?;
     anyhow::ensure!(resumed.applied == 0, "resume duplicated effects");
-    let replay = ProjectionScope::new(source.clone(), "counter", "v2")?;
-    let bound = control.run(store.high_water(&source)).await?;
-    store
-        .initialize(
-            &replay,
-            &DEFINITION,
-            GenerationStart::beginning(),
-            ReplayBound::Through(bound),
-            &control,
-        )
-        .await?;
-    let worker = store.projection(
-        store.takeover(&replay, &DEFINITION, &control).await?,
-        Counter,
-    )?;
-    let replayed = rss_projection::run(store, &worker, &control, limits)
-        .await
-        .into_result()?;
-    anyhow::ensure!(replayed.applied == 2, "replay did not apply both facts");
-    anyhow::ensure!(
-        control.run(worker.checkpoint()).await?.position == bound,
-        "replay checkpoint missing"
-    );
+    replay_snapshot(store, &source, &control, limits).await?;
     let tenant = source.tenant();
     let totals=store.local_tx(&source,&control,move |tx| Box::pin(async move {
         tx.with_connection(move |conn| Box::pin(async move {
