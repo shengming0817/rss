@@ -3402,6 +3402,7 @@ dependencies = [
  "libc",
  "rss-contract",
  "rss-platform",
+ "rss-redact",
  "rss-request-context",
  "rss-runtime",
  "serde",

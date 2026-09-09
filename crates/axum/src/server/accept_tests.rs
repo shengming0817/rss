@@ -314,3 +314,56 @@ async fn cancellation_during_accept_recovery_drains_existing_connection() {
         0
     );
 }
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::expect_used)] // reason: injected recovery event is the diagnostic boundary assertion.
+async fn accept_recovery_redacts_untrusted_listener_name() {
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::prelude::*;
+    let events = RecoveryEvents::default();
+    let subscriber = tracing_subscriber::registry().with(events.clone());
+    let token = CancellationToken::new();
+    let server = serve_owned(
+        ScriptedListener {
+            listener: TcpListener::bind("127.0.0.1:0").await.expect("bind"),
+            first: false,
+            failures: Arc::new(AtomicUsize::new(1)),
+            attempts: Arc::new(AtomicUsize::new(0)),
+            error: || std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+        },
+        Router::new(),
+        token.clone(),
+        Protocol::Http1,
+        "amqps://user:password@private/tenant\nforged-event",
+    )
+    .with_subscriber(subscriber);
+    tokio::pin!(server);
+    assert!(futures::poll!(&mut server).is_pending());
+    token.cancel();
+    assert!(server.await.is_ok());
+    let recorded = events.0.lock().expect("events");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].0.get("listener").map(String::as_str),
+        Some("<redacted>")
+    );
+}
+
+#[test]
+fn listener_diagnostics_are_bounded_and_never_exported_to_wire() {
+    use rss_redact::{RedactScope, safe};
+    assert_eq!(
+        safe(&ListenerLogName("http-main_1"), RedactScope::ServerLog),
+        "http-main_1"
+    );
+    for name in ["", "tenant@example.com", &"x".repeat(65)] {
+        assert_eq!(
+            safe(&ListenerLogName(name), RedactScope::ServerLog),
+            "<redacted>"
+        );
+    }
+    assert_eq!(
+        safe(&ListenerLogName("http-main_1"), RedactScope::Wire),
+        "<redacted>"
+    );
+}

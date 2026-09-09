@@ -257,8 +257,10 @@ wait and uses the existing graceful drain and runtime budget. Unknown and termin
 redacted failure instead of retrying forever. Recognized resource pressure includes Unix
 EMFILE/ENFILE/ENOBUFS/ENOMEM and Windows WSAEMFILE/WSAENOBUFS. The first failure and subsequent
 recovery emit closed `accept_retry` / `accept_recovered` events with the stable operator-controlled
-`listener` registration name; repeated failures do not grow logs. Raw error text and peer data are
-not included in these recovery events.
+`listener` registration name through `rss_redact::safe`. Names are public operator labels: use
+1–64 ASCII letters, digits, hyphens or underscores, and never include credentials or tenant/device
+data. Other names render as `<redacted>`; wire projection always redacts the name. Repeated failures
+do not grow logs. Raw error text and peer data are not included in these recovery events.
 
 This bounds retry overhead, not total server capacity: the current connection set has no explicit
 connection-count limit. Product hosts own readiness, alerting, traffic removal, exit/restart and
