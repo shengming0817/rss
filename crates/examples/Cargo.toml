@@ -26,7 +26,7 @@ providers = ["core", "rss-transactional-messaging/producer", "rss-transactional-
 managed = ["providers", "dep:rss-runtime", "rss-transactional-messaging-postgres/rss-runtime", "rss-transactional-messaging-amqp/managed-runtime", "rss-transactional-messaging-runtime/managed-runtime"]
 managed-worker = ["producer", "lifecycle", "rss-transactional-messaging-runtime/managed-runtime"]
 
-outbox-writer = ["execution-pg", "core", "rss-transactional-messaging/producer", "dep:rss-contract", "dep:rss-transactional-messaging-postgres"]
+outbox-writer = ["dep:sqlx", "dep:tokio", "dep:serde", "dep:serde_json", "dep:rss-request-context", "core", "rss-transactional-messaging/producer", "dep:rss-contract", "dep:rss-transactional-messaging-postgres"]
 relay-only = ["core", "rss-transactional-messaging/producer"]
 
 execution-pg = ["dep:sqlx", "dep:tokio", "dep:tokio-util", "dep:serde", "dep:serde_json", "dep:rss-request-context"]

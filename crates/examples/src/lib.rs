@@ -4,7 +4,7 @@ pub mod providers;
 
 #[cfg(feature = "device-command-pg")]
 pub mod device_command;
-#[cfg(feature = "execution-pg")]
+#[cfg(any(feature = "execution-pg", feature = "outbox-writer"))]
 pub mod pg;
 #[cfg(feature = "projection-pg")]
 pub mod projection;

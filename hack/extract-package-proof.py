@@ -146,7 +146,7 @@ def main():
             forbidden = {"testkit", "rss-transactional-messaging-testkit"}
         if name == "outbox-writer":
             expected = {"default", "producer", "consumer"}  # PG adapter's existing core closure.
-            forbidden = {"testkit", "rss-transactional-messaging-testkit", "rss-transactional-messaging-amqp", "rss-transactional-messaging-runtime"}
+            forbidden = {"testkit", "rss-transactional-messaging-testkit", "rss-transactional-messaging-amqp", "rss-transactional-messaging-runtime", "tokio-util"}
         if name == "relay-only":
             expected = {"producer"}
             forbidden |= {"rss-transactional-messaging-testkit", "rss-transactional-messaging-runtime"}

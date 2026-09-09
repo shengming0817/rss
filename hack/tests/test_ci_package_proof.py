@@ -179,7 +179,7 @@ class ExecutionProof(unittest.TestCase):
         workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
         for scenario in ("outbox-writer", "relay-only"):
             _, dependencies = proof.selected_dependencies(manifest, [scenario], workspace)
-            for forbidden in ("rss-transactional-messaging-runtime", "rss-transactional-messaging-testkit", "rss-transactional-messaging-amqp", "rss-runtime", "testkit"):
+            for forbidden in ("rss-transactional-messaging-runtime", "rss-transactional-messaging-testkit", "rss-transactional-messaging-amqp", "rss-runtime", "testkit", "tokio-util"):
                 self.assertNotIn(forbidden, dependencies)
             self.assertFalse(dependencies["rss-transactional-messaging"]["default-features"])
             self.assertEqual(dependencies["rss-transactional-messaging"]["features"], ["producer"])

@@ -128,7 +128,8 @@ consumer 复制场景及 fixture，独立 manifest/lock/target；所有 PG 组�
 
 ### Independent Outbox writer and relay (#2362)
 
-`outbox-writer` selects only the PG writer and the dependencies needed for business SQL. The fixture
+`outbox-writer` explicitly selects the PG writer and the dependencies needed for business SQL; it
+does not enable the cancellation-oriented `execution-pg` feature or depend on `tokio-util`. The fixture
 runs it after revoking Inbox and relay grants; it verifies commit and rollback of business + Outbox.
 The `relay-only` probe implements delivery without an append method or transaction associated type.
 
