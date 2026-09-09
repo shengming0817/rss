@@ -5,6 +5,38 @@ use std::sync::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[derive(Clone, Default)]
+struct RecoveryEvents(Arc<std::sync::Mutex<Vec<EventFields>>>);
+
+#[derive(Default)]
+struct EventFields(std::collections::BTreeMap<String, String>);
+
+impl tracing::field::Visit for EventFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name().into(), format!("{value:?}"));
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().into(), value.into());
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryEvents {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut fields = EventFields::default();
+        event.record(&mut fields);
+        if fields
+            .0
+            .get("outcome")
+            .is_some_and(|value| value.starts_with("accept_"))
+        {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(fields);
+        }
+    }
+}
+
 struct ScriptedListener {
     listener: TcpListener,
     first: bool,
@@ -63,18 +95,26 @@ async fn accept_pressure_retains_healthy_connection_and_recovers_after_thirty_se
     let failures = Arc::new(AtomicUsize::new(40));
     let attempts = Arc::new(AtomicUsize::new(0));
     let token = CancellationToken::new();
-    let server = tokio::spawn(serve_owned(
-        ScriptedListener {
-            listener,
-            first: true,
-            failures: failures.clone(),
-            attempts: attempts.clone(),
-            error: || std::io::Error::from(std::io::ErrorKind::OutOfMemory),
-        },
-        Router::new().route("/", axum::routing::get(|| async { "ok" })),
-        token.clone(),
-        Protocol::Http1,
-    ));
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::prelude::*;
+    let events = RecoveryEvents::default();
+    let subscriber = tracing_subscriber::registry().with(events.clone());
+    let server = tokio::spawn(
+        serve_owned(
+            ScriptedListener {
+                listener,
+                first: true,
+                failures: failures.clone(),
+                attempts: attempts.clone(),
+                error: || std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+            },
+            Router::new().route("/", axum::routing::get(|| async { "ok" })),
+            token.clone(),
+            Protocol::Http1,
+            "pressure-listener",
+        )
+        .with_subscriber(subscriber),
+    );
     let mut healthy = TcpStream::connect(addr).await.expect("connect");
     request(&mut healthy).await;
     for _ in 0..40 {
@@ -95,6 +135,16 @@ async fn accept_pressure_retains_healthy_connection_and_recovers_after_thirty_se
             .expect("server joins")
             .is_ok()
     );
+    let recorded = events.0.lock().expect("events");
+    assert_eq!(recorded.len(), 2, "only recovery start and end are logged");
+    for event in recorded.iter() {
+        assert_eq!(
+            event.0.get("listener").map(String::as_str),
+            Some("pressure-listener")
+        );
+        assert!(!event.0.contains_key("error"));
+        assert!(!event.0.contains_key("peer"));
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -114,6 +164,7 @@ async fn accept_recovery_has_bounded_attempts_and_cancels_without_waiting_for_re
         Router::new(),
         token.clone(),
         Protocol::Http1,
+        "pressure-listener",
     );
     tokio::pin!(server);
     for n in 1..=1000 {
@@ -150,6 +201,7 @@ async fn unknown_accept_error_is_terminal() {
         Router::new(),
         CancellationToken::new(),
         Protocol::Http1,
+        "pressure-listener",
     )
     .await
     .expect_err("terminal error");
@@ -239,6 +291,7 @@ async fn cancellation_during_accept_recovery_drains_existing_connection() {
         Router::new().route("/", axum::routing::get(|| async { "ok" })),
         token.clone(),
         Protocol::Http1,
+        "pressure-listener",
     ));
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     request(&mut stream).await;

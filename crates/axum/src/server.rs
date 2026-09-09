@@ -142,8 +142,11 @@ fn registration(
     shutdown_timeout: Duration,
     protocol: Protocol,
 ) -> ManagedTaskRegistration {
-    let (start, _) = ManagedTask::prepare(name, shutdown_timeout);
-    start.into_registration(move |token| serve_owned(listener, router, token, protocol))
+    let name = name.into();
+    let (start, _) = ManagedTask::prepare(name.clone(), shutdown_timeout);
+    start.into_registration(move |token| async move {
+        serve_owned(listener, router, token, protocol, &name).await
+    })
 }
 
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -203,6 +206,7 @@ async fn serve_owned(
     router: Router,
     token: CancellationToken,
     protocol: Protocol,
+    name: &str,
 ) -> Result<(), ShutdownError> {
     let mut connections = FuturesUnordered::new();
     let mut retry_wait: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
@@ -224,7 +228,7 @@ async fn serve_owned(
                     Ok(accepted) => accepted,
                     Err(error) if recoverable_accept_error(&error) => {
                         if retry_wait.is_none() {
-                            tracing::warn!(target: "rss_axum::server", outcome = "accept_retry", "listener recovering");
+                            tracing::warn!(target: "rss_axum::server", outcome = "accept_retry", listener = name, "listener recovering");
                         }
                         // ref: tokio-rs/axum axum/src/serve/listener.rs@axum-v0.8.9
                         // Keep the same timer across connection completions. The outer
@@ -235,7 +239,7 @@ async fn serve_owned(
                     Err(error) => return Err(ShutdownError::new(error)),
                 };
                 if retry_wait.take().is_some() {
-                    tracing::info!(target: "rss_axum::server", outcome = "accept_recovered", "listener recovered");
+                    tracing::info!(target: "rss_axum::server", outcome = "accept_recovered", listener = name, "listener recovered");
                 }
                 // H1 handlers run inside the connection future. Isolate their panics too.
                 connections.push(AssertUnwindSafe(connection(

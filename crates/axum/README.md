@@ -256,7 +256,9 @@ queue, and have no cumulative expiry. A successful accept ends recovery; shutdow
 wait and uses the existing graceful drain and runtime budget. Unknown and terminal errors return a
 redacted failure instead of retrying forever. Recognized resource pressure includes Unix
 EMFILE/ENFILE/ENOBUFS/ENOMEM and Windows WSAEMFILE/WSAENOBUFS. The first failure and subsequent
-recovery emit closed `accept_retry` / `accept_recovered` events; repeated failures do not grow logs.
+recovery emit closed `accept_retry` / `accept_recovered` events with the stable operator-controlled
+`listener` registration name; repeated failures do not grow logs. Raw error text and peer data are
+not included in these recovery events.
 
 This bounds retry overhead, not total server capacity: the current connection set has no explicit
 connection-count limit. Product hosts own readiness, alerting, traffic removal, exit/restart and
