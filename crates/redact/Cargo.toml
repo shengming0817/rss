@@ -23,6 +23,7 @@ required-features = ["derive"]
 rss-contract.workspace = true
 rss-redact-derive = { workspace = true, optional = true }
 hmac = { workspace = true }
+icu_properties.workspace = true
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }

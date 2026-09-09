@@ -26,6 +26,7 @@ thiserror = { workspace = true }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }
 rstest = { workspace = true }
 trybuild = { workspace = true }
 

@@ -68,6 +68,6 @@ provider text. Built-in secret wrappers remain available with or without the opt
 
 `secret` and `internal` derive fields accept only default/fixed or drop; partial masks and show
 are rejected at compile time. PII retains its declared masking policy. Email masking requires
-one `@`, nonempty local/domain parts, and no Unicode whitespace or control characters; malformed
+one `@`, nonempty local/domain parts, and no Unicode whitespace, control or format characters; malformed
 input is rendered as `<redacted>`. This is a diagnostic safety check, not RFC mailbox validation.
-`RedactionHashKey` takes zeroizing ownership before length validation, including rejected inputs.
+`RedactionHashKey` takes zeroizing ownership before length validation, including rejected inputs. Scalar HMAC encoding writes directly into a preallocated zeroizing buffer.

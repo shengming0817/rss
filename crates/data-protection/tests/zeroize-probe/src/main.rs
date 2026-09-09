@@ -74,6 +74,27 @@ fn transforms() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn scalar_hashes() -> Result<(), Box<dyn std::error::Error>> {
+    use rss_redact::{RedactValue, redact_hash};
+    let key = RedactionHashKey::from_bytes(vec![0x42; 32])?;
+    for value in [
+        RedactValue::Bool(true),
+        RedactValue::Signed(i128::MIN),
+        RedactValue::Unsigned(u128::MAX),
+        RedactValue::Uuid(uuid::Uuid::from_u128(u128::MAX)),
+        RedactValue::OffsetDateTime(time::OffsetDateTime::UNIX_EPOCH),
+        RedactValue::Duration(std::time::Duration::MAX),
+        RedactValue::SystemTime(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5)),
+        RedactValue::SystemTime(std::time::UNIX_EPOCH - std::time::Duration::from_secs(5)),
+    ] {
+        allocator::start(32);
+        let token = redact_hash(value, &key);
+        allocator::finish(1, 0);
+        assert!(token.as_str().starts_with("hmac-sha256:"));
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Anti-vacuity: ordinary Vec release must be observed as dirty.
     let bytes = vec![0x5A; 31];
@@ -84,9 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("keys") => keys(),
         Some("transforms") => transforms()?,
+        Some("scalars") => scalar_hashes()?,
         _ => {
             keys();
             transforms()?;
+            scalar_hashes()?;
         }
     }
     println!("zeroize probe passed");

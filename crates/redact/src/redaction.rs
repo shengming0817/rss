@@ -425,7 +425,11 @@ fn mask_email(value: RedactValue<'_>) -> String {
             return REDACTED_PLACEHOLDER.to_string();
         }
     };
-    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    use icu_properties::{CodePointMapData, props::GeneralCategory};
+    let category = CodePointMapData::<GeneralCategory>::new();
+    if s.chars()
+        .any(|c| c.is_whitespace() || c.is_control() || category.get(c) == GeneralCategory::Format)
+    {
         // reason: untrusted email-shaped text must not carry whitespace/control tails into logs.
         return REDACTED_PLACEHOLDER.to_string();
     }
@@ -470,7 +474,13 @@ fn mask_hmac(value: RedactValue<'_>, key: &RedactionHashKey) -> Option<String> {
         | RedactValue::Uuid(_)
         | RedactValue::Duration(_)
         | RedactValue::SystemTime(_)
-        | RedactValue::OffsetDateTime(_) => mac.update(scalar_to_string(value).as_bytes()),
+        | RedactValue::OffsetDateTime(_) => {
+            // i128/u128 take at most 40 bytes, with at most 19 bytes of timestamp suffix.
+            // Reserve before writing: no ordinary or realloc-discarded scalar plaintext copy.
+            let mut encoded = zeroize::Zeroizing::new(String::with_capacity(64));
+            let _ = write_scalar(value, &mut *encoded);
+            mac.update(encoded.as_bytes());
+        }
         // 无值 / Debug-only 视图不可哈希 ⇒ fail-closed 固定占位。
         RedactValue::Absent | RedactValue::Debug(_) => return None,
     }
@@ -484,23 +494,29 @@ fn mask_hmac(value: RedactValue<'_>, key: &RedactionHashKey) -> Option<String> {
 }
 
 fn scalar_to_string(value: RedactValue<'_>) -> String {
+    let mut text = String::new();
+    let _ = write_scalar(value, &mut text);
+    text
+}
+
+fn write_scalar(value: RedactValue<'_>, out: &mut impl std::fmt::Write) -> std::fmt::Result {
     match value {
-        RedactValue::Bool(v) => v.to_string(),
-        RedactValue::Signed(v) => v.to_string(),
-        RedactValue::Unsigned(v) => v.to_string(),
-        RedactValue::Uuid(v) => v.hyphenated().to_string(),
-        RedactValue::Duration(v) => format!("{}ns", v.as_nanos()),
+        RedactValue::Bool(v) => write!(out, "{v}"),
+        RedactValue::Signed(v) => write!(out, "{v}"),
+        RedactValue::Unsigned(v) => write!(out, "{v}"),
+        RedactValue::Uuid(v) => write!(out, "{}", v.hyphenated()),
+        RedactValue::Duration(v) => write!(out, "{}ns", v.as_nanos()),
         RedactValue::SystemTime(v) => match v.duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => format!("{}ns_since_unix_epoch", duration.as_nanos()),
-            Err(err) => format!("-{}ns_since_unix_epoch", err.duration().as_nanos()),
+            Ok(duration) => write!(out, "{}ns_since_unix_epoch", duration.as_nanos()),
+            Err(err) => write!(out, "-{}ns_since_unix_epoch", err.duration().as_nanos()),
         },
         RedactValue::OffsetDateTime(v) => {
-            format!("{}ns_since_unix_epoch", v.unix_timestamp_nanos())
+            write!(out, "{}ns_since_unix_epoch", v.unix_timestamp_nanos())
         }
-        RedactValue::Str(s) => s.to_string(),
-        RedactValue::Bytes(b) => format!("[{} bytes]", b.len()),
-        RedactValue::Debug(v) => format!("{v:?}"),
-        RedactValue::Absent => "None".to_string(),
+        RedactValue::Str(s) => out.write_str(s),
+        RedactValue::Bytes(b) => write!(out, "[{} bytes]", b.len()),
+        RedactValue::Debug(v) => write!(out, "{v:?}"),
+        RedactValue::Absent => out.write_str("None"),
     }
 }
 
@@ -880,6 +896,10 @@ mod tests {
     #[case("a@b\u{0085}private-tail", "<redacted>")]
     #[case("a@b\u{2003}private-tail", "<redacted>")]
     #[case("a@b\0private-tail", "<redacted>")]
+    #[case("a@b\u{202e}private-tail", "<redacted>")]
+    #[case("a@b\u{2066}private-tail", "<redacted>")]
+    #[case("a@b\u{200b}private-tail", "<redacted>")]
+    #[case("\u{202e}a@b", "<redacted>")]
     fn mask_email_masks_local(#[case] input: &str, #[case] want: &str) {
         assert_eq!(RedactionMode::EmailMask.mask(RedactValue::Str(input)), want);
     }

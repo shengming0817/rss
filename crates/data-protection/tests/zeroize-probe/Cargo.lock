@@ -310,6 +310,7 @@ name = "rss-redact"
 version = "0.1.0"
 dependencies = [
  "hmac",
+ "icu_properties",
  "rss-contract",
  "rss-redact-derive",
  "sha2",
@@ -452,6 +453,7 @@ dependencies = [
  "deranged",
  "num-conv",
  "powerfmt",
+ "serde_core",
  "time-core",
  "time-macros",
 ]
@@ -666,6 +668,8 @@ dependencies = [
  "rss-data-protection",
  "rss-redact",
  "rss-request-context",
+ "time",
+ "uuid",
 ]
 
 [[package]]

@@ -11,5 +11,8 @@ rss-data-protection = { path = "../.." }
 rss-redact = { path = "../../../redact" }
 rss-request-context = { path = "../../../request-context" }
 
+uuid = "1"
+time = "0.3"
+
 [lints.rust]
 unsafe_code = "deny"
