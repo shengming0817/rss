@@ -22,8 +22,8 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingRuntimePhase,
 };
 use rss_transactional_messaging::outbox::{
-    AppendOutcome, OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxSettlement,
-    OutboxStore, PendingMessage,
+    OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement,
+    PendingMessage,
 };
 #[cfg(feature = "managed-runtime")]
 use rss_transactional_messaging::policy::ShutdownBudget;
@@ -82,21 +82,12 @@ impl Store {
     }
 }
 
-impl OutboxStore<Vec<u8>> for Store {
+impl OutboxRelayStore<Vec<u8>> for Store {
     fn delivery_budget(&self) -> DeliveryBudget {
         budget()
     }
-    type Transaction<'tx> = ();
     type Claim = Claim;
     type PublishReceipt = ();
-
-    async fn append(
-        &self,
-        _transaction: &mut Self::Transaction<'_>,
-        _message: PendingMessage<Vec<u8>>,
-    ) -> Result<AppendOutcome, MessagingError> {
-        Ok(AppendOutcome::Inserted)
-    }
 
     async fn claim_partition_heads(
         &self,
@@ -364,21 +355,12 @@ struct AuditedStore {
     events: Arc<Mutex<Vec<String>>>,
 }
 
-impl OutboxStore<Vec<u8>> for AuditedStore {
+impl OutboxRelayStore<Vec<u8>> for AuditedStore {
     fn delivery_budget(&self) -> DeliveryBudget {
         budget()
     }
-    type Transaction<'tx> = ();
     type Claim = Claim;
     type PublishReceipt = ();
-
-    async fn append(
-        &self,
-        _transaction: &mut Self::Transaction<'_>,
-        _message: PendingMessage<Vec<u8>>,
-    ) -> Result<AppendOutcome, MessagingError> {
-        Ok(AppendOutcome::Inserted)
-    }
 
     async fn claim_partition_heads(
         &self,
@@ -836,21 +818,12 @@ impl PendingStore {
     }
 }
 
-impl OutboxStore<Vec<u8>> for PendingStore {
+impl OutboxRelayStore<Vec<u8>> for PendingStore {
     fn delivery_budget(&self) -> DeliveryBudget {
         budget()
     }
-    type Transaction<'tx> = ();
     type Claim = Claim;
     type PublishReceipt = ();
-
-    async fn append(
-        &self,
-        _transaction: &mut Self::Transaction<'_>,
-        _message: PendingMessage<Vec<u8>>,
-    ) -> Result<AppendOutcome, MessagingError> {
-        Ok(AppendOutcome::Inserted)
-    }
 
     async fn claim_partition_heads(
         &self,

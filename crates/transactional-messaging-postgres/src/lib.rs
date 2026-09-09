@@ -16,7 +16,7 @@ pub use consumer::{
     ConsumerRecoveryMode, PgConsumerEffect, PgConsumerEffectFailure, PgConsumerTx, ReceiptOnly,
 };
 pub use inbox::{PgInboxClaim, PgInboxStore};
-pub use outbox::{PgOutboxClaim, PgOutboxStore};
+pub use outbox::{PgOutboxClaim, PgOutboxStore, PgOutboxWriter};
 #[cfg(feature = "integration")]
 pub use transaction::PgTransactionFault;
 pub use transaction::{PgError, PgRuntime, PgStorageContractFailure, PgTransaction};

@@ -1,0 +1,5 @@
+error[E0599]: no method named `delivery_budget` found for reference `&PgOutboxWriter` in the current scope
+ --> tests/ui/writer_delivery_budget_fail.rs:5:20
+  |
+5 |     let _ = writer.delivery_budget();
+  |                    ^^^^^^^^^^^^^^^ method not found in `&PgOutboxWriter`

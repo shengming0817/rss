@@ -15,7 +15,8 @@ use rss_transactional_messaging::message::{
     MessageMetadata, MessageMetadataExtensions, MessageRoute, MessagingDomain, PartitionKey,
 };
 use rss_transactional_messaging::outbox::{
-    AppendOutcome, OutboxLeaseStatus, OutboxSettlement, OutboxStore, PendingMessage,
+    AppendOutcome, OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement, OutboxWriter,
+    PendingMessage,
 };
 
 use rss_transactional_messaging::transaction::{

@@ -54,7 +54,7 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
     use rss_transactional_messaging::{
         message::MessageEnvelope,
         observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
-        outbox::{OutboxDisposition, OutboxStore, PendingMessage},
+        outbox::{OutboxDisposition, OutboxWriter, PendingMessage},
         policy::OperationDeadline,
         transport::{PublishOutcome, Publisher},
     };

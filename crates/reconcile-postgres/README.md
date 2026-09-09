@@ -44,7 +44,7 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 ## 可选消息组合
 
-开启 `transactional-messaging` 才引入消息 core/PG 依赖。`messaging::protect` 和 `messaging::wake_with` 接受现有 `PgRuntime` 与显式 context，回调取得同一个消息 `PgTransaction`，可直接 `PgOutboxStore::append`。Reconcile 校验、业务 SQL、canonical Outbox 和调度状态同事务；消息 runtime 唯一拥有结算。它们返回 `LocalTxAttempt`，必须穷尽区分 committed、not-started、rolled-back、fenced、rollback-failed、commit-unknown。
+开启 `transactional-messaging` 才引入消息 core/PG 依赖。`messaging::protect` 和 `messaging::wake_with` 接受现有 `PgRuntime` 与显式 context，回调取得同一个消息 `PgTransaction`。仅追加消息时，使用共享 runtime 与 domain 构造 `PgOutboxWriter`，在回调中通过 `OutboxWriter::append` 写入，无需 receipt 类型或投递预算。确实同时承担投递的消费者才组合使用 `PgOutboxStore<R>`。Reconcile 校验、业务 SQL、canonical Outbox 和调度状态同事务；消息 runtime 唯一拥有结算。它们返回 `LocalTxAttempt`，必须穷尽区分 committed、not-started、rolled-back、fenced、rollback-failed、commit-unknown。
 
 消息模式需安装原消息 schema，并向同一 runtime 角色授予本组件最小权限。与默认路径共用本组件 SQL 和 fencing；不复制 Outbox/Inbox，不修改消息引擎依赖方向。回调的 context 可以直接借用业务字段，和 transaction 一起重借；不要求为借用额外包装 Arc。
 

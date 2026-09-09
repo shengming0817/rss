@@ -172,6 +172,28 @@ class ExecutionProof(unittest.TestCase):
                 self.assertFalse(dependencies[name]["default-features"])
                 self.assertEqual(dependencies[name]["features"], [selected])
 
+    def test_outbox_capabilities_resolve_without_algorithm_or_broker_dependencies(self):
+        import tomllib
+        root = SCRIPT.parent.parent
+        manifest = tomllib.loads((root / "crates/examples/Cargo.toml").read_text())
+        workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
+        for scenario in ("outbox-writer", "relay-only"):
+            _, dependencies = proof.selected_dependencies(manifest, [scenario], workspace)
+            for forbidden in ("rss-transactional-messaging-runtime", "rss-transactional-messaging-testkit", "rss-transactional-messaging-amqp", "rss-runtime", "testkit", "tokio-util"):
+                self.assertNotIn(forbidden, dependencies)
+            self.assertFalse(dependencies["rss-transactional-messaging"]["default-features"])
+            self.assertEqual(dependencies["rss-transactional-messaging"]["features"], ["producer"])
+            self.assertEqual("rss-transactional-messaging-postgres" in dependencies, scenario == "outbox-writer")
+
+    def test_writer_execution_requires_each_selected_binary_once(self):
+        suite = "test postgres_transactional_messaging_suite ... ok\n"
+        binary = "/proof/outbox-writer"
+        receipt = f"external-provider-consumer PASS {binary}\n"
+        proof.validate_execution(suite + receipt, "postgres_transactional_messaging_suite", [binary])
+        for log in (suite, suite + receipt * 2, receipt):
+            with self.subTest(log=log), self.assertRaises(ValueError):
+                proof.validate_execution(log, "postgres_transactional_messaging_suite", [binary])
+
 
 
 

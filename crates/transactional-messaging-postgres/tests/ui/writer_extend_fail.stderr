@@ -1,0 +1,5 @@
+error[E0599]: no method named `extend` found for reference `&PgOutboxWriter` in the current scope
+ --> tests/ui/writer_extend_fail.rs:5:20
+  |
+5 |     let _ = writer.extend(claim, deadline);
+  |                    ^^^^^^ method not found in `&PgOutboxWriter`

@@ -1,0 +1,5 @@
+error[E0599]: no method named `claim_partition_heads` found for reference `&PgOutboxWriter` in the current scope
+ --> tests/ui/writer_claim_partition_heads_fail.rs:5:20
+  |
+5 |     let _ = writer.claim_partition_heads(std::num::NonZeroUsize::MIN, deadline);
+  |                    ^^^^^^^^^^^^^^^^^^^^^ method not found in `&PgOutboxWriter`

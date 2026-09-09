@@ -16,13 +16,13 @@ use rss_transactional_messaging::{
     transport::DeliverySource,
 };
 #[cfg(feature = "producer")]
-use rss_transactional_messaging::{outbox::OutboxStore, transport::Publisher};
+use rss_transactional_messaging::{outbox::OutboxRelayStore, transport::Publisher};
 
 #[cfg(feature = "producer")]
 impl<P, S, U, C, E> RelayWorker<P, S, U, C, E>
 where
     P: Send + Sync + 'static,
-    S: OutboxStore<P> + 'static,
+    S: OutboxRelayStore<P> + 'static,
     S::Claim: Sync,
     U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
     C: ExecutionTimer + 'static,

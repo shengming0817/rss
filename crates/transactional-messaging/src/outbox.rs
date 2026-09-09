@@ -1,6 +1,6 @@
 //! Durable publication admission and ordered settlement.
 //!
-//! [`OutboxStore`] owns storage; [`crate::transport::Publisher`] supplies publication evidence.
+//! [`OutboxWriter`] owns admission and [`OutboxRelayStore`] owns delivery; [`crate::transport::Publisher`] supplies publication evidence.
 //! Retries preserve the original message ID and fingerprint. [`PartitionHead`] models the local
 //! gate only: providers must enforce the same transitions with durable fencing and atomic updates.
 
@@ -279,7 +279,26 @@ impl<C> IntoIterator for OutboxClaimBatch<C> {
     }
 }
 
-/// Transactional admission and fenced settlement of durable outbox records.
+/// Transactional admission of durable outbox records, independent of delivery.
+///
+/// The caller owns the transaction and its deadline. Providers must preserve tenant isolation,
+/// reject foreign transactions, and stage admission in the same transaction as business effects.
+pub trait OutboxWriter<P>: Send + Sync {
+    /// Caller transaction in which business effects and outbox admission commit together.
+    type Transaction<'tx>;
+    /// Stage the message in the supplied transaction; do not commit the caller's transaction.
+    /// Return `AlreadyPresent` only for the same identity and fingerprint. Different authored facts
+    /// under that identity must return [`Conflict`](crate::error::MessagingErrorKind::Conflict).
+    /// This method has no deadline parameter: the caller owns the enclosing transaction's budget
+    /// and must resolve or isolate that transaction on cancellation.
+    fn append(
+        &self,
+        transaction: &mut Self::Transaction<'_>,
+        message: PendingMessage<P>,
+    ) -> impl Future<Output = Result<AppendOutcome, MessagingError>> + Send;
+}
+
+/// Fenced delivery and settlement of durable outbox records.
 ///
 /// Providers must isolate records by tenant and use authoritative time for leases and any same-ID
 /// delivery window. Claim, renewal, and settlement must enforce fencing atomically; an expired
@@ -291,26 +310,13 @@ impl<C> IntoIterator for OutboxClaimBatch<C> {
 /// [`OwnershipLost`](crate::error::MessagingErrorKind::OwnershipLost), not overwrite newer state.
 /// Follow [`within`](crate::policy::within) for deadline and cancellation obligations. Recover
 /// using the existing identity and authoritative state.
-pub trait OutboxStore<P>: Send + Sync {
+pub trait OutboxRelayStore<P>: Send + Sync {
     /// Single provider-owned budget used for durable lease TTL and runtime delivery admission.
     fn delivery_budget(&self) -> crate::policy::DeliveryBudget;
-    /// Caller transaction in which business effects and outbox admission commit together.
-    type Transaction<'tx>;
     /// Durable record identity and fencing authority for one attempt.
     type Claim: Send;
     /// Confirmation evidence returned by the paired publisher.
     type PublishReceipt: Send;
-
-    /// Stage the message in the supplied transaction; do not commit the caller's transaction.
-    /// Return `AlreadyPresent` only for the same identity and fingerprint. Different authored facts
-    /// under that identity must return [`Conflict`](crate::error::MessagingErrorKind::Conflict).
-    /// This method has no deadline parameter: the caller owns the enclosing transaction's budget
-    /// and must resolve or isolate that transaction on cancellation.
-    fn append(
-        &self,
-        transaction: &mut Self::Transaction<'_>,
-        message: PendingMessage<P>,
-    ) -> impl Future<Output = Result<AppendOutcome, MessagingError>> + Send;
 
     /// Claim only the unresolved head of each `(tenant, domain, partition key)` sequence. An
     /// unresolved dead-letter head is not eligible and must continue blocking its successor.

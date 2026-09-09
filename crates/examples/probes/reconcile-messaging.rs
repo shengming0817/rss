@@ -42,13 +42,13 @@ pub async fn messages<T: Timer>(
     runtime: &rss_transactional_messaging_postgres::PgRuntime,
     claim: &rss_reconcile_postgres::PgClaim,
     c: &Control<'_, T>,
-    outbox: rss_transactional_messaging_postgres::PgOutboxStore<()>,
+    outbox: rss_transactional_messaging_postgres::PgOutboxWriter,
     message: rss_transactional_messaging::outbox::PendingMessage<Vec<u8>>,
 ) -> rss_transactional_messaging::transaction::LocalTxAttempt<
     (),
     rss_transactional_messaging_postgres::PgError,
 > {
-    use rss_transactional_messaging::outbox::OutboxStore;
+    use rss_transactional_messaging::outbox::OutboxWriter;
     rss_reconcile_postgres::messaging::protect(runtime, claim, c, (), move |_, tx| {
         Box::pin(async move {
             outbox.append(tx, message).await?;

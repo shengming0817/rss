@@ -35,6 +35,12 @@ A producer that only commits business state and appends/reads Outbox uses
 sequence privileges and `check_execution()` EXECUTE, but no Inbox privileges and no
 `claim_outbox`, `outbox_lease` or `settle_outbox` EXECUTE. Admission rejects those extra
 capabilities, including inherited grants; PostgreSQL also denies relay calls at execution.
+Construct `PgOutboxWriter::new(runtime.clone(), domain)` from that shared runtime, and call
+`OutboxWriter::append` inside its `local_tx` alongside business SQL. The writer needs no publisher,
+receipt type or delivery budget and exposes no claim/lease/settle or underlying runtime accessor.
+Its private runtime provenance rejects transactions from another runtime, even on the same database.
+The handle limits the Rust API; actual SQL authority remains governed by PostgreSQL ACLs.
+
 The full runtime constructor retains its existing consumer/relay requirements. Both profiles
 verify the same schema/definer/RLS/fencing contract using the PostgreSQL catalogs; lack of
 Inbox access does not hide schema drift behind information_schema visibility filtering.
@@ -127,7 +133,7 @@ use std::sync::Arc;
 use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::{
     message::{MessageEnvelope, MessageId, MessagingDomain},
-    outbox::{AppendOutcome, OutboxStore, PendingMessage},
+    outbox::{AppendOutcome, OutboxWriter, PendingMessage},
     policy::{DeliveryBudget, OperationDeadline},
     transaction::{LocalTxAttempt, TerminalDisposition},
 };
@@ -397,3 +403,17 @@ Use an exact-authorized termination when a blocked plan must stop, including an 
 Create new runtime bindings for the committed epoch before resuming work. Normal successors can
 then proceed because the old DR partition barrier has lost execution authority. The original
 same-ID deadline is never extended; product policy decides whether later new-ID recovery is needed.
+
+## Outbox capability migration (#2362)
+
+The mixed `OutboxStore` port is removed. Import `outbox::OutboxWriter` for append and
+`outbox::OutboxRelayStore` for delivery. The ports have no inheritance relationship; `Transaction`
+belongs only to the writer, and `Claim`, `PublishReceipt` and `DeliveryBudget` only to the relay port.
+`PgOutboxStore<R>` implements both for combined consumers; its private `PgOutboxWriter` owns the
+single admission path. Append-only consumers use `PgOutboxWriter` directly and remove receipt and
+budget parameters. There is no compatibility alias or deprecation bridge. Existing persisted rows,
+fingerprints, migrations, execution fencing and transaction outcomes are unchanged.
+
+The `rss-examples` `outbox-writer` binary is a real producer-ACL consumer. It verifies business and
+Outbox commit/rollback through the public API. The independent source/artifact runner executes it
+without AMQP or messaging-runtime dependencies and separately compiles a relay-only provider.

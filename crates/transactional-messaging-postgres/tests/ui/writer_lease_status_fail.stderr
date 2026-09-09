@@ -1,0 +1,5 @@
+error[E0599]: no method named `lease_status` found for reference `&PgOutboxWriter` in the current scope
+ --> tests/ui/writer_lease_status_fail.rs:5:20
+  |
+5 |     let _ = writer.lease_status(claim, deadline);
+  |                    ^^^^^^^^^^^^ method not found in `&PgOutboxWriter`

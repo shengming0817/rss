@@ -452,7 +452,7 @@ async fn storage_mutations(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::R
 }
 
 async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
-    use rss_transactional_messaging::{message::MessagingDomain, outbox::OutboxStore};
+    use rss_transactional_messaging::{message::MessagingDomain, outbox::OutboxRelayStore};
     let seq: i64 = sqlx::query_scalar(
         "SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id='outbox-roundtrip'",
     )

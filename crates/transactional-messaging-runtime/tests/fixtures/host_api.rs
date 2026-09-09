@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 mod relay {
     use super::*;
     use algorithms::relay::RelayWorker;
-    use message_core::{outbox::OutboxStore, transport::Publisher};
+    use message_core::{outbox::OutboxRelayStore, transport::Publisher};
 
     pub async fn run<P, S, U, C, E>(
         worker: RelayWorker<P, S, U, C, E>,
@@ -17,7 +17,7 @@ mod relay {
     ) -> Result<(), MessagingError>
     where
         P: Send + Sync,
-        S: OutboxStore<P>,
+        S: OutboxRelayStore<P>,
         S::Claim: Sync,
         U: Publisher<P, Receipt = S::PublishReceipt>,
         C: ExecutionTimer,
@@ -32,7 +32,7 @@ mod relay {
         budget: message_core::policy::ShutdownBudget,
     ) where
         P: Send + Sync + 'static,
-        S: OutboxStore<P> + 'static,
+        S: OutboxRelayStore<P> + 'static,
         S::Claim: Sync,
         U: Publisher<P, Receipt = S::PublishReceipt> + 'static,
         C: ExecutionTimer + 'static,

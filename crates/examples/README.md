@@ -125,3 +125,20 @@ consumer 复制场景及 fixture，独立 manifest/lock/target；所有 PG 组�
 纯工具由 `hack/package_proof.py` 单独持有；组件入口仅选择自己的场景，不新增 runner 或 receipt registry。
 候选流水线复用既有 packages.tsv/SHA256SUMS，并上传 commands.log、resolved.json、Cargo.lock 与后端运行日志。
 这些说明不是通过记录；精确最终 SHA、包/版本/digest、环境与运行结果在 issue/PR 签署。
+
+### Independent Outbox writer and relay (#2362)
+
+`outbox-writer` explicitly selects the PG writer and the dependencies needed for business SQL; it
+does not enable the cancellation-oriented `execution-pg` feature or depend on `tokio-util`. The fixture
+runs it after revoking Inbox and relay grants; it verifies commit and rollback of business + Outbox.
+The `relay-only` probe implements delivery without an append method or transaction associated type.
+
+```sh
+python3 hack/extract-package-proof.py --source --scenario outbox-writer --scenario relay-only
+python3 hack/extract-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$RSS_REVISION" --scenario outbox-writer --scenario relay-only
+```
+
+Both also run in the default scenario selection. The artifact command requires a clean exact
+candidate revision and records archive digests; compilation alone is not writer behavior evidence.
+The PG adapter still enables its existing core producer/consumer features; a narrow writer API does
+not claim that delivery types have been removed from the adapter's dependency graph.
