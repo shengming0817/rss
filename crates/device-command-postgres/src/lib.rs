@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 mod persistence;
+mod probe;
 mod store;
 pub use store::PgStore;
 /// Fresh component schema, executed only by an external migration owner.

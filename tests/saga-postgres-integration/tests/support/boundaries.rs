@@ -88,6 +88,8 @@ pub(super) async fn admission_drift(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    admission_contract::drift(pool, owner, control).await?;
+    reachable_and_logged(pool, owner, control).await?;
     for (break_sql, restore_sql) in [
         (
             "GRANT TRIGGER ON rss_saga.journal TO saga_runtime",
@@ -128,6 +130,115 @@ pub(super) async fn admission_drift(
         assert!(
             matches!(result, Err(ref failure) if failure.kind()==rss_saga::ErrorKind::StorageContract)
         );
+    }
+    Ok(())
+}
+
+// F4.2: a non-owner role avoids the pre-existing owner membership rejection.
+async fn reachable_and_logged(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    sqlx::raw_sql("CREATE ROLE saga_escalation NOLOGIN; GRANT saga_escalation TO saga_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
+    let result = reachable_grants(pool, owner, control).await;
+    sqlx::raw_sql("REVOKE saga_escalation FROM saga_runtime; DROP OWNED BY saga_escalation; DROP ROLE saga_escalation").execute(owner).await?;
+    result?;
+    logged_tables(pool, owner, control).await
+}
+async fn logged_tables(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    // Detach incoming fixture FKs so exactly one relation can be UNLOGGED at a time.
+    // PostgreSQL supplies quoted DDL and the original definitions; no second migration copy.
+    for table in ["step_receipts", "journal", "instances"] {
+        let incoming: Vec<(String, String)> = sqlx::query_as("SELECT format('ALTER TABLE %s DROP CONSTRAINT %I',conrelid::regclass,conname), format('ALTER TABLE %s ADD CONSTRAINT %I %s',conrelid::regclass,conname,pg_get_constraintdef(oid)) FROM pg_constraint WHERE contype='f' AND confrelid=to_regclass($1)")
+            .bind(format!("rss_saga.{table}")).fetch_all(owner).await?;
+        for (detach, _) in &incoming {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(detach.as_str()))
+                .execute(owner)
+                .await?;
+        }
+        let result = single_unlogged(pool, owner, control, table).await;
+        for (_, restore) in &incoming {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(restore.as_str()))
+                .execute(owner)
+                .await?;
+        }
+        result?;
+        PgStore::new(pool.clone(), control).await?;
+    }
+    Ok(())
+}
+async fn single_unlogged(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+    table: &str,
+) -> anyhow::Result<()> {
+    PgStore::new(pool.clone(), control).await?;
+    // Identifier is selected exclusively from the closed fixture table list above.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE rss_saga.{table} SET UNLOGGED"
+    )))
+    .execute(owner)
+    .await?;
+    let rejected = PgStore::new(pool.clone(), control).await;
+    let drifted = sqlx::query_scalar::<_, String>("SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='rss_saga' AND c.relkind='r' AND c.relpersistence<>'p'").fetch_all(owner).await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE rss_saga.{table} SET LOGGED"
+    )))
+    .execute(owner)
+    .await?;
+    anyhow::ensure!(
+        drifted? == [table],
+        "persistence case must isolate its target"
+    );
+    anyhow::ensure!(
+        matches!(rejected, Err(e) if e.kind()==ErrorKind::StorageContract),
+        "accepted unlogged {table}"
+    );
+    PgStore::new(pool.clone(), control).await?;
+    Ok(())
+}
+async fn reachable_grants(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    PgStore::new(pool.clone(), control).await?;
+    for (change, restore) in [
+        (
+            "GRANT UPDATE ON rss_saga.instances TO saga_escalation",
+            "REVOKE UPDATE ON rss_saga.instances FROM saga_escalation",
+        ),
+        (
+            "GRANT UPDATE(revision) ON rss_saga.instances TO saga_escalation",
+            "REVOKE UPDATE(revision) ON rss_saga.instances FROM saga_escalation",
+        ),
+        (
+            "GRANT CREATE ON SCHEMA rss_saga TO saga_escalation",
+            "REVOKE CREATE ON SCHEMA rss_saga FROM saga_escalation",
+        ),
+        (
+            "ALTER ROLE saga_escalation BYPASSRLS",
+            "ALTER ROLE saga_escalation NOBYPASSRLS",
+        ),
+        (
+            "ALTER ROLE saga_escalation CREATEROLE",
+            "ALTER ROLE saga_escalation NOCREATEROLE",
+        ),
+    ] {
+        sqlx::raw_sql(change).execute(owner).await?;
+        let rejected = PgStore::new(pool.clone(), control).await;
+        sqlx::raw_sql(restore).execute(owner).await?;
+        anyhow::ensure!(
+            matches!(rejected, Err(e) if e.kind()==ErrorKind::StorageContract),
+            "accepted reachable privilege: {change}"
+        );
+        PgStore::new(pool.clone(), control).await?;
     }
     Ok(())
 }

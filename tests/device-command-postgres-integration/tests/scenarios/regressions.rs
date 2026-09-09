@@ -240,6 +240,7 @@ pub(crate) async fn delayed_publication_read(f: &Fixture) -> anyhow::Result<()> 
     Ok(())
 }
 pub(crate) async fn catalog_drift(f: &Fixture) -> anyhow::Result<()> {
+    super::admission::executable_contract(f).await?;
     for (change, restore) in [
         (
             "ALTER POLICY tenant_scope ON rss_device_command.commands USING(true)",

@@ -24,7 +24,7 @@ pub(super) async fn admission_reason(f: &Fixture, expected: &str) -> anyhow::Res
         .with_writer(move || writer.clone())
         .finish();
     let result = stores(f.config.clone()).with_subscriber(subscriber).await;
-    assert!(result.is_err());
+    anyhow::ensure!(result.is_err(), "drifted schema admitted");
     let bytes = capture
         .0
         .lock()
@@ -42,7 +42,10 @@ pub(super) async fn admission_reason(f: &Fixture, expected: &str) -> anyhow::Res
             );
         }
     }
-    assert_eq!(reasons, vec![expected]);
+    anyhow::ensure!(
+        reasons == vec![expected],
+        "expected {expected}, got {reasons:?}"
+    );
     Ok(())
 }
 pub(crate) async fn diagnostic_classes(f: &Fixture) -> anyhow::Result<()> {

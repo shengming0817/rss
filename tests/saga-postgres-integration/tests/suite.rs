@@ -1,3 +1,5 @@
+#[path = "support/admission_contract.rs"]
+mod admission_contract;
 #[path = "support/boundaries.rs"]
 mod boundaries;
 #[path = "../../../crates/saga/tests/support/mod.rs"]
