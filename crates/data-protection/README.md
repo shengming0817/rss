@@ -32,7 +32,7 @@ Lowercase preserves Unicode default casing (including Final Sigma), with ICU4X c
 Borrowed caller inputs remain the caller’s responsibility; the library cannot erase copies made
 before ownership transfer or guarantee register/stack-spill erasure.
 
-`cargo test -p rss-data-protection --test consumer` runs the independent allocator probe fixture
+On Unix, `cargo test -p rss-data-protection --test consumer` runs the independent allocator probe fixture
 against the real public key/index APIs and redaction scalar hashing. It inspects initialized tracked buffers before release,
 including spare capacity and reallocation, and calibrates against an ordinary nonzero Vec.
 The fixture alone contains scoped unsafe allocator code; production crates remain unsafe-free.
@@ -40,6 +40,7 @@ Its committed source/lock live under this package’s tests; build artifacts and
 under `rss-external-check/zeroize-probe`. This T1 evidence is not an artifact/publishing claim.
 
 The consumer uses a private Python watchdog process to terminate the Cargo tree on timeout,
-interruption or parent-pipe closure (Unix process groups; Windows taskkill). Signals are handled
+interruption or parent-pipe closure using Unix process groups. This private test carrier is compiled
+only on Unix; it does not claim Windows process-tree verification. Signals are handled
 only in the watchdog, preserving libtest signal behavior. Unix regressions verify descendant
 handles close after parent EOF and timeout.

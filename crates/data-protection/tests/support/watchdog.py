@@ -1,4 +1,4 @@
-"""Private probe watchdog: own handlers in this process, never in the Rust test harness."""
+"""Private Unix probe watchdog: own handlers in this process, never in the Rust test harness."""
 import os
 import signal
 import subprocess
@@ -18,7 +18,7 @@ def main():
     threading.Thread(target=parent_closed, daemon=True).start()
     deadline = time.monotonic() + float(sys.argv[1])
     child = subprocess.Popen(sys.argv[2:], stdin=subprocess.DEVNULL,
-                             start_new_session=(os.name == 'posix'))
+                             start_new_session=True)
     try:
         while True:
             if cancelled.is_set() or time.monotonic() >= deadline:
@@ -30,15 +30,10 @@ def main():
     finally:
         if child.poll() is None:
             # Keep the group leader unreaped until its whole group has been signalled.
-            if os.name == 'posix':
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            else:
-                subprocess.run(['taskkill', '/F', '/T', '/PID', str(child.pid)],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=5, check=True)
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             child.wait(timeout=5)
 
 

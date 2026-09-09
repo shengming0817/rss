@@ -71,3 +71,7 @@ are rejected at compile time. PII retains its declared masking policy. Email mas
 one `@`, nonempty local/domain parts, and no Unicode whitespace, control or format characters; malformed
 input is rendered as `<redacted>`. This is a diagnostic safety check, not RFC mailbox validation.
 `RedactionHashKey` takes zeroizing ownership before length validation, including rejected inputs. Scalar HMAC encoding writes directly into a preallocated zeroizing buffer.
+
+`Last4` and `EmailMask` reject any input containing whitespace, control characters (C0/C1),
+or Unicode format characters (Cf), returning `<redacted>` before echoing any original text.
+This applies to default derived `Debug` and `ServerLog`; safe Unicode text retains its masking semantics.

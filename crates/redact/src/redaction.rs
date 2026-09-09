@@ -147,9 +147,9 @@ pub enum RedactionMode {
     Show,
     /// 固定占位 `<redacted>`。
     Fixed,
-    /// 保留尾 4 字符（`****1234`），其余抹去；过短 / 非文本 → fixed。
+    /// 保留尾 4 字符（`****1234`），其余抹去；过短 / 非文本 / 含空白、控制或格式字符 → fixed。
     Last4,
-    /// 邮箱掩码（`a***@example.com`）；非邮箱形 → fixed。
+    /// 邮箱掩码（`a***@example.com`）；非邮箱形 / 含空白、控制或格式字符 → fixed。
     ///
     /// **注意**：域名部分原样保留（视为非敏感，便于按域聚合诊断）。内网 / 机密域名本身属敏感时
     /// （如 `@m-and-a-target.com`）须改用 [`Fixed`](Self::Fixed)。
@@ -387,6 +387,14 @@ fn mask_show(value: RedactValue<'_>) -> String {
     }
 }
 
+// Both partial modes can echo input into unescaped diagnostic output.
+fn has_unsafe_mask_characters(text: &str) -> bool {
+    use icu_properties::{CodePointMapData, props::GeneralCategory};
+    let category = CodePointMapData::<GeneralCategory>::new();
+    text.chars()
+        .any(|c| c.is_whitespace() || c.is_control() || category.get(c) == GeneralCategory::Format)
+}
+
 fn mask_last4(value: RedactValue<'_>) -> String {
     let s = match value {
         RedactValue::Str(s) => s.to_string(),
@@ -401,6 +409,9 @@ fn mask_last4(value: RedactValue<'_>) -> String {
             return REDACTED_PLACEHOLDER.to_string();
         }
     };
+    if has_unsafe_mask_characters(&s) {
+        return REDACTED_PLACEHOLDER.to_string();
+    }
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= 4 {
         // 过短 ⇒ 保留尾 4 即泄全部，fail-closed 全脱。
@@ -425,12 +436,7 @@ fn mask_email(value: RedactValue<'_>) -> String {
             return REDACTED_PLACEHOLDER.to_string();
         }
     };
-    use icu_properties::{CodePointMapData, props::GeneralCategory};
-    let category = CodePointMapData::<GeneralCategory>::new();
-    if s.chars()
-        .any(|c| c.is_whitespace() || c.is_control() || category.get(c) == GeneralCategory::Format)
-    {
-        // reason: untrusted email-shaped text must not carry whitespace/control tails into logs.
+    if has_unsafe_mask_characters(&s) {
         return REDACTED_PLACEHOLDER.to_string();
     }
     // 域名部分原样保留（视为非敏感，见 RedactionMode::EmailMask 文档）；local 仅留首字符。

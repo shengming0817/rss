@@ -1,4 +1,5 @@
-//! F1.3: exercise the real libraries in a process with an observing allocator.
+//! F1.3: Unix-only process carrier for the independent allocator probe.
+#![cfg(unix)]
 use std::{path::Path, time::Duration};
 
 #[path = "support/process.rs"]

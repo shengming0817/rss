@@ -113,3 +113,40 @@ fn derive_forwards_scope_to_the_runtime_policy() {
         "DerivedMixed { visible: \"ok\", secret: <redacted>, card: <redacted>, email: <redacted> }"
     );
 }
+
+#[derive(rss_redact::Redact)]
+struct Phone {
+    #[redact(sensitivity = pii_phone)]
+    value: String,
+}
+
+#[test]
+fn partial_masks_reject_log_control_characters_before_echoing_input() {
+    for input in [
+        "12345\u{1b}[2J",
+        "12345\r\n67",
+        "12345\u{85}678",
+        "12345\u{202e}678",
+        "12345\u{2066}678",
+        "12345\u{200b}678",
+        "12345 678",
+        "12345\t678",
+        "\u{202e}12345678",
+    ] {
+        let value = Phone {
+            value: input.into(),
+        };
+        let expected = "Phone { value: <redacted> }";
+        assert_eq!(format!("{value:?}"), expected, "input {input:?}");
+        assert_eq!(rss_redact::safe(&value, RedactScope::ServerLog), expected);
+    }
+    for (input, tail) in [("12345678", "5678"), ("甲乙丙丁戊己", "丙丁戊己")] {
+        let value = Phone {
+            value: input.into(),
+        };
+        assert_eq!(
+            format!("{value:?}"),
+            format!("Phone {{ value: ****{tail} }}")
+        );
+    }
+}

@@ -39,7 +39,6 @@ pub fn run(command: &mut Command) -> io::Result<ExitStatus> {
     watchdog.0.wait()
 }
 
-#[cfg(unix)]
 #[test]
 fn parent_exit_and_timeout_release_descendant_handles() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{BufRead, Read};
