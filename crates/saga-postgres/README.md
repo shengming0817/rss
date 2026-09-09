@@ -14,7 +14,11 @@ All three component tables must remain permanent (LOGGED). Admission checks the 
 all SET ROLE reachable roles, including their inherited table/column privileges, schema CREATE,
 ownership and dangerous role attributes. A NOINHERIT membership does not hide reachable write
 authority. All catalog checks use one acquired connection under the constructor deadline.
-Tables ENABLE and FORCE RLS, functions have fixed search paths, and PUBLIC privileges are revoked.
+Admission rejects PUBLIC schema/table/column privileges and table rewrite rules. Each table must
+have exactly its canonical `tenant` policy, including command, roles, permissiveness and predicates.
+Function identity, arguments, return type, body and execution attributes must match the bundled
+migration; extra overloads cannot replace missing routines. Tables ENABLE and FORCE RLS, functions
+have fixed search paths, and PUBLIC function privileges are revoked.
 
 The application owns role provisioning, TLS configuration, migration execution and business tables.
 The tenant setting isolates queries inside trusted application code; it does not authenticate a

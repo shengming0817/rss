@@ -88,6 +88,7 @@ pub(super) async fn admission_drift(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    admission_contract::drift(pool, owner, control).await?;
     reachable_and_logged(pool, owner, control).await?;
     for (break_sql, restore_sql) in [
         (
