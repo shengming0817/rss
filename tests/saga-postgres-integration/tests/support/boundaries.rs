@@ -156,13 +156,13 @@ async fn logged_tables(
         let incoming: Vec<(String, String)> = sqlx::query_as("SELECT format('ALTER TABLE %s DROP CONSTRAINT %I',conrelid::regclass,conname), format('ALTER TABLE %s ADD CONSTRAINT %I %s',conrelid::regclass,conname,pg_get_constraintdef(oid)) FROM pg_constraint WHERE contype='f' AND confrelid=to_regclass($1)")
             .bind(format!("rss_saga.{table}")).fetch_all(owner).await?;
         for (detach, _) in &incoming {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(detach))
+            sqlx::raw_sql(sqlx::AssertSqlSafe(detach.as_str()))
                 .execute(owner)
                 .await?;
         }
         let result = single_unlogged(pool, owner, control, table).await;
         for (_, restore) in &incoming {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(restore))
+            sqlx::raw_sql(sqlx::AssertSqlSafe(restore.as_str()))
                 .execute(owner)
                 .await?;
         }
