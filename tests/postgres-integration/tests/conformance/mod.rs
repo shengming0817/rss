@@ -11,7 +11,9 @@ use rss_transactional_messaging::{
 };
 use rss_transactional_messaging_postgres::*;
 use rss_transactional_messaging_testkit::{
-    ConformanceError, inbox::InboxDriver, localtx::LocalTxDriver,
+    ConformanceError,
+    inbox::{InboxDriver, StaleReleaseEvidence},
+    localtx::LocalTxDriver,
 };
 use std::{
     sync::{
@@ -82,22 +84,62 @@ impl Harness {
             .bind(id).execute(&self.owner).await.map_err(port)?;
         Ok(())
     }
+    async fn acquire(
+        &self,
+        message: &MessageEnvelope<Vec<u8>>,
+    ) -> Result<PgInboxClaim, MessagingError> {
+        match self
+            .inbox()
+            .claim(binding(message).identity(), deadline())
+            .await?
+        {
+            IdempotencyDisposition::Acquired(claim) => Ok(claim),
+            _ => Err(port(std::io::Error::other("expected fresh inbox claim"))),
+        }
+    }
+    async fn terminal(
+        &self,
+        message: &MessageEnvelope<Vec<u8>>,
+    ) -> Result<TerminalReceipt, MessagingError> {
+        match self
+            .inbox()
+            .claim(binding(message).identity(), deadline())
+            .await?
+        {
+            IdempotencyDisposition::Terminal(receipt) => Ok(receipt),
+            _ => Err(port(std::io::Error::other("expected durable terminal"))),
+        }
+    }
+    async fn commit_claim(
+        &self,
+        claim: &PgInboxClaim,
+        message: &MessageEnvelope<Vec<u8>>,
+    ) -> Result<(), MessagingError> {
+        let consumer = PgConsumerTx::receipt_only(
+            self.runtime.clone(),
+            Effect(TerminalDisposition::Succeeded),
+        );
+        let result = consumer
+            .execute(
+                claim,
+                message,
+                binding(message).receipt_intent(),
+                deadline(),
+            )
+            .await;
+        if result.status() != rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed {
+            return Err(port(std::io::Error::other("expected real commit")));
+        }
+        Ok(())
+    }
     async fn commit_effect(&self) -> Result<(), MessagingError> {
         let message = message(&self.id());
-        let binding = binding(&message);
-        if let IdempotencyDisposition::Acquired(claim) =
-            self.inbox().claim(binding.identity(), deadline()).await?
+        if let IdempotencyDisposition::Acquired(claim) = self
+            .inbox()
+            .claim(binding(&message).identity(), deadline())
+            .await?
         {
-            let consumer = PgConsumerTx::receipt_only(
-                self.runtime.clone(),
-                Effect(TerminalDisposition::Succeeded),
-            );
-            let result = consumer
-                .execute(&claim, &message, binding.receipt_intent(), deadline())
-                .await;
-            if result.status() != rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed {
-                return Err(port(std::io::Error::other("expected real commit")));
-            }
+            self.commit_claim(&claim, &message).await?;
         }
         Ok(())
     }
@@ -191,6 +233,74 @@ impl LocalTxDriver for Harness {
     }
 }
 impl InboxDriver for Harness {
+    async fn cross_tenant_completion(&self) -> Result<[TerminalReceipt; 2], ConformanceError> {
+        let a = message(&self.id());
+        let meta = a.metadata();
+        let b = MessageEnvelope::new(
+            a.id().clone(),
+            MessageMetadata::new(
+                AuthoredMessageMetadata::new(
+                    rss_request_context::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                        .map_err(|e| conformance(port(e)))?,
+                    meta.occurred_at(),
+                    meta.domain().clone(),
+                    meta.route().clone(),
+                    meta.contract().clone(),
+                ),
+                MessageMetadataExtensions::default(),
+            ),
+            a.payload().clone(),
+        );
+        for msg in [&a, &b] {
+            let claim = self.acquire(msg).await.map_err(conformance)?;
+            self.commit_claim(&claim, msg).await.map_err(conformance)?;
+        }
+        Ok([
+            self.terminal(&a).await.map_err(conformance)?,
+            self.terminal(&b).await.map_err(conformance)?,
+        ])
+    }
+    async fn stale_release(&self) -> Result<[StaleReleaseEvidence; 2], ConformanceError> {
+        let mut evidence = Vec::new();
+        for after_terminal in [false, true] {
+            let message = message(&format!("{}-stale-{after_terminal}", self.id()));
+            let old = self.acquire(&message).await.map_err(conformance)?;
+            self.expire(message.id().as_str())
+                .await
+                .map_err(conformance)?;
+            let successor = self.acquire(&message).await.map_err(conformance)?;
+            let expected = TerminalReceipt::from_durable(
+                binding(&message).identity().clone(),
+                MessageFingerprint::of(&message),
+                TerminalDisposition::Succeeded,
+            );
+            if after_terminal {
+                self.commit_claim(&successor, &message)
+                    .await
+                    .map_err(conformance)?;
+            }
+            let release_result = self
+                .inbox()
+                .release(old, deadline())
+                .await
+                .map_err(|e| e.kind());
+            if !after_terminal {
+                self.commit_claim(&successor, &message)
+                    .await
+                    .map_err(conformance)?;
+            }
+            let actual = self.terminal(&message).await.map_err(conformance)?;
+            evidence.push(StaleReleaseEvidence {
+                release_result,
+                expected,
+                actual,
+            });
+        }
+        evidence
+            .try_into()
+            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))
+    }
+
     type Claim = PgInboxClaim;
     fn reset(&self) {
         self.reset_case();

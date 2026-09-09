@@ -9,8 +9,8 @@ pub(super) use ingress::{actual_state_redelivery, permanent_inputs};
 mod regressions;
 use super::*;
 pub(super) use regressions::{
-    authority_rollback, catalog_drift, closed_catalog, delayed_publication_read, immutable_facts,
-    late_controls,
+    authority_rollback, catalog_drift, closed_catalog, compose_replay_after_advance,
+    delayed_publication_read, immutable_facts, late_controls,
 };
 use rss_transactional_messaging_postgres::PgTransactionFault;
 pub(super) async fn lifecycle(f: &Fixture) -> anyhow::Result<()> {

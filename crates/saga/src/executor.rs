@@ -1,11 +1,13 @@
 //! One bounded driver for both new execution and durable recovery.
 //! ref: oxidecomputer/steno src/saga_exec.rs@main
+//! ref: tokio-rs/tokio tokio/src/macros/select.rs@tokio-1.52.3
 use crate::action::Registered;
 use crate::{
     Control, Definition, EffectContext, EffectOutcome, Error, Event, EventKind, Lease, Mutation,
     Phase, ReceiptContext, ReceiptProtection, Registry, SagaReceiptProtector, Scope, Snapshot,
     Status, Store, Timer,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Why a bounded invocation stopped after acknowledged durable progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,12 +181,17 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             .await?;
         // Bound the size of the public future when a provider has large native async futures.
         // Two allocations per invocation also keep debug builds within ordinary worker stacks.
+        let commit_inflight = AtomicBool::new(false);
         let renewal = Box::pin(self.renew_until_done(&lease, control));
-        let work = Box::pin(self.recover(&lease, resume, budget, control));
+        let work = Box::pin(self.recover(&lease, resume, budget, control, &commit_inflight));
         let result = tokio::select! {
             biased;
             work = work => work,
-            renewal = renewal => Err(renewal),
+            renewal = renewal => Err(if commit_inflight.load(Ordering::SeqCst) {
+                renewal.into_commit_unknown()
+            } else {
+                renewal
+            }),
         };
         // Unknown/cancelled writes leave authority to expire: another write cannot prove settlement.
         if !matches!(
@@ -218,6 +225,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         resume: Option<u64>,
         budget: u32,
         control: &Control<'_, T>,
+        commit_inflight: &AtomicBool,
     ) -> Result<Report, Error> {
         let mut snapshot = control.run(self.store.snapshot(lease, control)).await?;
         let entry = self.registry.resolve(snapshot.definition())?;
@@ -240,14 +248,18 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 kind: EventKind::Resume,
                 receipt: None,
             };
-            snapshot = self.commit(lease, snapshot, event, control).await?;
+            snapshot = self
+                .commit(lease, snapshot, event, control, commit_inflight)
+                .await?;
         }
         for advances in 0..budget {
             control.check()?;
             if snapshot.status().is_terminal() || snapshot.status() == Status::CompensationFailed {
                 return Ok(report(lease.scope(), &snapshot, advances));
             }
-            snapshot = self.advance(lease, snapshot, &entry, control).await?;
+            snapshot = self
+                .advance(lease, snapshot, &entry, control, commit_inflight)
+                .await?;
         }
         Ok(report(lease.scope(), &snapshot, budget))
     }
@@ -327,12 +339,18 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         snapshot: Snapshot,
         event: Event,
         control: &Control<'_, T>,
+        commit_inflight: &AtomicBool,
     ) -> Result<Snapshot, Error> {
         let mutation = Mutation::new(&snapshot, event.clone())?;
-        control
+        // Cancellation by the sibling renewal future must retain the pending write fact.
+        // Clear only after this await returns; a dropped work future leaves it set.
+        commit_inflight.store(true, Ordering::SeqCst);
+        let result = control
             .run(self.store.commit(lease, mutation, control))
             .await
-            .map_err(Error::uncertain)?;
+            .map_err(Error::uncertain);
+        commit_inflight.store(false, Ordering::SeqCst);
+        result?;
         snapshot.apply(event)
     }
     async fn advance<T: Timer>(
@@ -341,6 +359,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         mut snapshot: Snapshot,
         entry: &Registered,
         control: &Control<'_, T>,
+        commit_inflight: &AtomicBool,
     ) -> Result<Snapshot, Error> {
         let recovery = snapshot.progress().pending.is_some();
         let intent = if let Some(event) = snapshot.progress().pending.clone() {
@@ -371,7 +390,9 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                         kind: EventKind::Abort,
                         receipt: None,
                     };
-                    return self.commit(lease, snapshot, event, control).await;
+                    return self
+                        .commit(lease, snapshot, event, control, commit_inflight)
+                        .await;
                 }
                 (
                     step,
@@ -388,7 +409,9 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 kind,
                 receipt: None,
             };
-            snapshot = self.commit(lease, snapshot, event.clone(), control).await?;
+            snapshot = self
+                .commit(lease, snapshot, event.clone(), control, commit_inflight)
+                .await?;
             event
         };
         let event = if intent.kind == EventKind::ForwardIntent {
@@ -398,7 +421,8 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             self.compensate(lease.scope(), &snapshot, entry, &intent, recovery, control)
                 .await?
         };
-        self.commit(lease, snapshot, event, control).await
+        self.commit(lease, snapshot, event, control, commit_inflight)
+            .await
     }
     async fn forward<T: Timer>(
         &self,

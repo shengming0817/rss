@@ -3,14 +3,23 @@
 use rss_request_context::ExecutionTimer;
 use std::future::Future;
 
-use rss_transactional_messaging::error::MessagingError;
+use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::inbox::{IdempotencyDisposition, LeaseStatus};
 use rss_transactional_messaging::policy::ExecutionBudget;
+use rss_transactional_messaging::transaction::{TerminalDisposition, TerminalReceipt};
 
 use crate::{ConformanceError, suite_deadline, within_budget};
 
 /// Provider-owned inbox scenarios expressed through core dispositions.
 pub trait InboxDriver: Send + Sync {
+    /// Complete the same message/group/contract independently in two tenants.
+    fn cross_tenant_completion(
+        &self,
+    ) -> impl Future<Output = Result<[TerminalReceipt; 2], ConformanceError>>;
+    /// Release an old claim before successor commit, then in a separate scenario after terminal.
+    fn stale_release(
+        &self,
+    ) -> impl Future<Output = Result<[StaleReleaseEvidence; 2], ConformanceError>>;
     /// Provider claim capability.
     type Claim: Send + Sync;
 
@@ -46,6 +55,16 @@ pub trait InboxDriver: Send + Sync {
     fn stale_lease(&self) -> impl Future<Output = Result<LeaseStatus, MessagingError>>;
 }
 
+/// Actual terminal readback after an old claim tried to release successor authority.
+pub struct StaleReleaseEvidence {
+    /// Outcome of releasing the old claim.
+    pub release_result: Result<(), MessagingErrorKind>,
+    /// Receipt expected from the successor's committed input and disposition.
+    pub expected: TerminalReceipt,
+    /// Receipt read back after the stale operation and successor commit.
+    pub actual: TerminalReceipt,
+}
+
 /// Run the provider-neutral inbox conformance suite.
 pub async fn run_inbox_conformance<D: InboxDriver>(
     driver: &D,
@@ -53,6 +72,50 @@ pub async fn run_inbox_conformance<D: InboxDriver>(
     budget: ExecutionBudget,
 ) -> Result<(), ConformanceError> {
     let deadline = suite_deadline(timer, budget)?;
+    driver.reset();
+    let [a, b] = within_budget(
+        timer,
+        deadline,
+        "inbox.tenants.budget",
+        driver.cross_tenant_completion(),
+    )
+    .await??;
+    if a.consumer().tenant_id() == b.consumer().tenant_id()
+        || a.message_id() != b.message_id()
+        || a.consumer().group() != b.consumer().group()
+        || a.consumer().contract() != b.consumer().contract()
+        || a.disposition() != TerminalDisposition::Succeeded
+        || b.disposition() != TerminalDisposition::Succeeded
+    {
+        return Err(ConformanceError::mismatch(
+            "inbox.tenants.terminal",
+            "independent-success",
+            "incorrect-terminal",
+        ));
+    }
+    driver.reset();
+    for evidence in within_budget(
+        timer,
+        deadline,
+        "inbox.stale-release.budget",
+        driver.stale_release(),
+    )
+    .await??
+    {
+        if evidence.release_result != Err(MessagingErrorKind::OwnershipLost)
+            || !evidence.actual.matches(
+                evidence.expected.consumer(),
+                evidence.expected.fingerprint(),
+            )
+            || evidence.actual.disposition() != evidence.expected.disposition()
+        {
+            return Err(ConformanceError::mismatch(
+                "inbox.stale-release.terminal",
+                "unchanged-successor",
+                "incorrect-terminal",
+            ));
+        }
+    }
     driver.reset();
     expect_disposition(
         "inbox.claim.first",

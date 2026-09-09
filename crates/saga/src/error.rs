@@ -138,6 +138,10 @@ impl Error {
     pub fn diagnostic(&self) -> Option<&Diagnostic> {
         self.diagnostic.as_deref()
     }
+    pub(crate) fn into_commit_unknown(mut self) -> Self {
+        self.kind = ErrorKind::CommitUnknown;
+        self
+    }
     /// Conservatively classify interruption around a potentially mutating operation.
     pub fn uncertain(mut self) -> Self {
         if matches!(self.kind, ErrorKind::Cancelled | ErrorKind::Deadline) {

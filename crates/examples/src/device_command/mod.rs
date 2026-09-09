@@ -134,6 +134,7 @@ async fn scenario(
     s: Scope,
 ) -> anyhow::Result<()> {
     let coordinate = Coordinate::new(2, 3)?;
+    committed(compose::bootstrap(runtime, outbox.clone(), s, coordinate, budget()?).await)?;
     let command = committed(
         compose::enqueue(
             runtime,

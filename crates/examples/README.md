@@ -142,3 +142,8 @@ Both also run in the default scenario selection. The artifact command requires a
 candidate revision and records archive digests; compilation alone is not writer behavior evidence.
 The PG adapter still enables its existing core producer/consumer features; a narrow writer API does
 not claim that delivery types have been removed from the adapter's dependency graph.
+
+Command composition explicitly separates `bootstrap` from `enqueue`. Bootstrap initializes device
+authority once; enqueue only queues or exactly replays the original spec/message. After authority
+advances, an exact replay returns the original command at its current durable state, without adding
+a command or outbox row. A new command with the old coordinate remains fenced.

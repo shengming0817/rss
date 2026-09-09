@@ -65,7 +65,10 @@ AMQP implements these transport drivers against RabbitMQ. PostgreSQL instead imp
 outbox/inbox/transaction suites against PostgreSQL. The outbox runner verifies append identity,
 partition and lease rules, Retry/reclaim, and reclaim after publication without settlement;
 it does not require a provider to implement or simulate publication. Its `ReclaimEvidence`
-contains the observed claim identities and durable disposition. Retry, DeadLetter and Published
+contains the observed claim identities, original settlement and final successor disposition.
+The expired-claim scenario returns `StaleSettlementEvidence`: the old settlement must fail and
+the successor must still reach Published. Retry uses the existing scenario and also completes
+the successor; providers do not clone move-only claims for this proof. Retry, DeadLetter and Published
 transitions retain independent real-database proofs.
 
 The old OutboxDriver publication scenarios and observation getters have been removed. Callers
@@ -77,3 +80,15 @@ Budget failures retain the corresponding `.budget` stage.
 
 `FakeClock` implements the canonical `rss_request_context::Clock` and `ExecutionTimer`.
 `advance` returns an error if the new instant cannot be represented and leaves time unchanged.
+
+## Tenant identity and stale release
+
+Inbox and Outbox drivers must implement `cross_tenant_completion` for two different tenants with
+the same message ID. Inbox also keeps group and contract equal. Evidence comes from final stored
+receipts/dispositions, not the requested operation or a lease-status observation. Inbox `stale_release`
+returns both pre-commit and post-terminal scenarios, comparing the full successor identity,
+fingerprint and disposition after the old capability is rejected. These are required driver methods.
+
+Memory outbox keys all identities by tenant and message ID. Every claim carries a fresh monotonic
+attempt; Retry and `fence_claims` invalidate the previous one. Fencing preserves pending message
+facts and terminal heads. Attempt exhaustion fails closed without reusing an identity.

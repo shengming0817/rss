@@ -177,7 +177,8 @@ pub async fn verify(
         .await?;
     let store = PgStore::new(pool.clone(), control).await?;
     registration_ack(&proxy, &store, &pool, direct, d, control).await?;
-    completion(&proxy, &store, direct, owner, d, control).await?;
+    completion(&proxy, &store, direct, owner, d, control, false).await?;
+    completion(&proxy, &store, direct, owner, d, control, true).await?;
     pending(&proxy, &store, direct, owner, d, control).await?;
     aborted_commit(&proxy, &store, direct, owner, d, control).await?;
     assert_eq!(store.close(control).await, CloseOutcome::Drained);
@@ -241,6 +242,7 @@ async fn completion(
     owner: &PgPool,
     d: &Definition,
     control: &Control<'_, Clock>,
+    interrupt_renewal: bool,
 ) -> anyhow::Result<()> {
     let s = scope(TENANT)?;
     let effects = Arc::new(Effects::default());
@@ -249,12 +251,15 @@ async fn completion(
         armed: std::sync::atomic::AtomicBool::new(true),
         arm: proxy.arm.clone(),
         when: EventKind::ForwardApplied,
+        interrupt_renewal,
+        committed: tokio::sync::Notify::new(),
     };
     let executor = Executor::new(
         faulty,
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
-    );
+    )
+    .with_lease_policy(LeasePolicy::new(Duration::from_secs(6))?);
     // This proves lost COMMIT acknowledgement, not sub-second lease scheduling under load.
     executor.register(s, d, control).await?;
     assert_kind(executor.run(s, 30, control).await, ErrorKind::CommitUnknown);

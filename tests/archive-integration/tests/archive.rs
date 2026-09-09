@@ -243,7 +243,8 @@ async fn run() -> anyhow::Result<()> {
             Retention::new(172800, 604800)?,
             Hold::Release,
         ),
-        deadline(),
+        &Timer::new(),
+        Timer::new().cutoff(),
     )
     .await?;
     let clock = Timer::new();
@@ -376,7 +377,8 @@ async fn request(id: DeadLetterId, version: i64, hold: Hold) -> anyhow::Result<A
             Retention::new(172800, 604800)?,
             hold,
         ),
-        deadline(),
+        &Timer::new(),
+        Timer::new().cutoff(),
     )
     .await?)
 }
@@ -650,7 +652,8 @@ async fn fault_matrix(
             Retention::new(1, 1)?,
             Hold::Release,
         ),
-        deadline(),
+        &Timer::new(),
+        Timer::new().cutoff(),
     )
     .await?;
     assert_eq!(
@@ -672,7 +675,8 @@ async fn fault_matrix(
             Retention::new(172800, 604800)?,
             Hold::Release,
         ),
-        deadline(),
+        &Timer::new(),
+        Timer::new().cutoff(),
     )
     .await?;
     assert!(matches!(

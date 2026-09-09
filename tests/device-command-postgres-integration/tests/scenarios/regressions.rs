@@ -295,3 +295,108 @@ pub(crate) async fn closed_catalog(f: &Fixture) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Replay the public composition entry after authority advances, including an unknown acknowledgement.
+pub(crate) async fn compose_replay_after_advance(f: &mut Fixture) -> anyhow::Result<()> {
+    for (name, device, unknown) in [
+        (
+            "compose-confirmed",
+            "550e8400-e29b-41d4-a716-446655440031",
+            false,
+        ),
+        (
+            "compose-unknown",
+            "550e8400-e29b-41d4-a716-446655440032",
+            true,
+        ),
+    ] {
+        compose_replay_case(f, name, device, unknown).await?;
+    }
+    Ok(())
+}
+async fn compose_replay_case(
+    f: &mut Fixture,
+    name: &str,
+    device: &str,
+    unknown: bool,
+) -> anyhow::Result<()> {
+    use rss_examples::device_command::compose;
+    let s = Scope::new(TenantId::parse(TENANT)?, DeviceId::parse(device)?);
+    let c = Coordinate::new(1, 1)?;
+    committed(compose::bootstrap(&f.runtime, f.outbox.clone(), s, c, budget()?).await)?;
+    if unknown {
+        f.runtime
+            .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    }
+    let attempt = compose::enqueue(
+        &f.runtime,
+        f.outbox.clone(),
+        spec(name, s, c)?,
+        message(name, s.tenant())?,
+        budget()?,
+    )
+    .await;
+    assert_eq!(
+        status(attempt),
+        if unknown { "unknown" } else { "committed" }
+    );
+    if unknown {
+        f.runtime.close().await;
+        let (runtime, store, outbox) = stores(f.config.clone()).await?;
+        f.runtime = runtime;
+        f.store = store;
+        f.outbox = outbox;
+    }
+    assert_compose_replay(f, name, s, c).await
+}
+async fn assert_compose_replay(
+    f: &Fixture,
+    name: &str,
+    s: Scope,
+    c: Coordinate,
+) -> anyhow::Result<()> {
+    use rss_examples::device_command::compose;
+    let store = f.store.clone();
+    let next = Coordinate::new(2, 2)?;
+    committed(
+        f.runtime
+            .local_tx(s.tenant(), budget()?, move |tx| {
+                Box::pin(async move { store.advance(tx, s, c, next).await })
+            })
+            .await,
+    )?;
+    let expected = f
+        .load(name, s)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing original command"))?;
+    let replay = committed(
+        compose::enqueue(
+            &f.runtime,
+            f.outbox.clone(),
+            spec(name, s, c)?,
+            message(name, s.tenant())?,
+            budget()?,
+        )
+        .await,
+    )?;
+    assert_eq!(replay, expected);
+    assert_eq!(f.count("commands", name).await?, 1);
+    assert_eq!(f.count("outbox", &format!("dispatch.{name}")).await?, 1);
+    let fresh = format!("{name}-stale");
+    let denied = compose::enqueue(
+        &f.runtime,
+        f.outbox.clone(),
+        spec(&fresh, s, c)?,
+        message(&fresh, s.tenant())?,
+        budget()?,
+    )
+    .await;
+    assert_eq!(
+        denied
+            .fold(|_| None, Some, Some, Some, Some, Some)
+            .map(|e| e.kind()),
+        Some(rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost)
+    );
+    assert_eq!(f.count("commands", &fresh).await?, 0);
+    Ok(())
+}

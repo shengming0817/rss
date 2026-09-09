@@ -1,6 +1,8 @@
 use super::*;
 use rss_transactional_messaging::outbox::*;
-use rss_transactional_messaging_testkit::outbox::{OutboxDriver, ReclaimEvidence};
+use rss_transactional_messaging_testkit::outbox::{
+    OutboxDriver, ReclaimEvidence, StaleSettlementEvidence, TenantSettlement,
+};
 use std::num::NonZeroUsize;
 
 pub(super) struct Driver {
@@ -25,13 +27,25 @@ impl Driver {
         )
     }
     fn envelope(&self, suffix: &str, payload: Vec<u8>) -> MessageEnvelope<Vec<u8>> {
+        self.envelope_in_tenant(
+            suffix,
+            payload,
+            message(&self.h.id()).metadata().tenant_id(),
+        )
+    }
+    fn envelope_in_tenant(
+        &self,
+        suffix: &str,
+        payload: Vec<u8>,
+        tenant: rss_request_context::TenantId,
+    ) -> MessageEnvelope<Vec<u8>> {
         let template = message(&format!("{}{suffix}", self.h.id()));
         let m = template.metadata();
         MessageEnvelope::new(
             template.id().clone(),
             MessageMetadata::new(
                 AuthoredMessageMetadata::new(
-                    m.tenant_id(),
+                    tenant,
                     m.occurred_at(),
                     MessagingDomain::parse(&self.h.id()).expect("domain"),
                     m.route().clone(),
@@ -52,7 +66,13 @@ impl Driver {
         suffix: &str,
         payload: Vec<u8>,
     ) -> Result<AppendOutcome, MessagingError> {
-        let message = PendingMessage::new(self.envelope(suffix, payload));
+        self.append_message(PendingMessage::new(self.envelope(suffix, payload)))
+            .await
+    }
+    async fn append_message(
+        &self,
+        message: PendingMessage<Vec<u8>>,
+    ) -> Result<AppendOutcome, MessagingError> {
         let tenant = message.envelope().metadata().tenant_id();
         let store = self.store();
         self.h
@@ -178,39 +198,83 @@ impl Driver {
         assert_eq!(count, 1);
         Ok(())
     }
+    async fn disposition(
+        &self,
+        tenant: rss_request_context::TenantId,
+        id: &MessageId,
+    ) -> Result<OutboxDisposition, MessagingError> {
+        let status: String = sqlx::query_scalar("SELECT status FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND message_id=$3")
+            .bind(tenant.to_string()).bind(self.h.id()).bind(id.as_str()).fetch_one(&self.h.owner).await.map_err(port)?;
+        match status.as_str() {
+            "published" => Ok(OutboxDisposition::Published),
+            "pending" => Ok(OutboxDisposition::Retry),
+            "dead_letter" => Ok(OutboxDisposition::DeadLetter),
+            _ => Err(port(std::io::Error::other("outbox not settled"))),
+        }
+    }
     async fn settle(
         &self,
         claim: PgOutboxClaim,
         settlement: OutboxSettlement<()>,
-    ) -> Result<(), MessagingError> {
-        let disposition = settlement.disposition();
+    ) -> Result<OutboxDisposition, MessagingError> {
+        let envelope = PgOutboxStore::<()>::message(&claim).envelope();
+        let tenant = envelope.metadata().tenant_id();
+        let id = envelope.id().clone();
         self.store().settle(claim, settlement, deadline()).await?;
-        let status: String = sqlx::query_scalar(
-            "SELECT status FROM rss_transactional_messaging.outbox WHERE message_id=$1",
-        )
-        .bind(self.h.id())
-        .fetch_one(&self.h.owner)
-        .await
-        .map_err(port)?;
-        assert_eq!(
-            status,
-            match disposition {
-                OutboxDisposition::Published => "published",
-                OutboxDisposition::Retry => "pending",
-                OutboxDisposition::DeadLetter => "dead_letter",
-            }
-        );
-        Ok(())
+        self.disposition(tenant, &id).await
     }
 }
 impl OutboxDriver for Driver {
+    async fn cross_tenant_completion(&self) -> Result<[TenantSettlement; 2], ConformanceError> {
+        let a = message(&self.h.id()).metadata().tenant_id();
+        let b = rss_request_context::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
+        for tenant in [a, b] {
+            self.append_message(PendingMessage::new(self.envelope_in_tenant(
+                "",
+                vec![1, 2, 3],
+                tenant,
+            )))
+            .await
+            .map_err(conformance)?;
+        }
+        // The provider may return a partial batch while paging tenants. Complete each identity.
+        for _ in [a, b] {
+            let claim = self.claim().await.map_err(conformance)?;
+            self.settle(claim, OutboxSettlement::Published(()))
+                .await
+                .map_err(conformance)?;
+        }
+        let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT tenant_id::text,message_id,status FROM rss_transactional_messaging.outbox WHERE domain=$1 ORDER BY tenant_id")
+            .bind(self.h.id()).fetch_all(&self.h.owner).await.map_err(|e| conformance(port(e)))?;
+        let evidence = rows
+            .into_iter()
+            .map(|(tenant, id, status)| {
+                Ok(TenantSettlement {
+                    tenant: rss_request_context::TenantId::parse(&tenant)
+                        .map_err(|e| conformance(port(e)))?,
+                    message_id: MessageId::parse(&id).map_err(|e| conformance(port(e)))?,
+                    settlement: if status == "published" {
+                        OutboxDisposition::Published
+                    } else {
+                        OutboxDisposition::Retry
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, ConformanceError>>()?;
+        evidence
+            .try_into()
+            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))
+    }
+
     async fn retry_settlement_reclaims_same_message(
         &self,
     ) -> Result<ReclaimEvidence, ConformanceError> {
         self.append_first().await.map_err(conformance)?;
         let first = self.claim().await.map_err(conformance)?;
         let first_id = PgOutboxStore::<()>::message(&first).envelope().id().clone();
-        self.settle(first, OutboxSettlement::Retry)
+        let settlement = self
+            .settle(first, OutboxSettlement::Retry)
             .await
             .map_err(conformance)?;
         self.retry_ready().await.map_err(conformance)?;
@@ -219,30 +283,45 @@ impl OutboxDriver for Driver {
             .envelope()
             .id()
             .clone();
+        let successor_settlement = self
+            .settle(second, OutboxSettlement::Published(()))
+            .await
+            .map_err(conformance)?;
         Ok(ReclaimEvidence {
             claimed_message_ids: vec![first_id, second_id],
-            settlement: OutboxDisposition::Retry,
+            settlement,
+            successor_settlement,
         })
     }
     async fn reclaim_after_publish_before_settle(
         &self,
-    ) -> Result<ReclaimEvidence, ConformanceError> {
+    ) -> Result<StaleSettlementEvidence, ConformanceError> {
         self.append_first().await.map_err(conformance)?;
         let first = self.claim().await.map_err(conformance)?;
         let first_id = PgOutboxStore::<()>::message(&first).envelope().id().clone();
-        drop(first); // Crash window: no durable settlement has happened.
+        // Keep the old capability to exercise a delayed contender after database lease expiry.
         self.expire().await.map_err(conformance)?;
         let second = self.claim().await.map_err(conformance)?;
         let second_id = PgOutboxStore::<()>::message(&second)
             .envelope()
             .id()
             .clone();
-        self.settle(second, OutboxSettlement::Published(()))
+        let stale_result = self
+            .store()
+            .settle(first, OutboxSettlement::DeadLetter, deadline())
+            .await
+            .map_err(|e| e.kind());
+        let successor_settlement = self
+            .settle(second, OutboxSettlement::Published(()))
             .await
             .map_err(conformance)?;
-        Ok(ReclaimEvidence {
-            claimed_message_ids: vec![first_id, second_id],
-            settlement: OutboxDisposition::Published,
+        Ok(StaleSettlementEvidence {
+            stale_result,
+            reclaim: ReclaimEvidence {
+                claimed_message_ids: vec![first_id, second_id],
+                settlement: successor_settlement,
+                successor_settlement,
+            },
         })
     }
 

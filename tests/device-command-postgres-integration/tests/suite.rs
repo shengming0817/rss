@@ -337,6 +337,7 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
         scenarios::full_outbox_states(&fixture).await?;
         scenarios::authority_pages(&fixture).await?;
         scenarios::composition_boundaries(&fixture).await?;
+        scenarios::compose_replay_after_advance(&mut fixture).await?;
         fixture.runtime.close().await;
         fixture.owner.close().await;
         Ok::<(), anyhow::Error>(())

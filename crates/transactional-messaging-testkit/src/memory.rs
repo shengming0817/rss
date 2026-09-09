@@ -119,6 +119,18 @@ mod producer {
     };
 
     use super::{Arc, Duration, Mutex};
+    use rss_request_context::TenantId;
+
+    fn identity<P>(message: &PendingMessage<P>) -> (TenantId, MessageId) {
+        (
+            message.envelope().metadata().tenant_id(),
+            message.message_id().clone(),
+        )
+    }
+
+    fn attempt_exhausted() -> MessagingError {
+        MessagingError::new(MessagingErrorKind::Invariant, MemoryOutboxError)
+    }
 
     #[derive(Debug, thiserror::Error)]
     #[error("memory outbox rejected a conflicting or stale operation")]
@@ -126,7 +138,7 @@ mod producer {
 
     enum OutboxEntryState {
         Pending,
-        Claimed { epoch: u64 },
+        Claimed { attempt: u64 },
         DeadLetter,
     }
 
@@ -135,10 +147,17 @@ mod producer {
         state: OutboxEntryState,
     }
 
+    impl<P> OutboxEntry<P> {
+        fn owns(&self, claim: &(Arc<PendingMessage<P>>, u64)) -> bool {
+            identity(&self.message) == identity(&claim.0)
+                && matches!(self.state, OutboxEntryState::Claimed { attempt } if attempt == claim.1)
+        }
+    }
+
     struct OutboxState<P> {
         entries: VecDeque<OutboxEntry<P>>,
-        fingerprints: HashMap<String, MessageFingerprint>,
-        epoch: u64,
+        fingerprints: HashMap<(TenantId, MessageId), MessageFingerprint>,
+        next_attempt: u64,
         settlements: Vec<OutboxDisposition>,
     }
 
@@ -147,7 +166,7 @@ mod producer {
             Self {
                 entries: VecDeque::new(),
                 fingerprints: HashMap::new(),
-                epoch: 1,
+                next_attempt: 0,
                 settlements: Vec::new(),
             }
         }
@@ -198,7 +217,11 @@ mod producer {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.epoch = state.epoch.saturating_add(1);
+            for entry in &mut state.entries {
+                if matches!(entry.state, OutboxEntryState::Claimed { .. }) {
+                    entry.state = OutboxEntryState::Pending;
+                }
+            }
         }
 
         /// Resolve a dead-letter partition head so its successor becomes claimable.
@@ -248,7 +271,7 @@ mod producer {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let id = message.message_id().as_str().to_owned();
+            let id = identity(&message);
             if let Some(existing) = state.fingerprints.get(&id) {
                 if *existing == message.fingerprint() {
                     return Ok(AppendOutcome::AlreadyPresent);
@@ -288,8 +311,19 @@ mod producer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut claims = Vec::new();
             let mut seen_partitions = Vec::<PartitionIdentity>::new();
-            let epoch = state.epoch;
-            for entry in &mut state.entries {
+            // Preflight the whole possible batch so exhaustion cannot leave unreturned claims.
+            let maximum = u64::try_from(state.entries.len().min(limit.get()))
+                .map_err(|_| attempt_exhausted())?;
+            state
+                .next_attempt
+                .checked_add(maximum)
+                .ok_or_else(attempt_exhausted)?;
+            let OutboxState {
+                entries,
+                next_attempt,
+                ..
+            } = &mut *state;
+            for entry in entries {
                 let partition = entry.message.partition().cloned();
                 if partition
                     .as_ref()
@@ -305,12 +339,15 @@ mod producer {
                 }
                 let claimable = match entry.state {
                     OutboxEntryState::Pending => true,
-                    OutboxEntryState::Claimed { epoch: claim_epoch } => claim_epoch != epoch,
+                    OutboxEntryState::Claimed { .. } => false,
                     OutboxEntryState::DeadLetter => false,
                 };
                 if claimable {
-                    entry.state = OutboxEntryState::Claimed { epoch };
-                    claims.push((Arc::clone(&entry.message), epoch));
+                    *next_attempt += 1;
+                    entry.state = OutboxEntryState::Claimed {
+                        attempt: *next_attempt,
+                    };
+                    claims.push((Arc::clone(&entry.message), *next_attempt));
                 }
             }
             OutboxClaimBatch::try_from_provider(claims, limit)
@@ -329,11 +366,8 @@ mod producer {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let owned = state.entries.iter().any(|entry| {
-                entry.message.message_id() == claim.0.message_id()
-                    && matches!(entry.state, OutboxEntryState::Claimed { epoch } if epoch == claim.1)
-            });
-            Ok(if claim.1 == state.epoch && owned {
+            let owned = state.entries.iter().any(|entry| entry.owns(claim));
+            Ok(if owned {
                 OutboxLeaseStatus::Held {
                     delivery_remaining: None,
                     remaining: self.budget.lease_ttl(),
@@ -368,17 +402,14 @@ mod producer {
             let position = state
                 .entries
                 .iter()
-                .position(|entry| entry.message.message_id() == claim.0.message_id());
+                .position(|entry| identity(&entry.message) == identity(&claim.0));
             let Some(position) = position else {
                 return Err(MessagingError::new(
                     MessagingErrorKind::OwnershipLost,
                     MemoryOutboxError,
                 ));
             };
-            let owned = matches!(
-                state.entries[position].state,
-                OutboxEntryState::Claimed { epoch } if epoch == claim.1
-            ) && claim.1 == state.epoch;
+            let owned = state.entries[position].owns(&claim);
             if deadline.timeout().is_zero() {
                 if owned {
                     state.entries[position].state = OutboxEntryState::Pending;
@@ -389,12 +420,6 @@ mod producer {
                 ));
             }
             if !owned {
-                if matches!(
-                    state.entries[position].state,
-                    OutboxEntryState::Claimed { epoch } if epoch == claim.1
-                ) {
-                    state.entries[position].state = OutboxEntryState::Pending;
-                }
                 return Err(MessagingError::new(
                     MessagingErrorKind::OwnershipLost,
                     MemoryOutboxError,

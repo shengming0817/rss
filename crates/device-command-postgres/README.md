@@ -103,3 +103,8 @@ ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
 完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。
 
 ref: postgres src/backend/utils/adt/acl.c@REL_16_STABLE
+
+Command composition explicitly separates `bootstrap` from `enqueue`. Bootstrap initializes device
+authority once; enqueue only queues or exactly replays the original spec/message. After authority
+advances, an exact replay returns the original command at its current durable state, without adding
+a command or outbox row. A new command with the old coordinate remains fenced.

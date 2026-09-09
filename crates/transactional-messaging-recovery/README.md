@@ -44,6 +44,11 @@ after unknown commit or failed rollback.
 
 ## Consumer archive lifecycle
 
+`archive::authorize(authorizer, request, clock, cutoff)` independently enforces the absolute
+authorization deadline, including for a product authorizer that never returns. The authorizer
+receives the remaining budget for its own I/O. Timeout or denial yields no authorized request
+and cannot start archive storage or object operations.
+
 `archive` owns canonical archive format v1, exact-request product authorization, independently
 keyed AEAD assembly, and verified/missing proofs. `HotKey` and `ArchiveKey` cannot be interchanged;
 the archive cipher also rejects reuse of the actual HOT key identity. The canonical record includes

@@ -55,6 +55,10 @@ backwards and another failure pauses again. The caller owns authorization for th
 
 The default lease is 30 seconds, actively renewed every 10 seconds while work runs. `LeasePolicy` may select another explicit TTL; it is independent of the total deadline. A crashed worker becomes recoverable after its short lease expires without an administrator changing rows.
 
+If renewal interrupts an outstanding durable commit, the driver returns `CommitUnknown` with
+the original provider diagnostic and leaves the lease to expire. Recovery reads durable state;
+a renewal failure does not prove rollback. Outside a commit, the renewal error keeps its original classification.
+
 A lease fences local writes. It cannot cancel an already issued remote operation. Every action
 must pass its stable idempotency key to its external provider, reject changed content at the same
 key, and implement authoritative probing. This is not a distributed atomic transaction.

@@ -14,7 +14,14 @@ struct Memory(
     Arc<std::sync::atomic::AtomicBool>,
     Arc<std::sync::atomic::AtomicU8>,
     Arc<std::sync::atomic::AtomicUsize>,
+    Arc<RenewalFault>,
 );
+#[derive(Default)]
+struct RenewalFault {
+    point: std::sync::atomic::AtomicU8,
+    entered: tokio::sync::Notify,
+    fenced: std::sync::atomic::AtomicBool,
+}
 impl Store for Memory {
     async fn register<T: Timer>(
         &self,
@@ -64,6 +71,19 @@ impl Store for Memory {
         _: Duration,
         _: &Control<'_, T>,
     ) -> Result<(), Error> {
+        if self.4.point.load(Ordering::SeqCst) != 0 {
+            self.4.entered.notified().await;
+            return Err(Error::provider(
+                if self.4.fenced.load(Ordering::SeqCst) {
+                    ErrorKind::Fenced
+                } else {
+                    ErrorKind::Store
+                },
+                DiagnosticPhase::Operation,
+                Some("08006"),
+                std::io::Error::other("renewal fixture"),
+            ));
+        }
         Ok(())
     }
     async fn release<T: Timer>(&self, _: &Lease, _: &Control<'_, T>) -> Result<(), Error> {
@@ -71,6 +91,10 @@ impl Store for Memory {
         Ok(())
     }
     async fn snapshot<T: Timer>(&self, l: &Lease, _: &Control<'_, T>) -> Result<Snapshot, Error> {
+        if self.4.point.load(Ordering::SeqCst) == 3 {
+            self.4.entered.notify_one();
+            std::future::pending::<()>().await;
+        }
         if self.2.load(Ordering::SeqCst) == 2 {
             return Err(Error::new(ErrorKind::Store));
         }
@@ -90,19 +114,30 @@ impl Store for Memory {
         if self.2.load(Ordering::SeqCst) == 1 {
             std::future::pending::<()>().await;
         }
-        let mut data = self
-            .0
-            .lock()
-            .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
-        let (s, lease) = data
-            .get_mut(&l.scope())
-            .ok_or(Error::new(rss_saga::ErrorKind::Store))?;
-        if lease.token() != l.token() {
-            return Err(Error::new(rss_saga::ErrorKind::Fenced));
+        let applied = m.event().kind == EventKind::ForwardApplied;
+        if applied && self.4.point.load(Ordering::SeqCst) == 1 {
+            self.4.entered.notify_one();
+            std::future::pending::<()>().await;
         }
-        *s = s.apply(m.event().clone())?;
-        if m.event().kind == EventKind::ForwardIntent && self.1.swap(false, Ordering::SeqCst) {
-            return Err(Error::new(ErrorKind::CommitUnknown));
+        {
+            let mut data = self
+                .0
+                .lock()
+                .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
+            let (s, lease) = data
+                .get_mut(&l.scope())
+                .ok_or(Error::new(rss_saga::ErrorKind::Store))?;
+            if lease.token() != l.token() {
+                return Err(Error::new(rss_saga::ErrorKind::Fenced));
+            }
+            *s = s.apply(m.event().clone())?;
+            if m.event().kind == EventKind::ForwardIntent && self.1.swap(false, Ordering::SeqCst) {
+                return Err(Error::new(ErrorKind::CommitUnknown));
+            }
+        }
+        if applied && self.4.point.load(Ordering::SeqCst) == 2 {
+            self.4.entered.notify_one();
+            std::future::pending::<()>().await;
         }
         Ok(())
     }
@@ -618,4 +653,110 @@ impl rss_request_context::ExecutionTimer for ShutdownTimer {
     async fn sleep_until(&self, deadline: rss_request_context::Deadline) {
         tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
     }
+}
+
+#[tokio::test]
+async fn renewal_interrupts_commit_without_losing_settlement() -> anyhow::Result<()> {
+    for point in [1, 2, 3] {
+        for fenced in [false, true] {
+            let d = definition(&["one"])?;
+            let memory = Memory::default();
+            memory.4.point.store(point, Ordering::SeqCst);
+            memory.4.fenced.store(fenced, Ordering::SeqCst);
+            let effects = Arc::new(Effects::default());
+            let e = Executor::new(
+                memory.clone(),
+                protection()?,
+                registry(d.clone(), effects.clone(), false)?,
+            )
+            .with_lease_policy(LeasePolicy::new(Duration::from_millis(30))?);
+            let s = scope()?;
+            let clock = Clock::new();
+            let cancel = CancellationToken::new();
+            let control = Control::new(&clock, Duration::from_secs(5), &cancel);
+            e.register(s, &d, &control).await?;
+            let error = e
+                .run(s, 10, &control)
+                .await
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("missing renewal error"))?;
+            let expected = if point != 3 {
+                ErrorKind::CommitUnknown
+            } else if fenced {
+                ErrorKind::Fenced
+            } else {
+                ErrorKind::Store
+            };
+            assert_eq!(error.kind(), expected);
+            let diagnostic = error
+                .diagnostic()
+                .ok_or_else(|| anyhow::anyhow!("lost diagnostic"))?;
+            assert_eq!(diagnostic.phase(), DiagnosticPhase::Operation);
+            assert_eq!(diagnostic.sqlstate(), Some("08006"));
+            assert_eq!(
+                memory.3.load(Ordering::SeqCst),
+                usize::from(point == 3 && !fenced)
+            );
+            memory.4.point.store(0, Ordering::SeqCst);
+            assert_eq!(e.run(s, 10, &control).await?.status, Status::Succeeded);
+            let calls = effects
+                .calls
+                .lock()
+                .map_err(|_| anyhow::anyhow!("effects lock"))?;
+            assert_eq!(
+                calls.iter().filter(|call| *call == "execute:one").count(),
+                1
+            );
+            assert_eq!(
+                calls.iter().filter(|call| *call == "probe:one").count(),
+                usize::from(point == 1)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn caller_cancellation_preserves_pending_applied_commit() -> anyhow::Result<()> {
+    for point in [1, 2] {
+        let d = definition(&["one"])?;
+        let memory = Memory::default();
+        memory.4.point.store(point, Ordering::SeqCst);
+        let effects = Arc::new(Effects::default());
+        let executor = Executor::new(
+            memory.clone(),
+            protection()?,
+            registry(d.clone(), effects.clone(), false)?,
+        );
+        let s = scope()?;
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(5), &cancel);
+        executor.register(s, &d, &control).await?;
+        let interrupt = async {
+            memory.4.entered.notified().await;
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::join!(executor.run(s, 10, &control), interrupt);
+        assert_eq!(
+            result.err().map(|e| e.kind()),
+            Some(ErrorKind::CommitUnknown)
+        );
+        assert_eq!(memory.3.load(Ordering::SeqCst), 0);
+        memory.4.point.store(0, Ordering::SeqCst);
+        let fresh_cancel = CancellationToken::new();
+        let fresh = Control::new(&clock, Duration::from_secs(5), &fresh_cancel);
+        assert_eq!(executor.run(s, 10, &fresh).await?.status, Status::Succeeded);
+        assert_eq!(
+            effects
+                .calls
+                .lock()
+                .map_err(|_| anyhow::anyhow!("effects lock"))?
+                .iter()
+                .filter(|call| *call == "execute:one")
+                .count(),
+            1
+        );
+    }
+    Ok(())
 }
