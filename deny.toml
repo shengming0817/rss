@@ -5,10 +5,8 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-# advisories 门双轨（issue #1133）：`cargo deny check advisories` 与 `cargo audit` 同查 RustSec、互为独立
-# 第二实现（防御纵深）。二者各有独立 ignore 机制：本 `ignore`（按 feature-resolved 依赖图）vs cargo-audit 的
-# `--ignore`（Makefile 中 cargo-audit 扫 Cargo.lock 全量，会多报 phantom 条目，如 rsa
-# RUSTSEC-2023-0071）。本列表仍只覆盖 feature-resolved dependency graph。
+# advisories 门双轨（issue #1133）：cargo-deny 检查 feature-resolved 图，cargo-audit 检查完整锁图。
+# rsa 已退出 Cargo.lock，旧 advisory 豁免已撤销（#2376）；两个入口均不忽略 advisory。
 ignore = []
 
 [licenses]
@@ -38,11 +36,8 @@ multiple-versions = "warn"     # pre-GA 容忍多版本；趋近 GA 收紧为 de
 wildcards = "deny"             # 禁外部 `*` 版本依赖
 allow-wildcard-paths = true    # 但放行内部 workspace path 依赖（无版本即隐式 `*`，合法）
 deny = [
-  # 供应链 phantom 守卫（issue #1133）：rsa 当前是 phantom Cargo.lock 条目（经 sqlx-mysql，mysql feature 未启用 ⇒
-  # `cargo tree -i rsa --all-features --target all` 为空、不编译进产物），其 RUSTSEC-2023-0071（Marvin Attack、
-  # 无修复版本）在 cargo-audit 侧 `--ignore`。本 ban 是把「phantom 论证」从 Soft
-  # 升 Medium 的**机器守卫**：rsa 一旦进入 feature-resolved 依赖图（如有人启用 mysql feature），`deny check bans`
-  # 即非零退出——强制显式决策（移除本 ban + 修复/重新评估漏洞 + 同步 cargo-audit --ignore）。图外时本 ban 为 no-op。
+  # rsa 已退出锁图；保留 ban 防止重新进入 feature-resolved 图（#1133 / #2376）。
+  # 重新引入须显式复核供应链风险，不恢复已撤销的 cargo-audit 豁免。
   { crate = "rsa" },
   # JWT 验签供应链收敛（issue #1195 / 1109-A1）：oidc adapter 改用纯 RustCrypto（p256/hmac/sha2）做 ES256+HS256
   # 验签后，jsonwebtoken 退出依赖图。本 ban 防重新引入——jsonwebtoken v9 后端 = ring（被迫钉死 =9.3.1），v10 显式

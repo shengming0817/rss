@@ -20,7 +20,10 @@ make ci CI_PART=tests CI_FILTER='package(=amqp-integration) and test(=shared_amq
 providers 之一。consumer 先通过 `cargo fetch --locked` 准备冷 runner 的依赖下载，再运行 offline 证明；
 保留独立 workspace/依赖解析/target，组内串行并使用独立编译缓存，不重新构建工作区。Kafka 独立 API/依赖图证明使用宿主 OpenSSL SDK（Linux 的 pkg-config/libssl-dev、
 macOS 的 Homebrew openssl），避免为 cargo check 重编译 vendored OpenSSL；原工作区归档及真实 TLS 场景仍验证 vendored 构建。
-三个 provider 组最多同时使用三个 runner，组内串行。doctest 使用独立 `cargo test --doc` 命令。
+三个 provider 组最多同时使用三个 runner，组内串行。
+`CI_PART=tests` 只完成归档构建、测试组执行和适用的覆盖率汇总；测试失败仍收集其它组结果。
+doctest 使用独立 `cargo test --doc` 命令，仅由 `CI_PART=all` 或 `CI_PART=docs` 执行；
+`all` 在构建或测试失败后仍执行 doctest，并保留失败状态。
 
 本地产物位于 `.local-ci-runs/current`，被 Git 忽略。普通和插桩构建使用不同 target 子目录与缓存身份。
 执行 job 只运行原 archive；fixture 启动器作为 nextest non-test binary 一并构建、传递，不在执行 runner 重建。
@@ -28,6 +31,11 @@ macOS 的 Homebrew openssl），避免为 cargo check 重编译 vendored OpenSSL
 所有 workflow 用 `python3 hack/ci-pipeline.py --install-toolchain` 从 `rust-toolchain.toml` 读取 channel/profile/components，统一安装并为独立消费目录设置默认工具链；不重复维护版本。
 
 ## fixture 所有权
+
+`tests/fixtures/` 持有跨 package 的共享源码 fixture，是选择器显式声明的全局输入。
+包括 PG recovery / DR 与 Archive 共用的 `message_recovery.rs`；不再从 PG 测试目录跨 package 引用。
+该目录的增、改、删触发全工作区选择及 80% 行覆盖率门禁，原因是 `global-input`；
+普通 package 按 Cargo 反向依赖图选择，未知路径仍保守 full，不维护 fixture 消费者清单。
 
 `testkit` 的 `rss-test-launcher` 启动所选 provider，持有容器，向 nextest 子进程传递临时 0600 描述文件。
 测试名中的 `shared_amqp_` / `shared_kafka_` / `shared_mqtt_` 声明所需共享 provider；

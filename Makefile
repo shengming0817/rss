@@ -37,4 +37,4 @@ _ci-checks:
 
 audit:
 	cargo deny check advisories
-	cargo audit --ignore RUSTSEC-2023-0071
+	cargo audit

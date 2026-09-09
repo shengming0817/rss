@@ -99,6 +99,15 @@ class MakeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(commands, ['semver'])
 
+    def test_audit_runs_both_scanners_without_advisory_exemption(self):
+        result, commands = self.run_make("all", target="audit")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(commands, ['deny check advisories', 'audit'])
+        for failure in ('deny check advisories', 'audit'):
+            with self.subTest(failure=failure):
+                result, _ = self.run_make("all", target="audit", FAIL_COMMAND=failure)
+                self.assertNotEqual(result.returncode, 0)
+
     def test_invalid_part_and_empty_selection(self):
         result, commands = self.run_make("typo")
         self.assertNotEqual(result.returncode, 0)

@@ -2,7 +2,7 @@ use rss_request_context::Deadline;
 mod dr;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
-#[path = "../../postgres-integration/tests/recovery/support.rs"]
+#[path = "../../fixtures/message_recovery.rs"]
 mod support;
 use anyhow::Context;
 use aws_sdk_s3::{

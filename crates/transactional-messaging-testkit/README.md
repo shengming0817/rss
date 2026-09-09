@@ -51,7 +51,7 @@ requiring `Debug`, `Display`, or `source()`.
 
 There are no aliases, re-exports, shims, or fallback paths for the removed APIs.
 
-Licensed under the Apache License, Version 2.0.
+Licensed under the MIT License.
 
 ## Transport and store proof ownership
 
