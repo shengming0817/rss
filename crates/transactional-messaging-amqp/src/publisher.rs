@@ -216,8 +216,9 @@ where
     .await;
 
     match result {
-        Ok(result) => result,
-        Err(_) => Err(PublishPipelineError::Deadline(PublishDeadlineElapsed {
+        // timeout_at may return an immediately ready confirmation at the cutoff.
+        Ok(result) if publish_now() < cutoff => result,
+        Ok(_) | Err(_) => Err(PublishPipelineError::Deadline(PublishDeadlineElapsed {
             phase: PublishPhase::from_u8(phase.load(Ordering::Relaxed)),
         })),
     }
@@ -2110,6 +2111,17 @@ mod publish_deadline_tests {
         .await;
         assert!(result.is_err());
         assert!(super::publish_now().duration_since(started) <= Duration::from_secs(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_confirmation_at_cutoff_is_not_confirmed() {
+        let result = run_publish_pipeline(
+            super::publish_now(),
+            future::ready(Ok::<(), Infallible>(())),
+            |()| future::ready(Ok::<(), Infallible>(())),
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     #[test]
