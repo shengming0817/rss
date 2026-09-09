@@ -24,3 +24,17 @@ identity fixture only tests the port and encoding contract.
 Stored `ProtectionAad` cannot be passed directly to `Aead::open`, and `DerivedAad` has no raw-byte
 constructor. These are encoding/type boundaries, not authentication capabilities. Decrypted plaintext
 remains inside a zeroizing capsule. Public compile-fail tests cover the actual type boundaries.
+
+Blind-index keys take zeroizing ownership before validating their length, so rejected keys are
+cleared too. Transform input copies and every intermediate/final result use `Zeroizing<String>`;
+outputs are sized before writing to prevent reallocation from leaving plaintext copies behind.
+Lowercase preserves Unicode default casing (including Final Sigma), with ICU4X casing properties.
+Borrowed caller inputs remain the caller’s responsibility; the library cannot erase copies made
+before ownership transfer or guarantee register/stack-spill erasure.
+
+`cargo test -p rss-data-protection --test zeroize` runs the independent allocator probe fixture
+against the real public key/index APIs. It inspects initialized tracked buffers before release,
+including spare capacity and reallocation, and calibrates against an ordinary nonzero Vec.
+The fixture alone contains scoped unsafe allocator code; production crates remain unsafe-free.
+Its committed source/lock live under this package’s tests; build artifacts and logs are regenerable
+under `rss-external-check/zeroize-probe`. This T1 evidence is not an artifact/publishing claim.

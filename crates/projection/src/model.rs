@@ -71,10 +71,15 @@ impl BatchLimit {
     }
 }
 /// A single ordered journal, scoped to one tenant. This is not authentication evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SourceScope {
     tenant: TenantId,
     source: String,
+}
+impl std::fmt::Debug for SourceScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SourceScope(<redacted>)")
+    }
 }
 impl SourceScope {
     /// Bind a tenant and validated source name.
@@ -93,11 +98,16 @@ impl SourceScope {
     }
 }
 /// Immutable read-model generation identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ProjectionScope {
     source: SourceScope,
     projection: String,
     generation: String,
+}
+impl std::fmt::Debug for ProjectionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProjectionScope(<redacted>)")
+    }
 }
 impl ProjectionScope {
     /// Bind one projection generation to exactly one source.
@@ -215,12 +225,17 @@ pub enum ApplyOutcome {
 
 /// Fact identity already represented by a caller-prepared generation baseline.
 /// A snapshot producer must retain every processed identity, including filtered facts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BaselineReceipt {
     source: SourceScope,
     position: Position,
     id: String,
     fingerprint: [u8; 32],
+}
+impl std::fmt::Debug for BaselineReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BaselineReceipt(<redacted>)")
+    }
 }
 impl BaselineReceipt {
     /// Hydrate snapshot receipt metadata. Completeness is the snapshot producer's contract.
@@ -267,10 +282,15 @@ impl BaselineReceipt {
 }
 /// Generation start together with the complete deduplication state of its baseline.
 /// Private fields prevent a positioned start being supplied without an explicit receipt set.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GenerationStart {
     after: Option<Position>,
     receipts: Vec<BaselineReceipt>,
+}
+impl std::fmt::Debug for GenerationStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GenerationStart(<redacted>)")
+    }
 }
 impl GenerationStart {
     /// Begin before the source's first event with an empty read model.

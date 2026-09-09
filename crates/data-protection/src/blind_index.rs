@@ -17,6 +17,7 @@ use hmac::Hmac;
 use hmac::Mac as _;
 use rss_request_context::TenantId;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 // ── 域分隔常量 ─────────────────────────────────────────────────────────────────
 
@@ -58,11 +59,11 @@ pub struct BlindIndexKey(#[redact(sensitivity = secret)] Vec<u8>);
 impl BlindIndexKey {
     /// 由字节构造 root key（受控 funnel；< 32 字节 → `KeyTooShort`）。
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, BlindIndexError> {
-        let b = bytes.into();
-        if b.len() < 32 {
+        let key = Self(bytes.into());
+        if key.0.len() < 32 {
             return Err(BlindIndexError::KeyTooShort);
         }
-        Ok(Self(b))
+        Ok(key)
     }
 
     /// 借出 key 字节（`pub(crate)`：全部 HMAC 在模块内完成，key 不出 crate）。
@@ -191,20 +192,73 @@ pub enum Transform {
 }
 
 /// 对明文依次 apply 变换管道（infallible；空结果不在此层拒绝，由 `compute` fail-closed）。
-pub(crate) fn apply_transforms(plaintext: &str, transforms: &[Transform]) -> String {
-    transforms
-        .iter()
-        .fold(plaintext.to_owned(), |s, t| match t {
-            Transform::Lowercase => s.to_lowercase(),
-            Transform::Trim => s.trim().to_owned(),
-            Transform::DigitsOnly => s.chars().filter(|c| c.is_ascii_digit()).collect(),
+pub(crate) fn apply_transforms(plaintext: &str, transforms: &[Transform]) -> Zeroizing<String> {
+    let mut current = copy_text(plaintext);
+    for transform in transforms {
+        current = match transform {
+            Transform::Lowercase => copy_chars(lowercase_chars(&current)),
+            Transform::Trim => copy_text(current.trim()),
+            Transform::DigitsOnly => copy_chars(current.chars().filter(char::is_ascii_digit)),
             Transform::LastN(n) => {
-                // 按 char 计数（UTF-8 安全）；saturating_sub 处理 n≥len 和 n=0 边界。
-                let chars: Vec<char> = s.chars().collect();
-                let skip = chars.len().saturating_sub(*n);
-                chars.into_iter().skip(skip).collect()
+                let start = current
+                    .char_indices()
+                    .rev()
+                    .nth(*n)
+                    .map_or(0, |(offset, c)| offset + c.len_utf8());
+                copy_text(&current[start..])
             }
-        })
+        };
+    }
+    current
+}
+
+fn copy_text(text: &str) -> Zeroizing<String> {
+    let mut output = Zeroizing::new(String::with_capacity(text.len()));
+    output.push_str(text);
+    output
+}
+
+fn copy_chars(chars: impl Iterator<Item = char> + Clone) -> Zeroizing<String> {
+    // zeroize cannot erase allocations discarded by growth: measure before writing secrets.
+    let capacity = chars.clone().map(char::len_utf8).sum();
+    let mut output = Zeroizing::new(String::with_capacity(capacity));
+    for c in chars {
+        output.push(c);
+    }
+    output
+}
+
+// Preserve str::to_lowercase's sole contextual mapping (Final_Sigma) without its growing String.
+// ref: rust library/alloc/src/str.rs@1.96.0
+// ref: icu4x components/properties/src/props.rs@icu@2.2.0
+fn lowercase_chars(text: &str) -> impl Iterator<Item = char> + Clone + '_ {
+    use icu_properties::{
+        CodePointSetData,
+        props::{CaseIgnorable, Cased},
+    };
+    let ignorable = CodePointSetData::new::<CaseIgnorable>();
+    let cased = CodePointSetData::new::<Cased>();
+    text.char_indices().flat_map(move |(offset, c)| {
+        let mapped = if c == 'Σ' {
+            let before = text[..offset]
+                .chars()
+                .rev()
+                .find(|c| !ignorable.contains(*c));
+            let after = text[offset + c.len_utf8()..]
+                .chars()
+                .find(|c| !ignorable.contains(*c));
+            if before.is_some_and(|c| cased.contains(c))
+                && !after.is_some_and(|c| cased.contains(c))
+            {
+                'ς'
+            } else {
+                'σ'
+            }
+        } else {
+            c
+        };
+        mapped.to_lowercase()
+    })
 }
 
 // ── FilterBits ────────────────────────────────────────────────────────────────
@@ -654,7 +708,7 @@ mod tests {
         #[case] input: &str,
         #[case] expected: &str,
     ) {
-        assert_eq!(apply_transforms(input, transforms), expected);
+        assert_eq!(apply_transforms(input, transforms).as_str(), expected);
     }
 
     /// `LastN` 对多字节 UTF-8 字符正确按 char 计数（不按字节）。
@@ -662,10 +716,42 @@ mod tests {
     fn last_n_utf8_char_boundary() {
         // "中文AB" = 4 chars；LastN(3) 应得 "文AB"（非截字节）。
         let result = apply_transforms("中文AB", &[Transform::LastN(3)]);
-        assert_eq!(result, "文AB");
+        assert_eq!(result.as_str(), "文AB");
         // "日本語テスト" = 6 chars；LastN(2) → "スト"
         let result2 = apply_transforms("日本語テスト", &[Transform::LastN(2)]);
-        assert_eq!(result2, "スト");
+        assert_eq!(result2.as_str(), "スト");
+    }
+
+    #[test]
+    fn lowercase_matches_unicode_and_final_sigma_semantics() {
+        for input in [
+            "ΑΣ",
+            "Σ",
+            "ΑΣΑ",
+            "Α\u{301}Σ",
+            "ΑΣ\u{301}Α",
+            "Α:Σ",
+            "ΑΣ:Α",
+            "İȺ",
+            "中文ABC",
+        ] {
+            assert_eq!(
+                apply_transforms(input, &[Transform::Lowercase]).as_str(),
+                input.to_lowercase()
+            );
+        }
+        // Batch all Unicode scalar mappings and Sigma's preceding/following contexts.
+        // The separators prevent unrelated cases from supplying casing context.
+        let mut input = String::new();
+        for c in (0..=0x10ffff).filter_map(char::from_u32) {
+            input.extend([
+                c, 'Σ', ' ', 'Α', 'Σ', c, ' ', 'Α', c, 'Σ', ' ', 'Α', 'Σ', c, 'Α', ' ',
+            ]);
+        }
+        assert_eq!(
+            apply_transforms(&input, &[Transform::Lowercase]).as_str(),
+            input.to_lowercase()
+        );
     }
 
     /// 幂等性：normalize 型变换连续两次结果不变。

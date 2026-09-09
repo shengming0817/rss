@@ -1,0 +1,15 @@
+[package]
+name = "zeroize-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+rss-data-protection = { path = "../.." }
+rss-redact = { path = "../../../redact" }
+rss-request-context = { path = "../../../request-context" }
+
+[lints.rust]
+unsafe_code = "deny"

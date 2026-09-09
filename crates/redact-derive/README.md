@@ -34,3 +34,7 @@ visible/masked fields; hidden generic parameters need no bound.
 
 ref: serde-rs/serde serde_derive/src/bound.rs@v1.0.228
 ref: https://serde.rs/attr-bound.html
+
+`secret`/`internal` fields allow only default/fixed and drop. Explicit last4, email_mask and show
+are compile errors, including through struct-level bound overrides. PII partial masks remain valid;
+PII show remains invalid. Unsafe historical declarations have no compatibility mode.

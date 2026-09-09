@@ -96,3 +96,43 @@ fn definition_identity_is_exact_and_redacted() {
     assert_ne!(identity, DefinitionIdentity::new([174; 32]));
     assert!(!format!("{identity:?}").contains("173"));
 }
+
+#[test]
+fn identities_stay_hidden_after_event_baseline_conversion() -> anyhow::Result<()> {
+    use rss_projection::{BaselineReceipt, GenerationStart, ProjectionScope};
+    let tenant_text = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let source = SourceScope::new(TenantId::parse(tenant_text)?, "private-source")?;
+    let scope = ProjectionScope::new(source.clone(), "private-projection", "private-generation")?;
+    let event = Event::new(
+        source.clone(),
+        Position::new(1)?,
+        "private-event",
+        b"private-payload".to_vec(),
+    )?;
+    let receipt = BaselineReceipt::from_event(&event);
+    let start = GenerationStart::after(event.position(), vec![receipt.clone()])?;
+    assert_eq!(receipt.id(), "private-event");
+    assert_eq!(scope.projection(), "private-projection");
+    for value in [
+        &source as &dyn std::fmt::Debug,
+        &scope,
+        &event,
+        &receipt,
+        &start,
+    ] {
+        for rendered in [format!("{value:?}"), format!("{value:#?}")] {
+            assert!(rendered.contains("<redacted>"));
+            for identity in [
+                tenant_text,
+                "private-source",
+                "private-projection",
+                "private-generation",
+                "private-event",
+                "private-payload",
+            ] {
+                assert!(!rendered.contains(identity), "{rendered}");
+            }
+        }
+    }
+    Ok(())
+}

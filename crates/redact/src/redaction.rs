@@ -109,11 +109,11 @@ impl crate::Redact for RedactionHashKey {
 impl RedactionHashKey {
     /// 由字节构造 redaction HMAC key（< 32 字节 → [`RedactionHashError::KeyTooShort`]）。
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, RedactionHashError> {
-        let b = bytes.into();
-        if b.len() < REDACTION_HASH_KEY_MIN_BYTES {
+        let key = Self(bytes.into());
+        if key.0.len() < REDACTION_HASH_KEY_MIN_BYTES {
             return Err(RedactionHashError::KeyTooShort);
         }
-        Ok(Self(b))
+        Ok(key)
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
@@ -425,13 +425,19 @@ fn mask_email(value: RedactValue<'_>) -> String {
             return REDACTED_PLACEHOLDER.to_string();
         }
     };
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        // reason: untrusted email-shaped text must not carry whitespace/control tails into logs.
+        return REDACTED_PLACEHOLDER.to_string();
+    }
     // 域名部分原样保留（视为非敏感，见 RedactionMode::EmailMask 文档）；local 仅留首字符。
     match s.as_str().split_once('@') {
-        Some((local, domain)) if !domain.is_empty() => match local.chars().next() {
-            Some(first) => format!("{first}***@{domain}"),
-            // 空 local（如 `@d.com`）⇒ fail-closed 固定占位。
-            None => REDACTED_PLACEHOLDER.to_string(),
-        },
+        Some((local, domain)) if !domain.is_empty() && !domain.contains('@') => {
+            match local.chars().next() {
+                Some(first) => format!("{first}***@{domain}"),
+                // 空 local（如 `@d.com`）⇒ fail-closed 固定占位。
+                None => REDACTED_PLACEHOLDER.to_string(),
+            }
+        }
         // 非邮箱形 ⇒ fail-closed 固定占位。
         _ => REDACTED_PLACEHOLDER.to_string(),
     }
@@ -864,6 +870,16 @@ mod tests {
     #[case("a@b.io", "a***@b.io")]
     #[case("not-an-email", "<redacted>")] // 非邮箱 → fixed
     #[case("@no-local.com", "<redacted>")] // 空 local → fixed
+    #[case("a@", "<redacted>")]
+    #[case("a@b@private-tail", "<redacted>")]
+    #[case(" a@b", "<redacted>")]
+    #[case("a b@c", "<redacted>")]
+    #[case("a@b c", "<redacted>")]
+    #[case("a@b\r\nprivate-tail", "<redacted>")]
+    #[case("a@b\tprivate-tail", "<redacted>")]
+    #[case("a@b\u{0085}private-tail", "<redacted>")]
+    #[case("a@b\u{2003}private-tail", "<redacted>")]
+    #[case("a@b\0private-tail", "<redacted>")]
     fn mask_email_masks_local(#[case] input: &str, #[case] want: &str) {
         assert_eq!(RedactionMode::EmailMask.mask(RedactValue::Str(input)), want);
     }
