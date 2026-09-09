@@ -4,115 +4,51 @@ use std::{
     time::Duration,
 };
 
-struct ProcessTree(Option<Child>);
-impl ProcessTree {
-    fn spawn(command: &mut Command) -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt as _;
-            command.process_group(0);
-        }
-        Ok(Self(Some(command.spawn()?)))
-    }
-    fn terminate(&mut self) -> io::Result<()> {
-        if let Some(mut child) = self.0.take() {
-            // The leader stays unreaped while signalling its group, preventing PID reuse.
-            #[cfg(unix)]
-            let killed = Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{}", child.id())])
-                .stderr(Stdio::null())
-                .status();
-            #[cfg(windows)]
-            let killed = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &child.id().to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            #[cfg(not(any(unix, windows)))]
-            let killed: io::Result<ExitStatus> = Err(io::Error::other("unsupported probe host"));
-            if !killed.is_ok_and(|status| status.success()) {
-                if child.try_wait()?.is_some() {
-                    return Ok(());
-                }
-                child.kill()?;
-                child.wait()?;
-                return Err(io::Error::other("failed to terminate probe process tree"));
-            }
-            child.wait()?;
-        }
-        Ok(())
-    }
+pub fn command(program: &str, limit: Duration) -> Command {
+    let mut command = Command::new("python3");
+    command
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/watchdog.py"
+        ))
+        .arg(limit.as_secs_f64().to_string())
+        .arg(program);
+    command
 }
-impl Drop for ProcessTree {
+
+struct Watchdog(Child);
+impl Drop for Watchdog {
     fn drop(&mut self) {
-        let _ = self.terminate();
+        // Closing the liveness pipe asks the isolated watchdog to retire its entire tree.
+        // Abrupt termination of this Rust process closes the same handle in the kernel.
+        self.0.stdin.take();
+        let _ = self.0.wait();
     }
 }
 
-pub async fn run(command: &mut Command, limit: Duration) -> io::Result<ExitStatus> {
-    ProcessTree::spawn(command)?.wait(limit).await
-}
-
-impl ProcessTree {
-    async fn wait(&mut self, limit: Duration) -> io::Result<ExitStatus> {
-        let outcome = {
-            let wait = async {
-                loop {
-                    let child = self
-                        .0
-                        .as_mut()
-                        .ok_or_else(|| io::Error::other("missing process"))?;
-                    if let Some(status) = child.try_wait()? {
-                        self.0.take();
-                        return Ok(status);
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            };
-            tokio::select! {
-                result = tokio::time::timeout(limit, wait) => result.unwrap_or_else(|_| {
-                    Err(io::Error::new(io::ErrorKind::TimedOut, "probe process tree exceeded deadline"))
-                }),
-                signal = cancelled() => {
-                    signal?;
-                    Err(io::Error::new(io::ErrorKind::Interrupted, "probe process cancelled"))
-                }
-            }
-        };
-        if outcome.is_err() {
-            self.terminate()?;
-        }
-        outcome
-    }
-}
-
-async fn cancelled() -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate())?;
-        let mut interrupt = signal(SignalKind::interrupt())?;
-        tokio::select! { _ = term.recv() => {}, _ = interrupt.recv() => {} }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await
+pub fn run(command: &mut Command) -> io::Result<ExitStatus> {
+    let mut watchdog = Watchdog(command.stdin(Stdio::piped()).spawn()?);
+    watchdog.0.wait()
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn early_exit_and_timeout_release_descendant_handles()
--> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn parent_exit_and_timeout_release_descendant_handles() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{BufRead, Read};
     for timeout in [false, true] {
-        let mut tree = ProcessTree::spawn(
-            Command::new("/bin/sh")
+        let limit = if timeout {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(60)
+        };
+        let mut watchdog = Watchdog(
+            command("/bin/sh", limit)
                 .args(["-c", "sleep 60 & echo ready; wait"])
-                .stdout(Stdio::piped()),
-        )?;
-        let child = tree.0.as_mut().ok_or("missing leader")?;
-        let group = child.id();
-        let stdout = child.stdout.take().ok_or("missing output")?;
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()?,
+        );
+        let stdout = watchdog.0.stdout.take().ok_or("missing output")?;
         let (ready_send, ready) = std::sync::mpsc::channel();
         let (done_send, done) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
@@ -121,29 +57,19 @@ async fn early_exit_and_timeout_release_descendant_handles()
             let _ = ready_send.send(output.read_line(&mut line));
             let _ = done_send.send(output.read_to_end(&mut Vec::new()));
         });
-        ready.recv_timeout(Duration::from_secs(2))??;
-        if timeout {
-            let error = tree
-                .wait(Duration::from_millis(1))
-                .await
-                .err()
-                .ok_or("watchdog did not time out")?;
-            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        ready.recv_timeout(Duration::from_secs(3))??;
+        if !timeout {
+            watchdog.0.stdin.take();
         }
-        drop(tree); // Same guard runs on ? and unwinding before the watchdog returns.
-        let ended = done.recv_timeout(Duration::from_secs(2));
-        if ended.is_err() {
-            // Retire the deliberately leaked descendant when running the red regression.
-            Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{group}")])
-                .status()?;
-        }
-        reader.join().map_err(|_| "output reader panicked")?;
+        let ended = done.recv_timeout(Duration::from_secs(3));
+        let status = watchdog.0.wait()?;
         assert!(
             ended.is_ok(),
-            "descendant retained output after guard dropped"
+            "descendant retained output after parent EOF/deadline"
         );
         ended??;
+        assert_eq!(status.code(), Some(if timeout { 124 } else { 130 }));
+        reader.join().map_err(|_| "output reader panicked")?;
     }
     Ok(())
 }

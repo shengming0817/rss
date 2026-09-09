@@ -4,16 +4,15 @@ use std::{path::Path, process::Command, time::Duration};
 #[path = "support/process.rs"]
 mod process;
 
-#[tokio::test]
-async fn public_paths_clear_owned_allocations_before_release()
--> Result<(), Box<dyn std::error::Error>> {
+#[test]
+fn public_paths_clear_owned_allocations_before_release() -> Result<(), Box<dyn std::error::Error>> {
     let owner = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fixture = owner.join("tests/zeroize-probe");
     let output = owner.join("../../rss-external-check/zeroize-probe");
     std::fs::create_dir_all(&output)?;
     let log_path = output.join(format!("{}.log", std::process::id()));
     let log = std::fs::File::create(&log_path)?;
-    let mut command = Command::new(env!("CARGO"));
+    let mut command = process::command(env!("CARGO"), Duration::from_secs(600));
     command
         .args(["run", "--locked", "--offline", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
@@ -25,7 +24,7 @@ async fn public_paths_clear_owned_allocations_before_release()
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .stdout(log.try_clone()?)
         .stderr(log);
-    let status = process::run(&mut command, Duration::from_secs(600)).await?;
+    let status = process::run(&mut command)?;
     let evidence = std::fs::read_to_string(&log_path)?;
     assert!(status.success(), "zeroize probe failed: {evidence}");
     assert!(

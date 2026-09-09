@@ -39,5 +39,7 @@ The fixture alone contains scoped unsafe allocator code; production crates remai
 Its committed source/lock live under this package’s tests; build artifacts and logs are regenerable
 under `rss-external-check/zeroize-probe`. This T1 evidence is not an artifact/publishing claim.
 
-The consumer watchdog terminates the Cargo process tree on timeout, interruption and early return
-(Unix process groups; Windows taskkill). Unix regression tests verify descendant handles close.
+The consumer uses a private Python watchdog process to terminate the Cargo tree on timeout,
+interruption or parent-pipe closure (Unix process groups; Windows taskkill). Signals are handled
+only in the watchdog, preserving libtest signal behavior. Unix regressions verify descendant
+handles close after parent EOF and timeout.
