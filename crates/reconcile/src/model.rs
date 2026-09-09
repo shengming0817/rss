@@ -62,10 +62,15 @@ fn name(value: String) -> Result<String, Error> {
     Ok(value)
 }
 /// Explicit tenant and controller boundary, not an authentication credential.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Scope {
     tenant: TenantId,
     reconciler: String,
+}
+impl std::fmt::Debug for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Scope(<redacted>)")
+    }
 }
 impl Scope {
     /// Caller selects the tenant from authenticated application context.
@@ -85,10 +90,15 @@ impl Scope {
     }
 }
 /// One durable work identity; never an ambient or tenantless key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     scope: Scope,
     entity: String,
+}
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Target(<redacted>)")
+    }
 }
 impl Target {
     /// Construct an independently scheduled target.

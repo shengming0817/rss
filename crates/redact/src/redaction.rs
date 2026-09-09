@@ -109,11 +109,11 @@ impl crate::Redact for RedactionHashKey {
 impl RedactionHashKey {
     /// 由字节构造 redaction HMAC key（< 32 字节 → [`RedactionHashError::KeyTooShort`]）。
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, RedactionHashError> {
-        let b = bytes.into();
-        if b.len() < REDACTION_HASH_KEY_MIN_BYTES {
+        let key = Self(bytes.into());
+        if key.0.len() < REDACTION_HASH_KEY_MIN_BYTES {
             return Err(RedactionHashError::KeyTooShort);
         }
-        Ok(Self(b))
+        Ok(key)
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
@@ -147,9 +147,9 @@ pub enum RedactionMode {
     Show,
     /// 固定占位 `<redacted>`。
     Fixed,
-    /// 保留尾 4 字符（`****1234`），其余抹去；过短 / 非文本 → fixed。
+    /// 保留尾 4 字符（`****1234`），其余抹去；过短 / 非文本 / 含空白、控制或格式字符 → fixed。
     Last4,
-    /// 邮箱掩码（`a***@example.com`）；非邮箱形 → fixed。
+    /// 邮箱掩码（`a***@example.com`）；非邮箱形 / 含空白、控制或格式字符 → fixed。
     ///
     /// **注意**：域名部分原样保留（视为非敏感，便于按域聚合诊断）。内网 / 机密域名本身属敏感时
     /// （如 `@m-and-a-target.com`）须改用 [`Fixed`](Self::Fixed)。
@@ -387,6 +387,14 @@ fn mask_show(value: RedactValue<'_>) -> String {
     }
 }
 
+// Both partial modes can echo input into unescaped diagnostic output.
+fn has_unsafe_mask_characters(text: &str) -> bool {
+    use icu_properties::{CodePointMapData, props::GeneralCategory};
+    let category = CodePointMapData::<GeneralCategory>::new();
+    text.chars()
+        .any(|c| c.is_whitespace() || c.is_control() || category.get(c) == GeneralCategory::Format)
+}
+
 fn mask_last4(value: RedactValue<'_>) -> String {
     let s = match value {
         RedactValue::Str(s) => s.to_string(),
@@ -401,6 +409,9 @@ fn mask_last4(value: RedactValue<'_>) -> String {
             return REDACTED_PLACEHOLDER.to_string();
         }
     };
+    if has_unsafe_mask_characters(&s) {
+        return REDACTED_PLACEHOLDER.to_string();
+    }
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= 4 {
         // 过短 ⇒ 保留尾 4 即泄全部，fail-closed 全脱。
@@ -425,13 +436,18 @@ fn mask_email(value: RedactValue<'_>) -> String {
             return REDACTED_PLACEHOLDER.to_string();
         }
     };
+    if has_unsafe_mask_characters(&s) {
+        return REDACTED_PLACEHOLDER.to_string();
+    }
     // 域名部分原样保留（视为非敏感，见 RedactionMode::EmailMask 文档）；local 仅留首字符。
     match s.as_str().split_once('@') {
-        Some((local, domain)) if !domain.is_empty() => match local.chars().next() {
-            Some(first) => format!("{first}***@{domain}"),
-            // 空 local（如 `@d.com`）⇒ fail-closed 固定占位。
-            None => REDACTED_PLACEHOLDER.to_string(),
-        },
+        Some((local, domain)) if !domain.is_empty() && !domain.contains('@') => {
+            match local.chars().next() {
+                Some(first) => format!("{first}***@{domain}"),
+                // 空 local（如 `@d.com`）⇒ fail-closed 固定占位。
+                None => REDACTED_PLACEHOLDER.to_string(),
+            }
+        }
         // 非邮箱形 ⇒ fail-closed 固定占位。
         _ => REDACTED_PLACEHOLDER.to_string(),
     }
@@ -464,7 +480,13 @@ fn mask_hmac(value: RedactValue<'_>, key: &RedactionHashKey) -> Option<String> {
         | RedactValue::Uuid(_)
         | RedactValue::Duration(_)
         | RedactValue::SystemTime(_)
-        | RedactValue::OffsetDateTime(_) => mac.update(scalar_to_string(value).as_bytes()),
+        | RedactValue::OffsetDateTime(_) => {
+            // i128/u128 take at most 40 bytes, with at most 19 bytes of timestamp suffix.
+            // Reserve before writing: no ordinary or realloc-discarded scalar plaintext copy.
+            let mut encoded = zeroize::Zeroizing::new(String::with_capacity(64));
+            let _ = write_scalar(value, &mut *encoded);
+            mac.update(encoded.as_bytes());
+        }
         // 无值 / Debug-only 视图不可哈希 ⇒ fail-closed 固定占位。
         RedactValue::Absent | RedactValue::Debug(_) => return None,
     }
@@ -478,23 +500,29 @@ fn mask_hmac(value: RedactValue<'_>, key: &RedactionHashKey) -> Option<String> {
 }
 
 fn scalar_to_string(value: RedactValue<'_>) -> String {
+    let mut text = String::new();
+    let _ = write_scalar(value, &mut text);
+    text
+}
+
+fn write_scalar(value: RedactValue<'_>, out: &mut impl std::fmt::Write) -> std::fmt::Result {
     match value {
-        RedactValue::Bool(v) => v.to_string(),
-        RedactValue::Signed(v) => v.to_string(),
-        RedactValue::Unsigned(v) => v.to_string(),
-        RedactValue::Uuid(v) => v.hyphenated().to_string(),
-        RedactValue::Duration(v) => format!("{}ns", v.as_nanos()),
+        RedactValue::Bool(v) => write!(out, "{v}"),
+        RedactValue::Signed(v) => write!(out, "{v}"),
+        RedactValue::Unsigned(v) => write!(out, "{v}"),
+        RedactValue::Uuid(v) => write!(out, "{}", v.hyphenated()),
+        RedactValue::Duration(v) => write!(out, "{}ns", v.as_nanos()),
         RedactValue::SystemTime(v) => match v.duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => format!("{}ns_since_unix_epoch", duration.as_nanos()),
-            Err(err) => format!("-{}ns_since_unix_epoch", err.duration().as_nanos()),
+            Ok(duration) => write!(out, "{}ns_since_unix_epoch", duration.as_nanos()),
+            Err(err) => write!(out, "-{}ns_since_unix_epoch", err.duration().as_nanos()),
         },
         RedactValue::OffsetDateTime(v) => {
-            format!("{}ns_since_unix_epoch", v.unix_timestamp_nanos())
+            write!(out, "{}ns_since_unix_epoch", v.unix_timestamp_nanos())
         }
-        RedactValue::Str(s) => s.to_string(),
-        RedactValue::Bytes(b) => format!("[{} bytes]", b.len()),
-        RedactValue::Debug(v) => format!("{v:?}"),
-        RedactValue::Absent => "None".to_string(),
+        RedactValue::Str(s) => out.write_str(s),
+        RedactValue::Bytes(b) => write!(out, "[{} bytes]", b.len()),
+        RedactValue::Debug(v) => write!(out, "{v:?}"),
+        RedactValue::Absent => out.write_str("None"),
     }
 }
 
@@ -864,6 +892,20 @@ mod tests {
     #[case("a@b.io", "a***@b.io")]
     #[case("not-an-email", "<redacted>")] // 非邮箱 → fixed
     #[case("@no-local.com", "<redacted>")] // 空 local → fixed
+    #[case("a@", "<redacted>")]
+    #[case("a@b@private-tail", "<redacted>")]
+    #[case(" a@b", "<redacted>")]
+    #[case("a b@c", "<redacted>")]
+    #[case("a@b c", "<redacted>")]
+    #[case("a@b\r\nprivate-tail", "<redacted>")]
+    #[case("a@b\tprivate-tail", "<redacted>")]
+    #[case("a@b\u{0085}private-tail", "<redacted>")]
+    #[case("a@b\u{2003}private-tail", "<redacted>")]
+    #[case("a@b\0private-tail", "<redacted>")]
+    #[case("a@b\u{202e}private-tail", "<redacted>")]
+    #[case("a@b\u{2066}private-tail", "<redacted>")]
+    #[case("a@b\u{200b}private-tail", "<redacted>")]
+    #[case("\u{202e}a@b", "<redacted>")]
     fn mask_email_masks_local(#[case] input: &str, #[case] want: &str) {
         assert_eq!(RedactionMode::EmailMask.mask(RedactValue::Str(input)), want);
     }

@@ -65,3 +65,13 @@ scrubbing only removes userinfo. None of these results can construct `LastError`
 `redact_error`, `LastError::from_error` and `LastError::from_redactable` have been removed. Classify
 errors at their component owner and explicitly select `ErrorSummary`; never infer a category from
 provider text. Built-in secret wrappers remain available with or without the optional derive feature.
+
+`secret` and `internal` derive fields accept only default/fixed or drop; partial masks and show
+are rejected at compile time. PII retains its declared masking policy. Email masking requires
+one `@`, nonempty local/domain parts, and no Unicode whitespace, control or format characters; malformed
+input is rendered as `<redacted>`. This is a diagnostic safety check, not RFC mailbox validation.
+`RedactionHashKey` takes zeroizing ownership before length validation, including rejected inputs. Scalar HMAC encoding writes directly into a preallocated zeroizing buffer.
+
+`Last4` and `EmailMask` reject any input containing whitespace, control characters (C0/C1),
+or Unicode format characters (Cf), returning `<redacted>` before echoing any original text.
+This applies to default derived `Debug` and `ServerLog`; safe Unicode text retains its masking semantics.

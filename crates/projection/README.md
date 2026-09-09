@@ -118,3 +118,8 @@ See `rss-projection-postgres` for the atomic PostgreSQL implementation and execu
 
 
 最小可运行使用流程及独立源码/候选 artifact 命令见 [rss-examples](../examples/README.md)。
+
+Default `Debug` for `SourceScope`, `ProjectionScope`, `BaselineReceipt` and `GenerationStart`
+uses fixed redacted placeholders. Converting an `Event` into baseline/start metadata does not
+re-expose tenant, source or event identity in recursive diagnostics. Explicit accessors still
+return the original metadata and require the caller to control its output boundary.

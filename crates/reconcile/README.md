@@ -18,3 +18,5 @@ core 没有 provider、消息引擎、设备命令或产品运行框架依赖。
 
 
 最小可运行使用流程及独立源码/候选 artifact 命令见 [rss-examples](../examples/README.md)。
+
+`Scope` / `Target` 的默认 `Debug` 使用固定脱敏占位，`Observation` 递归格式化不会展开租户、reconciler 或 entity 身份。显式访问器仍返回原身份，调用方须自行控制其输出边界。

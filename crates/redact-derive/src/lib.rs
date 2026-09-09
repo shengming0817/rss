@@ -9,7 +9,7 @@
 //!
 //! **fail-closed（Hard）**：每个字段必须显式带 `#[redact(sensitivity = ...)]`；
 //! 缺标注 / 重复敏感度 / 未知 sensitivity / 未知 mode / `secret|pii|internal` 又 `mode = "show"` /
-//! `mode = "hash"` 均编译错误——缺标注或显式矛盾策略不能通过宏展开；public 声明是否真实仍由类型作者负责
+//! `secret|internal` 的 `last4|email_mask` / `mode = "hash"` 均编译错误——缺标注或显式矛盾策略不能通过宏展开；public 声明是否真实仍由类型作者负责
 //! （compile-fail golden 见 `tests/`）。
 //!
 //! 不依赖 `rss-redact` crate：展开时解析消费方声明的实际依赖名并生成对应绝对路径（无编译环；
@@ -261,6 +261,16 @@ fn field_policy(field: &syn::Field, idx: usize, redact: &TokenStream2) -> syn::R
         return Err(syn::Error::new(
             field.span(),
             "secret|pii|internal 不得与 mode = \"show\" 同用（敏感字段不可声明明文输出）",
+        ));
+    }
+    if matches!(
+        sens,
+        Some(ParsedDataClass::Secret | ParsedDataClass::Internal)
+    ) && matches!(mode, Some(Mode::Last4 | Mode::EmailMask))
+    {
+        return Err(syn::Error::new(
+            field.span(),
+            "secret|internal 仅允许 fixed 或 drop（敏感字段不可声明部分输出）",
         ));
     }
     // 解析最终 mode 表达式；fail-closed：mode/sensitivity 皆缺 ⇒ 编译错误（不得隐式明文）。

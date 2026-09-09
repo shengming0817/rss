@@ -1,0 +1,5 @@
+error: secret|internal 仅允许 fixed 或 drop（敏感字段不可声明部分输出）
+ --> tests/ui/internal_email_mask.rs:5:5
+  |
+5 |     #[redact(sensitivity = internal, mode = "email_mask")]
+  |     ^

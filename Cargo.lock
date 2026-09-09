@@ -3423,6 +3423,7 @@ name = "rss-data-protection"
 version = "0.1.0"
 dependencies = [
  "hmac 0.12.1",
+ "icu_properties",
  "rss-redact",
  "rss-request-context",
  "rstest",
@@ -3664,6 +3665,7 @@ name = "rss-redact"
 version = "0.1.0"
 dependencies = [
  "hmac 0.12.1",
+ "icu_properties",
  "rss-contract",
  "rss-redact-derive",
  "rstest",
