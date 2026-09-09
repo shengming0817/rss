@@ -54,11 +54,11 @@ expected_policies(relation, name, roles, predicate) AS (
  ('runtime_role', (NOT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls)
     AND (pg_has_role(current_user, r.oid, 'USAGE') OR pg_has_role(current_user, r.oid, 'SET'))))),
  ('runtime_role', (NOT pg_has_role(current_user, 'rss_tmsg_relay', 'MEMBER'))),
- ('columns', (NOT EXISTS (SELECT 1 FROM columns expected LEFT JOIN information_schema.columns actual
-    ON actual.table_schema = 'rss_transactional_messaging' AND actual.table_name = expected.relation
-      AND actual.column_name = expected.name
-    WHERE actual.column_name IS NULL OR actual.data_type <> expected.type
-      OR (actual.is_nullable = 'YES') <> expected.nullable))),
+ ('columns', (NOT EXISTS (SELECT 1 FROM columns expected LEFT JOIN pg_attribute actual
+    ON actual.attrelid = to_regclass('rss_transactional_messaging.' || expected.relation)
+      AND actual.attname = expected.name AND actual.attnum > 0 AND NOT actual.attisdropped
+    WHERE actual.attname IS NULL OR format_type(actual.atttypid, actual.atttypmod) <> expected.type
+      OR (NOT actual.attnotnull) <> expected.nullable))),
  ('constraints', (NOT EXISTS (SELECT 1 FROM (VALUES
     ('inbox', ARRAY['tenant_id','message_id','consumer_group']::name[]),
     ('outbox', ARRAY['tenant_id','message_id']::name[])) expected(relation, columns)
@@ -74,7 +74,7 @@ expected_policies(relation, name, roles, predicate) AS (
     WHERE c.oid IS NULL OR NOT c.relrowsecurity OR NOT c.relforcerowsecurity
       OR pg_has_role(current_user, c.relowner, 'MEMBER')
       OR EXISTS (SELECT 1 FROM unnest(string_to_array(r.privileges, ',')) privilege
-        WHERE NOT has_table_privilege(current_user, c.oid, privilege))
+        WHERE has_table_privilege(current_user, c.oid, privilege) IS DISTINCT FROM (NOT $2 OR r.name <> 'inbox'))
   ))),
  ('runtime_acl', (NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='rss_transactional_messaging' AND p.proname LIKE 'archive_%' AND has_function_privilege(current_user,p.oid,'EXECUTE')))),
  ('runtime_acl', (has_schema_privilege(current_user, 'rss_transactional_messaging', 'USAGE'))),
@@ -83,6 +83,7 @@ expected_policies(relation, name, roles, predicate) AS (
  ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.policy', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
  ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.outbox', CASE WHEN $1 THEN 'DELETE,TRUNCATE,REFERENCES,TRIGGER' ELSE 'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER' END))),
  ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.inbox', 'TRUNCATE,REFERENCES,TRIGGER'))),
+ ('runtime_acl', (NOT $2 OR NOT has_any_column_privilege(current_user, 'rss_transactional_messaging.inbox', 'SELECT,INSERT,UPDATE,REFERENCES'))),
  ('runtime_acl', (has_sequence_privilege(current_user, 'rss_transactional_messaging.outbox_seq_seq', 'USAGE'))),
  ('runtime_acl', (NOT has_sequence_privilege(current_user, 'rss_transactional_messaging.outbox_seq_seq', 'SELECT,UPDATE'))),
  ('relay_acl', (NOT has_sequence_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox_seq_seq', 'USAGE,SELECT,UPDATE'))),
@@ -98,7 +99,7 @@ expected_policies(relation, name, roles, predicate) AS (
  ('functions', (NOT EXISTS (SELECT 1 FROM functions f LEFT JOIN pg_proc p ON p.oid = to_regprocedure(f.signature)
     WHERE p.oid IS NULL OR NOT p.prosecdef OR p.proowner <> (SELECT oid FROM relay_role)
       OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp' = ANY(p.proconfig))
-      OR NOT has_function_privilege(current_user, p.oid, 'EXECUTE')
+      OR has_function_privilege(current_user, p.oid, 'EXECUTE') IS DISTINCT FROM (NOT $2)
       OR EXISTS (SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f',p.proowner))) a
         WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')))),
  ('constraints', NOT EXISTS (SELECT 1 FROM expected_constraints e LEFT JOIN pg_constraint c

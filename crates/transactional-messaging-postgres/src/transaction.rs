@@ -300,6 +300,7 @@ pub enum PgTransactionFault {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Profile {
     Runtime,
+    Producer,
     Recovery,
     #[cfg(feature = "recovery")]
     Dr,
@@ -315,6 +316,16 @@ impl PgRuntime {
         binding: ExecutionBinding,
     ) -> Result<Self, PgError> {
         Self::connect_profile(config, timer, binding, Profile::Runtime).await
+    }
+    /// Connect a producer that only writes business state and appends/reads its tenant Outbox.
+    /// Requires no Inbox privileges and rejects effective relay function EXECUTE grants.
+    /// Schema, definer isolation, tenant RLS and execution fencing remain fully checked.
+    pub async fn connect_producer<C: ExecutionTimer + 'static>(
+        config: PgConfig,
+        timer: C,
+        binding: ExecutionBinding,
+    ) -> Result<Self, PgError> {
+        Self::connect_profile(config, timer, binding, Profile::Producer).await
     }
     pub(crate) async fn connect_profile<C: ExecutionTimer + 'static>(
         config: PgConfig,
@@ -363,6 +374,7 @@ impl PgRuntime {
             let failure = within(&runtime.timer, cutoff, |_| async {
                 sqlx::query_scalar::<_, String>(include_str!("probe.sql"))
                     .bind(recovery_operator)
+                    .bind(profile == Profile::Producer)
                     .fetch_optional(&runtime.pool)
                     .await
             })

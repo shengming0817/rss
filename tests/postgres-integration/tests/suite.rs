@@ -64,6 +64,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         Box::pin(examples::run(&fixture, &network, &owner)).await?;
         let timer = Timer::new();
         let config = PgConfig::new(&params.host, params.port, &params.database, "tmsg_runtime", PgPassword::new("fixture-only"), rss_transactional_messaging_postgres::PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?);
+        transaction_only_permissions(&owner, config.clone()).await?;
         let raw_runtime = PgPoolOptions::new().max_connections(2).acquire_timeout(Duration::from_secs(5))
             .connect_with(PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database)
                 .username("tmsg_runtime").password("fixture-only").ssl_mode(PgSslMode::VerifyFull)
@@ -82,8 +83,6 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         Box::pin(conformance::run(runtime.clone(), &owner)).await?;
         eprintln!("pg-suite phase=adversarial");
         Box::pin(adversarial::run(runtime.clone(), &owner, &raw_runtime, config.clone())).await?;
-        eprintln!("pg-suite phase=lifecycle::business_outbox_atomicity");
-        lifecycle::business_outbox_atomicity(runtime.clone(), &owner).await?;
         eprintln!("pg-suite phase=lifecycle::close_during_transaction");
         lifecycle::close_during_transaction(config.clone(), &owner).await?;
         #[cfg(feature = "rss-runtime")]
@@ -449,5 +448,84 @@ async fn outbox_roundtrip(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
             .count(),
         0
     );
+    Ok(())
+}
+
+// A producer must be able to commit business writes and Outbox without relay authority.
+async fn transaction_only_permissions(
+    owner: &sqlx::PgPool,
+    config: PgConfig,
+) -> anyhow::Result<()> {
+    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) FROM tmsg_runtime").execute(owner).await?;
+    sqlx::raw_sql("REVOKE ALL ON rss_transactional_messaging.inbox FROM tmsg_runtime")
+        .execute(owner)
+        .await?;
+    let runtime = Arc::new(
+        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding()).await?,
+    );
+    lifecycle::business_outbox_atomicity(runtime.clone(), owner).await?;
+    producer_relay_denied(runtime.clone()).await?;
+    sqlx::raw_sql("DELETE FROM rss_transactional_messaging.outbox WHERE message_id IN ('transaction-only','atomic-commit'); DELETE FROM public.business_effects WHERE id IN ('transaction-only','atomic-commit')").execute(owner).await?;
+    runtime.close().await;
+    assert!(
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .is_err()
+    );
+
+    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime").execute(owner).await?;
+    assert!(
+        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql(
+        "GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO tmsg_runtime",
+    )
+    .execute(owner)
+    .await?;
+    Ok(())
+}
+
+async fn producer_relay_denied(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
+    use rss_transactional_messaging::{message::MessagingDomain, outbox::OutboxStore};
+    use rss_transactional_messaging_postgres::PgOutboxStore;
+    let envelope = message("transaction-only");
+    let tenant = envelope.metadata().tenant_id();
+    let store = Arc::new(PgOutboxStore::<()>::new(
+        runtime.clone(),
+        MessagingDomain::parse(envelope.metadata().domain().as_str())?,
+        outbox_budget(Duration::from_secs(60)),
+    )?);
+    assert!(
+        store
+            .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+            .await
+            .is_err()
+    );
+    for statement in [
+        "SELECT rss_transactional_messaging.outbox_lease(NULL,NULL,NULL,NULL,NULL,NULL)",
+        "SELECT rss_transactional_messaging.settle_outbox(NULL,NULL,NULL,NULL,NULL,NULL)",
+    ] {
+        let failure = runtime
+            .local_tx(tenant, deadline(), move |tx| {
+                Box::pin(async move {
+                    tx.with_connection(move |connection| {
+                        Box::pin(async move {
+                            sqlx::query(statement).execute(connection).await?;
+                            Ok(())
+                        })
+                    })
+                    .await
+                })
+            })
+            .await
+            .fold(Ok, Err, Err, Err, Err, Err)
+            .expect_err("producer cannot execute relay functions");
+        assert!(matches!(
+            failure,
+            rss_transactional_messaging_postgres::PgError::PermissionDenied(_)
+        ));
+    }
     Ok(())
 }

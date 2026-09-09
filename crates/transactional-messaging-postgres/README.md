@@ -30,6 +30,15 @@ SELECT/INSERT; Outbox sequence USAGE; and EXECUTE on the three package functions
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
+A producer that only commits business state and appends/reads Outbox uses
+`PgRuntime::connect_producer(config, timer, binding)`. Grant the same schema/policy/Outbox/
+sequence privileges and `check_execution()` EXECUTE, but no Inbox privileges and no
+`claim_outbox`, `outbox_lease` or `settle_outbox` EXECUTE. Admission rejects those extra
+capabilities, including inherited grants; PostgreSQL also denies relay calls at execution.
+The full runtime constructor retains its existing consumer/relay requirements. Both profiles
+verify the same schema/definer/RLS/fencing contract using the PostgreSQL catalogs; lack of
+Inbox access does not hide schema drift behind information_schema visibility filtering.
+
 The relay definer is a closed component identity: it must not receive any parent role membership,
 including grants with INHERIT/SET disabled or an ADMIN option. A direct membership is the first edge
 of every indirect permission path, so rejecting those edges closes inherited, SET ROLE and role-grant
@@ -37,7 +46,7 @@ authority without a global catalog scan. `INHERIT` or `NOINHERIT` alone is accep
 exists. Role attributes such as CREATEDB/CREATEROLE are distinct from inherited object privileges;
 SET ROLE reachability is separate again. Runtime-to-relay membership remains independently forbidden.
 
-Runtime, Recovery, DR and Archive all check this one relay posture after the shared fencing probe,
+Runtime, Producer, Recovery, DR and Archive all check this one relay posture after the shared fencing probe,
 before any profile-specific early return. Extra relay attributes/memberships are rejected through
 the existing closed storage-contract categories. The relay check reports `RelayRole`; the preceding
 shared fencing probe reports `Functions` for relay SUPERUSER or runtime-to-relay membership.
