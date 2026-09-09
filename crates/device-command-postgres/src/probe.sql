@@ -18,15 +18,15 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
  (1,'revision',
     (SELECT obj_description(oid,'pg_namespace')='rss-device-command-postgres:1' FROM namespace)
     AND (SELECT count(*)=2 FROM rels)),
- (1,'relations',
+ (2,'relations',
     (SELECT bool_and(relkind='r' AND relpersistence='p') FROM rels)
     AND NOT EXISTS(SELECT FROM pg_trigger WHERE tgrelid IN(SELECT oid FROM rels) AND NOT tgisinternal)
     AND NOT EXISTS(SELECT FROM pg_rewrite WHERE ev_class IN(SELECT oid FROM rels))),
- (2,'runtime_role',session_user=current_user
+ (3,'runtime_role',session_user=current_user
     AND NOT EXISTS(SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole)
     AND NOT EXISTS(SELECT FROM reachable r JOIN namespace n ON n.nspowner=r.oid)
     AND NOT EXISTS(SELECT FROM reachable r JOIN rels c ON c.relowner=r.oid)),
- (3,'runtime_acl',
+ (4,'runtime_acl',
     has_schema_privilege(current_user,(SELECT oid FROM namespace),'USAGE')
     AND NOT EXISTS(SELECT FROM rels WHERE NOT has_table_privilege(current_user,oid,'SELECT'))
     AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN rels c
@@ -41,7 +41,7 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
         AND has_schema_privilege(r.oid,n.oid,'USAGE') AND (
             EXISTS(SELECT FROM rels c WHERE has_table_privilege(r.oid,c.oid,'SELECT') OR has_any_column_privilege(r.oid,c.oid,'SELECT'))
             OR EXISTS(SELECT FROM functions p WHERE has_function_privilege(r.oid,p.oid,'EXECUTE'))))),
- (4,'rls_policy',(SELECT bool_and(relrowsecurity AND relforcerowsecurity) FROM rels)
+ (5,'rls_policy',(SELECT bool_and(relrowsecurity AND relforcerowsecurity) FROM rels)
     AND NOT EXISTS (
         SELECT FROM (SELECT oid,'tenant_scope'::name AS name FROM rels) e
         FULL JOIN (SELECT * FROM pg_policy WHERE polrelid IN(SELECT oid FROM rels)) p

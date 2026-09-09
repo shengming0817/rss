@@ -40,6 +40,19 @@ pub(super) async fn executable_contract(f: &Fixture) -> anyhow::Result<()> {
         assert_eq!(f.count("commands", "probe-retained").await?, 1);
         assert_eq!(f.count("outbox", "dispatch.probe-retained").await?, 1);
     }
+    reject(
+        f,
+        "ALTER SCHEMA rss_device_command RENAME TO device_command_unavailable",
+        "ALTER SCHEMA device_command_unavailable RENAME TO rss_device_command",
+        "revision",
+    )
+    .await?;
+    function_attributes(f).await?;
+    relation_drift(f).await?;
+    assert_eq!(f.load("probe-retained", s).await?, Some(original));
+    Ok(())
+}
+async fn function_attributes(f: &Fixture) -> anyhow::Result<()> {
     for (change, restore) in [
         (
             "ALTER FUNCTION rss_device_command.save(uuid,uuid,text,bigint,text,bigint,bigint,bigint) STRICT",
@@ -52,6 +65,9 @@ pub(super) async fn executable_contract(f: &Fixture) -> anyhow::Result<()> {
     ] {
         reject(f, change, restore, "functions").await?;
     }
+    Ok(())
+}
+async fn relation_drift(f: &Fixture) -> anyhow::Result<()> {
     // Keep the trigger helper outside the component so the relation guard is the rejecting check.
     sqlx::raw_sql("CREATE FUNCTION public.swallow_command_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").execute(&f.owner).await?;
     let triggers = async {
@@ -76,7 +92,6 @@ pub(super) async fn executable_contract(f: &Fixture) -> anyhow::Result<()> {
         "relations",
     )
     .await?;
-    assert_eq!(f.load("probe-retained", s).await?, Some(original));
     Ok(())
 }
 async fn snapshot(f: &Fixture) -> anyhow::Result<String> {
