@@ -143,25 +143,63 @@ async fn reachable_and_logged(
     let result = reachable_grants(pool, owner, control).await;
     sqlx::raw_sql("REVOKE saga_escalation FROM saga_runtime; DROP OWNED BY saga_escalation; DROP ROLE saga_escalation").execute(owner).await?;
     result?;
-    // PostgreSQL requires referencing tables to become unlogged before their parents.
+    logged_tables(pool, owner, control).await
+}
+async fn logged_tables(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    // Detach incoming fixture FKs so exactly one relation can be UNLOGGED at a time.
+    // PostgreSQL supplies quoted DDL and the original definitions; no second migration copy.
     for table in ["step_receipts", "journal", "instances"] {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "ALTER TABLE rss_saga.{table} SET UNLOGGED"
-        )))
-        .execute(owner)
-        .await?;
-        let rejected = PgStore::new(pool.clone(), control).await;
-        if !matches!(rejected, Err(e) if e.kind()==ErrorKind::StorageContract) {
-            restore_logged(owner).await?;
-            anyhow::bail!("accepted unlogged {table}");
+        let incoming: Vec<(String, String)> = sqlx::query_as("SELECT format('ALTER TABLE %s DROP CONSTRAINT %I',conrelid::regclass,conname), format('ALTER TABLE %s ADD CONSTRAINT %I %s',conrelid::regclass,conname,pg_get_constraintdef(oid)) FROM pg_constraint WHERE contype='f' AND confrelid=to_regclass($1)")
+            .bind(format!("rss_saga.{table}")).fetch_all(owner).await?;
+        for (detach, _) in &incoming {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(detach))
+                .execute(owner)
+                .await?;
         }
+        let result = single_unlogged(pool, owner, control, table).await;
+        for (_, restore) in &incoming {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(restore))
+                .execute(owner)
+                .await?;
+        }
+        result?;
+        PgStore::new(pool.clone(), control).await?;
     }
-    restore_logged(owner).await?;
-    PgStore::new(pool.clone(), control).await?;
     Ok(())
 }
-async fn restore_logged(owner: &PgPool) -> anyhow::Result<()> {
-    sqlx::raw_sql("ALTER TABLE rss_saga.instances SET LOGGED; ALTER TABLE rss_saga.journal SET LOGGED; ALTER TABLE rss_saga.step_receipts SET LOGGED").execute(owner).await?;
+async fn single_unlogged(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+    table: &str,
+) -> anyhow::Result<()> {
+    PgStore::new(pool.clone(), control).await?;
+    // Identifier is selected exclusively from the closed fixture table list above.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE rss_saga.{table} SET UNLOGGED"
+    )))
+    .execute(owner)
+    .await?;
+    let rejected = PgStore::new(pool.clone(), control).await;
+    let drifted = sqlx::query_scalar::<_, String>("SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='rss_saga' AND c.relkind='r' AND c.relpersistence<>'p'").fetch_all(owner).await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE rss_saga.{table} SET LOGGED"
+    )))
+    .execute(owner)
+    .await?;
+    anyhow::ensure!(
+        drifted? == [table],
+        "persistence case must isolate its target"
+    );
+    anyhow::ensure!(
+        matches!(rejected, Err(e) if e.kind()==ErrorKind::StorageContract),
+        "accepted unlogged {table}"
+    );
+    PgStore::new(pool.clone(), control).await?;
     Ok(())
 }
 async fn reachable_grants(
