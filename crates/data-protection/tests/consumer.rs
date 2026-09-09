@@ -1,5 +1,5 @@
 //! F1.3: exercise the real libraries in a process with an observing allocator.
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::Path, time::Duration};
 
 #[path = "support/process.rs"]
 mod process;

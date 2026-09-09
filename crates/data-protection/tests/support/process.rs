@@ -1,6 +1,6 @@
 use std::{
     io,
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, ChildStdin, Command, ExitStatus, Stdio},
     time::Duration,
 };
 
@@ -16,18 +16,26 @@ pub fn command(program: &str, limit: Duration) -> Command {
     command
 }
 
-struct Watchdog(Child);
+struct Watchdog(Child, Option<ChildStdin>);
+impl Watchdog {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        let mut child = command.stdin(Stdio::piped()).spawn()?;
+        // Child::wait closes Child.stdin itself. Keep the liveness writer in a separate owner.
+        let liveness = child.stdin.take();
+        Ok(Self(child, liveness))
+    }
+}
 impl Drop for Watchdog {
     fn drop(&mut self) {
         // Closing the liveness pipe asks the isolated watchdog to retire its entire tree.
         // Abrupt termination of this Rust process closes the same handle in the kernel.
-        self.0.stdin.take();
+        self.1.take();
         let _ = self.0.wait();
     }
 }
 
 pub fn run(command: &mut Command) -> io::Result<ExitStatus> {
-    let mut watchdog = Watchdog(command.stdin(Stdio::piped()).spawn()?);
+    let mut watchdog = Watchdog::spawn(command)?;
     watchdog.0.wait()
 }
 
@@ -41,13 +49,12 @@ fn parent_exit_and_timeout_release_descendant_handles() -> Result<(), Box<dyn st
         } else {
             Duration::from_secs(60)
         };
-        let mut watchdog = Watchdog(
+        let mut watchdog = Watchdog::spawn(
             command("/bin/sh", limit)
                 .args(["-c", "sleep 60 & echo ready; wait"])
                 .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()?,
-        );
+                .stdout(Stdio::piped()),
+        )?;
         let stdout = watchdog.0.stdout.take().ok_or("missing output")?;
         let (ready_send, ready) = std::sync::mpsc::channel();
         let (done_send, done) = std::sync::mpsc::channel();
@@ -59,7 +66,7 @@ fn parent_exit_and_timeout_release_descendant_handles() -> Result<(), Box<dyn st
         });
         ready.recv_timeout(Duration::from_secs(3))??;
         if !timeout {
-            watchdog.0.stdin.take();
+            watchdog.1.take();
         }
         let ended = done.recv_timeout(Duration::from_secs(3));
         let status = watchdog.0.wait()?;
