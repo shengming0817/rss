@@ -17,7 +17,11 @@ normal commit/rollback. Unknown settlement closes the connection instead of retu
 NOSUPERUSER NOBYPASSRLS schema owner**. Every tenant relation has ENABLE/FORCE RLS. Runtime roles get
 schema USAGE, table SELECT and function EXECUTE, with no direct INSERT/UPDATE/DELETE/TRUNCATE on
 component tables. Do not grant membership in the owner role. Function search paths are fixed and
-PUBLIC privileges revoked. Applications own role provisioning, authentication, migration execution
+PUBLIC privileges revoked. Admission rejects PUBLIC schema/table/column/function ACLs (including
+default function EXECUTE), and requires exactly the canonical tenant policy on each of the four
+component tables: role set, command, permissiveness, USING and WITH CHECK. Restricted group
+grants and independent maintenance roles remain supported; component checks do not govern
+application-owned read models. Applications own role provisioning, authentication, migration execution
 and business-table policies. The tenant setting provides isolation within a trusted application;
 it does not authenticate a caller that already holds database credentials.
 
@@ -166,3 +170,10 @@ this adapter retains effect, receipt and checkpoint in its own single transactio
 `python3 hack/projection-package-proof.py --artifacts DIR --revision SHA`。
 两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
 完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。
+
+Admission observes the configured database at construction; it neither repairs drift nor protects
+against trusted administrators changing DDL after admission. Restore the version-matched schema
+and grants before retrying; there is no permissive compatibility mode.
+
+ref: postgres src/backend/utils/adt/acl.c@REL_16_STABLE
+ref: postgres src/backend/utils/adt/ruleutils.c@REL_16_STABLE

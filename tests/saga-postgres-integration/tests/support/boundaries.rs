@@ -88,6 +88,7 @@ pub(super) async fn admission_drift(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    reachable_and_logged(pool, owner, control).await?;
     for (break_sql, restore_sql) in [
         (
             "GRANT TRIGGER ON rss_saga.journal TO saga_runtime",
@@ -128,6 +129,77 @@ pub(super) async fn admission_drift(
         assert!(
             matches!(result, Err(ref failure) if failure.kind()==rss_saga::ErrorKind::StorageContract)
         );
+    }
+    Ok(())
+}
+
+// F4.2: a non-owner role avoids the pre-existing owner membership rejection.
+async fn reachable_and_logged(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    sqlx::raw_sql("CREATE ROLE saga_escalation NOLOGIN; GRANT saga_escalation TO saga_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
+    let result = reachable_grants(pool, owner, control).await;
+    sqlx::raw_sql("REVOKE saga_escalation FROM saga_runtime; DROP OWNED BY saga_escalation; DROP ROLE saga_escalation").execute(owner).await?;
+    result?;
+    // PostgreSQL requires referencing tables to become unlogged before their parents.
+    for table in ["step_receipts", "journal", "instances"] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE rss_saga.{table} SET UNLOGGED"
+        )))
+        .execute(owner)
+        .await?;
+        let rejected = PgStore::new(pool.clone(), control).await;
+        if !matches!(rejected, Err(e) if e.kind()==ErrorKind::StorageContract) {
+            restore_logged(owner).await?;
+            anyhow::bail!("accepted unlogged {table}");
+        }
+    }
+    restore_logged(owner).await?;
+    PgStore::new(pool.clone(), control).await?;
+    Ok(())
+}
+async fn restore_logged(owner: &PgPool) -> anyhow::Result<()> {
+    sqlx::raw_sql("ALTER TABLE rss_saga.instances SET LOGGED; ALTER TABLE rss_saga.journal SET LOGGED; ALTER TABLE rss_saga.step_receipts SET LOGGED").execute(owner).await?;
+    Ok(())
+}
+async fn reachable_grants(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    PgStore::new(pool.clone(), control).await?;
+    for (change, restore) in [
+        (
+            "GRANT UPDATE ON rss_saga.instances TO saga_escalation",
+            "REVOKE UPDATE ON rss_saga.instances FROM saga_escalation",
+        ),
+        (
+            "GRANT UPDATE(revision) ON rss_saga.instances TO saga_escalation",
+            "REVOKE UPDATE(revision) ON rss_saga.instances FROM saga_escalation",
+        ),
+        (
+            "GRANT CREATE ON SCHEMA rss_saga TO saga_escalation",
+            "REVOKE CREATE ON SCHEMA rss_saga FROM saga_escalation",
+        ),
+        (
+            "ALTER ROLE saga_escalation BYPASSRLS",
+            "ALTER ROLE saga_escalation NOBYPASSRLS",
+        ),
+        (
+            "ALTER ROLE saga_escalation CREATEROLE",
+            "ALTER ROLE saga_escalation NOCREATEROLE",
+        ),
+    ] {
+        sqlx::raw_sql(change).execute(owner).await?;
+        let rejected = PgStore::new(pool.clone(), control).await;
+        sqlx::raw_sql(restore).execute(owner).await?;
+        anyhow::ensure!(
+            matches!(rejected, Err(e) if e.kind()==ErrorKind::StorageContract),
+            "accepted reachable privilege: {change}"
+        );
+        PgStore::new(pool.clone(), control).await?;
     }
     Ok(())
 }

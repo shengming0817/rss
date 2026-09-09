@@ -17,31 +17,7 @@ impl<R: Send> PgStore<R> {
         outbox: Arc<PgOutboxStore<R>>,
     ) -> Result<Self, PgError> {
         outbox.validate_transaction(tx)?;
-        let failure: Option<String> = tx
-            .with_connection(|c| {
-                Box::pin(async move {
-                    sqlx::query_scalar(include_str!("probe.sql"))
-                        .fetch_optional(c)
-                        .await
-                })
-            })
-            .await?;
-        if let Some(raw) = failure {
-            let reason = match raw.as_str() {
-                "revision" => "revision",
-                "runtime_role" => "runtime_role",
-                "runtime_acl" => "runtime_acl",
-                "rls_policy" => "rls_policy",
-                "functions" => "functions",
-                _ => "unknown",
-            };
-            tracing::warn!(
-                phase = "probe",
-                reason,
-                "device command storage contract rejected"
-            );
-            return Err(error(Error::InvalidSnapshot));
-        }
+        crate::probe::validate(tx).await?;
         Ok(Self { outbox })
     }
     async fn mutate(

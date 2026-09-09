@@ -1,4 +1,5 @@
 use rss_transactional_messaging::policy::OperationDeadline;
+mod admission;
 mod review;
 pub(super) use review::{
     authority_pages, composition_boundaries, diagnostic_classes, full_outbox_states,

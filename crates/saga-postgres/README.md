@@ -10,6 +10,10 @@ An external migrator executes the version-matched `MIGRATION_SQL` as a dedicated
 NOSUPERUSER NOBYPASSRLS schema owner. The fresh `rss_saga` schema contains only instances, journal
 and step_receipts. Provision a separate runtime login with schema USAGE, table SELECT and EXECUTE
 on the component functions; grant no direct write, REFERENCES or TRIGGER privileges (including column grants) and no owner membership.
+All three component tables must remain permanent (LOGGED). Admission checks the current role and
+all SET ROLE reachable roles, including their inherited table/column privileges, schema CREATE,
+ownership and dangerous role attributes. A NOINHERIT membership does not hide reachable write
+authority. All catalog checks use one acquired connection under the constructor deadline.
 Tables ENABLE and FORCE RLS, functions have fixed search paths, and PUBLIC privileges are revoked.
 
 The application owns role provisioning, TLS configuration, migration execution and business tables.
@@ -79,3 +83,8 @@ ref: baseline/pre-community-core-20260902 adapters/postgres/migrations/0083_crea
 `python3 hack/saga-package-proof.py --artifacts DIR --revision SHA`。
 两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
 完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。
+
+Admission is read-only and rejects drift; it does not repair storage or defend against trusted
+administrators performing DDL after construction. No compatibility bypass is provided.
+
+ref: postgres src/backend/utils/adt/acl.c@REL_16_STABLE

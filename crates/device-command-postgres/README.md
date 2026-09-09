@@ -16,7 +16,13 @@ allows its dedicated migration owner and one runtime database login shared by ap
 instances. Additional ACL principals, inherited access by other application logins and extra
 functions are rejected. Database administrators remain product-owned trusted operators.
 Admission checks exact policy predicates, roles and function signatures/ACLs, and rejects
-additional permissive policies or changed function search paths. The owner must
+additional permissive policies or changed function search paths. All five function definitions
+are derived from the bundled migration: admission verifies their bodies, parameter names/types,
+return types, SQL language and execution attributes, including CALLED ON NULL INPUT. Tables must
+be ordinary permanent relations with no non-internal triggers or rewrite rules. These checks
+run on the supplied transaction connection and never invoke a business function or repair DDL.
+Restore the version-matched definitions before retrying; no compatibility bypass is provided.
+Trusted administrator DDL after construction remains outside the admission guarantee. The owner must
 not be reachable through SET ROLE. Products provision roles and execute migrations.
 
 Install the separately versioned messaging schema with its own documented runtime grants. New
@@ -25,7 +31,7 @@ Future changes to this component's persisted format require append-only upgrades
 
 `PgStore::new(tx, outbox)` checks its schema revision, RLS and runtime privilege boundary using
 an existing tenant-bound transaction. Rejections log structured `phase="probe"` and a closed
-`reason` (`revision`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
+`reason` (`revision`, `relations`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
 `unknown`), without database names, credentials or role names. Every constructor and operation validates the transaction's private runtime provenance against
 its Outbox owner. Distinct PgRuntime instances are rejected even for the same database; share
 the original Arc or construct a new paired store after reconnecting. `PgRuntime` remains the connection/TLS/deadline/quarantine owner. Companion SQL is
@@ -95,3 +101,5 @@ ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
 `python3 hack/device-command-package-proof.py --artifacts DIR --revision SHA`。
 两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
 完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。
+
+ref: postgres src/backend/utils/adt/acl.c@REL_16_STABLE
