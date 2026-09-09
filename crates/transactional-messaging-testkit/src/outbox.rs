@@ -90,11 +90,18 @@ pub async fn run_outbox_conformance<D: OutboxDriver>(
         driver.cross_tenant_completion(),
     )
     .await??;
-    if a.tenant == b.tenant || a.message_id != b.message_id {
+    if a.tenant == b.tenant {
         return Err(ConformanceError::mismatch(
-            "outbox.tenants.identity",
-            "different-tenants-same-id",
-            "incorrect-identities",
+            "outbox.tenants.tenant",
+            "different",
+            "same",
+        ));
+    }
+    if a.message_id != b.message_id {
+        return Err(ConformanceError::mismatch(
+            "outbox.tenants.message-id",
+            "same",
+            "different",
         ));
     }
     for result in [a, b] {

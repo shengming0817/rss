@@ -80,18 +80,42 @@ pub async fn run_inbox_conformance<D: InboxDriver>(
         driver.cross_tenant_completion(),
     )
     .await??;
-    if a.consumer().tenant_id() == b.consumer().tenant_id()
-        || a.message_id() != b.message_id()
-        || a.consumer().group() != b.consumer().group()
-        || a.consumer().contract() != b.consumer().contract()
-        || a.disposition() != TerminalDisposition::Succeeded
-        || b.disposition() != TerminalDisposition::Succeeded
-    {
-        return Err(ConformanceError::mismatch(
-            "inbox.tenants.terminal",
-            "independent-success",
-            "incorrect-terminal",
-        ));
+    for (matches, stage, expected, actual) in [
+        (
+            a.consumer().tenant_id() != b.consumer().tenant_id(),
+            "inbox.tenants.tenant",
+            "different",
+            "same",
+        ),
+        (
+            a.message_id() == b.message_id(),
+            "inbox.tenants.message-id",
+            "same",
+            "different",
+        ),
+        (
+            a.consumer().group() == b.consumer().group(),
+            "inbox.tenants.group",
+            "same",
+            "different",
+        ),
+        (
+            a.consumer().contract() == b.consumer().contract(),
+            "inbox.tenants.contract",
+            "same",
+            "different",
+        ),
+        (
+            a.disposition() == TerminalDisposition::Succeeded
+                && b.disposition() == TerminalDisposition::Succeeded,
+            "inbox.tenants.disposition",
+            "succeeded",
+            "rejected",
+        ),
+    ] {
+        if !matches {
+            return Err(ConformanceError::mismatch(stage, expected, actual));
+        }
     }
     driver.reset();
     for evidence in within_budget(

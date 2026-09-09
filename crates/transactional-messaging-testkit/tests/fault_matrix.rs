@@ -45,9 +45,16 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Defect {
     OutboxTenantCollision,
+    OutboxTenantMessageMismatch,
+    OutboxTenantUnsettled,
     OutboxStaleSettlement,
     OutboxSuccessorLost,
     InboxTenantCollision,
+    InboxTenantMessageMismatch,
+    InboxTenantGroupMismatch,
+    InboxTenantContractMismatch,
+    InboxTenantDispositionA,
+    InboxTenantDispositionB,
     InboxStaleRelease,
     InboxTerminalChanged,
     OutboxAfterPublishBeforeSettle,
@@ -194,8 +201,16 @@ impl OutboxDriver for OutboxFixture {
                 } else {
                     b
                 },
-                message_id: fixture_id("same")?,
-                settlement: OutboxDisposition::Published,
+                message_id: fixture_id(if self.is(Defect::OutboxTenantMessageMismatch) {
+                    "other"
+                } else {
+                    "same"
+                })?,
+                settlement: if self.is(Defect::OutboxTenantUnsettled) {
+                    OutboxDisposition::Retry
+                } else {
+                    OutboxDisposition::Published
+                },
             },
         ])
     }
@@ -333,16 +348,50 @@ impl InboxDriver for InboxFixture {
             TenantId::parse("22222222-2222-2222-2222-222222222222")
                 .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?
         };
+        let fixture_error = |_| ConformanceError::fixture(MessagingErrorKind::Invariant);
         let b = TerminalReceipt::from_durable(
             ConsumerIdentity::new(
                 tenant,
-                a.consumer().group().clone(),
-                a.message_id().clone(),
-                a.consumer().contract().clone(),
+                if self.defect == Some(Defect::InboxTenantGroupMismatch) {
+                    ConsumerGroup::parse("other-group").map_err(fixture_error)?
+                } else {
+                    a.consumer().group().clone()
+                },
+                if self.defect == Some(Defect::InboxTenantMessageMismatch) {
+                    fixture_id("other")?
+                } else {
+                    a.message_id().clone()
+                },
+                if self.defect == Some(Defect::InboxTenantContractMismatch) {
+                    ContractIdentity::new(
+                        ContractId::parse("other.contract").map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?,
+                        ContractVersion::from_major(1).map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?,
+                        SchemaDigest::parse("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?,
+                    )
+                } else {
+                    a.consumer().contract().clone()
+                },
             ),
             a.fingerprint(),
-            a.disposition(),
+            if self.defect == Some(Defect::InboxTenantDispositionB) {
+                TerminalDisposition::Rejected(
+                    rss_transactional_messaging::transaction::RejectKind::Permanent,
+                )
+            } else {
+                a.disposition()
+            },
         );
+        let a = if self.defect == Some(Defect::InboxTenantDispositionA) {
+            TerminalReceipt::from_durable(
+                a.consumer().clone(),
+                a.fingerprint(),
+                TerminalDisposition::Rejected(
+                    rss_transactional_messaging::transaction::RejectKind::Permanent,
+                ),
+            )
+        } else {
+            a
+        };
         Ok([a, b])
     }
     async fn stale_release(&self) -> Result<[StaleReleaseEvidence; 2], ConformanceError> {
@@ -868,27 +917,45 @@ async fn provider_failures_identify_the_publisher_scenario() {
 
 #[tokio::test]
 async fn durable_identity_faults_are_rejected_by_public_suites() {
-    for defect in [
-        Defect::OutboxTenantCollision,
-        Defect::OutboxStaleSettlement,
-        Defect::OutboxSuccessorLost,
+    for (defect, stage) in [
+        (Defect::OutboxTenantCollision, "outbox.tenants.tenant"),
+        (
+            Defect::OutboxTenantMessageMismatch,
+            "outbox.tenants.message-id",
+        ),
+        (Defect::OutboxTenantUnsettled, "outbox.tenants.settlement"),
+        (Defect::OutboxStaleSettlement, "outbox.reclaim.stale"),
+        (Defect::OutboxSuccessorLost, "outbox.retry.successor"),
     ] {
-        assert!(
+        assert_eq!(
             run_outbox_conformance(
                 &OutboxFixture::new(Some(defect)),
                 &FakeClock::new(),
                 ExecutionBudget::STANDARD
             )
             .await
-            .is_err()
+            .err()
+            .map(ConformanceError::stage),
+            Some(stage)
         );
     }
-    for defect in [
-        Defect::InboxTenantCollision,
-        Defect::InboxStaleRelease,
-        Defect::InboxTerminalChanged,
+    for (defect, stage) in [
+        (Defect::InboxTenantCollision, "inbox.tenants.tenant"),
+        (
+            Defect::InboxTenantMessageMismatch,
+            "inbox.tenants.message-id",
+        ),
+        (Defect::InboxTenantGroupMismatch, "inbox.tenants.group"),
+        (
+            Defect::InboxTenantContractMismatch,
+            "inbox.tenants.contract",
+        ),
+        (Defect::InboxTenantDispositionA, "inbox.tenants.disposition"),
+        (Defect::InboxTenantDispositionB, "inbox.tenants.disposition"),
+        (Defect::InboxStaleRelease, "inbox.stale-release.terminal"),
+        (Defect::InboxTerminalChanged, "inbox.stale-release.terminal"),
     ] {
-        assert!(
+        assert_eq!(
             run_inbox_conformance(
                 &InboxFixture {
                     defect: Some(defect)
@@ -897,7 +964,9 @@ async fn durable_identity_faults_are_rejected_by_public_suites() {
                 ExecutionBudget::STANDARD
             )
             .await
-            .is_err()
+            .err()
+            .map(ConformanceError::stage),
+            Some(stage)
         );
     }
 }
