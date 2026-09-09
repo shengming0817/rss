@@ -42,7 +42,8 @@ by the caller through the fallible `credentials(...)` builder, which rejects inv
 The caller owns authentication, authorization, credential rotation and the contents of its TLS config.
 Default keepalive/connect timeout are 10 seconds; reconnection uses exponential backoff with jitter, initially 100–200 milliseconds and capped at 30 seconds.
 `ReconnectPolicy` configures the initial and maximum waits. The delay resets only after connection and
-subscriptions are validated; cancellation interrupts the wait.
+subscriptions are validated. Backoff continues processing queued commands, including graceful
+shutdown; handling commands does not restart the timer. Forced cancellation remains separate.
 Session expiry defaults to the upstream persistent-session setting and can be set explicitly.
 `Reconnecting { cause, generation }` retains a closed diagnostic; transient broker busy/quota
 responses recover automatically, while authentication, storage and session mismatch failures remain terminal.
@@ -86,6 +87,9 @@ payloads before appending to the Outbox. `MqttOutboxPlan` binds one domain and a
 map of typed routes to `MqttOutboxTopic` destinations/options. The adapter sends persisted payload
 bytes unchanged and exclusively writes canonical user properties; there is no encoding callback.
 Wrong domain, unbound route and oversized/invalid metadata fail before protocol admission.
+Both raw and Outbox publication fix one monotonic cutoff on entry: metadata encoding, size
+validation, queue admission and broker confirmation consume the same budget. Expiration before
+command submission is definitely-not-published; expiration after submission remains ambiguous.
 
 The RSS MQTT envelope uses `messageId`, `tenantId`, `domain`, `route`, `contractId`, `schemaVersion`,
 `schemaHash`, `occurredAt`, optional `partitionKey`, `correlation`, `causationId`, `trace` and

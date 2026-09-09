@@ -473,10 +473,9 @@ async fn apply_settlement(
                     .map_err(evidence_error)?,
                 &clock,
             );
-            if settlement
+            if !matches!(settlement
                 .settle(terminal_decision(received, subscription, false)?, deadline)
-                .await
-                .is_ok()
+                .await, Err(error) if error.kind() == MessagingErrorKind::DeadlineElapsed)
             {
                 return Err(evidence_error(()));
             }

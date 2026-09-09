@@ -662,7 +662,10 @@ impl DeliverySettlement for AmqpSettlement {
             }
             Err(error) => {
                 self.subscription_rpc.closing.requested.cancel();
-                Err(MessagingError::new(MessagingErrorKind::Transient, error))
+                Err(MessagingError::new(
+                    MessagingErrorKind::DeadlineElapsed,
+                    error,
+                ))
             }
         }
     }

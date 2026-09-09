@@ -94,12 +94,20 @@ impl MqttPublisher {
         request: PublishRequest,
         deadline: OperationDeadline,
     ) -> PublishOutcome<()> {
-        if !request.valid_size(self.packet_bytes) {
-            return outcome::definite(Kind::Permanent, Stage::Encode, Reason::InvalidMessage);
-        }
         let Ok(cutoff) = self.shared.deadline(deadline.timeout()) else {
             return outcome::definite(Kind::Permanent, Stage::Admission, Reason::InvalidMessage);
         };
+        self.publish_until(request, cutoff).await
+    }
+
+    pub(crate) async fn publish_until(
+        &self,
+        request: PublishRequest,
+        cutoff: Deadline,
+    ) -> PublishOutcome<()> {
+        if !request.valid_size(self.packet_bytes) {
+            return outcome::definite(Kind::Permanent, Stage::Encode, Reason::InvalidMessage);
+        }
         if cutoff
             .remaining(self.shared.clock.now())
             .unwrap_or_default()
@@ -146,6 +154,13 @@ impl MqttPublisher {
                 Stage::Admission,
                 Reason::TransportUnavailable,
             );
+        }
+        if cutoff
+            .remaining(self.shared.clock.now())
+            .unwrap_or_default()
+            .is_zero()
+        {
+            return outcome::definite(Kind::Transient, Stage::Admission, Reason::DeadlineElapsed);
         }
         permit.send(Command::Publish {
             request,
@@ -394,3 +409,6 @@ impl Drop for MqttResource {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

@@ -622,3 +622,45 @@ async fn shutdown_preserves_the_session_store_failure_cause() -> anyhow::Result<
     server.await??;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graceful_shutdown_interrupts_long_reconnect_backoff() -> anyhow::Result<()> {
+    let peer = Peer::new().await?;
+    let config = peer
+        .config("shutdown-backoff")?
+        .reconnect_policy(rss_mqtt::ReconnectPolicy::new(
+            Duration::from_secs(30),
+            Duration::from_secs(120),
+        )?);
+    let (drop_tx, drop_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let wire = peer.accept(false).await?;
+        drop_rx.await?;
+        drop(wire);
+        // A graceful close may reconnect to finish the protocol shutdown.
+        let mut wire = peer.accept(false).await?;
+        anyhow::ensure!(
+            matches!(wire.read().await?, Packet::Disconnect(_)),
+            "expected DISCONNECT"
+        );
+        Ok::<_, anyhow::Error>(())
+    });
+    let clock = Arc::new(Timer::new());
+    let (publisher, _receiver, resource) =
+        rss_mqtt::connect(config, clock, Arc::new(FileStore::new()?))?;
+    publisher.wait_ready(Duration::from_secs(3)).await?;
+    let mut state = publisher.connection_state();
+    let _ = drop_tx.send(());
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        state.wait_for(|s| matches!(s, rss_mqtt::ConnectionState::Reconnecting { .. })),
+    )
+    .await??;
+    let result = resource.shutdown(Duration::from_secs(3)).await;
+    if result.is_err() {
+        server.abort();
+    }
+    assert_eq!(result, Ok(()));
+    tokio::time::timeout(Duration::from_secs(3), server).await???;
+    Ok(())
+}

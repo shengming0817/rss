@@ -3260,6 +3260,10 @@ impl Clock for RecordingTimer {
 
 impl ExecutionTimer for RecordingTimer {
     async fn sleep_until(&self, deadline: Deadline) {
+        // Only recovery delays are released here; operation watchdogs stay pending.
+        if deadline.remaining(self.now()).unwrap_or_default() >= Duration::from_secs(1) {
+            std::future::pending::<()>().await;
+        }
         self.delays
             .lock()
             .expect("delays")
@@ -3275,6 +3279,7 @@ impl ExecutionTimer for RecordingTimer {
 enum RecoveryStep {
     TransientError,
     EmptyStream,
+    Delivery { fails: bool },
 }
 
 struct RecoverySource {
@@ -3283,7 +3288,8 @@ struct RecoverySource {
 
 impl DeliverySource<Vec<u8>> for RecoverySource {
     type Settlement = RecordingSettlement;
-    type Deliveries = futures::stream::Empty<IncomingDelivery<Vec<u8>, Self::Settlement>>;
+    type Deliveries =
+        futures::stream::Iter<std::vec::IntoIter<IncomingDelivery<Vec<u8>, Self::Settlement>>>;
 
     async fn deliveries(
         &self,
@@ -3295,14 +3301,23 @@ impl DeliverySource<Vec<u8>> for RecoverySource {
                 std::io::Error::other("subscription unavailable"),
             )),
             Some(RecoveryStep::EmptyStream) | None => Ok(ManagedDeliveryStream::from_provider(
-                futures::stream::empty(),
+                futures::stream::iter(Vec::new()),
+            )),
+            Some(RecoveryStep::Delivery { fails }) => Ok(ManagedDeliveryStream::from_provider(
+                futures::stream::iter(vec![IncomingDelivery::Valid(Box::new(Delivery::new(
+                    envelope(|_| {}),
+                    if fails {
+                        RecordingSettlement::failing()
+                    } else {
+                        RecordingSettlement::new()
+                    },
+                )))]),
             )),
         }
     }
 }
 
-#[tokio::test]
-async fn subscription_backoff_saturates_and_success_resets_the_cursor() {
+async fn assert_subscription_delays(steps: Vec<RecoveryStep>, expected_delays: &[Duration]) {
     let message = envelope(|_| {});
     let delays = Arc::new(Mutex::new(Vec::new()));
     let timer = Arc::new(RecordingTimer {
@@ -3311,13 +3326,9 @@ async fn subscription_backoff_saturates_and_success_resets_the_cursor() {
     });
     let worker = ConsumerWorker::new(
         Arc::new(RecoverySource {
-            steps: Mutex::new(VecDeque::from([
-                RecoveryStep::TransientError,
-                RecoveryStep::TransientError,
-                RecoveryStep::EmptyStream,
-            ])),
+            steps: Mutex::new(steps.into()),
         }),
-        idle_inbox(),
+        Arc::new(UnlimitedInbox),
         Arc::new(FakeTx {
             calls: Arc::new(AtomicUsize::new(0)),
             disposition: TerminalDisposition::Succeeded,
@@ -3328,13 +3339,13 @@ async fn subscription_backoff_saturates_and_success_resets_the_cursor() {
         Arc::clone(&timer),
         consumer_policy(),
         Arc::new(NoopEmitter),
-        SubscriptionBackoffPolicy::new(Duration::from_millis(100), Duration::from_millis(150))
+        SubscriptionBackoffPolicy::new(Duration::from_millis(100), Duration::from_millis(400))
             .expect("backoff"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(worker.run(cancellation.clone()));
 
-    for expected in 1..=3 {
+    for expected in 1..=expected_delays.len() {
         tokio::time::timeout(Duration::from_secs(1), async {
             while delays.lock().expect("delays").len() < expected {
                 tokio::task::yield_now().await;
@@ -3342,20 +3353,43 @@ async fn subscription_backoff_saturates_and_success_resets_the_cursor() {
         })
         .await
         .expect("recovery delay");
-        if expected < 3 {
+        if expected < expected_delays.len() {
             timer.permits.add_permits(1);
         }
     }
-    assert_eq!(
-        *delays.lock().expect("delays"),
-        [
-            Duration::from_millis(100),
-            Duration::from_millis(150),
-            Duration::from_millis(100),
-        ]
-    );
+    assert_eq!(*delays.lock().expect("delays"), expected_delays);
     cancellation.cancel();
     support::join_worker(task).await.expect("graceful stop");
+}
+
+#[tokio::test]
+async fn subscription_backoff_does_not_reset_on_empty_stream() {
+    assert_subscription_delays(
+        vec![
+            RecoveryStep::EmptyStream,
+            RecoveryStep::EmptyStream,
+            RecoveryStep::EmptyStream,
+            RecoveryStep::EmptyStream,
+        ],
+        &[100, 200, 400, 400].map(Duration::from_millis),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn subscription_backoff_processing_failures_saturate_and_success_resets() {
+    assert_subscription_delays(
+        vec![
+            RecoveryStep::Delivery { fails: true },
+            RecoveryStep::TransientError,
+            RecoveryStep::Delivery { fails: true },
+            RecoveryStep::Delivery { fails: true },
+            RecoveryStep::Delivery { fails: false },
+            RecoveryStep::EmptyStream,
+        ],
+        &[100, 200, 400, 400, 100, 200].map(Duration::from_millis),
+    )
+    .await;
 }
 
 #[tokio::test]
