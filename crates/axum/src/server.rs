@@ -142,17 +142,132 @@ fn registration(
     shutdown_timeout: Duration,
     protocol: Protocol,
 ) -> ManagedTaskRegistration {
-    let (start, _) = ManagedTask::prepare(name, shutdown_timeout);
-    start.into_registration(move |token| serve_owned(listener, router, token, protocol))
+    let name = name.into();
+    let (start, _) = ManagedTask::prepare(name.clone(), shutdown_timeout);
+    start.into_registration(move |token| async move {
+        serve_owned(listener, router, token, protocol, &name).await
+    })
+}
+
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+fn recoverable_accept_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::TimedOut
+            | ErrorKind::NetworkDown
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::HostUnreachable
+            | ErrorKind::OutOfMemory
+    ) || resource_pressure(error.raw_os_error())
+}
+
+#[cfg(unix)]
+fn resource_pressure(code: Option<i32>) -> bool {
+    matches!(
+        code,
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
+}
+
+#[cfg(windows)]
+fn resource_pressure(code: Option<i32>) -> bool {
+    use windows_sys::Win32::Networking::WinSock::{WSAEMFILE, WSAENOBUFS};
+    matches!(code, Some(WSAEMFILE | WSAENOBUFS))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn resource_pressure(_code: Option<i32>) -> bool {
+    // reason: no known platform errno mapping; unrecognized errors remain terminal.
+    false
+}
+
+// Private transport seam: production ownership stays with TcpListener.
+trait Accept: Send {
+    fn accept(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>> + Send;
+}
+
+impl Accept for TcpListener {
+    async fn accept(&mut self) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+        TcpListener::accept(self).await
+    }
+}
+
+// Registration names are public operator labels, never tenant/device identifiers or secrets.
+struct ListenerLogName<'a>(&'a str);
+
+impl rss_redact::Redact for ListenerLogName<'_> {
+    fn redact_scoped(&self, scope: rss_redact::RedactScope) -> String {
+        let public_label = !self.0.is_empty()
+            && self.0.len() <= 64
+            && self
+                .0
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        if matches!(scope, rss_redact::RedactScope::ServerLog) && public_label {
+            self.0.into()
+        } else {
+            "<redacted>".into()
+        }
+    }
+}
+
+impl ListenerLogName<'_> {
+    fn recovering(&self) {
+        tracing::warn!(target: "rss_axum::server", outcome = "accept_retry", listener = %rss_redact::safe(self, rss_redact::RedactScope::ServerLog), "listener recovering");
+    }
+
+    fn recovered(&self) {
+        tracing::info!(target: "rss_axum::server", outcome = "accept_recovered", listener = %rss_redact::safe(self, rss_redact::RedactScope::ServerLog), "listener recovered");
+    }
+}
+
+async fn accept_with_retry(
+    listener: &mut impl Accept,
+    retry_wait: &mut Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    name: &ListenerLogName<'_>,
+) -> Result<Option<(TcpStream, std::net::SocketAddr)>, ShutdownError> {
+    if let Some(delay) = retry_wait {
+        delay.as_mut().await;
+    }
+    match listener.accept().await {
+        Ok(accepted) => {
+            if retry_wait.take().is_some() {
+                name.recovered();
+            }
+            Ok(Some(accepted))
+        }
+        Err(error) if recoverable_accept_error(&error) => {
+            if retry_wait.is_none() {
+                name.recovering();
+            }
+            // ref: tokio-rs/axum axum/src/serve/listener.rs@axum-v0.8.9
+            // Retain this timer across select cancellation by connection completions.
+            *retry_wait = Some(Box::pin(tokio::time::sleep(ACCEPT_RETRY_DELAY)));
+            Ok(None)
+        }
+        Err(error) => Err(ShutdownError::new(error)),
+    }
 }
 
 async fn serve_owned(
-    listener: TcpListener,
+    mut listener: impl Accept,
     router: Router,
     token: CancellationToken,
     protocol: Protocol,
+    name: &str,
 ) -> Result<(), ShutdownError> {
+    let name = ListenerLogName(name);
     let mut connections = FuturesUnordered::new();
+    let mut retry_wait: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
         tokio::select! {
             biased;
@@ -161,8 +276,8 @@ async fn serve_owned(
             Some(result) = connections.next(), if !connections.is_empty() => {
                 record_connection(result);
             },
-            accepted = listener.accept() => {
-                let (stream, peer) = accepted.map_err(ShutdownError::new)?;
+            accepted = accept_with_retry(&mut listener, &mut retry_wait, &name) => {
+                let Some((stream, peer)) = accepted? else { continue; };
                 // H1 handlers run inside the connection future. Isolate their panics too.
                 connections.push(AssertUnwindSafe(connection(
                     stream, router.clone(), peer, token.clone(), protocol,
@@ -308,3 +423,6 @@ where
         }
     }
 }
+
+#[cfg(all(test, feature = "http1"))]
+mod accept_tests;

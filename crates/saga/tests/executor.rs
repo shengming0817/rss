@@ -494,9 +494,10 @@ async fn managed_cancellation_is_a_clean_lifecycle_exit() -> anyhow::Result<()> 
     let (start, status) = rss_runtime::ManagedTask::prepare("saga-test", Duration::from_secs(1));
     let (registration, result) =
         Arc::new(e).into_registration(start, Clock::new(), s, 10, Duration::from_secs(60));
-    let mut stack = rss_runtime::ShutdownStack::try_new(rss_runtime::TotalDrainBudget::new(
-        Duration::from_secs(2),
-    )?)?;
+    let mut stack = rss_runtime::ShutdownStack::try_new(
+        rss_runtime::TotalDrainBudget::new(Duration::from_secs(2))?,
+        std::sync::Arc::new(ShutdownTimer),
+    )?;
     let mut startup = stack.startup()?;
     startup.stage_task_with_token(registration);
     startup.commit().finish();
@@ -586,9 +587,10 @@ async fn managed_yield_and_pause_preserve_continuation_owner() -> anyhow::Result
         let (registration, result) =
             e.clone()
                 .into_registration(start, Clock::new(), s, budget, Duration::from_secs(10));
-        let mut stack = rss_runtime::ShutdownStack::try_new(rss_runtime::TotalDrainBudget::new(
-            Duration::from_secs(1),
-        )?)?;
+        let mut stack = rss_runtime::ShutdownStack::try_new(
+            rss_runtime::TotalDrainBudget::new(Duration::from_secs(1))?,
+            std::sync::Arc::new(ShutdownTimer),
+        )?;
         let mut startup = stack.startup()?;
         startup.stage_task_with_token(registration);
         startup.commit().finish();
@@ -603,4 +605,17 @@ async fn managed_yield_and_pause_preserve_continuation_owner() -> anyhow::Result
         }
     }
     Ok(())
+}
+
+pub struct ShutdownTimer;
+impl rss_request_context::Clock for ShutdownTimer {
+    #[allow(clippy::disallowed_methods)] // reason: this concrete test clock owns the Tokio time domain.
+    fn now(&self) -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
+    }
+}
+impl rss_request_context::ExecutionTimer for ShutdownTimer {
+    async fn sleep_until(&self, deadline: rss_request_context::Deadline) {
+        tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
+    }
 }

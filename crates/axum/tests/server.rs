@@ -1,4 +1,6 @@
 #![cfg(feature = "http2")]
+#[path = "support/timer.rs"]
+mod timer;
 use axum::{Router, routing::get};
 use http_body_util::{BodyExt, Empty};
 use hyper::{body::Bytes, client::conn::http2::SendRequest};
@@ -71,7 +73,11 @@ async fn start_with(
 ) -> (SocketAddr, ShutdownStack) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(total).unwrap()).unwrap();
+    let mut owner = ShutdownStack::try_new(
+        TotalDrainBudget::new(total).unwrap(),
+        std::sync::Arc::new(timer::TokioTimer),
+    )
+    .unwrap();
     owner
         .startup()
         .unwrap()
@@ -149,8 +155,11 @@ async fn cancellation_before_first_poll_releases_listener() {
     let registration =
         serve_http2_registration(listener, Router::new(), "http", Duration::from_secs(1));
     let status = registration.status();
-    let mut owner =
-        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(2)).unwrap()).unwrap();
+    let mut owner = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(2)).unwrap(),
+        std::sync::Arc::new(timer::TokioTimer),
+    )
+    .unwrap();
     owner.startup().unwrap().stage_task_with_token(registration);
     assert!(owner.shutdown().join().await.unwrap().is_clean());
     assert_eq!(status.wait_stopped().await, TaskExit::Cancelled);
@@ -247,8 +256,11 @@ async fn all_http2_streams_are_cancelled_before_later_dependency_teardown() {
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut owner =
-            ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(2)).unwrap()).unwrap();
+        let mut owner = ShutdownStack::try_new(
+            TotalDrainBudget::new(Duration::from_secs(2)).unwrap(),
+            std::sync::Arc::new(timer::TokioTimer),
+        )
+        .unwrap();
         let mut startup = owner.startup().unwrap();
         startup.stage_resource(rss_runtime::DynManagedResource::new_box(Dependency {
             release,

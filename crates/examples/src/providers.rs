@@ -209,9 +209,10 @@ async fn run_inner(input: FixtureInput) -> anyhow::Result<()> {
         PgPrivateCa::from_pem(input.pg_ca.into_bytes())?,
     );
     #[cfg(feature = "managed")]
-    let mut stack = rss_runtime::ShutdownStack::try_new(rss_runtime::TotalDrainBudget::new(
-        Duration::from_secs(8),
-    )?)?;
+    let mut stack = rss_runtime::ShutdownStack::try_new(
+        rss_runtime::TotalDrainBudget::new(Duration::from_secs(8))?,
+        std::sync::Arc::new(Timer::new()),
+    )?;
     #[cfg(feature = "managed")]
     let mut startup = stack.startup()?;
     let timer = Timer::new();

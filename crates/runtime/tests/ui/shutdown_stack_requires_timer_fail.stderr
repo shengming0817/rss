@@ -1,0 +1,15 @@
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+ --> tests/ui/shutdown_stack_requires_timer_fail.rs:4:18
+  |
+4 |     let _owner = ShutdownStack::try_new(budget);
+  |                  ^^^^^^^^^^^^^^^^^^^^^^-------- argument #2 of type `Arc<_>` is missing
+  |
+note: associated function defined here
+ --> src/shutdown.rs
+  |
+  |     pub fn try_new(
+  |            ^^^^^^^
+help: provide the argument
+  |
+4 |     let _owner = ShutdownStack::try_new(budget, /* timer */);
+  |                                               +++++++++++++

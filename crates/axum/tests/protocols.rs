@@ -1,4 +1,6 @@
 #![cfg(feature = "http1")]
+#[path = "support/timer.rs"]
+mod timer;
 
 use axum::{Router, body::Bytes, routing::get};
 use http_body_util::{BodyExt as _, Empty};
@@ -33,7 +35,11 @@ fn constructors() -> Vec<Register> {
 async fn start(register: Register, router: Router, drain: Duration) -> (SocketAddr, ShutdownStack) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(WAIT).unwrap()).unwrap();
+    let mut owner = ShutdownStack::try_new(
+        TotalDrainBudget::new(WAIT).unwrap(),
+        std::sync::Arc::new(timer::TokioTimer),
+    )
+    .unwrap();
     let mut startup = owner.startup().unwrap();
     startup.stage_task_with_token(register(listener, router, "http", drain));
     startup.commit().finish();
@@ -218,7 +224,11 @@ async fn http1_timeout_drops_handler_before_dependency_teardown() {
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(WAIT).unwrap()).unwrap();
+        let mut owner = ShutdownStack::try_new(
+            TotalDrainBudget::new(WAIT).unwrap(),
+            std::sync::Arc::new(timer::TokioTimer),
+        )
+        .unwrap();
         let mut startup = owner.startup().unwrap();
         startup.stage_resource(rss_runtime::DynManagedResource::new_box(Dependency {
             release,

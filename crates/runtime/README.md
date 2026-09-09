@@ -7,16 +7,17 @@ It does not install process signals or panic hooks, bind listeners, parse config
 registries, or model assemblies and providers.
 
 The stack owns its cancellation root. Resources receive only a short-lived child token while they
-are being registered, and every shutdown has one positive total budget:
+are being registered, and every shutdown has one positive total budget. The `timer` below is the
+host-provided `Arc<impl rss_request_context::ExecutionTimer>`:
 
 ```rust
 use std::time::Duration;
 
 use rss_runtime::{ManagedTask, ShutdownStack, TotalDrainBudget};
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(timer: std::sync::Arc<impl rss_request_context::ExecutionTimer + 'static>) -> Result<(), Box<dyn std::error::Error>> {
 let budget = TotalDrainBudget::new(Duration::from_secs(30))?;
-let mut stack = ShutdownStack::try_new(budget)?;
+let mut stack = ShutdownStack::try_new(budget, timer)?;
 
 let (start, status) = ManagedTask::prepare("relay", Duration::from_secs(5));
 let registration = start.into_registration(|token| async move {
@@ -40,6 +41,29 @@ if !receipt.is_clean() {
 # Ok(())
 # }
 ```
+
+`ShutdownStack::try_new` and `LifecycleScope::try_new` require an active Tokio runtime and an
+explicit `Arc<impl rss_request_context::ExecutionTimer + 'static>`. A missing runtime returns
+`RuntimeUnavailable` before resource registration; the timer is a mandatory constructor capability.
+All total and per-resource shutdown deadlines use that timer's monotonic domain. Unrepresentable
+cutoffs fail closed as exhausted budgets. No hidden Tokio timer probe or timer fallback remains.
+
+A timerless Tokio runtime is supported when the host supplies a valid independent timer. The host
+owns timer/runtime assembly and must keep both driven through cleanup; RSS owns only the retained
+timer capability and its shutdown arbitration. A Tokio-backed host timer requires its own enabled
+time driver. Registered resources retain their own timer prerequisites.
+Migration: pass the host timer to both constructors; the former one-argument
+constructors and `TimeDriverUnavailable` are removed. Timer admission performs no panic probing,
+including in `panic = "abort"` builds. Isolation of actual resource/callback panics still depends on
+Rust unwinding and the host's panic policy.
+
+Standalone `ManagedTask::shutdown` and `ManagedBlockingWorker::shutdown` retain their join handles
+when a waiter is cancelled. Concurrent/repeated calls return the same actual join result, including
+errors and panics; thread success includes thread-local destruction. A task status is not a join
+receipt. Dropping the task owner aborts its task; dropping a thread owner requests cancellation but
+cannot forcibly stop the thread. These standalone shutdown methods do not impose their own timeout.
+Migration: a second shutdown no longer clears a failure, and cancelling only a shutdown waiter no
+longer aborts an independently retained managed task.
 
 There are no default features. The crate deliberately has no compatibility API for former
 lifecycle ownership paths.
@@ -69,9 +93,10 @@ business effects. Successfully returning without sealing registration is `Regist
 use std::time::Duration;
 use rss_runtime::{AdmissionGate, LifecycleScope, ManagedTask, ScopeExit, ShutdownError, TotalDrainBudget};
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(timer: std::sync::Arc<impl rss_request_context::ExecutionTimer + 'static>) -> Result<(), Box<dyn std::error::Error>> {
 let mut scope = LifecycleScope::<(), ShutdownError, tokio::sync::oneshot::error::RecvError>::try_new(
     TotalDrainBudget::new(Duration::from_secs(10))?,
+    timer,
 )?;
 // This example requests stop when one request is in flight. A product supplies its own source.
 let (request_stop, stop) = tokio::sync::oneshot::channel();

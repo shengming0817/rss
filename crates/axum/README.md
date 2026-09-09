@@ -130,14 +130,14 @@ authenticator. The status/body mapper alone does not provide a complete authenti
 
 ```rust,no_run
 # #[cfg(feature = "http2")]
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(timer: std::sync::Arc<impl rss_request_context::ExecutionTimer + 'static>) -> Result<(), Box<dyn std::error::Error>> {
 use std::time::Duration;
 use rss_runtime::{ShutdownStack, TotalDrainBudget};
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 let registration = rss_axum::serve_http2_registration(
     listener, axum::Router::new(), "http", Duration::from_secs(5));
 let status = registration.status();
-let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?)?;
+let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?, timer)?;
 let mut startup = owner.startup()?;
 startup.stage_task_with_token(registration);
 startup.commit().finish();
@@ -247,3 +247,23 @@ ref: rust-lang/futures-rs futures-util/src/stream/futures_unordered/mod.rs@0.3.3
 Managed listeners inject the accepted TCP peer as standard Axum `ConnectInfo<SocketAddr>`
 on every request, for HTTP/1, HTTP/2 and Auto. They never interpret proxy headers;
 products own trusted proxy normalization and client attribution.
+
+### Listener recovery
+
+A recognized transient accept failure pauses new acceptance for one second while existing
+connections continue progressing. Retries retain only one deadline, create no tasks or connection
+queue, and have no cumulative expiry. A successful accept ends recovery; shutdown interrupts the
+wait and uses the existing graceful drain and runtime budget. Unknown and terminal errors return a
+redacted failure instead of retrying forever. Recognized resource pressure includes Unix
+EMFILE/ENFILE/ENOBUFS/ENOMEM and Windows WSAEMFILE/WSAENOBUFS. The first failure and subsequent
+recovery emit closed `accept_retry` / `accept_recovered` events with the stable operator-controlled
+`listener` registration name through `rss_redact::safe`. Names are public operator labels: use
+1–64 ASCII letters, digits, hyphens or underscores, and never include credentials or tenant/device
+data. Other names render as `<redacted>`; wire projection always redacts the name. Repeated failures
+do not grow logs. Raw error text and peer data are not included in these recovery events.
+
+This bounds retry overhead, not total server capacity: the current connection set has no explicit
+connection-count limit. Product hosts own readiness, alerting, traffic removal, exit/restart and
+capacity values. A future local connection limit must be enforced by this connection owner; HTTP
+handler concurrency alone cannot bound TCP connections. No automatic restart or fixed listener
+failure window is installed by this adapter.

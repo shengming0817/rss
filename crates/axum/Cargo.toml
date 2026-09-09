@@ -13,7 +13,7 @@ publish = ["crates-io"]
 
 [features]
 default = []
-managed-server = ["axum/tokio","dep:rss-runtime", "dep:futures", "dep:hyper", "dep:hyper-util", "dep:tracing", "tokio/net", "hyper/server"]
+managed-server = ["axum/tokio","dep:rss-runtime", "dep:rss-redact", "dep:futures", "dep:hyper", "dep:hyper-util", "dep:tracing", "tokio/net", "hyper/server", "dep:libc", "dep:windows-sys"]
 
 http1 = ["managed-server", "hyper/http1", "hyper-util/http1"]
 http2 = ["managed-server", "hyper/http2", "hyper-util/http2"]
@@ -23,6 +23,7 @@ auto-protocol = ["http1", "http2", "hyper-util/server-auto"]
 rss-contract.workspace = true
 rss-request-context.workspace = true
 rss-runtime = { workspace = true, optional = true }
+rss-redact = { workspace = true, optional = true }
 futures = { workspace = true, optional = true, features = ["std", "async-await"] }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
@@ -32,6 +33,12 @@ tokio = { workspace = true, features = ["time", "macros"] }
 tokio-util.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true, features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 tracing.workspace = true

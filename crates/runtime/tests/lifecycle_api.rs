@@ -1,3 +1,4 @@
+mod support;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -126,7 +127,7 @@ fn total_drain_budget_rejects_zero() {
 fn shutdown_owner_requires_an_active_tokio_runtime() {
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
     assert!(matches!(
-        ShutdownStack::try_new(budget),
+        ShutdownStack::try_new(budget, Arc::new(support::TokioTimer)),
         Err(ShutdownStackError::RuntimeUnavailable)
     ));
 }
@@ -135,7 +136,8 @@ fn shutdown_owner_requires_an_active_tokio_runtime() {
 #[allow(clippy::expect_used)] // reason: lifecycle setup and clean drain are test assertions.
 async fn empty_runtime_finishes_with_a_typed_clean_receipt() {
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-    let stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     let receipt = stack
         .shutdown()
         .join()
@@ -152,7 +154,8 @@ async fn empty_runtime_finishes_with_a_typed_clean_receipt() {
 async fn startup_and_launch_stage_resources_immediately_and_drain_lifo() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     let mut startup = stack.startup().expect("registration is open");
     startup.stage_resource(DynManagedResource::new_box(RecordingResource {
         name: "dependency",
@@ -185,7 +188,8 @@ async fn startup_and_launch_stage_resources_immediately_and_drain_lifo() {
 async fn dropping_stack_continues_the_owned_drain() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     let mut startup = stack.startup().expect("registration is open");
     startup.stage_resource(DynManagedResource::new_box(RecordingResource {
         name: "first",
@@ -225,7 +229,8 @@ async fn dropping_stack_continues_the_owned_drain() {
 async fn dropped_stack_keeps_the_total_drain_budget() {
     let dropped = Arc::new(AtomicUsize::new(0));
     let budget = TotalDrainBudget::new(Duration::from_millis(20)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     stack
         .startup()
         .expect("registration is open")
@@ -251,7 +256,8 @@ async fn cancelling_shutdown_waiter_continues_exactly_one_owned_drain() {
     let finishes = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(tokio::sync::Notify::new());
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     stack
         .startup()
         .expect("registration is open")
@@ -288,7 +294,8 @@ async fn transaction_funnels_bind_tokens_and_seal_after_launch() {
     let gate_started = Arc::new(tokio::sync::Notify::new());
     let gate_release = Arc::new(tokio::sync::Notify::new());
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     let (regular_start, regular_status) = ManagedTask::prepare("regular", Duration::from_secs(1));
     let regular_registration = regular_start.into_registration(|token| async move {
         token.cancelled().await;
@@ -370,7 +377,8 @@ async fn transaction_starts_and_joins_fallible_blocking_registration() {
     let observed_token = Arc::new(Mutex::new(None));
     let run_observed_token = Arc::clone(&observed_token);
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     let registration = blocking_worker_registration(
         "transaction-blocking",
         Duration::from_secs(1),
@@ -411,7 +419,8 @@ async fn transaction_starts_and_joins_fallible_blocking_registration() {
 #[allow(clippy::expect_used)] // reason: failure receipt construction is the test assertion.
 async fn failed_receipt_is_complete_ordered_and_consumable() {
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     stack
         .startup()
         .expect("registration is open")
@@ -433,7 +442,8 @@ async fn failed_receipt_is_complete_ordered_and_consumable() {
 #[allow(clippy::expect_used)] // reason: budget exhaustion receipt is the test assertion.
 async fn exhausted_receipt_counts_current_and_remaining_resources() {
     let budget = TotalDrainBudget::new(Duration::from_millis(1)).expect("positive budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("inside Tokio runtime");
     let mut startup = stack.startup().expect("registration is open");
     startup.stage_resource(DynManagedResource::new_box(HangingResource("remaining")));
     startup.stage_resource(DynManagedResource::new_box(HangingResource("current")));
@@ -464,7 +474,8 @@ fn drop_after_originating_runtime_stops_still_broadcasts_cancellation() {
     let observed = Arc::new(Mutex::new(None));
     let stack = runtime.block_on(async {
         let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-        let mut stack = ShutdownStack::try_new(budget).expect("inside Tokio runtime");
+        let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+            .expect("inside Tokio runtime");
         stack
             .startup()
             .expect("registration is open")
@@ -502,7 +513,8 @@ fn explicit_shutdown_reports_stopped_originating_runtime() {
         .expect("origin runtime builds");
     let stack = origin.block_on(async {
         let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("positive budget");
-        ShutdownStack::try_new(budget).expect("inside origin runtime")
+        ShutdownStack::try_new(budget, Arc::new(support::TokioTimer))
+            .expect("inside origin runtime")
     });
     drop(origin);
     let waiter = tokio::runtime::Builder::new_current_thread()
@@ -519,6 +531,7 @@ async fn scope_retains_execution_and_shutdown_failures() {
     use rss_runtime::{LifecycleScope, ScopeExit};
     let mut scope = LifecycleScope::<(), &'static str, &'static str>::try_new(
         TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     let outcome = scope
@@ -552,6 +565,7 @@ async fn scope_cancelled_during_startup_recovers_receipt() {
     let staged = Arc::new(tokio::sync::Notify::new());
     let mut scope = LifecycleScope::<(), (), ()>::try_new(
         TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     {
@@ -590,9 +604,11 @@ async fn scope_cancelled_during_startup_recovers_receipt() {
 async fn drain_wait_can_be_cancelled_and_repeated_without_losing_receipt() {
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let mut stack =
-        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"))
-            .expect("runtime");
+    let mut stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
+    )
+    .expect("runtime");
     stack
         .startup()
         .expect("startup")
@@ -628,9 +644,11 @@ async fn drain_wait_can_be_cancelled_and_repeated_without_losing_receipt() {
 #[tokio::test]
 #[allow(clippy::expect_used)] // reason: cached failure receipt ownership is the assertion.
 async fn join_consumes_a_previously_observed_failure_receipt() {
-    let mut stack =
-        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"))
-            .expect("runtime");
+    let mut stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
+    )
+    .expect("runtime");
     stack
         .startup()
         .expect("registration is open")
@@ -645,9 +663,11 @@ async fn join_consumes_a_previously_observed_failure_receipt() {
 #[tokio::test]
 #[allow(clippy::expect_used)] // reason: gate lifecycle assertions.
 async fn admission_closes_synchronously_and_waits_for_last_permit() {
-    let mut stack =
-        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"))
-            .expect("runtime");
+    let mut stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
+    )
+    .expect("runtime");
     let (control, gate) = stack
         .startup()
         .expect("startup")
@@ -670,6 +690,7 @@ async fn critical_completion_during_startup_stops_scope() {
     use rss_runtime::{LifecycleScope, ScopeExit, TaskExit};
     let mut scope = LifecycleScope::<(), (), ()>::try_new(
         TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     let outcome = scope
@@ -705,6 +726,7 @@ async fn cancelling_scope_cleanup_wait_keeps_original_execution_error() {
     let release = Arc::new(tokio::sync::Notify::new());
     let mut scope = LifecycleScope::<(), &'static str, &'static str>::try_new(
         TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     {
@@ -748,7 +770,8 @@ async fn cancelling_scope_cleanup_wait_keeps_original_execution_error() {
 async fn scope_reports_unsealed_execution_panic_and_invalid_reuse() {
     use rss_runtime::{LifecycleScope, ScopeExit, ScopeStateError};
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("budget");
-    let mut scope = LifecycleScope::<(), (), ()>::try_new(budget).expect("runtime");
+    let mut scope = LifecycleScope::<(), (), ()>::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("runtime");
     assert!(matches!(
         scope.wait().await,
         Err(ScopeStateError::NotStarted)
@@ -767,7 +790,8 @@ async fn scope_reports_unsealed_execution_panic_and_invalid_reuse() {
             .await,
         Err(ScopeStateError::AlreadyDriven)
     ));
-    let mut scope = LifecycleScope::<(), (), ()>::try_new(budget).expect("runtime");
+    let mut scope = LifecycleScope::<(), (), ()>::try_new(budget, Arc::new(support::TokioTimer))
+        .expect("runtime");
     assert!(matches!(
         scope
             .drive(|_| panic!("private payload"), std::future::pending())
@@ -785,6 +809,7 @@ async fn ordinary_task_and_empty_monitor_do_not_stop_execution() {
     for with_task in [false, true] {
         let mut scope = LifecycleScope::<u8, (), ()>::try_new(
             TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+            Arc::new(support::TokioTimer),
         )
         .expect("runtime");
         let outcome = scope
@@ -826,6 +851,7 @@ async fn critical_terminal_reasons_remain_named_and_trigger_cleanup() {
     ] {
         let mut scope = LifecycleScope::<(), (), ()>::try_new(
             TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+            Arc::new(support::TokioTimer),
         )
         .expect("runtime");
         let outcome = scope
@@ -903,6 +929,7 @@ async fn critical_blocking_terminal_results_are_observed() {
     ] {
         let mut scope = LifecycleScope::<(), (), ()>::try_new(
             TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+            Arc::new(support::TokioTimer),
         )
         .expect("runtime");
         let outcome = scope
@@ -948,6 +975,7 @@ async fn already_ready_stop_prevents_construction_and_preserves_stop_error() {
     use rss_runtime::{LifecycleScope, ScopeExit};
     let mut scope = LifecycleScope::<(), &'static str, &'static str>::try_new(
         TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     let outcome = scope
@@ -966,9 +994,11 @@ async fn already_ready_stop_prevents_construction_and_preserves_stop_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::expect_used)] // reason: barriers establish the concurrent admit/close boundary.
 async fn concurrent_admit_close_counts_every_successful_lease() {
-    let mut stack =
-        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(2)).expect("budget"))
-            .expect("runtime");
+    let mut stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(2)).expect("budget"),
+        Arc::new(support::TokioTimer),
+    )
+    .expect("runtime");
     let (control, gate) = stack
         .startup()
         .expect("startup")
@@ -1012,6 +1042,7 @@ async fn admission_timeout_does_not_certify_permit_or_task_termination() {
         let mut stack = ShutdownStack::try_new(
             TotalDrainBudget::new(Duration::from_secs(if total_first { 1 } else { 2 }))
                 .expect("budget"),
+            Arc::new(support::TokioTimer),
         )
         .expect("runtime");
         let (control, gate) = stack
@@ -1052,6 +1083,7 @@ async fn scope_admission_and_critical_tasks_preserve_deferred_dependency_order()
     let admitted = Arc::new(tokio::sync::Notify::new());
     let mut scope = LifecycleScope::<(), (), ()>::try_new(
         TotalDrainBudget::new(Duration::from_secs(2)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     let recorded = Arc::clone(&events);
@@ -1165,9 +1197,11 @@ async fn timed_out_blocking_runner_is_not_reported_as_terminated() {
     let (release, wait_release) = std::sync::mpsc::channel::<()>();
     let (started, start_received) = tokio::sync::oneshot::channel();
     let (finished, finish_received) = tokio::sync::oneshot::channel();
-    let mut stack =
-        ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"))
-            .expect("runtime");
+    let mut stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
+    )
+    .expect("runtime");
     let status = stack
         .startup()
         .expect("startup")
@@ -1216,6 +1250,7 @@ async fn unpolled_drive_leaves_scope_ready_without_constructing_resources() {
     use rss_runtime::{LifecycleScope, ScopeExit, ScopeStateError};
     let mut scope = LifecycleScope::<(), (), ()>::try_new(
         TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     drop(scope.drive(
@@ -1256,6 +1291,7 @@ async fn incomplete_registration_preserves_non_clone_execution_value() {
     struct Value(u8);
     let mut scope = LifecycleScope::<Value, (), ()>::try_new(
         TotalDrainBudget::new(Duration::from_secs(1)).expect("budget"),
+        Arc::new(support::TokioTimer),
     )
     .expect("runtime");
     scope
@@ -1275,7 +1311,9 @@ async fn incomplete_registration_preserves_non_clone_execution_value() {
 async fn execution_and_stop_errors_keep_independent_types() {
     use rss_runtime::{LifecycleScope, ScopeExit};
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("budget");
-    let mut scope = LifecycleScope::<(), &'static str, u16>::try_new(budget).expect("runtime");
+    let mut scope =
+        LifecycleScope::<(), &'static str, u16>::try_new(budget, Arc::new(support::TokioTimer))
+            .expect("runtime");
     assert!(matches!(
         scope
             .drive(
@@ -1287,7 +1325,9 @@ async fn execution_and_stop_errors_keep_independent_types() {
             .exit(),
         ScopeExit::Completed(Err("execution"))
     ));
-    let mut scope = LifecycleScope::<(), &'static str, u16>::try_new(budget).expect("runtime");
+    let mut scope =
+        LifecycleScope::<(), &'static str, u16>::try_new(budget, Arc::new(support::TokioTimer))
+            .expect("runtime");
     assert!(matches!(
         scope
             .drive(|_| unreachable!("stop ready"), async { Err(403) })
@@ -1303,7 +1343,7 @@ async fn execution_and_stop_errors_keep_independent_types() {
 async fn bare_stack_critical_monitor_observes_registration_and_empty_closure() {
     use rss_runtime::TaskExit;
     let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("budget");
-    let mut stack = ShutdownStack::try_new(budget).expect("runtime");
+    let mut stack = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer)).expect("runtime");
     let monitor = stack.critical_tasks();
     assert!(futures::poll!(std::pin::pin!(monitor.wait())).is_pending());
     let (start, _) = ManagedTask::prepare("bare-critical", Duration::from_secs(1));
@@ -1316,8 +1356,133 @@ async fn bare_stack_critical_monitor_observes_registration_and_empty_closure() {
     assert_eq!(exit.reason(), TaskExit::Completed);
     assert!(stack.shutdown().join().await.expect("receipt").is_clean());
     assert_eq!(monitor.wait().await.expect("sticky terminal"), exit);
-    let empty = ShutdownStack::try_new(budget).expect("runtime");
+    let empty = ShutdownStack::try_new(budget, Arc::new(support::TokioTimer)).expect("runtime");
     let monitor = empty.critical_tasks();
     drop(empty);
     assert!(monitor.wait().await.is_none());
 }
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: barriers and join results are the regression assertions.
+async fn standalone_task_shutdown_retains_join_after_waiter_cancellation() {
+    for failed in [false, true] {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(AtomicUsize::new(0));
+        let (start, _) = ManagedTask::prepare("retained-task", Duration::from_secs(1));
+        let task = start.spawn_detached(tokio_util::sync::CancellationToken::new(), |_| {
+            let release = release.clone();
+            let finished = finished.clone();
+            async move {
+                release.notified().await;
+                finished.fetch_add(1, Ordering::SeqCst);
+                if failed {
+                    Err(ShutdownError::new(std::io::Error::other("private")))
+                } else {
+                    Ok(())
+                }
+            }
+        });
+        let mut first = Box::pin(task.shutdown());
+        assert!(futures::poll!(&mut first).is_pending());
+        drop(first);
+        let mut retry = Box::pin(task.shutdown());
+        let mut concurrent = Box::pin(task.shutdown());
+        assert!(futures::poll!(&mut retry).is_pending());
+        assert!(futures::poll!(&mut concurrent).is_pending());
+        assert_eq!(finished.load(Ordering::SeqCst), 0);
+        release.notify_one();
+        let (a, b) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(retry, concurrent)
+        })
+        .await
+        .expect("both waiters join");
+        for result in [a, b, task.shutdown().await] {
+            assert_eq!(result.is_err(), failed);
+            if let Err(error) = result {
+                assert_eq!(error.kind(), rss_runtime::ShutdownErrorKind::Operation);
+                assert!(!format!("{error:?}").contains("private"));
+            }
+        }
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)] // reason: the worker has bounded synchronization and each join is asserted.
+async fn standalone_thread_shutdown_retains_join_after_waiter_cancellation() {
+    for failed in [false, true] {
+        let (release, wait) = std::sync::mpsc::channel();
+        let finished = Arc::new(AtomicUsize::new(0));
+        let observed = finished.clone();
+        let worker = rss_runtime::ManagedBlockingWorker::try_spawn(
+            "retained-thread",
+            tokio_util::sync::CancellationToken::new(),
+            Duration::from_secs(1),
+            move |_| {
+                wait.recv_timeout(Duration::from_secs(5))
+                    .expect("release thread");
+                observed.fetch_add(1, Ordering::SeqCst);
+                if failed {
+                    Err(ShutdownError::new(std::io::Error::other("private")))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect("spawn thread");
+        let mut first = Box::pin(worker.shutdown());
+        assert!(futures::poll!(&mut first).is_pending());
+        drop(first);
+        let mut retry = Box::pin(worker.shutdown());
+        let mut concurrent = Box::pin(worker.shutdown());
+        assert!(futures::poll!(&mut retry).is_pending());
+        assert!(futures::poll!(&mut concurrent).is_pending());
+        assert_eq!(finished.load(Ordering::SeqCst), 0);
+        release.send(()).expect("release worker");
+        let (a, b) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(retry, concurrent)
+        })
+        .await
+        .expect("both waiters join");
+        for result in [a, b, worker.shutdown().await] {
+            assert_eq!(result.is_err(), failed);
+            if let Err(error) = result {
+                assert_eq!(error.kind(), rss_runtime::ShutdownErrorKind::Operation);
+                assert!(!format!("{error:?}").contains("private"));
+            }
+        }
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: timerless runtime must be rejected before registration.
+fn shutdown_owner_accepts_timerless_runtime_with_explicit_timer() {
+    timerless::run().expect("injected timer handles cleanup and both deadline levels");
+}
+
+#[test]
+#[allow(clippy::expect_used)] // reason: enable_time must admit resources and execute cleanup.
+fn shutdown_owner_with_time_driver_executes_cleanup() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let budget = TotalDrainBudget::new(Duration::from_secs(1)).expect("budget");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut stack =
+            ShutdownStack::try_new(budget, Arc::new(support::TokioTimer)).expect("time enabled");
+        let mut startup = stack.startup().expect("startup");
+        startup.stage_resource(DynManagedResource::new_box(RecordingResource {
+            name: "timer",
+            events: events.clone(),
+        }));
+        startup.commit().finish();
+        assert!(stack.shutdown().join().await.expect("receipt").is_clean());
+        assert_eq!(*events.lock().expect("events"), vec!["timer"]);
+    });
+}
+
+#[path = "support/timerless.rs"]
+mod timerless;

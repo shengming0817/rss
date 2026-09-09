@@ -3399,8 +3399,10 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "rss-contract",
  "rss-platform",
+ "rss-redact",
  "rss-request-context",
  "rss-runtime",
  "serde",
@@ -3412,6 +3414,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trybuild",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3703,6 +3706,7 @@ dependencies = [
  "dynosaur",
  "futures",
  "rss-redact",
+ "rss-request-context",
  "thiserror",
  "tokio",
  "tokio-util",

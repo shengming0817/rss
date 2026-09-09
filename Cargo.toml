@@ -96,6 +96,8 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+libc = "0.2"
+windows-sys = { version = "0.61", default-features = false }
 arc-swap = "1.9.2"
 rss-ledger-postgres = { path = "crates/ledger-postgres", version = "0.1.0" }
 rss-ledger = { path = "crates/ledger", version = "0.1.0" }

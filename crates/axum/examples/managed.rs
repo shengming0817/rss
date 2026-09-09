@@ -40,7 +40,10 @@ async fn smoke(
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let router = Router::new().route("/", get(|| async { "served" }));
-    let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(2))?)?;
+    let mut owner = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(2))?,
+        std::sync::Arc::new(timer::TokioTimer),
+    )?;
     let mut startup = owner.startup()?;
     startup.stage_task_with_token(register(listener, router, "http", Duration::from_secs(1)));
     startup.commit().finish();
@@ -102,4 +105,20 @@ async fn http2_request(address: std::net::SocketAddr) -> Result<(), Box<dyn std:
         result = &mut connection => { result?; return Err("client connection ended before response".into()); }
     }
     Ok(())
+}
+
+#[cfg(any(feature = "http1", feature = "http2"))]
+mod timer {
+    pub struct TokioTimer;
+    impl rss_request_context::Clock for TokioTimer {
+        #[allow(clippy::disallowed_methods)] // reason: this concrete test clock owns the Tokio time domain.
+        fn now(&self) -> std::time::Instant {
+            tokio::time::Instant::now().into_std()
+        }
+    }
+    impl rss_request_context::ExecutionTimer for TokioTimer {
+        async fn sleep_until(&self, deadline: rss_request_context::Deadline) {
+            tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
+        }
+    }
 }

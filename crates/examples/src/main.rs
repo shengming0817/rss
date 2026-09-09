@@ -1,5 +1,8 @@
 //! Minimal public consumers; each selected scenario asserts its observable result.
 
+#[cfg(feature = "lifecycle")]
+mod timer;
+
 #[cfg(feature = "diagnostic")]
 mod diagnostic;
 #[cfg(feature = "memory")]
@@ -126,7 +129,10 @@ async fn lifecycle() -> anyhow::Result<()> {
     };
     let stopped = Arc::new(AtomicBool::new(false));
     let observed = stopped.clone();
-    let mut stack = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(5))?)?;
+    let mut stack = ShutdownStack::try_new(
+        TotalDrainBudget::new(Duration::from_secs(5))?,
+        std::sync::Arc::new(timer::TokioTimer),
+    )?;
     let (start, _) = ManagedTask::prepare("example", Duration::from_secs(2));
     let registration = start.into_registration(|token| async move {
         token.cancelled().await;

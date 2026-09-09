@@ -147,9 +147,12 @@ enum ScopeState<T, E, S> {
 
 impl<T, E, S> LifecycleScope<T, E, S> {
     /// Create a local owner on the currently driven Tokio runtime.
-    pub fn try_new(budget: TotalDrainBudget) -> Result<Self, ShutdownStackError> {
+    pub fn try_new(
+        budget: TotalDrainBudget,
+        timer: std::sync::Arc<impl rss_request_context::ExecutionTimer + 'static>,
+    ) -> Result<Self, ShutdownStackError> {
         Ok(Self {
-            state: ScopeState::Ready(ShutdownStack::try_new(budget)?),
+            state: ScopeState::Ready(ShutdownStack::try_new(budget, timer)?),
         })
     }
 
