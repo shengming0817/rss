@@ -34,6 +34,9 @@ without exposing a general-purpose Reject constructor.
 
 `ConsumerWorker` supervises subscription establishment, unexpected stream termination, and
 transient delivery-processing failures with a distinct unbounded, saturating exponential backoff.
+Opening a stream does not reset backoff: consecutive subscribe errors, empty streams and
+recoverable processing errors share the failure cursor. Only a completed delivery-processing
+operation (including successful settlement or invalid-delivery rejection) resets it to the base.
 Transient delivery failures retire the current provider stream before resubscription. It processes
 exactly one delivery at a time, so the next delivery is not polled until the current settlement
 completes. Graceful shutdown stops admission and lets the current delivery finish. The same loop

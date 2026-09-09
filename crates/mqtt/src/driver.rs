@@ -383,6 +383,7 @@ impl Drop for Driver {
     reason = "one driver stack value avoids allocating each MQTT packet event"
 )]
 enum Next {
+    Retry,
     Event(Result<Event, ConnectionError>),
     Retire,
     Stop,
@@ -418,14 +419,48 @@ async fn next(
     }
 }
 
+// One timer per failed connection, kept alive while queued commands are handled.
+async fn wait_reconnect(
+    driver: &mut Driver,
+    client: &AsyncClient,
+    commands: &mut mpsc::Receiver<Command>,
+) -> Next {
+    let sleep = tokio::time::sleep(driver.reconnect.next());
+    tokio::pin!(sleep);
+    let shared = driver.shared.clone();
+    loop {
+        tokio::select! {
+            biased;
+            () = shared.cancelled.cancelled() => return Next::Stop,
+            () = &mut sleep => return Next::Retry,
+            command = commands.recv() => match command {
+                Some(command) => {
+                    if let Some((deadline, response)) = driver.handle_command(client, command) {
+                        return Next::Shutdown(deadline, response);
+                    }
+                }
+                None => return Next::Stop,
+            }
+        }
+    }
+}
+
 async fn run(
     mut driver: Driver,
     client: AsyncClient,
     mut eventloop: EventLoop,
     mut commands: mpsc::Receiver<Command>,
 ) {
+    let mut reconnect_pending = false;
     loop {
-        match next(&mut driver, &client, &mut eventloop, &mut commands).await {
+        let action = if reconnect_pending {
+            reconnect_pending = false;
+            wait_reconnect(&mut driver, &client, &mut commands).await
+        } else {
+            next(&mut driver, &client, &mut eventloop, &mut commands).await
+        };
+        match action {
+            Next::Retry => {}
             Next::Stop => return,
             Next::Shutdown(deadline, response) => {
                 driver.retire();
@@ -452,9 +487,7 @@ async fn run(
                         driver.retire();
                         eventloop.clean();
                         driver.reconnecting(error);
-                        if !driver.reconnect.wait(&driver.shared.cancelled).await {
-                            return;
-                        }
+                        reconnect_pending = true;
                     } else {
                         driver.fail(error);
                         return;
@@ -469,9 +502,7 @@ async fn run(
                     return;
                 }
                 driver.reconnecting(cause);
-                if !driver.reconnect.wait(&driver.shared.cancelled).await {
-                    return;
-                }
+                reconnect_pending = true;
             }
             Next::Retire => {
                 driver.retire();
@@ -564,4 +595,143 @@ async fn shutdown(
     })
     .await
     .map_err(|_| MqttError::DeadlineElapsed)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handles::tests::{TestClock, publisher};
+
+    fn fixture() -> anyhow::Result<(Driver, AsyncClient, mpsc::Receiver<Command>)> {
+        let (publisher, commands) = publisher(TestClock::new());
+        publisher
+            .shared
+            .state
+            .send_replace(ConnectionState::Reconnecting {
+                cause: MqttError::Unavailable,
+                generation: 1,
+            });
+        let (client, _eventloop) = AsyncClient::builder(rumqttc::MqttOptions::new(
+            "backoff",
+            rumqttc::Broker::tcp("localhost", 1883),
+        ))
+        .capacity(1)
+        .try_build()?;
+        Ok((
+            Driver {
+                shared: publisher.shared,
+                outstanding: HashMap::new(),
+                subscriptions: Vec::new(),
+                subscription: None,
+                session_present: false,
+                max_deliveries: 1,
+                reconnect: crate::ReconnectPolicy::new(
+                    Duration::from_secs(30),
+                    Duration::from_secs(120),
+                )?
+                .build(),
+            },
+            client,
+            commands,
+        ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::disallowed_methods)] // reason: paused-time test measures elapsed driver waiting.
+    async fn reconnect_drains_full_queue_and_handles_shutdown_without_cancelling()
+    -> anyhow::Result<()> {
+        let (mut driver, client, mut commands) = fixture()?;
+        let shared = driver.shared.clone();
+        let deadline = shared.deadline(Duration::from_secs(3))?;
+        let (tx, publication) = oneshot::channel();
+        shared
+            .commands
+            .try_send(Command::Publish {
+                request: crate::PublishRequest::new("events", vec![])?,
+                deadline,
+                response: tx,
+            })
+            .map_err(|_| anyhow::anyhow!("fill queue"))?;
+        assert_eq!(shared.commands.capacity(), 0);
+        let (tx, _closed) = oneshot::channel();
+        let started = tokio::time::Instant::now();
+        let (action, sent) = tokio::join!(
+            wait_reconnect(&mut driver, &client, &mut commands),
+            shared.commands.send(Command::Shutdown {
+                deadline,
+                response: tx
+            }),
+        );
+        assert!(sent.is_ok());
+        assert!(matches!(action, Next::Shutdown(_, _)));
+        assert!(
+            matches!(publication.await?, Err(rss_transactional_messaging::transport::PublishOutcome::DefinitelyNotPublished(f))
+            if f.reason() == Reason::TransportUnavailable)
+        );
+        assert!(!shared.cancelled.is_cancelled());
+        assert_eq!(tokio::time::Instant::now(), started);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_rejects_stale_settlement_and_cancellation_stops_wait() -> anyhow::Result<()>
+    {
+        let (mut driver, client, mut commands) = fixture()?;
+        let shared = driver.shared.clone();
+        let (tx, settled) = oneshot::channel();
+        shared
+            .commands
+            .try_send(Command::Settle {
+                generation: 0,
+                pkid: 1,
+                reason: rumqttc::mqttbytes::v5::PubAckReason::Success,
+                deadline: shared.deadline(Duration::from_secs(3))?,
+                response: tx,
+            })
+            .map_err(|_| anyhow::anyhow!("queue settlement"))?;
+        let (action, result) =
+            tokio::join!(wait_reconnect(&mut driver, &client, &mut commands), async {
+                let result = settled.await;
+                shared.cancelled.cancel();
+                result
+            });
+        assert_eq!(result?, Err(MqttError::StaleDelivery));
+        assert!(matches!(action, Next::Stop));
+        Ok(())
+    }
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::disallowed_methods)] // reason: paused-time test measures the original retry timer.
+    async fn commands_do_not_restart_the_reconnect_timer() -> anyhow::Result<()> {
+        let (mut driver, client, mut commands) = fixture()?;
+        let shared = driver.shared.clone();
+        let producer = async {
+            for _ in 0..65 {
+                let (tx, rx) = oneshot::channel();
+                shared
+                    .commands
+                    .send(Command::Publish {
+                        request: crate::PublishRequest::new("events", vec![])?,
+                        deadline: shared.deadline(Duration::from_secs(3))?,
+                        response: tx,
+                    })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("command channel closed"))?;
+                let _ = rx.await?;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        let started = tokio::time::Instant::now();
+        let action = tokio::time::timeout(Duration::from_secs(65), async {
+            tokio::select! {
+                action = wait_reconnect(&mut driver, &client, &mut commands) => Ok(action),
+                result = producer => { result?; anyhow::bail!("producer ended"); }
+            }
+        })
+        .await??;
+        assert!(matches!(action, Next::Retry));
+        let elapsed = tokio::time::Instant::now().duration_since(started);
+        assert!((Duration::from_secs(30)..=Duration::from_secs(60)).contains(&elapsed));
+        Ok(())
+    }
 }

@@ -78,15 +78,14 @@ impl MqttOutboxPlan {
             .routes
             .get(message.metadata().route())
             .ok_or(MqttError::InvalidMessage)?;
-        // Bound authored input before copying it; final validation also counts MQTT framing.
+        #[cfg(test)]
+        crate::handles::tests::preflight();
+        // Bound authored input before copying it; the publisher validates final MQTT framing.
         let properties = codec::encode(message, limit as usize)?;
         let mut request = PublishRequest::new(topic.topic.clone(), message.payload().clone())?
             .retain(topic.retain);
         request.properties.user_properties = properties;
         request.properties.message_expiry_interval = topic.expiry;
-        if !request.valid_size(limit) {
-            return Err(MqttError::InvalidMessage);
-        }
         Ok(request)
     }
 }
@@ -117,8 +116,15 @@ impl Publisher<Vec<u8>> for MqttOutboxPublisher {
         message: &MessageEnvelope<Vec<u8>>,
         deadline: OperationDeadline,
     ) -> PublishOutcome<()> {
+        let Ok(cutoff) = self.publisher.shared.deadline(deadline.timeout()) else {
+            return outcome::definite(
+                PublishFailureKind::Permanent,
+                PublishFailureStage::Admission,
+                PublishFailureReason::InvalidMessage,
+            );
+        };
         match self.plan.encode(message, self.publisher.packet_bytes) {
-            Ok(request) => self.publisher.publish(request, deadline).await,
+            Ok(request) => self.publisher.publish_until(request, cutoff).await,
             Err(_) => outcome::definite(
                 PublishFailureKind::Permanent,
                 PublishFailureStage::Encode,

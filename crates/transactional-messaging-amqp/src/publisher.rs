@@ -56,41 +56,41 @@ fn build_properties(
         &mut table,
         "tenantId",
         &envelope.metadata().tenant_id().to_string(),
-    );
+    )?;
     if let Some(value) = envelope.metadata().correlation() {
-        insert_header(&mut table, "correlation", value);
+        insert_header(&mut table, "correlation", value)?;
     }
-    insert_header(&mut table, "domain", envelope.metadata().domain().as_str());
-    insert_header(&mut table, "route", envelope.metadata().route().as_str());
+    insert_header(&mut table, "domain", envelope.metadata().domain().as_str())?;
+    insert_header(&mut table, "route", envelope.metadata().route().as_str())?;
     insert_header(
         &mut table,
         "contractId",
         envelope.metadata().contract().id().as_str(),
-    );
+    )?;
     insert_header(
         &mut table,
         "schemaVersion",
         &format!("v{}", envelope.metadata().contract().version().major()),
-    );
+    )?;
     insert_header(
         &mut table,
         "schemaHash",
         envelope.metadata().contract().schema_digest().as_str(),
-    );
+    )?;
     if let Some(partition) = envelope.metadata().partition() {
-        insert_header(&mut table, "partitionKey", partition.key().as_str());
+        insert_header(&mut table, "partitionKey", partition.key().as_str())?;
     }
     if let Some(value) = envelope.metadata().causation() {
-        insert_header(&mut table, "causationId", value.as_str());
+        insert_header(&mut table, "causationId", value.as_str())?;
     }
     if let Some(value) = envelope.transport_context().trace() {
-        insert_header(&mut table, "trace", value);
+        insert_header(&mut table, "trace", value)?;
     }
     if let Some(value) = envelope.transport_context().tenant_authority() {
-        insert_header(&mut table, "tenantAuthority", value);
+        insert_header(&mut table, "tenantAuthority", value)?;
     }
     for (key, value) in envelope.metadata().attributes() {
-        insert_header(&mut table, &format!("attribute.{key}"), value);
+        insert_header(&mut table, &format!("attribute.{key}"), value)?;
     }
     if table.inner().is_empty() {
         Ok(props)
@@ -99,11 +99,12 @@ fn build_properties(
     }
 }
 
-fn insert_header(table: &mut FieldTable, key: &str, value: &str) {
+fn insert_header(table: &mut FieldTable, key: &str, value: &str) -> Result<(), ShortStringError> {
     table.insert(
-        key.into(),
+        ShortString::try_new(key)?,
         AMQPValue::LongString(value.as_bytes().to_vec().into()),
     );
+    Ok(())
 }
 
 /// publish 被 broker 拒绝（durable publish-ok 语义失败）。internal source（不进 Display 凭据边界）。
@@ -174,12 +175,18 @@ impl<E> PublishPipelineError<E> {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
+// reason: adapter-local I/O watchdog uses the same monotonic domain as Tokio timeout_at.
+fn publish_now() -> tokio::time::Instant {
+    tokio::time::Instant::now()
+}
+
 /// 用**一个** Tokio deadline 覆盖 `basic_publish` 与 `PublisherConfirm` 两次 await。
 ///
 /// helper 保持 adapter-private 且只抽象 future，不引入 mock trait/公共 provider 抽象。第一阶段完成后仅
 /// 切换审计 phase；第二阶段继续消费同一个 timeout 的剩余预算。
 async fn run_publish_pipeline<PublishFuture, ConfirmFactory, ConfirmFuture, PendingConfirm, T, E>(
-    publish_timeout: Duration,
+    cutoff: tokio::time::Instant,
     basic_publish: PublishFuture,
     confirm: ConfirmFactory,
 ) -> Result<T, PublishPipelineError<E>>
@@ -191,7 +198,7 @@ where
     // `basic_publish` 的 future 只有在 AMQP method frame 已交给 lapin driver 后才返回
     // `PublisherConfirm`；因此该 await 的 client failure 一律按发送后不确定窗口处理。
     let phase = AtomicU8::new(PublishPhase::PostSend.as_u8());
-    let result = tokio::time::timeout(publish_timeout, async {
+    let result = tokio::time::timeout_at(cutoff, async {
         let pending = basic_publish
             .await
             .map_err(|source| PublishPipelineError::Client {
@@ -209,8 +216,9 @@ where
     .await;
 
     match result {
-        Ok(result) => result,
-        Err(_) => Err(PublishPipelineError::Deadline(PublishDeadlineElapsed {
+        // timeout_at may return an immediately ready confirmation at the cutoff.
+        Ok(result) if publish_now() < cutoff => result,
+        Ok(_) | Err(_) => Err(PublishPipelineError::Deadline(PublishDeadlineElapsed {
             phase: PublishPhase::from_u8(phase.load(Ordering::Relaxed)),
         })),
     }
@@ -597,8 +605,8 @@ enum PublisherTransportError {
 enum PublishAttemptFailure {
     #[error("amqp publish deadline elapsed before admission")]
     ExpiredAdmission,
-    #[error("amqp publish message id validation failed")]
-    MessageId(#[source] ShortStringError),
+    #[error("amqp publish metadata encoding failed")]
+    Encoding(#[source] ShortStringError),
     #[error("amqp publish admission failed")]
     Admission(#[source] PublisherTransportError),
     #[error("amqp publish client failed")]
@@ -635,7 +643,7 @@ impl PublishAttemptFailure {
 
     fn decision(&self) -> PublishFailureDecision {
         match self {
-            Self::MessageId(_) => {
+            Self::Encoding(_) => {
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
             }
             Self::ExpiredAdmission | Self::Admission(_) | Self::Rejected(_) => {
@@ -660,7 +668,7 @@ impl PublishAttemptFailure {
 
     fn phase(&self) -> PublishPhase {
         match self {
-            Self::ExpiredAdmission | Self::MessageId(_) | Self::Admission(_) => {
+            Self::ExpiredAdmission | Self::Encoding(_) | Self::Admission(_) => {
                 PublishPhase::PreSend
             }
             Self::Client { phase, .. } => *phase,
@@ -671,7 +679,7 @@ impl PublishAttemptFailure {
 
     fn diagnostic(&self, kind: PublishFailureKind) -> PublishFailure {
         let stage = match self {
-            Self::MessageId(_) => PublishFailureStage::Encode,
+            Self::Encoding(_) => PublishFailureStage::Encode,
             Self::ExpiredAdmission | Self::Admission(_) => PublishFailureStage::Admission,
             Self::Client {
                 phase: PublishPhase::PreSend,
@@ -682,7 +690,7 @@ impl PublishAttemptFailure {
             }
         };
         let reason = match self {
-            Self::MessageId(_) => PublishFailureReason::InvalidMessage,
+            Self::Encoding(_) => PublishFailureReason::InvalidMessage,
             Self::ExpiredAdmission | Self::Deadline { .. } => PublishFailureReason::DeadlineElapsed,
             Self::Rejected(_) => PublishFailureReason::ProviderRejected,
             Self::Admission(_) | Self::Client { .. } => PublishFailureReason::TransportUnavailable,
@@ -1676,16 +1684,24 @@ impl Publisher<Vec<u8>> for PublisherInner {
         message: &MessageEnvelope<Vec<u8>>,
         deadline: OperationDeadline,
     ) -> PublishOutcome<Self::Receipt> {
-        if deadline.timeout().is_zero() {
+        let Some(cutoff) = publish_now().checked_add(deadline.timeout()) else {
+            return self.handle_publish_failure(PublishAttemptFailure::ExpiredAdmission);
+        };
+        if cutoff <= publish_now() {
             return self.handle_publish_failure(PublishAttemptFailure::ExpiredAdmission);
         }
         let message_id = message.id().as_str().to_string();
         let properties = match build_properties(&message_id, message) {
             Ok(properties) => properties,
             Err(error) => {
-                return self.handle_publish_failure(PublishAttemptFailure::MessageId(error));
+                return self.handle_publish_failure(PublishAttemptFailure::Encoding(error));
             }
         };
+        #[cfg(test)]
+        publish_deadline_tests::preflight().await;
+        if cutoff <= publish_now() {
+            return self.handle_publish_failure(PublishAttemptFailure::ExpiredAdmission);
+        }
         let snapshot = match self.transport_snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1719,9 +1735,12 @@ impl Publisher<Vec<u8>> for PublisherInner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         let transport = snapshot.transport.clone();
+        if cutoff <= publish_now() {
+            return self.handle_publish_failure(PublishAttemptFailure::ExpiredAdmission);
+        }
         let cancelled_attempt = conn::OnDrop::new(|| self.retire_transport(snapshot.generation));
         let confirmation = run_publish_pipeline(
-            deadline.timeout(),
+            cutoff,
             async {
                 let pending = transport
                     .confirm_channel
@@ -1933,16 +1952,17 @@ mod publish_deadline_tests {
         RecoveryTimeoutConfigError, run_publish_pipeline, validate_recovery_timeout,
     };
 
-    #[test]
-    #[allow(clippy::expect_used)] // Typed envelope fixtures and property assertions.
-    fn occurrence_time_uses_only_typed_timestamp() {
+    #[allow(clippy::expect_used)] // reason: fixed valid envelope fixture.
+    fn message(
+        seconds: i64,
+        extensions: rss_transactional_messaging::message::MessageMetadataExtensions,
+    ) -> rss_transactional_messaging::message::MessageEnvelope<Vec<u8>> {
         use rss_transactional_messaging::message::{
             AuthoredMessageMetadata, ContractIdentity, MessageEnvelope, MessageId, MessageMetadata,
-            MessageMetadataExtensions, MessageRoute, MessagingDomain,
+            MessageRoute, MessagingDomain,
         };
 
-        for seconds in [0, 42, i64::MAX] {
-            let message = MessageEnvelope::new(
+        MessageEnvelope::new(
                 MessageId::parse("message-1").expect("message id"),
                 MessageMetadata::new(
                     AuthoredMessageMetadata::new(
@@ -1959,10 +1979,17 @@ mod publish_deadline_tests {
                             ).expect("schema"),
                         ),
                     ),
-                    MessageMetadataExtensions::default(),
+                    extensions,
                 ),
                 Vec::new(),
-            );
+            )
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // Typed envelope fixtures and property assertions.
+    fn occurrence_time_uses_only_typed_timestamp() {
+        for seconds in [0, 42, i64::MAX] {
+            let message = message(seconds, Default::default());
             let props =
                 super::build_properties(message.id().as_str(), &message).expect("properties");
             assert_eq!(*props.timestamp(), Some(seconds as u64));
@@ -1975,6 +2002,126 @@ mod publish_deadline_tests {
                     .contains_key("occurredAt")
             );
         }
+    }
+
+    #[test]
+    fn header_keys_respect_wire_byte_limit_without_panicking() {
+        for key in [
+            "a".repeat(245),
+            "a".repeat(246),
+            format!("{}a", "é".repeat(122)),
+            "é".repeat(123),
+        ] {
+            let wire_key = format!("attribute.{key}");
+            let result = std::panic::catch_unwind(|| {
+                let mut table = lapin::types::FieldTable::default();
+                let _ = super::insert_header(&mut table, &wire_key, "value");
+                table.inner().len()
+            });
+            assert_eq!(result.ok(), Some(usize::from(wire_key.len() <= 255)));
+        }
+    }
+
+    thread_local! {
+        static PREFLIGHT: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+    }
+    pub(super) async fn preflight() {
+        let elapsed = PREFLIGHT.with(|slot| slot.replace(Duration::ZERO));
+        if !elapsed.is_zero() {
+            tokio::time::advance(elapsed).await;
+        }
+    }
+
+    fn unavailable_publisher() -> anyhow::Result<PublisherInner> {
+        Ok(PublisherInner {
+            connection_config: super::PublisherConnectionConfig {
+                endpoint: crate::endpoint::Endpoint::parse(
+                    "amqp://guest:guest@127.0.0.1:1/%2f",
+                    true,
+                )?,
+                trust: crate::conn::AmqpTlsTrust::WebPki,
+            },
+            transports: std::sync::Arc::new(std::sync::Mutex::new(
+                super::PublisherTransportLifecycle {
+                    slot: super::TransportSlot::Unavailable { generation: 1 },
+                    recovery: None,
+                },
+            )),
+            name: "preflight-test".into(),
+            recovery_timeout: Duration::from_secs(10),
+            #[cfg(feature = "test-support")]
+            post_send_connection_close_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "test-support")]
+            confirmation_pause: std::sync::Mutex::new(None),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_preflight_is_rejected_before_transport_admission() -> anyhow::Result<()> {
+        use rss_transactional_messaging::{policy::OperationDeadline, transport::*};
+        let publisher = unavailable_publisher()?;
+        PREFLIGHT.with(|slot| slot.set(Duration::from_secs(11)));
+        let outcome = publisher
+            .publish(
+                &message(0, Default::default()),
+                OperationDeadline::from_remaining(Duration::from_secs(10)),
+            )
+            .await;
+        assert!(matches!(outcome, PublishOutcome::DefinitelyNotPublished(f)
+            if f.reason() == PublishFailureReason::DeadlineElapsed && f.stage() == PublishFailureStage::Admission));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oversized_attribute_is_a_definite_encoding_failure() -> anyhow::Result<()> {
+        use rss_transactional_messaging::{
+            message::MessageMetadataExtensions, policy::OperationDeadline, transport::*,
+        };
+        let publisher = unavailable_publisher()?;
+        for key in ["a".repeat(246), "é".repeat(123)] {
+            let message = message(
+                0,
+                MessageMetadataExtensions::new(None, None, None, [(key, "value".into())].into()),
+            );
+            let outcome = publisher
+                .publish(
+                    &message,
+                    OperationDeadline::from_remaining(Duration::from_secs(10)),
+                )
+                .await;
+            assert!(matches!(outcome, PublishOutcome::DefinitelyNotPublished(f)
+                if f.kind() == PublishFailureKind::Permanent && f.stage() == PublishFailureStage::Encode && f.reason() == PublishFailureReason::InvalidMessage));
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn preflight_leaves_only_the_remaining_pipeline_budget() {
+        let started = super::publish_now();
+        let cutoff = started + Duration::from_secs(10);
+        tokio::time::advance(Duration::from_secs(7)).await;
+        let result = run_publish_pipeline(
+            cutoff,
+            future::ready(Ok::<(), Infallible>(())),
+            |()| async {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                Ok::<(), Infallible>(())
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(super::publish_now().duration_since(started) <= Duration::from_secs(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_confirmation_at_cutoff_is_not_confirmed() {
+        let result = run_publish_pipeline(
+            super::publish_now(),
+            future::ready(Ok::<(), Infallible>(())),
+            |()| future::ready(Ok::<(), Infallible>(())),
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2047,7 +2194,7 @@ mod publish_deadline_tests {
     #[allow(clippy::expect_used)]
     async fn basic_publish_half_open_consumes_the_shared_deadline() {
         let err = run_publish_pipeline(
-            Duration::from_secs(10),
+            super::publish_now() + Duration::from_secs(10),
             future::pending::<Result<(), Infallible>>(),
             |()| future::ready(Ok::<(), Infallible>(())),
         )
@@ -2062,7 +2209,7 @@ mod publish_deadline_tests {
     #[allow(clippy::expect_used)]
     async fn publisher_confirm_half_open_consumes_the_shared_deadline() {
         let err = run_publish_pipeline(
-            Duration::from_secs(10),
+            super::publish_now() + Duration::from_secs(10),
             future::ready(Ok::<(), Infallible>(())),
             |()| future::pending::<Result<(), Infallible>>(),
         )
@@ -2077,7 +2224,7 @@ mod publish_deadline_tests {
     #[tokio::test(start_paused = true)]
     async fn basic_publish_elapsed_time_is_deducted_from_confirm_budget() -> anyhow::Result<()> {
         let err = run_publish_pipeline(
-            Duration::from_secs(10),
+            super::publish_now() + Duration::from_secs(10),
             async {
                 tokio::time::sleep(Duration::from_secs(7)).await;
                 Ok::<(), Infallible>(())
@@ -2153,7 +2300,7 @@ mod publish_pipeline_red_tests {
     // reason: the test must name which publish phase lost its client error.
     async fn publish_pipeline_client_error_carries_the_observed_phase() {
         let post_send = run_publish_pipeline(
-            Duration::from_secs(1),
+            super::publish_now() + Duration::from_secs(1),
             future::ready(Err::<(), _>(io_reset())),
             |()| future::ready(Ok::<(), lapin::Error>(())),
         )
@@ -2168,7 +2315,7 @@ mod publish_pipeline_red_tests {
         ));
 
         let confirm = run_publish_pipeline(
-            Duration::from_secs(1),
+            super::publish_now() + Duration::from_secs(1),
             future::ready(Ok::<(), lapin::Error>(())),
             |()| future::ready(Err::<(), _>(closed_channel())),
         )
@@ -2287,7 +2434,7 @@ mod publish_pipeline_red_tests {
                 PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Transient),
             ),
             (
-                super::PublishAttemptFailure::MessageId(
+                super::PublishAttemptFailure::Encoding(
                     lapin::types::ShortString::try_new("x".repeat(256))
                         .expect_err("oversized message id"),
                 ),
@@ -2542,7 +2689,7 @@ mod publish_pipeline_red_tests {
     #[allow(clippy::disallowed_methods)]
     // reason: paused Tokio time observes the adapter-private monotonic shared recovery deadline.
     async fn publish_pipeline_recovery_replaces_connection_and_confirm_with_one_deadline() {
-        let started = tokio::time::Instant::now();
+        let started = super::publish_now();
         let deadline = started + Duration::from_secs(9);
         let cancellation = CancellationToken::new();
         let replacement = transport("connection-1", "confirm-1");

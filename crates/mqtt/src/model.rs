@@ -262,6 +262,8 @@ impl PublishRequest {
         self
     }
     pub(crate) fn valid_size(&self, max: u32) -> bool {
+        #[cfg(test)]
+        crate::handles::tests::preflight();
         if self
             .properties
             .correlation_data

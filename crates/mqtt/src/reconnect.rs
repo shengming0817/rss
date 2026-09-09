@@ -53,13 +53,7 @@ impl Reconnect {
     pub(crate) fn reset(&mut self) {
         self.delays = self.policy.builder().build();
     }
-    pub(crate) async fn wait(&mut self, cancelled: &tokio_util::sync::CancellationToken) -> bool {
-        tokio::select! {
-            () = cancelled.cancelled() => false,
-            () = tokio::time::sleep(self.next()) => true,
-        }
-    }
-    fn next(&mut self) -> Duration {
+    pub(crate) fn next(&mut self) -> Duration {
         self.delays
             .next()
             .unwrap_or(self.policy.maximum)
@@ -70,17 +64,6 @@ impl Reconnect {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn cancellation_interrupts_a_backoff_wait() {
-        let mut retry = ReconnectPolicy::default().build();
-        let cancelled = tokio_util::sync::CancellationToken::new();
-        let cancellation = cancelled.clone();
-        let task = tokio::spawn(async move { retry.wait(&cancelled).await });
-        tokio::task::yield_now().await;
-        cancellation.cancel();
-        assert!(matches!(task.await, Ok(false)));
-    }
 
     #[tokio::test(start_paused = true)]
     async fn growing_jitter_stays_bounded_and_reset_restores_initial_range() -> anyhow::Result<()> {

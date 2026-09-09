@@ -848,10 +848,7 @@ where
                 result = &mut subscribe => result,
             };
             let mut deliveries = match deliveries {
-                Ok(deliveries) => {
-                    recovery_attempt = NonZeroU32::MIN;
-                    deliveries
-                }
+                Ok(deliveries) => deliveries,
                 Err(error) if is_recoverable(error.kind()) => {
                     emit_runtime_failure(
                         self.emitter.as_ref(),
@@ -934,7 +931,7 @@ where
                     }
                 };
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => recovery_attempt = NonZeroU32::MIN,
                     Err(error) if is_recoverable(error.kind()) => {
                         self.emitter.emit(
                             TransactionalMessagingObservation::ConsumerSubscribeRetry {

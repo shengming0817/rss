@@ -92,8 +92,12 @@ stage/reason labels and generation, never endpoint coordinates or provider error
   and broker confirms distinguish confirmed, definitely-not-published and ambiguous outcomes.
   Unroutable publication is transient. An attempted send whose confirmation is lost or whose
   future is cancelled retires its generation; the caller retries using the same `MessageId`.
-- Per-call `OperationDeadline` from the messaging core covers the complete send/confirm or
-  settlement operation. Constructor `recovery_timeout` must be an integral number of milliseconds in `1ms..=24h` and bounds publisher background replacement:
+- Per-call `OperationDeadline` from the messaging core fixes the publication cutoff on entry,
+  including metadata encoding, transport snapshot, payload copying and send/confirm. Expired
+  preflight is definitely-not-published and does not retire a healthy generation. Header keys,
+  including the `attribute.` prefix, must fit 255 UTF-8 bytes; invalid keys return a permanent
+  encoding failure without panicking. Settlement watchdog expiration is `DeadlineElapsed`,
+  matching zero-budget settlement and abandon; it requests close without a second broker decision. Constructor `recovery_timeout` must be an integral number of milliseconds in `1ms..=24h` and bounds publisher background replacement:
   confirm drain, connection close and new confirmed transport share one recovery deadline.
   Resource shutdown has its own total budget, independently of that recovery operation.
   Every publisher generation shares one connection-close future across recovery, cancellation
