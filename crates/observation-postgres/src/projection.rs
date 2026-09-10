@@ -3,7 +3,7 @@
 use crate::{PgStore, store::restore, transaction::sql_error};
 use futures::TryStreamExt;
 use rss_observation::{ApplicableRecord, Clock, Error, ErrorKind, Id, JournalReadGrant, Scope};
-use rss_projection::{BatchLimit, Event, Position, Source, SourceScope};
+use rss_projection::{BatchLimit, Event, Phase, Position, Source, SourceScope};
 #[cfg(feature = "projection-postgres")]
 use rss_projection_postgres::PgTransaction;
 use rss_request_context::Deadline;
@@ -56,23 +56,29 @@ impl<C: Clock> PgSource<C> {
         &self,
         event: &Event,
         deadline: Deadline,
-    ) -> Result<ApplicableRecord, Error> {
-        self.check(event.source())?;
+    ) -> Result<ApplicableRecord, rss_projection::Error> {
+        self.check(event.source()).map_err(source_error)?;
         let event = event.clone();
         let tenant = self.grant.tenant();
         self.store
-            .transact(tenant, deadline, 0, move |connection, _| {
-                Box::pin(async move {
-                    let row = sqlx::query(LOOKUP)
-                        .bind(tenant.to_string())
-                        .bind(event.position().get() as i64)
-                        .fetch_optional(connection)
-                        .await
-                        .map_err(sql_error)?;
-                    resolve_row(row, &event)
-                })
-            })
+            .transact(
+                tenant,
+                deadline,
+                self.store.take_fault(),
+                move |connection, _| {
+                    Box::pin(async move {
+                        let row = sqlx::query(LOOKUP)
+                            .bind(tenant.to_string())
+                            .bind(event.position().get() as i64)
+                            .fetch_optional(connection)
+                            .await
+                            .map_err(sql_error)?;
+                        resolve_row(row, &event)
+                    })
+                },
+            )
             .await
+            .map_err(|error: BridgeError| error.0)
     }
     /// Resolve on the same borrowed transaction as the read-model effect/checkpoint. Does not
     /// change tenant, watchdogs or settlement authority; the enclosing Projection Control applies.
@@ -81,10 +87,10 @@ impl<C: Clock> PgSource<C> {
         &self,
         tx: &mut PgTransaction<'_>,
         event: &Event,
-    ) -> Result<ApplicableRecord, Error> {
-        self.check(event.source())?;
+    ) -> Result<ApplicableRecord, rss_projection::Error> {
+        self.check(event.source()).map_err(source_error)?;
         if tx.tenant() != self.grant.tenant() {
-            return Err(ErrorKind::Unauthorized.into());
+            return Err(source_error(ErrorKind::Unauthorized.into()));
         }
         let tenant = self.grant.tenant().to_string();
         let position = event.position().get() as i64;
@@ -102,8 +108,9 @@ impl<C: Clock> PgSource<C> {
                 })
             })
             .await
-            .map_err(|e| Error::provider(ErrorKind::Storage, e))??;
-        resolve_row(row, event)
+            .map_err(rss_projection::Error::from)?
+            .map_err(source_error)?;
+        resolve_row(row, event).map_err(|error| error.0)
     }
 }
 impl<C: Clock> Source for PgSource<C> {
@@ -129,24 +136,48 @@ impl<C: Clock> Source for PgSource<C> {
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
         self.store
-            .transact(tenant, self.deadline(), 0, move |connection, _| {
-                Box::pin(async move {
-                    let mut rows = sqlx::query(READ)
-                        .bind(tenant.to_string())
-                        .bind(after.map(|p| p.get() as i64))
-                        .bind(i64::from(limit.get()))
-                        .fetch(connection);
-                    let mut events = Vec::new();
-                    while let Some(row) = rows.try_next().await.map_err(sql_error)? {
-                        let (pos, record) = restore_row(row)?;
-                        events.push(event_for(&scope, pos, &record)?);
-                    }
-                    Ok(events)
-                })
-            })
+            .transact(
+                tenant,
+                self.deadline(),
+                self.store.take_fault(),
+                move |connection, _| {
+                    Box::pin(async move {
+                        let mut rows = sqlx::query(READ)
+                            .bind(tenant.to_string())
+                            .bind(after.map(|p| p.get() as i64))
+                            .bind(i64::from(limit.get()))
+                            .fetch(connection);
+                        let mut events = Vec::new();
+                        while let Some(row) = rows.try_next().await.map_err(sql_error)? {
+                            let (pos, record) = restore_row(row)?;
+                            events.push(
+                                event_for(&scope, pos, &record)
+                                    .map_err(|e| restore_error(Some(pos), e))?,
+                            );
+                        }
+                        Ok(events)
+                    })
+                },
+            )
             .await
-            .map_err(source_error)
+            .map_err(|error: BridgeError| error.0)
     }
+}
+// Only this adapter needs to carry projection diagnostics through Observation settlement.
+struct BridgeError(rss_projection::Error);
+impl From<Error> for BridgeError {
+    fn from(error: Error) -> Self {
+        Self(source_error(error))
+    }
+}
+fn restore_error(position: Option<Position>, error: Error) -> BridgeError {
+    BridgeError(rss_projection::Error::provider(
+        rss_projection::ErrorKind::StorageContract,
+        Phase::Restore,
+        None,
+        position,
+        error,
+    ))
 }
 fn position(value: i64) -> Result<Position, Error> {
     if value <= 0 {
@@ -154,22 +185,37 @@ fn position(value: i64) -> Result<Position, Error> {
     }
     Position::new(value as u64).map_err(projection_error)
 }
-fn restore_row(row: PgRow) -> Result<(Position, ApplicableRecord), Error> {
-    let pos = position(row.try_get("log_position").map_err(sql_error)?)?;
-    let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)
-        .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
-    let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)
-        .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
-    let record = restore(row, &scope, &id)?
-        .into_applicable()
-        .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
+fn restore_row(row: PgRow) -> Result<(Position, ApplicableRecord), BridgeError> {
+    let pos = row
+        .try_get("log_position")
+        .map_err(sql_error)
+        .and_then(position)
+        .map_err(|e| restore_error(None, e))?;
+    let record = (|| -> Result<ApplicableRecord, Error> {
+        let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)
+            .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
+        let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)
+            .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
+        restore(row, &scope, &id)?
+            .into_applicable()
+            .map_err(|e| Error::provider(ErrorKind::Invariant, e))
+    })()
+    .map_err(|e| restore_error(Some(pos), e))?;
     Ok((pos, record))
 }
-fn resolve_row(row: Option<PgRow>, event: &Event) -> Result<ApplicableRecord, Error> {
-    let (pos, record) = restore_row(row.ok_or(ErrorKind::Invariant)?)?;
-    // Reconstruct the only accepted encoding. No permissive parser, alternate identity, or mapper.
-    if event_for(event.source(), pos, &record)? != *event {
-        return Err(ErrorKind::InvalidInput.into());
+fn resolve_row(row: Option<PgRow>, event: &Event) -> Result<ApplicableRecord, BridgeError> {
+    let row =
+        row.ok_or_else(|| restore_error(Some(event.position()), ErrorKind::Invariant.into()))?;
+    let (pos, record) = restore_row(row)?;
+    // Reconstruct the only accepted encoding. No permissive parser or alternate identity.
+    if event_for(event.source(), pos, &record).map_err(|e| restore_error(Some(pos), e))? != *event {
+        return Err(BridgeError(rss_projection::Error::provider(
+            rss_projection::ErrorKind::InvalidInput,
+            Phase::Restore,
+            None,
+            Some(pos),
+            Error::new(ErrorKind::InvalidInput),
+        )));
     }
     Ok(record)
 }
@@ -205,15 +251,21 @@ fn projection_error(error: rss_projection::Error) -> Error {
 }
 fn source_error(error: Error) -> rss_projection::Error {
     use rss_projection::{ErrorKind as Kind, Phase};
-    let kind = match error.kind() {
-        ErrorKind::Unauthorized => Kind::ScopeMismatch,
-        ErrorKind::Deadline => Kind::Deadline,
-        ErrorKind::Invariant | ErrorKind::InvalidInput | ErrorKind::Conflict => {
-            Kind::StorageContract
-        }
-        _ => Kind::Unavailable,
+    let (kind, phase) = match error.kind() {
+        ErrorKind::Unauthorized => (Kind::ScopeMismatch, Phase::Admission),
+        ErrorKind::Deadline => (Kind::Deadline, Phase::Operation),
+        ErrorKind::CommitUnknown => (Kind::CommitUnknown, Phase::Commit),
+        ErrorKind::RollbackFailed => (Kind::RollbackFailed, Phase::Rollback),
+        ErrorKind::Storage => (Kind::Unavailable, Phase::Operation),
+        ErrorKind::Invariant
+        | ErrorKind::InvalidInput
+        | ErrorKind::Conflict
+        | ErrorKind::Closed
+        | ErrorKind::LifecycleConflict
+        | ErrorKind::StaleEpoch
+        | ErrorKind::UnknownStream => (Kind::StorageContract, Phase::Operation),
     };
-    rss_projection::Error::provider(kind, Phase::Operation, None, error)
+    rss_projection::Error::provider(kind, phase, None, None, error)
 }
 
 #[cfg(test)]

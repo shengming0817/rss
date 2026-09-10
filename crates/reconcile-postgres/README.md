@@ -62,3 +62,7 @@ ref: launchbadge/sqlx `sqlx-core/src/transaction.rs@v0.9.0`；PostgreSQL 16 expl
 `python3 hack/reconcile-package-proof.py --artifacts DIR --revision SHA`。
 两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
 完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。
+
+SQLx 解码、列、配置与关闭池错误不会因缺少 SQLSTATE 被视为暂时故障；应用 SQL 将这些错误
+归为 `Permanent`，组件结构错误归为 `StorageContract`。认证失败及缺数据库不自动重试。
+锁不可用 `55P03` 为 `Transient`，仍须结合事务结果与剩余期限决定恢复。

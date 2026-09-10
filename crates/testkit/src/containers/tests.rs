@@ -112,3 +112,55 @@ fn vhost_names_are_safe_before_management_io() {
     }
     assert!(validate_rabbit_vhost("good-vhost_1").is_ok());
 }
+
+#[tokio::test]
+async fn bridge_network_diagnostics_contain_no_docker_output() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    const CHILD: &str = "RSS_BRIDGE_DIAGNOSTIC_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let error = bridge_network("diagnostic-proof")
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("fake Docker unexpectedly succeeded"))?;
+        assert!(error.to_string().contains("exit=Some(7)"));
+        let mut chain: Option<&dyn std::error::Error> = Some(error.as_ref());
+        while let Some(value) = chain {
+            assert!(!format!("{value:?} {value}").contains("secret"));
+            chain = value.source();
+        }
+        return Ok(());
+    }
+    let directory = tempfile::tempdir()?;
+    let docker = directory.path().join("docker");
+    std::fs::write(
+        &docker,
+        "#!/bin/sh\necho 'permission denied secret-password secret-dsn' >&2\nexit 7\n",
+    )?;
+    std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(45),
+        tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "containers::tests::bridge_network_diagnostics_contain_no_docker_output",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("PATH", directory.path())
+            .env("RSS_TEST_RUN_ID", "diagnostic-proof")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    anyhow::ensure!(
+        output.status.success(),
+        "child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    anyhow::ensure!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "child did not run its assertion"
+    );
+    Ok(())
+}

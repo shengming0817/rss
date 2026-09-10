@@ -11,8 +11,8 @@ pub(super) use external::{direct_advance_obeys_control, external_recovery};
 mod admission;
 use super::*;
 pub(super) use admission::{
-    application_error_cannot_claim_settlement, borrowed_timeout_rolls_back, bounded_close,
-    rejects_dangerous_acl, store_identity,
+    application_error_cannot_claim_settlement, application_lock_timeout_rolls_back,
+    borrowed_timeout_rolls_back, bounded_close, rejects_dangerous_acl, store_identity,
 };
 use sqlx::Connection;
 
@@ -109,7 +109,12 @@ impl PgEffect for Reject {
         _: &Event,
     ) -> Result<PgEffectOutcome, PgOperationError> {
         increment(tx, scope).await?;
-        Err(PgOperationError::rejected())
+        Err(PgOperationError::rejected(
+            rss_projection::Phase::Application,
+            None,
+            None,
+            rss_projection::ErrorKind::Rejected,
+        ))
     }
 }
 pub(super) async fn isolation(
@@ -233,7 +238,12 @@ pub(super) async fn ordered_append(
         .local_tx(s.source(), control, move |tx| {
             Box::pin(async move {
                 tx.append(&source, "aborted", b"3").await?;
-                Err(PgOperationError::rejected())
+                Err(PgOperationError::rejected(
+                    rss_projection::Phase::Application,
+                    None,
+                    None,
+                    rss_projection::ErrorKind::Rejected,
+                ))
             })
         })
         .await;

@@ -33,7 +33,7 @@ assert_eq!(
 ```
 
 `TraceParent::parse` does not trim or normalize input. Version `00` uses the strict four-field W3C
-form; versions `01..fe` preserve an optional opaque future suffix; version `ff` is rejected. Inputs
+form; versions `01..fe` preserve an optional opaque future suffix without ASCII control characters; version `ff` is rejected. Inputs
 over 512 bytes are rejected before content classification. Errors and restore outcomes are closed
 and never contain the original value or an SDK error.
 

@@ -120,3 +120,7 @@ work and unblocks its DR partition barrier; Completed members remain Completed, 
 Published facts, envelopes, fingerprints and delivery deadlines are unchanged. Termination never
 asserts that an unfinished delivery succeeded. `ActionKind::DrTerminate` distinguishes this
 transition in the same closed completion observer.
+
+Archive `Error::Permanent` means provider configuration/input must change before retry. PostgreSQL
+authentication or missing-database failures retain this classification instead of becoming
+`Unavailable`. The failure class alone does not establish write settlement.

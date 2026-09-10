@@ -40,6 +40,9 @@ pub enum Error {
     /// Provider unavailable; write settlement may be unknown.
     #[error("archive provider unavailable")]
     Unavailable,
+    /// Provider configuration or input must change before retry.
+    #[error("archive provider permanently rejected operation")]
+    Permanent,
     /// Schema or effective permissions violate the storage contract.
     #[error("archive storage contract mismatch")]
     StorageContract,

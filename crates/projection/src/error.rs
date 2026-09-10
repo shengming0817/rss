@@ -1,4 +1,4 @@
-use crate::ErrorKind;
+use crate::{ErrorKind, Position};
 use rss_redact::RedactedSource;
 use std::sync::Arc;
 
@@ -15,6 +15,8 @@ pub enum Phase {
     Setup,
     /// Component SQL operation.
     Operation,
+    /// Restoring a persisted source record.
+    Restore,
     /// Trusted application SQL.
     Application,
     /// Transaction commit acknowledgment.
@@ -27,12 +29,17 @@ pub enum Phase {
 pub struct Diagnostic {
     phase: Phase,
     sqlstate: Option<String>,
+    position: Option<Position>,
     source: RedactedSource,
 }
 impl Diagnostic {
     /// Stage at which the provider failed.
     pub const fn phase(&self) -> Phase {
         self.phase
+    }
+    /// Validated source position, when known; never an application identity or payload.
+    pub const fn position(&self) -> Option<Position> {
+        self.position
     }
     /// Validated five-character SQLSTATE, when available.
     pub fn sqlstate(&self) -> Option<&str> {
@@ -59,6 +66,7 @@ impl Error {
         kind: ErrorKind,
         phase: Phase,
         sqlstate: Option<&str>,
+        position: Option<Position>,
         source: E,
     ) -> Self {
         let sqlstate = sqlstate
@@ -73,6 +81,7 @@ impl Error {
             diagnostic: Some(Arc::new(Diagnostic {
                 phase,
                 sqlstate,
+                position,
                 source: RedactedSource::new(source),
             })),
         }

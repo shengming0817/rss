@@ -22,3 +22,12 @@ async fn one_way_upgrade() -> anyhow::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(90), upgrade::run()).await??;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_rows_keep_safe_coordinates_and_settlement() -> anyhow::Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let f = Fixture::new(false).await?;
+        scenarios::restore_diagnostics(&f).await
+    })
+    .await?
+}

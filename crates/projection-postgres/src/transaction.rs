@@ -206,25 +206,46 @@ pub(crate) fn map_sql(error: sqlx::Error) -> Error {
     sql_error(error, Phase::Operation)
 }
 pub(crate) fn sql_error(error: sqlx::Error, phase: Phase) -> Error {
-    let kind = match error.as_database_error().and_then(|e| e.code()).as_deref() {
+    let kind = classify(&error);
+    evidence(error, kind, phase)
+}
+fn classify(error: &sqlx::Error) -> ErrorKind {
+    match error {
+        sqlx::Error::Database(db) => code_kind(db.code().as_deref()),
+        sqlx::Error::Io(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
+            ) =>
+        {
+            ErrorKind::StorageContract
+        }
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => {
+            ErrorKind::Unavailable
+        }
+        _ => ErrorKind::StorageContract,
+    }
+}
+fn code_kind(code: Option<&str>) -> ErrorKind {
+    match code {
         Some("P1001") => ErrorKind::ScopeMismatch,
         Some("P1002") => ErrorKind::Fenced,
         Some("P1003") => ErrorKind::Conflict,
         Some("P1004") => ErrorKind::OutOfOrder,
         Some("23514" | "22003") => ErrorKind::InvalidInput,
-        Some("42501" | "42P01" | "42883") => ErrorKind::StorageContract,
-        _ => ErrorKind::Unavailable,
-    };
-    evidence(error, kind, phase)
+        Some(code)
+            if code == "55P03"
+                || ["08", "40", "53", "57", "58"]
+                    .iter()
+                    .any(|class| code.starts_with(class)) =>
+        {
+            ErrorKind::Unavailable
+        }
+        _ => ErrorKind::StorageContract,
+    }
 }
 fn application_sql(error: sqlx::Error) -> Error {
-    let code = error.as_database_error().and_then(|e| e.code());
-    let transient = code.as_deref().is_none_or(|code| {
-        ["08", "40", "53", "57", "58"]
-            .iter()
-            .any(|class| code.starts_with(class))
-    });
-    let kind = if transient {
+    let kind = if classify(&error) == ErrorKind::Unavailable {
         ErrorKind::Unavailable
     } else {
         ErrorKind::Rejected
@@ -236,7 +257,7 @@ fn evidence(error: sqlx::Error, kind: ErrorKind, phase: Phase) -> Error {
         .as_database_error()
         .and_then(|e| e.code())
         .map(|s| s.into_owned());
-    Error::provider(kind, phase, code.as_deref(), error)
+    Error::provider(kind, phase, code.as_deref(), None, error)
 }
 /// Pool admission is closed in every outcome. An interrupted drain can be retried explicitly.
 #[must_use = "inspect whether the pool drained or still has outstanding borrowers"]
@@ -261,15 +282,32 @@ pub enum CloseOutcome {
 pub struct PgOperationError(#[source] pub(crate) Error);
 impl PgOperationError {
     /// Reject the application operation; the adapter will roll back before returning it.
-    pub const fn rejected() -> Self {
-        Self(Error::new(ErrorKind::Rejected))
+    pub fn rejected<E: std::error::Error + Send + Sync + 'static>(
+        phase: Phase,
+        sqlstate: Option<&str>,
+        position: Option<rss_projection::Position>,
+        source: E,
+    ) -> Self {
+        Self(Error::provider(
+            ErrorKind::Rejected,
+            phase,
+            sqlstate,
+            position,
+            source,
+        ))
     }
     /// Report an application dependency failure without asserting provider settlement.
-    pub fn unavailable<E: std::error::Error + Send + Sync + 'static>(source: E) -> Self {
+    pub fn unavailable<E: std::error::Error + Send + Sync + 'static>(
+        phase: Phase,
+        sqlstate: Option<&str>,
+        position: Option<rss_projection::Position>,
+        source: E,
+    ) -> Self {
         Self(Error::provider(
             ErrorKind::Unavailable,
-            Phase::Application,
-            None,
+            phase,
+            sqlstate,
+            position,
             source,
         ))
     }
@@ -278,5 +316,58 @@ impl PgOperationError {
 impl From<PgOperationError> for Error {
     fn from(error: PgOperationError) -> Self {
         error.0
+    }
+}
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+    #[test]
+    fn structural_sqlx_errors_are_not_retryable() {
+        for error in [
+            sqlx::Error::RowNotFound,
+            sqlx::Error::ColumnNotFound("secret-column".into()),
+            sqlx::Error::ColumnIndexOutOfBounds { index: 9, len: 1 },
+            sqlx::Error::Decode(Box::new(std::io::Error::other("secret-value"))),
+            sqlx::Error::ColumnDecode {
+                index: "secret-column".into(),
+                source: Box::new(std::io::Error::other("secret-value")),
+            },
+            sqlx::Error::Configuration(Box::new(std::io::Error::other("secret-dsn"))),
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "secret",
+            )),
+        ] {
+            assert_ne!(classify(&error), ErrorKind::Unavailable);
+            let result = application_sql(error);
+            assert_ne!(result.kind(), ErrorKind::Unavailable);
+            assert!(!format!("{result:?} {result}").contains("secret"));
+        }
+    }
+    #[test]
+    fn sqlstate_recovery_contract() {
+        for code in ["55P03", "08006", "40001", "40P01", "53300", "57014"] {
+            assert_eq!(code_kind(Some(code)), ErrorKind::Unavailable, "{code}");
+        }
+        for code in [
+            "28P01", "28000", "3D000", "42703", "42P01", "42501", "ZZ999",
+        ] {
+            assert_ne!(code_kind(Some(code)), ErrorKind::Unavailable, "{code}");
+        }
+        assert_ne!(code_kind(None), ErrorKind::Unavailable);
+    }
+    #[test]
+    fn temporary_transport_is_retryable() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "secret",
+            )),
+        ] {
+            assert_eq!(application_sql(error).kind(), ErrorKind::Unavailable);
+        }
     }
 }

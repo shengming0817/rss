@@ -129,11 +129,11 @@ pub(crate) async fn watchdog_fault(
     Ok(())
 }
 #[cfg(feature = "integration")]
-pub(crate) async fn after_write_fault<T>(
+pub(crate) async fn after_write_fault<T, E: From<Error>>(
     connection: &mut sqlx::PgConnection,
     fault: u8,
-    result: Result<T, Error>,
-) -> Result<T, Error> {
+    result: Result<T, E>,
+) -> Result<T, E> {
     if fault == 9 && result.is_ok() {
         sqlx::query("SELECT set_config('statement_timeout','10ms',true)")
             .execute(&mut *connection)
@@ -143,7 +143,7 @@ pub(crate) async fn after_write_fault<T>(
             .execute(connection)
             .await
             .map_err(sql_error)?;
-        return Err(ErrorKind::Invariant.into()); // The injected server timeout must actually fire.
+        return Err(Error::new(ErrorKind::Invariant).into()); // The injected server timeout must actually fire.
     }
     result
 }
