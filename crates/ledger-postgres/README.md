@@ -138,7 +138,8 @@ ref: baseline 5b63e10 adapters/postgres/src/audit_repo.rs
 
 Independent consumers require explicit `--source` or `--artifacts DIR --revision SHA`;
 implicit dirty repackaging is no longer supported. Scenarios live in `crates/examples`,
-share their source between both modes, and execute under the existing provider fixtures.
+and share their source between both modes. The PG and messaging scenarios execute under the
+existing provider fixtures; `all` reports `GRAPH PASS` for dependency/API compilation only.
 Candidate validation checks embedded Cargo identity and dependency origins before execution;
 VCS metadata is not cryptographic provenance. Compilation, fixed-artifact execution and registry
 publication are distinct results.
