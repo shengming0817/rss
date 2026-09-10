@@ -15,6 +15,8 @@ mod store;
 #[derive(serde::Deserialize)]
 pub struct Input {
     pub port: u16,
+    pub username: String,
+    pub password: String,
     pub ca: String,
     pub certificate: String,
     pub key: String,
@@ -62,7 +64,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         Arc::new(tls),
         rss_mqtt::Limits::new(8, 8, 8, 65536)?,
     )?
-    .credentials("mqtt", b"fixture-only".to_vec())?
+    .credentials(input.username, input.password.into_bytes())?
     .subscriptions(vec![topic.clone()])?;
     let (publisher, mut receiver, resource) = rss_mqtt::connect(
         config,
@@ -114,4 +116,23 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         .await?;
     resource.shutdown(Duration::from_secs(10)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn runtime_requires_fixture_credentials() -> anyhow::Result<()> {
+        let input = serde_json::json!({"port":8883,"username":"user","password":"secret",
+            "ca":"ca","certificate":"cert","key":"key","directory":"/tmp/example","id":"example"});
+        assert!(serde_json::from_value::<super::Input>(input.clone()).is_ok());
+        for key in ["username", "password"] {
+            let mut missing = input.clone();
+            missing
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("fixture input must be an object"))?
+                .remove(key);
+            assert!(serde_json::from_value::<super::Input>(missing).is_err());
+        }
+        Ok(())
+    }
 }

@@ -71,7 +71,8 @@ def main():
                     environment={"RSS_LEDGER_MESSAGING": str(int(name == "messaging"))},
                 )
         shutil.rmtree(directory / "target")
-        print(f"PASS ledger/{name}", flush=True)
+        kind = "GRAPH" if name in {'all'} else "BEHAVIOR"
+        print(f"{kind} PASS ledger/{name}", flush=True)
 
 
 if __name__ == "__main__":

@@ -167,7 +167,7 @@ explicit delta deletion, gap and recovery snapshot while projection is stopped, 
 resumes a generation. The complete empty recovery snapshot clears only its declared coverage.
 `crates/examples/src/observation/install.rs` composes both published `MIGRATION_SQL` constants and consumer-local facts SQL;
 it does not depend on workspace sibling paths. `crates/examples/src/observation/model.rs`, installer and facts schema are
-consumer-owned assets shipped in the package;
+consumer-owned assets maintained in the non-published repository examples and copied from the same revision by the proof runner;
 no Inventory, source precedence, device authentication or compliance policy enters the component.
 
 Real PostgreSQL T2 in `postgres-integration --test observation_projection` proves ordered

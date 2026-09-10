@@ -243,7 +243,7 @@ def main():
                     verify_example_failure(result.returncode, result.stderr)
                 else:
                     cargo(['run', '--locked', '--offline', *flags], directory)
-            results[mode] = 'feature/API and selected behavior passed'
+            results[mode] = 'BEHAVIOR PASS' if mode in {'base', 'managed', 'http1', 'http2', 'auto'} else 'GRAPH PASS'
         shutil.rmtree(directory / 'target')
     print(json.dumps({'revision': args.revision, 'scenarioSha256': hashlib.sha256(source.encode()).hexdigest(), 'consumers': results}, indent=2))
 

@@ -1,5 +1,4 @@
-#[path = "../../../../crates/examples/src/observation/install.rs"]
-mod installer;
+use super::installer;
 use rss_observation::*;
 use rss_observation_postgres::{PgSource, PgStore};
 use rss_request_context::{Deadline, TenantId};

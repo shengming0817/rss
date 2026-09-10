@@ -1,7 +1,6 @@
 //! Exact candidate schemas and consumer-owned transaction behavior under non-owner roles.
+use super::fence_fixture as fence;
 use std::time::Duration;
-#[path = "../../../fixtures/message_fence.rs"]
-mod fence;
 #[tokio::test]
 async fn example_consumer() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(120), run()).await??;
@@ -46,7 +45,14 @@ async fn run() -> anyhow::Result<()> {
         );
         fence::provision(&admin).await?;
     }
-    let input = testkit::example_process::pg_input(&fixture, "ledger_runtime", super::TENANT);
+    let mut input = testkit::example_process::pg_input(&fixture, "ledger_runtime", super::TENANT);
+    use ring::rand::SecureRandom as _;
+    let mut key = [0u8; 32];
+    ring::rand::SystemRandom::new()
+        .fill(&mut key)
+        .map_err(|_| anyhow::anyhow!("fixture key generation failed"))?;
+    input["ledger_key_id"] = serde_json::json!("ledger-fixture");
+    input["ledger_key"] = serde_json::json!(key);
     match std::env::var("RSS_LEDGER_EXAMPLE") {
         Ok(binary) => {
             testkit::example_process::run_binary(&binary, &input, Duration::from_secs(60)).await?;
@@ -57,8 +63,14 @@ async fn run() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e.into()),
     }
+    verify(&admin, messaging).await?;
+    admin.close().await;
+    Ok(())
+}
+
+async fn verify(admin: &sqlx::PgPool, messaging: bool) -> anyhow::Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ledger.entries")
-        .fetch_one(&admin)
+        .fetch_one(admin)
         .await?;
     anyhow::ensure!(
         count == if messaging { 2 } else { 1 },
@@ -68,13 +80,12 @@ async fn run() -> anyhow::Result<()> {
         let ids: Vec<String> = sqlx::query_scalar(
             "SELECT message_id FROM rss_transactional_messaging.outbox ORDER BY message_id",
         )
-        .fetch_all(&admin)
+        .fetch_all(admin)
         .await?;
         anyhow::ensure!(
             ids == ["commit"],
             "message/ledger transaction did not commit and roll back together"
         );
     }
-    admin.close().await;
     Ok(())
 }

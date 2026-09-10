@@ -16,7 +16,7 @@ import tomllib
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from package_proof import (archive_digest, bounded_archive, checked_members, candidate_archives,
+from package_proof import (extract_candidates,
     validate_graph, selected_dependencies, cargo, consumer, package_closure, require_candidate_revision, run_command, cargo_environment, validate_execution)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,16 +117,8 @@ def main():
     if args.source:
         allowed = {name: Path(p["manifest_path"]).parent for name, p in closure.items()}
     else:
-        archives = candidate_archives(args.artifacts.resolve(), args.revision, {name: p["version"] for name, p in closure.items()})
-        for name, path in sorted(archives.items()):
-            print(f"artifact\t{name}\t{closure[name]['version']}\t{args.revision}\t{archive_digest(path)}", flush=True)
-        extracted = run / "extracted"
-        extracted.mkdir()
-        for path in archives.values():
-            with bounded_archive(path) as archive:
-                members = list(checked_members(archive, path.stem))
-                archive.extractall(extracted, members=members, filter="data")
-        allowed = {name: extracted / f'{name}-{p["version"]}' for name, p in closure.items()}
+        allowed = extract_candidates(args.artifacts.resolve(), args.revision,
+                                     {name: p["version"] for name, p in closure.items()}, run / "extracted")
     print(f"proof output: {run}", flush=True)
     providers = []
     writers = []

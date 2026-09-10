@@ -1,7 +1,6 @@
 //! Shared provisioning for the two recovery artifact scenarios; never a library dependency.
+use crate::fence_fixture as fence;
 use std::time::Duration;
-#[path = "message_fence.rs"]
-mod fence;
 pub const TENANT: &str = "11111111-1111-1111-1111-111111111111";
 pub struct Fixture {
     pub _pg: testkit::PgTlsFixture,

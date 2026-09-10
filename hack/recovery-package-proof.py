@@ -92,7 +92,8 @@ def main():
                 },
             )
         shutil.rmtree(directory / "target")
-        print(f"PASS recovery/{name}", flush=True)
+        kind = "GRAPH" if name in {'s3', 'managed'} else "BEHAVIOR"
+        print(f"{kind} PASS recovery/{name}", flush=True)
 
 
 if __name__ == "__main__":

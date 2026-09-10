@@ -43,7 +43,17 @@ class ArtifactProof(unittest.TestCase):
         return path
 
     def validate(self):
-        return proof.candidate_archives(self.root, REVISION, self.versions)
+        with proof.candidate_archives(self.root, REVISION, self.versions) as archives:
+            return set(archives)
+
+    def test_replacing_source_after_validation_cannot_change_extracted_bytes(self):
+        with proof.candidate_archives(self.root, REVISION, self.versions) as archives:
+            self.archive(extra={"src/lib.rs": b"pub fn changed() {}"})
+            archive, _digest = archives["rss-sample"]
+            extracted = self.root / "extracted"
+            archive.extractall(extracted, filter="data")
+            self.assertEqual((extracted / "rss-sample-0.1.0/src/lib.rs").read_bytes(),
+                             b"pub fn value() -> u8 { 1 }")
 
     def test_exact_artifact_passes(self):
         self.assertEqual(set(self.validate()), {"rss-sample"})
@@ -58,7 +68,7 @@ class ArtifactProof(unittest.TestCase):
             self.validate()
 
     def test_manifest_sha_cannot_relabel_an_old_or_dirty_archive(self):
-        for revision, dirty in [("b" * 40, False), (REVISION, True)]:
+        for revision, dirty in [("b" * 40, False), (REVISION, True), (REVISION, None), (REVISION, 0)]:
             with self.subTest(revision=revision, dirty=dirty):
                 self.archive(revision, dirty)
                 with self.assertRaisesRegex(ValueError, "revision|dirty"):

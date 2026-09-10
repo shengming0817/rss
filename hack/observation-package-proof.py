@@ -79,7 +79,8 @@ def main():
             )
             cargo(["check", "--locked", "--bin", "rss-examples"], directory)
         shutil.rmtree(directory / "target")
-        print(f"PASS observation/{name}", flush=True)
+        kind = "GRAPH" if name in {'adapter', 'projection'} else "BEHAVIOR"
+        print(f"{kind} PASS observation/{name}", flush=True)
 
 
 if __name__ == "__main__":

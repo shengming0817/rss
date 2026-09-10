@@ -1,5 +1,7 @@
 mod admission;
 mod fixture;
+#[path = "../../../../crates/examples/src/observation/install.rs"]
+mod installer;
 mod process;
 mod scenarios;
 mod upgrade;

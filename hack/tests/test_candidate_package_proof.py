@@ -45,45 +45,6 @@ def bundle(root, *, sha=REVISION, dirty=False, extra=None):
 
 
 class Entrances(unittest.TestCase):
-    def test_candidate_identity_before_use(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            path = bundle(root)
-            self.assertEqual(
-                package_proof.candidate_archives(
-                    root, REVISION, {"rss-sample": "0.1.0"}
-                ),
-                {"rss-sample": path},
-            )
-            for options in (
-                {"sha": "b" * 40},
-                {"dirty": True},
-                {"dirty": None},
-                {"dirty": 0},
-                {"extra": {"../../escape": b"bad"}},
-                {
-                    "extra": {
-                        "Cargo.toml": b'[package]\nname="rss-sample"\nversion="0.1.0"\n[dependencies.x]\npath="/source"\n'
-                    }
-                },
-            ):
-                bundle(root, **options)
-                with self.subTest(options=options), self.assertRaises(ValueError):
-                    package_proof.candidate_archives(
-                        root, REVISION, {"rss-sample": "0.1.0"}
-                    )
-            path = bundle(root)
-            path.write_bytes(path.read_bytes() + b"bad")
-            with self.assertRaises(ValueError):
-                package_proof.candidate_archives(
-                    root, REVISION, {"rss-sample": "0.1.0"}
-                )
-            path.unlink()
-            with self.assertRaises((ValueError, FileNotFoundError)):
-                package_proof.candidate_archives(
-                    root, REVISION, {"rss-sample": "0.1.0"}
-                )
-
     def test_each_main_rejects_relabelled_archive_before_consumer_creation(self):
         metadata = {
             "packages": [

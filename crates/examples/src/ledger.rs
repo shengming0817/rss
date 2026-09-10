@@ -21,11 +21,20 @@ impl Timer for Clock {
         tokio::time::sleep(end.saturating_sub(self.now())).await;
     }
 }
-pub fn auth() -> anyhow::Result<Authenticator> {
-    Ok(Authenticator::new(
-        KeyId::parse("example-key")?,
-        vec![7; 32],
-    )?)
+#[derive(serde::Deserialize)]
+pub struct Input {
+    #[serde(flatten)]
+    pub pg: crate::pg::Input,
+    pub ledger_key_id: String,
+    pub ledger_key: [u8; 32],
+}
+impl Input {
+    fn auth(&self) -> anyhow::Result<Authenticator> {
+        Ok(Authenticator::new(
+            KeyId::parse(&self.ledger_key_id)?,
+            self.ledger_key.to_vec(),
+        )?)
+    }
 }
 fn request(tenant: TenantId, id: &str) -> anyhow::Result<AppendRequest> {
     Ok(AppendRequest::new(
@@ -61,12 +70,12 @@ pub async fn install(input: crate::pg::Input) -> anyhow::Result<()> {
     pool.close().await;
     Ok(())
 }
-pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
-    let tenant = TenantId::parse(&input.tenant)?;
+pub async fn run(input: Input) -> anyhow::Result<()> {
+    let tenant = TenantId::parse(&input.pg.tenant)?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(40), &cancel);
-    let store = PgLedger::new(input.pool().await?, auth()?, &control).await?;
+    let store = PgLedger::new(input.pg.pool().await?, input.auth()?, &control).await?;
     let req = request(tenant, "standalone")?;
     let first = committed(store.append(&req, &control).await)?;
     let replay = committed(store.append(&req, &control).await)?;
@@ -75,7 +84,7 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
         "ledger idempotency mismatch"
     );
     store.close(&control).await?;
-    let reopened = PgLedger::new(input.pool().await?, auth()?, &control).await?;
+    let reopened = PgLedger::new(input.pg.pool().await?, input.auth()?, &control).await?;
     let page = committed(
         reopened
             .read_window(
@@ -87,7 +96,11 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
             .await,
     )?;
     anyhow::ensure!(
-        auth()?.verify_chain(req.ledger(), page.entries())?.count() == 1,
+        input
+            .auth()?
+            .verify_chain(req.ledger(), page.entries())?
+            .count()
+            == 1,
         "durable chain missing"
     );
     #[cfg(feature = "ledger-messaging")]
@@ -109,7 +122,7 @@ impl rss_request_context::ExecutionTimer for Clock {
 }
 #[cfg(feature = "ledger-messaging")]
 async fn messaging(
-    input: &crate::pg::Input,
+    input: &Input,
     store: &PgLedger,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
@@ -123,16 +136,16 @@ async fn messaging(
         PgConfig, PgError, PgOutboxWriter, PgPassword, PgPrivateCa, PgRuntime,
     };
     use std::sync::Arc;
-    let tenant = TenantId::parse(&input.tenant)?;
+    let tenant = TenantId::parse(&input.pg.tenant)?;
     let runtime = Arc::new(
         PgRuntime::connect_producer(
             PgConfig::new(
-                &input.host,
-                input.port,
-                &input.database,
-                &input.username,
-                PgPassword::new(input.password.clone()),
-                PgPrivateCa::from_pem(input.pg_ca.as_bytes().to_vec())?,
+                &input.pg.host,
+                input.pg.port,
+                &input.pg.database,
+                &input.pg.username,
+                PgPassword::new(input.pg.password.clone()),
+                PgPrivateCa::from_pem(input.pg.pg_ca.as_bytes().to_vec())?,
             ),
             Clock::new(),
             ExecutionBinding::new(
@@ -146,7 +159,7 @@ async fn messaging(
         let id = if rollback { "rollback" } else { "commit" };
         let req = request(tenant, id)?;
         let writing = req.clone();
-        let authenticator = Arc::new(auth()?);
+        let authenticator = Arc::new(input.auth()?);
         let writer =
             PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("writer-example")?);
         let pending = crate::sample_message::message(tenant, id)?;
@@ -180,4 +193,24 @@ async fn messaging(
     }
     runtime.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn runtime_requires_fixture_key_material() -> anyhow::Result<()> {
+        let input = serde_json::json!({"host":"localhost","port":5432,"database":"example",
+            "username":"runtime","password":"fixture","pg_ca":"ca","tenant":"tenant",
+            "ledger_key_id":"random-fixture","ledger_key":vec![9u8;32]});
+        assert!(serde_json::from_value::<super::Input>(input.clone()).is_ok());
+        for key in ["ledger_key_id", "ledger_key"] {
+            let mut missing = input.clone();
+            missing
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("fixture input must be an object"))?
+                .remove(key);
+            assert!(serde_json::from_value::<super::Input>(missing).is_err());
+        }
+        Ok(())
+    }
 }

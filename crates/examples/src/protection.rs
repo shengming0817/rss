@@ -1,8 +1,6 @@
 //! Consumer-owned, ephemeral AES-GCM key; no KMS, persistence or authentication policy.
 use ring::rand::{SecureRandom, SystemRandom};
-use rss_data_protection::{
-    Aead, AeadError, CiphertextEnvelope, ProtectionContext,
-};
+use rss_data_protection::{Aead, AeadError, CiphertextEnvelope, ProtectionContext};
 use rss_request_context::TenantId;
 
 use rss_examples::ephemeral::EphemeralKey;

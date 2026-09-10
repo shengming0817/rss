@@ -61,6 +61,7 @@ stdout/stderr 并发排空，各保留至多 16 KiB 尾部；失败时输出脱�
 
 artifact 模式要求 checkout 与候选为同一 clean revision，读取既有 `packages.tsv` 和 `SHA256SUMS`，
 校验实际 `.crate` 字节、Cargo 内嵌 VCS revision、版本、安全成员路径和 normalized manifest。
+摘要、身份校验与提取使用同一份有界私有快照；校验后替换原归档不会改变被提取的内容。
 每包限制为压缩输入 16 MiB、完整 TAR 流 64 MiB、4096 个成员、单成员 8 MiB、累计内容 32 MiB；
 摘要流式计算，先限制解压流再解析 TAR（包含扩展 header 和 padding），超限立即失败。
 RSS 依赖只允许指向该次解包的候选闭包，不能回到主仓源码或 internal package。
@@ -170,16 +171,21 @@ The logging restriction remains consumer-owned in `src/mqtt/logging.rs`.
 Observation runs snapshot/delta core decisions and the single `observation` handoff against PG;
 `observation-install` installs both candidate-owned component schemas with a dedicated owner.
 Its model, installer and facts SQL have moved from the adapter examples to `src/observation`.
-Ledger independently runs core chain verification, standalone PG and the borrowed messaging
+Ledger runtime requires `ledger_key_id` and 32-byte `ledger_key` from the fixture over stdin.
+It independently runs core chain verification, standalone PG and the borrowed messaging
 transaction: commit and rollback are checked against both durable stores.
 Recovery runs core authorization/plan decisions, PG Outbox redrive with the original delivery
 window, and one PG + Object Lock S3 archive with exact-version readback and HOT cleanup.
-S3-only and managed combinations retain their own capability graphs; complete fault matrices
-remain with the component integration owners.
+Compile-only combinations print `GRAPH PASS`: Observation adapter/projection, Ledger all,
+Recovery S3-only/managed, and Axum both/all. These prove independent API/feature resolution.
+Core and provider execution print `BEHAVIOR PASS` (MQTT explicitly reports real broker behavior;
+Axum platform reports its asserted result). Complete fault matrices remain with the component owners.
 
+MQTT also requires the fixture broker `username` and `password` in its stdin input.
 Provider credentials and temporary key bytes arrive through bounded stdin, not logs. The existing
-fixture launcher owns resources; candidate installers supply component migrations. A successful
-process exit also requires durable postconditions, and missing/duplicate execution fails proof.
+fixture launcher owns resources; candidate installers supply component migrations. Provider behavior
+requires durable postconditions in addition to a successful process exit; missing or duplicate
+provider execution fails proof. Graph-only combinations make no behavior claim.
 The five proof entrances (including Axum) share bounded archive validation, environment checks,
 resolved graphs and command logs. `--scenario` is for development selection; final acceptance runs
 all scenarios. These instructions are not execution receipts: issue/PR evidence binds the exact

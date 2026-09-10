@@ -2,12 +2,21 @@
 use super::{GenericImage, ImageExt, Result, copied_tls_image, runtime, tls};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 
+const USERNAME: &str = "mqtt";
+const PASSWORD: &str = "fixture-only";
+
 pub struct MqttTlsFixture {
     container: runtime::Container<GenericImage>,
     port: u16,
     material: tls::TlsMaterial,
 }
 impl MqttTlsFixture {
+    pub const fn username(&self) -> &str {
+        USERNAME
+    }
+    pub const fn password(&self) -> &str {
+        PASSWORD
+    }
     pub const fn port(&self) -> u16 {
         self.port
     }
@@ -48,7 +57,7 @@ pub async fn exclusive_mqtt_tls(matching_host: bool) -> Result<MqttTlsFixture> {
     let config = "listener 8883\ncafile /rss-tls/ca.pem\ncertfile /rss-tls/server.pem\nkeyfile /rss-tls/server-key.pem\nrequire_certificate true\nallow_anonymous false\npassword_file /tmp/mqtt-passwords\npersistence true\npersistence_location /mosquitto/data/\nautosave_interval 1\nlog_dest stderr\n";
     let request = copied_tls_image(image, &material)
         .with_copy_to("/mosquitto/config/mosquitto.conf", config.as_bytes().to_vec())
-        .with_cmd(["sh", "-c", "mosquitto_passwd -b -c /tmp/mqtt-passwords mqtt fixture-only && chmod 644 /tmp/mqtt-passwords && while true; do mosquitto -c /mosquitto/config/mosquitto.conf; sleep 0.1; done"]);
+        .with_cmd(["sh", "-c", &format!("mosquitto_passwd -b -c /tmp/mqtt-passwords {USERNAME} {PASSWORD} && chmod 644 /tmp/mqtt-passwords && while true; do mosquitto -c /mosquitto/config/mosquitto.conf; sleep 0.1; done")]);
     let container = runtime::start(request).await?;
     let port = container.get_host_port_ipv4(8883.tcp()).await?;
     Ok(MqttTlsFixture {

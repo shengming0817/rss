@@ -7,6 +7,8 @@ use sqlx::{
 };
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+#[path = "../../fixtures/message_fence.rs"]
+mod fence_fixture;
 mod messaging;
 mod scenarios;
 struct Clock(Instant);

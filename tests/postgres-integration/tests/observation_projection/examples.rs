@@ -1,7 +1,6 @@
 //! Provision roles only; the independent installer must provide both candidate schemas.
+use super::installer;
 use std::time::Duration;
-#[path = "../../../../crates/examples/src/observation/install.rs"]
-mod installer;
 #[tokio::test]
 async fn example_consumer() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(120), run()).await??;
