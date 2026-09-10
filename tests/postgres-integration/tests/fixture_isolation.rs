@@ -93,7 +93,7 @@ async fn same_dns_on_independent_networks_keeps_tls_and_cleanup_isolated() -> an
         .err()
         .ok_or_else(|| anyhow::anyhow!("missing network must fail construction"))?;
     anyhow::ensure!(
-        format!("{failure:#}").contains("category=network-missing"),
+        format!("{failure:#}").contains("reason=not-found"),
         "missing network must preserve its safe failure category"
     );
     // A failed attachment must not disconnect or clean up another fixture.

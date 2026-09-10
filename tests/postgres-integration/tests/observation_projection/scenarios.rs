@@ -681,7 +681,7 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
     assert_eq!(original[0].payload(), new[0].payload());
     assert_ne!(original[0].source(), new[0].source());
     assert!(
-        matches!(rebuilt.resolve(&original[0], deadline()).await, Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
+        matches!(rebuilt.resolve(&original[0], deadline()).await, Err(e) if e.kind() == rss_projection::ErrorKind::ScopeMismatch)
     );
     Ok(rebuilt)
 }
@@ -718,5 +718,127 @@ async fn rebuilt_checkpoint(
             .position,
         None
     );
+    Ok(())
+}
+
+pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
+    let input = seed(f).await?;
+    let events = input
+        .source
+        .read(input.source.scope(), None, BatchLimit::new(2)?)
+        .await?;
+    assert_eq!(events.len(), 2);
+    let bad = &events[1];
+    let projection = f.projection().await?;
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let scope = ProjectionScope::new(input.source.scope().clone(), "facts", "bad-row")?;
+    let execution = session(&projection, &scope, &input.source, &control).await?;
+    let changed = sqlx::query(
+        "UPDATE rss_observation.batches SET raw=$1 WHERE tenant_id=$2::uuid AND log_position=$3",
+    )
+    .bind(b"secret-payload".as_slice())
+    .bind(TENANT)
+    .bind(bad.position().get() as i64)
+    .execute(&f.admin)
+    .await?;
+    assert_eq!(changed.rows_affected(), 1);
+    assert_source_failures(f, &input, &execution, bad, &control).await?;
+    assert_restore_settlement(&input, &execution, bad).await
+}
+async fn assert_source_failures(
+    f: &Fixture,
+    input: &Inputs,
+    execution: &Session,
+    bad: &Event,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    use rss_projection::ErrorKind as Kind;
+    let error = rss_projection::run(
+        input.source.as_ref(),
+        execution,
+        control,
+        RunLimit::new(BatchLimit::new(2)?, 2)?,
+    )
+    .await
+    .into_result()
+    .err()
+    .ok_or_else(|| anyhow::anyhow!("bad source row accepted"))?;
+    assert_restore_error(&error, Kind::StorageContract, bad.position())?;
+    assert_eq!(execution.checkpoint().await?.position, None);
+    assert!(values(f, "bad-row", "inside").await?.is_empty());
+    let error = input
+        .source
+        .resolve(bad, deadline())
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("bad row resolved"))?;
+    assert_restore_error(&error, Kind::StorageContract, bad.position())?;
+    let error = execution
+        .execute(None, bad, control)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("bad row applied"))?;
+    assert_restore_error(&error, Kind::Rejected, bad.position())?;
+    assert_eq!(execution.checkpoint().await?.position, None);
+    assert!(values(f, "bad-row", "inside").await?.is_empty());
+
+    Ok(())
+}
+async fn assert_restore_settlement(
+    input: &Inputs,
+    execution: &Session,
+    bad: &Event,
+) -> anyhow::Result<()> {
+    use rss_projection::{ErrorKind as Kind, Phase};
+    // Settlement uncertainty overrides the earlier restore failure; its coordinate is not evidence of rollback.
+    input
+        .store
+        .inject_next_fault(rss_observation_postgres::Fault::RollbackAckLost);
+    let error = input
+        .source
+        .read(input.source.scope(), None, BatchLimit::new(2)?)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("rollback failure lost"))?;
+    assert_eq!(error.kind(), Kind::RollbackFailed);
+    assert_eq!(error.diagnostic().map(|d| d.phase()), Some(Phase::Rollback));
+    assert_eq!(error.diagnostic().and_then(|d| d.position()), None);
+    input
+        .store
+        .inject_next_fault(rss_observation_postgres::Fault::RollbackPending);
+    let short = rss_request_context::Deadline::at(
+        rss_observation::Clock::now(&Clock) + Duration::from_millis(100),
+    );
+    let error = input
+        .source
+        .resolve(bad, short)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("pending rollback accepted"))?;
+    assert_eq!(error.kind(), Kind::RollbackFailed);
+    assert_eq!(execution.checkpoint().await?.position, None);
+    Ok(())
+}
+fn assert_restore_error(
+    error: &rss_projection::Error,
+    kind: rss_projection::ErrorKind,
+    position: Position,
+) -> anyhow::Result<()> {
+    assert_eq!(error.kind(), kind);
+    let diagnostic = error
+        .diagnostic()
+        .ok_or_else(|| anyhow::anyhow!("missing restore diagnostic"))?;
+    assert_eq!(diagnostic.phase(), rss_projection::Phase::Restore);
+    assert_eq!(diagnostic.position(), Some(position));
+    let mut chain: Option<&dyn std::error::Error> = Some(error);
+    while let Some(value) = chain {
+        let rendered = format!("{value:?} {value}");
+        for secret in ["secret-payload", TENANT, "composition", "snapshot", "delta"] {
+            assert!(!rendered.contains(secret), "unsafe diagnostic");
+        }
+        chain = value.source();
+    }
     Ok(())
 }

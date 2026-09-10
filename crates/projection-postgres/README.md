@@ -143,7 +143,7 @@ structure; historical tests are scenario sources, not evidence for the new guara
 `PgEffect` and `local_tx` callbacks return `PgOperationError`, which exposes only application
 rejection and dependency failure constructors. Propagate borrowed SQL/append errors with `?`;
 only the adapter classifies fencing and settlement. `Error::kind()` is the recovery decision,
-while `diagnostic()` retains a safe phase/SQLSTATE and an opaque original provider source.
+while `diagnostic()` retains a safe phase/SQLSTATE/optional position and an opaque original provider source.
 Application SQL errors cannot claim component protocol codes even when they raise the same SQLSTATE.
 
 Call `store.close(&control)` after cancelling and joining workers. Admission closes immediately;
@@ -177,3 +177,15 @@ and grants before retrying; there is no permissive compatibility mode.
 
 ref: postgres src/backend/utils/adt/acl.c@REL_16_STABLE
 ref: postgres src/backend/utils/adt/ruleutils.c@REL_16_STABLE
+
+Application error constructors take `(phase, sqlstate, position, source)`; all consumers must migrate
+together. Neither constructor grants application code authority to assert provider settlement.
+SQLx decoding, column, configuration and closed-pool failures are not transient. Authentication,
+missing database and unknown component failures are `StorageContract`; application SQL maps
+non-transient failures to `Rejected`. Real lock unavailability (`55P03`) is `Unavailable`, subject
+to the enclosing transaction outcome and caller budget.
+
+Transient SQLSTATE classification uses an explicit allowlist. Undefined/duplicate files (`58P01`,
+`58P02`), dropped databases (`57P04`), configuration limits (`53400`), protocol violations (`08P01`)
+and disk exhaustion (`53100`) require correction, rather than automatic retries based on their class.
+Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .

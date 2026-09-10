@@ -102,6 +102,7 @@ impl Drop for BridgeNetwork {
 pub(super) const LAUNCHER_REQUIRED: &str = "fixture requires the Make launcher; from the workspace root run: make ci CI_PART=tests CI_FILTER='package(/-integration$/)'";
 
 /// Creates a unique bridge with bounded normal release and launcher-owned fallback cleanup.
+/// Docker failures expose only a closed category, exit code and stderr length; daemon text is discarded.
 pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     if !is_safe_label_token(prefix) {
         return Err(anyhow::anyhow!(
@@ -117,12 +118,7 @@ pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
     command.args(["--label", &format!("rss.test-run={run}")]);
     command.arg(&name).kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(30), command.output()).await??;
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "docker network create {name} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+    check_docker_output("network", "create", output.status.code(), &output.stderr)?;
     Ok(BridgeNetwork { name })
 }
 
@@ -165,41 +161,43 @@ async fn start_on_network<I: testcontainers::Image>(
     .await;
     stage.finish(matches!(&output, Ok(output) if output.exit_code == Some(0)));
     let output = output?;
-    anyhow::ensure!(
-        output.exit_code == Some(0),
-        "fixture network attachment failed (category={}, exit={:?}, stderr_bytes={})",
-        network_attachment_category(&output.stderr),
-        output.exit_code,
-        output.stderr.len()
-    );
+    check_docker_output(
+        "network",
+        "connect",
+        output.exit_code.map(|code| code as i32),
+        output.stderr.as_bytes(),
+    )?;
     Ok(container)
 }
 
-fn network_attachment_category(stderr: &str) -> &'static str {
-    let message = stderr.to_ascii_lowercase();
-    if message.contains("network") && message.contains("not found") {
-        "network-missing"
-    } else if message.contains("permission denied")
-        || message.contains("cannot connect to the docker daemon")
+fn check_docker_output(
+    resource: &str,
+    operation: &str,
+    exit: Option<i32>,
+    stderr: &[u8],
+) -> Result<()> {
+    // Untrusted daemon text is inspected locally, never retained in a returned error.
+    let message = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let reason = if message.contains("permission denied") || message.contains("access denied") {
+        "permission-denied"
+    } else if message.contains("conflict")
+        || message.contains("active endpoints")
+        || message.contains("already exists")
     {
-        "daemon-or-permission"
-    } else if message.contains("endpoint") && message.contains("already exists") {
-        "endpoint-conflict"
+        "resource-in-use"
+    } else if message.contains("no such") || message.contains("not found") {
+        "not-found"
+    } else if message.contains("cannot connect") || message.contains("connection refused") {
+        "daemon-unavailable"
     } else {
-        "unknown"
-    }
-}
-
-#[test]
-fn network_attachment_diagnostics_do_not_echo_daemon_secrets() {
-    for (message, expected) in [
-        ("network secret-network not found", "network-missing"),
-        ("permission denied at secret-socket", "daemon-or-permission"),
-        ("endpoint secret-name already exists", "endpoint-conflict"),
-        ("unexpected secret-password", "unknown"),
-    ] {
-        assert_eq!(network_attachment_category(message), expected);
-    }
+        "command-failed"
+    };
+    anyhow::ensure!(
+        exit == Some(0),
+        "fixture Docker {resource} {operation} failed (reason={reason}, exit={exit:?}, stderr_bytes={})",
+        stderr.len()
+    );
+    Ok(())
 }
 
 fn retry_published_port_resolution(

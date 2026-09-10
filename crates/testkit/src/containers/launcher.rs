@@ -20,27 +20,7 @@ async fn docker(args: &[&str]) -> Result<std::process::Output> {
         .kill_on_drop(true)
         .output()
         .await?;
-    // Docker may include endpoint credentials in raw errors; emit only closed diagnostic classes.
-    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    let reason = if stderr.contains("permission denied") || stderr.contains("access denied") {
-        "permission-denied"
-    } else if stderr.contains("conflict") || stderr.contains("active endpoints") {
-        "resource-in-use"
-    } else if stderr.contains("no such") || stderr.contains("not found") {
-        "not-found"
-    } else if stderr.contains("cannot connect") || stderr.contains("connection refused") {
-        "daemon-unavailable"
-    } else {
-        "command-failed"
-    };
-    anyhow::ensure!(
-        output.status.success(),
-        "fixture Docker {} {} failed (reason={reason}, exit={:?}, stderr_bytes={})",
-        args[0],
-        args[1],
-        output.status.code(),
-        output.stderr.len()
-    );
+    super::check_docker_output(args[0], args[1], output.status.code(), &output.stderr)?;
     Ok(output)
 }
 async fn cleanup(run: &str) -> Result<()> {

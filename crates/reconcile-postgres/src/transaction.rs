@@ -227,13 +227,30 @@ async fn setup(
     Ok(())
 }
 pub(crate) fn map_sql(error: sqlx::Error) -> Error {
-    let kind = match &error {
-        sqlx::Error::Database(db) => code_kind(db.code().as_deref()),
-        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut => ErrorKind::Transient,
-        sqlx::Error::PoolClosed | sqlx::Error::Tls(_) => ErrorKind::Permanent,
-        _ => ErrorKind::StorageContract,
-    };
+    let kind = classify(&error);
     Error::provider(kind, error)
+}
+fn classify(error: &sqlx::Error) -> ErrorKind {
+    match error {
+        sqlx::Error::Database(db) => code_kind(db.code().as_deref()),
+        sqlx::Error::Io(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
+            ) =>
+        {
+            ErrorKind::Permanent
+        }
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => {
+            ErrorKind::Transient
+        }
+        sqlx::Error::PoolClosed
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::Configuration(_)
+        | sqlx::Error::InvalidArgument(_)
+        | sqlx::Error::Encode(_) => ErrorKind::Permanent,
+        _ => ErrorKind::StorageContract,
+    }
 }
 fn code_kind(code: Option<&str>) -> ErrorKind {
     match code {
@@ -255,15 +272,28 @@ fn code_kind(code: Option<&str>) -> ErrorKind {
     }
 }
 fn transient_code(code: &str) -> bool {
-    code == "55P03"
-        || ["08", "40", "53", "57", "58"]
-            .iter()
-            .any(|class| code.starts_with(class))
+    // Explicit recoverable conditions only; a class also contains configuration/protocol failures.
+    // ref: PostgreSQL 16 Appendix A (errcodes-appendix.html).
+    matches!(
+        code,
+        "08000"
+            | "08001"
+            | "08003"
+            | "08006"
+            | "08007"
+            | "40001"
+            | "40P01"
+            | "53200"
+            | "53300"
+            | "55P03"
+            | "57014"
+            | "57P01"
+            | "57P02"
+            | "57P03"
+    )
 }
 fn application_sql(error: sqlx::Error) -> Error {
-    let code = error.as_database_error().and_then(|e| e.code());
-    let transient = code.as_deref().is_none_or(transient_code);
-    let kind = if transient {
+    let kind = if classify(&error) == ErrorKind::Transient {
         ErrorKind::Transient
     } else {
         ErrorKind::Permanent
@@ -328,6 +358,60 @@ mod classification {
             ("ZZ999", ErrorKind::StorageContract),
         ] {
             assert_eq!(code_kind(Some(code)), expected, "{code}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+    #[test]
+    fn structural_sqlx_errors_are_not_retryable() {
+        for error in [
+            sqlx::Error::RowNotFound,
+            sqlx::Error::ColumnNotFound("secret-column".into()),
+            sqlx::Error::ColumnIndexOutOfBounds { index: 9, len: 1 },
+            sqlx::Error::Decode(Box::new(std::io::Error::other("secret-value"))),
+            sqlx::Error::ColumnDecode {
+                index: "secret-column".into(),
+                source: Box::new(std::io::Error::other("secret-value")),
+            },
+            sqlx::Error::Configuration(Box::new(std::io::Error::other("secret-dsn"))),
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "secret",
+            )),
+        ] {
+            assert_ne!(classify(&error), ErrorKind::Transient);
+            let result = application_sql(error);
+            assert_ne!(result.kind(), ErrorKind::Transient);
+            assert!(!format!("{result:?} {result}").contains("secret"));
+        }
+    }
+    #[test]
+    fn sqlstate_recovery_contract() {
+        for code in ["55P03", "08006", "40001", "40P01", "53300", "57014"] {
+            assert_eq!(code_kind(Some(code)), ErrorKind::Transient, "{code}");
+        }
+        for code in [
+            "28P01", "28000", "3D000", "42703", "42P01", "42501", "ZZ999", "58P01", "58P02",
+            "57P04", "53400", "08P01", "40002", "53100",
+        ] {
+            assert_ne!(code_kind(Some(code)), ErrorKind::Transient, "{code}");
+        }
+        assert_ne!(code_kind(None), ErrorKind::Transient);
+    }
+    #[test]
+    fn temporary_transport_is_retryable() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "secret",
+            )),
+        ] {
+            assert_eq!(application_sql(error).kind(), ErrorKind::Transient);
         }
     }
 }

@@ -51,6 +51,7 @@ impl TraceParent {
         }
         if bytes.len() < 55
             || !bytes.is_ascii()
+            || bytes.iter().any(u8::is_ascii_control)
             || bytes[2] != b'-'
             || bytes[35] != b'-'
             || bytes[52] != b'-'
@@ -254,6 +255,18 @@ mod tests {
             .expect("ff is reserved");
         assert_eq!(error, TraceParentError::UnsupportedVersion);
         assert!(!error.to_string().contains(&unsupported));
+    }
+
+    #[test]
+    fn future_suffix_rejects_every_ascii_control_character() {
+        let prefix = "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-vendor";
+        for byte in (0u8..=31).chain([127]) {
+            let input = format!("{prefix}{}suffix", char::from(byte));
+            assert!(
+                matches!(TraceParent::parse(&input), Err(TraceParentError::Malformed)),
+                "accepted control {byte}"
+            );
+        }
     }
 
     #[test]

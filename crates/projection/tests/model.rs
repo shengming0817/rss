@@ -64,6 +64,7 @@ fn diagnostics_keep_classification_and_stop_before_raw_source() -> anyhow::Resul
         ErrorKind::Unavailable,
         Phase::Acquire,
         Some("08006"),
+        None,
         std::io::Error::other("postgres://secret"),
     );
     assert_eq!(error.kind(), ErrorKind::Unavailable);
@@ -80,6 +81,7 @@ fn diagnostics_keep_classification_and_stop_before_raw_source() -> anyhow::Resul
         ErrorKind::Deadline,
         Phase::Operation,
         Some("password=secret"),
+        None,
         std::io::Error::other("secret"),
     );
     assert_eq!(invalid.diagnostic().and_then(|d| d.sqlstate()), None);
@@ -133,6 +135,31 @@ fn identities_stay_hidden_after_event_baseline_conversion() -> anyhow::Result<()
                 assert!(!rendered.contains(identity), "{rendered}");
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn restore_diagnostic_keeps_only_safe_position() -> anyhow::Result<()> {
+    use rss_projection::{Error, ErrorKind, Phase};
+    let position = Position::new(42)?;
+    let error = Error::provider(
+        ErrorKind::StorageContract,
+        Phase::Restore,
+        None,
+        Some(position),
+        std::io::Error::other("secret-payload"),
+    );
+    assert_eq!(
+        error.diagnostic().and_then(|d| d.position()),
+        Some(position)
+    );
+    assert_eq!(error.diagnostic().map(|d| d.phase()), Some(Phase::Restore));
+    assert_eq!(error, Error::new(ErrorKind::StorageContract));
+    let mut chain: Option<&dyn std::error::Error> = Some(&error);
+    while let Some(value) = chain {
+        assert!(!format!("{value:?} {value}").contains("secret"));
+        chain = value.source();
     }
     Ok(())
 }

@@ -122,7 +122,9 @@ impl PgEffect for CrashEffect {
         event: &Event,
     ) -> Result<PgEffectOutcome, PgOperationError> {
         self.inner.apply(tx, scope, event).await?;
-        std::fs::write(&self.marker, b"staged").map_err(PgOperationError::unavailable)?;
+        std::fs::write(&self.marker, b"staged").map_err(|error| {
+            PgOperationError::unavailable(rss_projection::Phase::Application, None, None, error)
+        })?;
         std::future::pending().await
     }
 }

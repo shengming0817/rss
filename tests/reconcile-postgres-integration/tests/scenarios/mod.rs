@@ -7,6 +7,7 @@ pub async fn run(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     corruption::run(store, pool, owner, c).await?;
+    application_lock_timeout_rolls_back(store, owner, c).await?;
     scheduling(store, owner, c).await?;
     isolation(store, pool, owner, c).await?;
     fencing(store, owner, c).await?;
@@ -356,5 +357,33 @@ async fn live_connection_admission(
         assert!(matches!(result,Err(e) if e.kind()==ErrorKind::StorageContract));
         assert!(!called.load(Ordering::SeqCst));
     }
+    Ok(())
+}
+
+async fn application_lock_timeout_rolls_back(
+    store: &PgStore,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let scope = Scope::new(TenantId::parse(TENANT)?, "classification-lock")?;
+    let mut holder = owner.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(2374)")
+        .execute(&mut *holder)
+        .await?;
+    let result: Result<(), rss_reconcile::Error> = store.local_tx(&scope, control, |tx| Box::pin(async move {
+        tx.with_connection(|conn| Box::pin(async move {
+            sqlx::query("INSERT INTO public.effects(tenant_id,id,n) VALUES($1::uuid,'classification-lock',1)").bind(TENANT).execute(&mut *conn).await?;
+            sqlx::query("SELECT set_config('lock_timeout','20ms',true)").execute(&mut *conn).await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(2374)").execute(conn).await?;
+            Ok(())
+        })).await
+    })).await;
+    holder.rollback().await?;
+    assert!(matches!(result, Err(e) if e.kind() == ErrorKind::Transient));
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM public.effects WHERE id='classification-lock'")
+            .fetch_one(owner)
+            .await?;
+    assert_eq!(count, 0);
     Ok(())
 }

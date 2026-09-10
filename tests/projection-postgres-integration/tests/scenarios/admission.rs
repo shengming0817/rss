@@ -124,7 +124,7 @@ pub(crate) async fn bounded_close(
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("closed pool served read"))?;
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert_eq!(error.kind(), ErrorKind::StorageContract);
     assert_eq!(
         error
             .diagnostic()
@@ -286,5 +286,49 @@ async fn assert_drift(
         "accepted drift: {change}"
     );
     PgStore::new(pool.clone()).await?;
+    Ok(())
+}
+
+pub(crate) async fn application_lock_timeout_rolls_back(
+    store: &PgStore,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let s = scope("classification-lock", TENANT)?;
+    let mut holder = owner.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(2374)")
+        .execute(&mut *holder)
+        .await?;
+    let source = s.source().clone();
+    let result: Result<(), Error> = store
+        .local_tx(s.source(), control, move |tx| {
+            Box::pin(async move {
+                tx.append(&source, "must-roll-back", b"secret").await?;
+                tx.with_connection(|conn| {
+                    Box::pin(async move {
+                        sqlx::query("SELECT set_config('lock_timeout','20ms',true)")
+                            .execute(&mut *conn)
+                            .await?;
+                        sqlx::query("SELECT pg_advisory_xact_lock(2374)")
+                            .execute(conn)
+                            .await?;
+                        Ok(())
+                    })
+                })
+                .await
+            })
+        })
+        .await;
+    holder.rollback().await?;
+    let error = result
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("lock unexpectedly acquired"))?;
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert_eq!(error.diagnostic().and_then(|d| d.sqlstate()), Some("55P03"));
+    assert_eq!(
+        error.diagnostic().map(|d| d.phase()),
+        Some(Phase::Application)
+    );
+    assert_eq!(store.high_water(s.source()).await?, None);
     Ok(())
 }

@@ -97,7 +97,7 @@ impl<C: Clock> PgStore<C> {
         self.fault
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     }
-    fn take_fault(&self) -> u8 {
+    pub(crate) fn take_fault(&self) -> u8 {
         #[cfg(feature = "integration")]
         {
             self.fault.swap(0, std::sync::atomic::Ordering::SeqCst)
@@ -122,19 +122,20 @@ impl<C: Clock> PgStore<C> {
             .bind(tenant.to_string()).bind(remaining).execute(connection).await.map_err(sql_error)?;
         Ok(())
     }
-    pub(crate) async fn transact<T, F>(
+    pub(crate) async fn transact<T, E, F>(
         &self,
         tenant: TenantId,
         deadline: Deadline,
         fault: u8,
         operation: F,
-    ) -> Result<T, Error>
+    ) -> Result<T, E>
     where
         T: Send,
+        E: From<Error> + Send,
         F: for<'a> FnOnce(
                 &'a mut PgConnection,
                 &'a Progress,
-            ) -> futures::future::BoxFuture<'a, Result<T, Error>>
+            ) -> futures::future::BoxFuture<'a, Result<T, E>>
             + Send,
     {
         let progress = Progress::new();
@@ -155,7 +156,7 @@ impl<C: Clock> PgStore<C> {
             }
             .await;
             let result = if fault == 1 || fault == 5 || fault == 6 {
-                Err(ErrorKind::Storage.into())
+                Err(Error::new(ErrorKind::Storage).into())
             } else {
                 result
             };
@@ -169,7 +170,7 @@ impl<C: Clock> PgStore<C> {
                         .await
                         .map_err(|e| Error::provider(ErrorKind::CommitUnknown, e))?;
                     if fault == 2 || fault == 3 {
-                        return Err(ErrorKind::CommitUnknown.into());
+                        return Err(Error::new(ErrorKind::CommitUnknown).into());
                     }
                     lease.settled = true;
                     Ok(value)
@@ -183,14 +184,15 @@ impl<C: Clock> PgStore<C> {
                         .await
                         .map_err(|e| Error::provider(ErrorKind::RollbackFailed, e))?;
                     if fault == 5 {
-                        return Err(ErrorKind::RollbackFailed.into());
+                        return Err(Error::new(ErrorKind::RollbackFailed).into());
                     }
                     lease.settled = true;
                     Err(error)
                 }
             }
         })
-        .await?
+        .await
+        .map_err(E::from)?
     }
     async fn receive_once(
         &self,
@@ -233,7 +235,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
         let fault = self.take_fault();
         let encoded_scope = scope.clone();
         let encoded_policy = policy.clone();
-        let result = self
+        let result: Result<u64, Error> = self
             .transact(
                 grant.scope().tenant(),
                 deadline,

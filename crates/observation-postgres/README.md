@@ -129,8 +129,11 @@ reconstruction from the validated durable record. Debug/error formatting does no
 `resolve(event, deadline)` returns `ApplicableRecord` under the source's tenant grant.
 `resolve_in_transaction(&mut PgTransaction, event)` (requires `projection-postgres`) resolves on the **same borrowed transaction**
 as the consumer's `PgEffect`. Provision that projection runtime role with Observation schema USAGE
-and table SELECT as well. The resolver does not change session identity, deadlines or settlement. Its static SQL retains
-Observation error classification in both entry points; the example maps invalid references,
+and table SELECT as well. The resolver does not change session identity, deadlines or settlement. Both resolver methods return `rss_projection::Error`; their static SQL is classified by the Observation owner before projection.
+`read` and both resolvers expose corrupt rows as `Phase::Restore` with `diagnostic().position()` once
+a legal journal position is known. Restoration stays inside the original transaction/deadline;
+rollback failure takes precedence over a row failure. Diagnostics contain no raw record or identity.
+The Rust resolver error type replaces the prior Observation error without a compatibility wrapper; the example maps invalid references,
 authorization failures and storage-contract violations to a rejected effect, rather than transient
 unavailability. Neither category advances the checkpoint.
 The consumer mapping supplies its own `DefinitionIdentity` to Projection `initialize` and

@@ -49,7 +49,8 @@ fn error(e: PgError) -> Error {
         | rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost => Error::Conflict,
         rss_transactional_messaging::error::MessagingErrorKind::DeadlineElapsed => Error::Deadline,
         rss_transactional_messaging::error::MessagingErrorKind::Invariant => Error::Evidence,
-        _ => Error::Unavailable,
+        rss_transactional_messaging::error::MessagingErrorKind::Permanent => Error::Permanent,
+        rss_transactional_messaging::error::MessagingErrorKind::Transient => Error::Unavailable,
     }
 }
 fn attempt<T>(v: LocalTxAttempt<T, PgError>) -> LocalTxAttempt<T, Error> {
@@ -108,6 +109,16 @@ fn sql_error(error: sqlx::Error) -> PgError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn permanent_failures_are_not_unavailable() {
+        use super::*;
+        use rss_transactional_messaging::error::MessagingErrorKind as Kind;
+        let mapped = error(PgError::classified(
+            Kind::Permanent,
+            std::io::Error::other("secret"),
+        ));
+        assert_eq!(mapped, Error::Permanent);
+    }
     #[test]
     fn archive_size_projections_match_core() {
         let limit = rss_transactional_messaging_recovery::archive::MAX_OBJECT_BYTES;

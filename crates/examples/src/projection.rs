@@ -42,12 +42,12 @@ impl PgEffect for Counter {
         event: &Event,
     ) -> Result<PgEffectOutcome, PgOperationError> {
         let scope = scope.clone();
-        let amount = i64::from(
-            *event
-                .payload()
-                .first()
-                .ok_or(PgOperationError::rejected())?,
-        );
+        let amount = i64::from(*event.payload().first().ok_or(PgOperationError::rejected(
+            rss_projection::Phase::Application,
+            None,
+            Some(event.position()),
+            rss_projection::ErrorKind::InvalidInput,
+        ))?);
         tx.with_connection(move |conn| Box::pin(async move {
             sqlx::query("INSERT INTO public.projection_demo_counts(tenant_id,generation,total) VALUES($1::uuid,$2,$3) ON CONFLICT(tenant_id,generation) DO UPDATE SET total=projection_demo_counts.total+EXCLUDED.total")
                 .bind(scope.source().tenant().to_string()).bind(scope.generation()).bind(amount).execute(conn).await?;

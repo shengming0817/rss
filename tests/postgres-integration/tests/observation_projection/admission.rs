@@ -168,7 +168,7 @@ async fn reject_permanent(
         .await?;
     assert_eq!(
         independent.err().map(|e| e.kind()),
-        Some(ErrorKind::Invariant)
+        Some(rss_projection::ErrorKind::StorageContract)
     );
     assert_eq!(
         atomic.err().map(|e| e.kind()),

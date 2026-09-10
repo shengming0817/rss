@@ -32,7 +32,14 @@ impl<C: Clock + 'static> PgEffect for Facts<C> {
             .await
             .map_err(operation_error)?;
         let record = applicable.record();
-        let scope = record.scope().encode().map_err(operation_error)?;
+        let scope = record.scope().encode().map_err(|error| {
+            PgOperationError::rejected(
+                rss_projection::Phase::Application,
+                None,
+                Some(event.position()),
+                error,
+            )
+        })?;
         let coverage = record.batch().coverage().id().as_str().to_owned();
         let projection = projection.clone();
         let body = record.batch().body().clone();
@@ -56,20 +63,31 @@ impl<C: Clock + 'static> PgEffect for Facts<C> {
     }
 }
 
-fn operation_error(error: rss_observation::Error) -> PgOperationError {
-    use rss_observation::ErrorKind;
+fn operation_error(error: rss_projection::Error) -> PgOperationError {
+    use rss_projection::{ErrorKind, Phase};
+    let phase = error.diagnostic().map_or(Phase::Application, |d| d.phase());
+    let position = error.diagnostic().and_then(|d| d.position());
+    let sqlstate = error
+        .diagnostic()
+        .and_then(|d| d.sqlstate())
+        .map(str::to_owned);
     match error.kind() {
-        ErrorKind::Storage
-        | ErrorKind::Closed
+        ErrorKind::Unavailable
         | ErrorKind::Deadline
+        | ErrorKind::Cancelled
         | ErrorKind::CommitUnknown
-        | ErrorKind::RollbackFailed => PgOperationError::unavailable(error),
+        | ErrorKind::RollbackFailed => {
+            PgOperationError::unavailable(phase, sqlstate.as_deref(), position, error)
+        }
         ErrorKind::InvalidInput
-        | ErrorKind::Unauthorized
+        | ErrorKind::ScopeMismatch
+        | ErrorKind::OutOfOrder
+        | ErrorKind::SourceContract
         | ErrorKind::Conflict
-        | ErrorKind::LifecycleConflict
-        | ErrorKind::StaleEpoch
-        | ErrorKind::UnknownStream
-        | ErrorKind::Invariant => PgOperationError::rejected(),
+        | ErrorKind::Fenced
+        | ErrorKind::Rejected
+        | ErrorKind::StorageContract => {
+            PgOperationError::rejected(phase, sqlstate.as_deref(), position, error)
+        }
     }
 }

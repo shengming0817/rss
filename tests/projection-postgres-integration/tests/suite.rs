@@ -143,6 +143,7 @@ async fn projection_postgres_suite() -> anyhow::Result<()> {
         scenarios::definition_binding(&store, &owner, &control).await?;
         scenarios::rejects_dangerous_acl(&pool, &owner).await?;
         scenarios::borrowed_timeout_rolls_back(&pool, &store, &control).await?;
+        scenarios::application_lock_timeout_rolls_back(&store, &owner, &control).await?;
         scenarios::application_error_cannot_claim_settlement(&store, &control).await?;
         scenarios::filtered_receipts(&store, &owner, &control).await?;
         scenarios::atomic_recovery(&store, &owner, &control).await?;

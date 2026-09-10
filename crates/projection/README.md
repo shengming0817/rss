@@ -123,3 +123,8 @@ Default `Debug` for `SourceScope`, `ProjectionScope`, `BaselineReceipt` and `Gen
 uses fixed redacted placeholders. Converting an `Event` into baseline/start metadata does not
 re-expose tenant, source or event identity in recursive diagnostics. Explicit accessors still
 return the original metadata and require the caller to control its output boundary.
+
+Provider diagnostics contain a closed phase, validated SQLSTATE and optional source `Position`.
+`Phase::Restore` identifies persisted-row reconstruction; unknown positions remain `None`.
+`Error::provider(kind, phase, sqlstate, position, source)` requires callers to supply that context
+explicitly. Raw sources remain redacted, and position/phase do not change recovery classification.
