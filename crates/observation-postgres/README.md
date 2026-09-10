@@ -153,20 +153,21 @@ Tenant journal order is delivery order, never MDM source priority or cross-sourc
 Provision a fresh demo database as its administrator:
 
 ```sh
-psql "$ADMIN_DATABASE_URL" -f crates/observation-postgres/examples/handoff/setup.sql
+psql "$ADMIN_DATABASE_URL" -f crates/examples/src/observation/setup.sql
 # Set handoff_owner and handoff_runtime passwords separately with psql \password.
-# PG_CA_FILE contains the trusted server CA. MIGRATION_DATABASE_URL identifies handoff_owner.
-cargo run -p rss-observation-postgres --features projection-postgres --example handoff-install
-# DATABASE_URL identifies handoff_runtime.
-cargo run -p rss-observation-postgres --features projection-postgres --example handoff
+# Supply bounded stdin JSON: host, port, database, username, password, pg_ca, tenant.
+# owner-input.json identifies handoff_owner; keep these ephemeral inputs private.
+cargo run -p rss-examples --features observation-handoff --bin observation-install < owner-input.json
+# runtime-input.json identifies handoff_runtime.
+cargo run -p rss-examples --features observation-handoff --bin observation < runtime-input.json
 ```
 
 The example supplies its own authority, clock and read-model mapping. It receives snapshot,
 explicit delta deletion, gap and recovery snapshot while projection is stopped, then runs and
 resumes a generation. The complete empty recovery snapshot clears only its declared coverage.
-`handoff/install.rs` composes both published `MIGRATION_SQL` constants and package-local facts SQL;
-it does not depend on workspace sibling paths. `handoff/model.rs`, installer and facts schema are
-consumer-owned assets shipped in the package;
+`crates/examples/src/observation/install.rs` composes both published `MIGRATION_SQL` constants and consumer-local facts SQL;
+it does not depend on workspace sibling paths. `crates/examples/src/observation/model.rs`, installer and facts schema are
+consumer-owned assets maintained in the non-published repository examples and copied from the same revision by the proof runner;
 no Inventory, source precedence, device authentication or compliance policy enters the component.
 
 Real PostgreSQL T2 in `postgres-integration --test observation_projection` proves ordered
@@ -177,3 +178,8 @@ exact `.crate` files; the Source-only closure rejects the concrete Projection Po
 
 ref: postgres/postgres doc/src/sgml/mvcc.sgml@c13dd7d50f21268dc64b4b3edbce31993985ab12
 ref: EventStore/EventStoreDB-Client-Rust kurrentdb/src/types.rs@d76e58ba464b2dc77c196ffefbca330ce9df938d
+
+The source and candidate consumers run the same handoff with real PostgreSQL. Use
+`python3 hack/observation-package-proof.py --source`, or `--artifacts DIR --revision SHA`
+from the same clean candidate revision. Core and independent adapter/projection capability graphs
+remain separate; the handoff asserts durable reception, replay and projection progress.

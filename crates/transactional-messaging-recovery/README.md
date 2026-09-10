@@ -33,9 +33,11 @@ versioned capsule bytes and AAD derived from independently trusted record/tenant
 fingerprint coordinates. Decrypted payloads remain in zeroizing `Plaintext`; list/inspect return no
 payload or key data. Current limits are 4 MiB encoded plaintext and 16 MiB serialized ciphertext.
 
-`python3 hack/recovery-package-proof.py` validates isolated core-only, PostgreSQL and managed-host
-consumers from actual packaged archives. `--artifacts DIR --revision REV` validates supplied
-candidate checksums and revision without repackaging. Package proof does not publish a release.
+`python3 hack/recovery-package-proof.py --source` validates independent source consumers for core,
+PostgreSQL, S3, combined archive and managed-host features. `--artifacts DIR --revision REV`
+uses the same selection against supplied candidates after validating embedded identity and checksums.
+Core, PostgreSQL and combined archive run behavior; S3-only and managed-host selections report
+`GRAPH PASS` for dependency/API checks. Package proof does not publish a release.
 
 Exact retries reuse the same OperationId and request digest. A new operation cannot reuse a replay
 MessageId, including a previous replay from the same source. `StoreFailureKind` retains closed backend
@@ -124,3 +126,12 @@ transition in the same closed completion observer.
 Archive `Error::Permanent` means provider configuration/input must change before retry. PostgreSQL
 authentication or missing-database failures retain this classification instead of becoming
 `Unavailable`. The failure class alone does not establish write settlement.
+
+Independent consumers require explicit `--source` or `--artifacts DIR --revision SHA`;
+implicit dirty repackaging is no longer supported. Scenarios live in `crates/examples`,
+and share their source between both modes. PostgreSQL and combined archive scenarios execute
+under the existing provider fixtures; S3-only and managed-host combinations only check their
+dependency graphs and APIs.
+Candidate validation checks embedded Cargo identity and dependency origins before execution;
+VCS metadata is not cryptographic provenance. Compilation, fixed-artifact execution and registry
+publication are distinct results.

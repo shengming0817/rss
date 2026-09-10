@@ -1,5 +1,7 @@
 mod admission;
 mod fixture;
+#[path = "../../../../crates/examples/src/observation/install.rs"]
+mod installer;
 mod process;
 mod scenarios;
 mod upgrade;
@@ -31,3 +33,5 @@ async fn corrupt_rows_keep_safe_coordinates_and_settlement() -> anyhow::Result<(
     })
     .await?
 }
+
+mod examples;

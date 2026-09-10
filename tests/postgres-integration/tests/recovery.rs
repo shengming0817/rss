@@ -1038,3 +1038,6 @@ async fn compensated(
     assert!(!published, "resolved is never publication evidence");
     Ok(())
 }
+
+#[path = "recovery/examples.rs"]
+mod examples;

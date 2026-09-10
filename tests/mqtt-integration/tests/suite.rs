@@ -42,3 +42,5 @@ mod outbox;
 
 #[path = "scenarios/logging.rs"]
 mod logging;
+
+mod examples;

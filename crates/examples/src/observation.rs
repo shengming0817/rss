@@ -1,5 +1,5 @@
 //! Run against an empty example database provisioned with handoff/setup.sql.
-#[path = "handoff/model.rs"]
+#[path = "observation/model.rs"]
 mod model;
 use rss_observation::{
     Access, Authority, Batch, Body, Change, Clock as _, Coverage, Epoch, Error, Id,
@@ -10,7 +10,7 @@ use rss_projection::{
     BatchLimit, Control, GenerationStart, ProjectionScope, ReplayBound, RunLimit,
 };
 use rss_request_context::{Deadline, TenantId};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -37,16 +37,8 @@ impl Authority for DemoAuthority {
         Ok(())
     } // reason: local fixture; products must authenticate and authorize each request.
 }
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    let options = std::env::var("DATABASE_URL")?
-        .parse::<PgConnectOptions>()?
-        .ssl_mode(PgSslMode::VerifyFull)
-        .ssl_root_cert(std::env::var("PG_CA_FILE")?);
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(options.clone())
-        .await?;
+pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
+    let pool = input.pool().await?;
     #[allow(clippy::disallowed_methods)] // reason: this host owns the injected clock origin.
     let clock = Clock(Instant::now());
     let store = Arc::new(
@@ -57,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?,
     );
-    let tenant = TenantId::parse("00000000-0000-0000-0000-000000000071")?;
+    let tenant = TenantId::parse(&input.tenant)?;
     let scope = Scope::new(
         tenant,
         Id::new("example")?,
@@ -75,6 +67,62 @@ async fn main() -> anyhow::Result<()> {
             deadline,
         )
         .await?;
+    receive_batches(store.as_ref(), &scope, deadline).await?;
+    let source = Arc::new(PgSource::new(
+        store.clone(),
+        JournalReadGrant::verify(&DemoAuthority, tenant)?,
+        rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
+    )?);
+    let projection = rss_projection_postgres::PgStore::new(input.pool().await?).await?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let scope = ProjectionScope::new(source.scope().clone(), "facts", "example-v1")?;
+    projection
+        .initialize(
+            &scope,
+            &model::DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            &control,
+        )
+        .await?;
+    for expected in [3, 0] {
+        let execution = projection.projection(
+            projection
+                .takeover(&scope, &model::DEFINITION, &control)
+                .await?,
+            model::Facts::new(source.clone()),
+        )?;
+        let report = rss_projection::run(
+            source.as_ref(),
+            &execution,
+            &control,
+            RunLimit::new(BatchLimit::new(10)?, 100)?,
+        )
+        .await
+        .into_result()?;
+        anyhow::ensure!(
+            report.applied == expected && report.position.is_some(),
+            "handoff progress mismatch: expected {expected}, got {} at {:?}",
+            report.applied,
+            report.position
+        );
+    }
+    let projection_closed = projection.close(&control).await;
+    let observation_closed = store.close(deadline).await;
+    anyhow::ensure!(
+        projection_closed == rss_projection_postgres::CloseOutcome::Drained,
+        "projection pool did not drain: {projection_closed:?}"
+    );
+    observation_closed?;
+    Ok(())
+}
+
+async fn receive_batches(
+    store: &PgStore<Clock>,
+    scope: &Scope,
+    deadline: Deadline,
+) -> anyhow::Result<()> {
     let coverage = Coverage::new(
         Id::new("all")?,
         Id::new("v1")?,
@@ -117,63 +165,15 @@ async fn main() -> anyhow::Result<()> {
             coverage.clone(),
             body,
         )?;
-        store
-            .receive(
-                &VerifiedBatch::verify(&DemoAuthority, scope.clone(), batch)?,
-                deadline,
-            )
-            .await?;
-    }
-    let source = Arc::new(PgSource::new(
-        store.clone(),
-        JournalReadGrant::verify(&DemoAuthority, tenant)?,
-        rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
-    )?);
-    let projection = rss_projection_postgres::PgStore::new(
-        PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?,
-    )
-    .await?;
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
-    let scope = ProjectionScope::new(source.scope().clone(), "facts", "example-v1")?;
-    projection
-        .initialize(
-            &scope,
-            &model::DEFINITION,
-            GenerationStart::beginning(),
-            ReplayBound::Live,
-            &control,
-        )
-        .await?;
-    for _ in 0..2 {
-        let execution = projection.projection(
-            projection
-                .takeover(&scope, &model::DEFINITION, &control)
-                .await?,
-            model::Facts::new(source.clone()),
-        )?;
-        let report = rss_projection::run(
-            source.as_ref(),
-            &execution,
-            &control,
-            RunLimit::new(BatchLimit::new(10)?, 100)?,
-        )
-        .await
-        .into_result()?;
-        println!(
-            "applied={} checkpoint={:?}",
-            report.applied, report.position
+        let verified = VerifiedBatch::verify(&DemoAuthority, scope.clone(), batch)?;
+        let first = store.receive(&verified, deadline).await?;
+        let replay = store.receive(&verified, deadline).await?;
+        anyhow::ensure!(
+            matches!(first, rss_observation::ReceiveOutcome::Accepted(_))
+                && matches!(replay, rss_observation::ReceiveOutcome::Replay(_))
+                && first.record().decision().encode()? == replay.record().decision().encode()?,
+            "duplicate observation changed its receipt"
         );
     }
-    let projection_closed = projection.close(&control).await;
-    let observation_closed = store.close(deadline).await;
-    anyhow::ensure!(
-        projection_closed == rss_projection_postgres::CloseOutcome::Drained,
-        "projection pool did not drain: {projection_closed:?}"
-    );
-    observation_closed?;
     Ok(())
 }

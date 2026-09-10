@@ -24,28 +24,31 @@ MAX_MEMBER_BYTES = 8 * 1024 * 1024
 MAX_CONTENT_BYTES = 32 * 1024 * 1024
 MAX_MEMBERS = 4096
 
-def archive_digest(path):
-    if path.stat().st_size > MAX_COMPRESSED_BYTES:
-        raise ValueError("compressed archive budget exceeded")
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 @contextmanager
-def bounded_archive(path):
-    """Bound decompression, including PAX headers/padding, before tarfile parses it."""
-    if path.stat().st_size > MAX_COMPRESSED_BYTES:
-        raise ValueError("compressed archive budget exceeded")
-    with tempfile.TemporaryFile() as raw, gzip.open(path, "rb") as source:
+def bounded_archive(path, expected_digest):
+    """Hash a bounded private snapshot; parse and extract only those same bytes."""
+    with tempfile.TemporaryFile() as compressed, path.open("rb") as source:
+        digest = hashlib.sha256()
         size = 0
-        while block := source.read(min(1024 * 1024, MAX_TAR_BYTES + 1 - size)):
+        while block := source.read(min(1024 * 1024, MAX_COMPRESSED_BYTES + 1 - size)):
             size += len(block)
-            if size > MAX_TAR_BYTES:
-                raise ValueError("decompressed archive budget exceeded")
-            raw.write(block)
-        raw.seek(0)
-        with tarfile.open(fileobj=raw, mode="r:") as archive:
-            yield archive
+            if size > MAX_COMPRESSED_BYTES:
+                raise ValueError("compressed archive budget exceeded")
+            digest.update(block)
+            compressed.write(block)
+        if digest.hexdigest() != expected_digest:
+            raise ValueError(f"checksum mismatch: {path.name}")
+        compressed.seek(0)
+        with tempfile.TemporaryFile() as raw, gzip.GzipFile(fileobj=compressed, mode="rb") as stream:
+            size = 0
+            while block := stream.read(min(1024 * 1024, MAX_TAR_BYTES + 1 - size)):
+                size += len(block)
+                if size > MAX_TAR_BYTES:
+                    raise ValueError("decompressed archive budget exceeded")
+                raw.write(block)
+            raw.seek(0)
+            with tarfile.open(fileobj=raw, mode="r:") as archive:
+                yield archive
 
 
 def checked_members(archive, prefix):
@@ -66,8 +69,8 @@ def checked_members(archive, prefix):
         yield member
 
 
-def candidate_archives(directory, revision, versions):
-    """Validate inventory, bytes, Cargo identity and safe extraction before using any archive."""
+def extract_candidates(directory, revision, versions, extracted):
+    """Validate and extract one private snapshot at a time, then close it."""
     rows = {}
     for line in (directory / "packages.tsv").read_text().splitlines():
         name, version, sha = line.split("\t")
@@ -82,27 +85,27 @@ def candidate_archives(directory, revision, versions):
         if filename in sums:
             raise ValueError(f"duplicate checksum: {filename}")
         sums[filename] = digest
-    result = {}
+    if not versions:
+        raise ValueError("empty artifact selection")
+    extracted.mkdir()
     for name, version in versions.items():
         if rows.get(name) != version:
             raise ValueError(f"missing package or version mismatch: {name}")
         path = directory / f"{name}-{version}.crate"
-        if archive_digest(path) != sums.get(path.name):
-            raise ValueError(f"checksum mismatch: {path.name}")
-        prefix = f"{name}-{version}"
-        with bounded_archive(path) as archive:
-            list(checked_members(archive, prefix))
+        digest = sums.get(path.name)
+        with bounded_archive(path, digest) as archive:
+            prefix = f"{name}-{version}"
+            members = list(checked_members(archive, prefix))
             vcs = json.load(archive.extractfile(f"{prefix}/.cargo_vcs_info.json"))["git"]
-            if vcs.get("sha1") != revision or vcs.get("dirty", False):
+            if not isinstance(vcs, dict) or vcs.get("sha1") != revision or vcs.get("dirty", False) is not False:
                 raise ValueError(f"revision mismatch or dirty archive: {name}")
             manifest = tomllib.loads(archive.extractfile(f"{prefix}/Cargo.toml").read().decode())
             if (manifest["package"]["name"], manifest["package"]["version"]) != (name, version):
                 raise ValueError(f"archive package version mismatch: {name}")
             reject_source_dependencies(manifest)
-        result[name] = path
-    if not result:
-        raise ValueError("empty artifact selection")
-    return result
+            archive.extractall(extracted, members=members, filter="data")
+        print(f"artifact\t{name}\t{version}\t{revision}\t{digest}", flush=True)
+    return {name: extracted / f"{name}-{version}" for name, version in versions.items()}
 
 
 def reject_source_dependencies(table):
@@ -143,8 +146,9 @@ def validate_graph(facts, consumer_root, allowed_paths, expected_message_feature
                 raise ValueError(f"message feature mismatch: {actual} != {expected_message_features}")
 
     resolved = {p['name']: set(nodes[p['id']]['features']) for p in facts['packages'] if p['id'] in nodes}
-    if not set(required_dependencies) <= resolved.keys():
-        raise ValueError('consumer dependency missing')
+    missing = set(required_dependencies) - resolved.keys()
+    if missing:
+        raise ValueError(f"consumer dependencies missing: {', '.join(sorted(missing))}")
     for name, expected in (required_features or {}).items():
         actual = resolved.get(name)
         if actual != expected:
@@ -407,15 +411,8 @@ def prepare_sources(args, dependencies, prefix):
     if args.source:
         allowed = {name: Path(p['manifest_path']).parent for name, p in closure.items()}
     else:
-        archives = candidate_archives(args.artifacts.resolve(), args.revision, {n:p['version'] for n,p in closure.items()})
-        extracted = root / 'extracted'
-        extracted.mkdir()
-        for name, path in archives.items():
-            with bounded_archive(path) as archive:
-                members = list(checked_members(archive, path.stem))
-                archive.extractall(extracted, members=members, filter='data')
-            print(f'artifact\t{name}\t{closure[name]["version"]}\t{args.revision}\t{archive_digest(path)}', flush=True)
-        allowed = {name: extracted / f'{name}-{p["version"]}' for name,p in closure.items()}
+        allowed = extract_candidates(args.artifacts.resolve(), args.revision,
+                                     {n:p['version'] for n,p in closure.items()}, root / 'extracted')
     print(f'proof output: {root}', flush=True)
     return root, allowed
 
@@ -441,3 +438,25 @@ def compiler_config(table):
         if isinstance(value, dict) and compiler_config(value):
             return True
     return False
+
+
+def provider_consumer(directory, package, target, test_name, binaries, *, environment=None):
+    """Run already-built isolated binaries under the existing provider fixture owner."""
+    env = dict(cargo_environment(os.environ), RSS_TEST_RUN_ID=directory.parent.name + '-' + directory.name)
+    env.update(environment or {})
+    env.update({key: str(directory / 'target/debug' / name) for key, name in binaries.items()})
+    command = ['cargo', 'run', '--locked', '-p', 'testkit', '--features', 'containers',
+               '--bin', 'rss-test-launcher', '--', '--', 'cargo', 'test', '--locked',
+               '-p', package, '--test', target, test_name, '--', '--exact', '--nocapture']
+    path = directory / 'provider-integration.log'
+    with path.open('w') as log:
+        run_command(command, ROOT, env, log, timeout=900).check_returncode()
+    validate_execution(path.read_text(), test_name, [env[key] for key in binaries])
+
+
+def record_graph(directory, allowed, message_features, forbidden, *, required_features=None, required_dependencies=()):
+    facts = json.loads(cargo(['metadata', '--format-version', '1'], directory))
+    validate_graph(facts, directory, allowed, message_features, forbidden,
+                   required_features=required_features, required_dependencies=required_dependencies)
+    (directory / 'resolved.json').write_text(json.dumps(facts, indent=2) + '\n')
+    return facts

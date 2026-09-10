@@ -1,5 +1,6 @@
-import hashlib
 import importlib.util
+import sys
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,25 +8,6 @@ import unittest
 SPEC = importlib.util.spec_from_file_location("axum_proof", Path(__file__).resolve().parents[1] / "axum-package-proof.py")
 PROOF = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROOF)
-
-
-class ArtifactIdentity(unittest.TestCase):
-    def test_exact_revision_and_digest_are_required(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            archive = root / "rss-axum-0.1.0.crate"
-            archive.write_bytes(b"fixture")
-            (root / "packages.tsv").write_text("rss-axum\t0.1.0\trevision\n")
-            (root / "SHA256SUMS").write_text(hashlib.sha256(b"fixture").hexdigest() + "  " + archive.name + "\n")
-            versions = {"rss-axum": "0.1.0"}
-            self.assertEqual(PROOF.archives_at(root, "revision", versions), {"rss-axum": archive})
-            with self.assertRaisesRegex(ValueError, "revision"):
-                PROOF.archives_at(root, "other", versions)
-            with self.assertRaisesRegex(ValueError, "identity"):
-                PROOF.archives_at(root, "revision", {"rss-axum": "0.2.0"})
-            archive.write_bytes(b"changed")
-            with self.assertRaisesRegex(ValueError, "checksum"):
-                PROOF.archives_at(root, "revision", versions)
 
 
 class ProtocolIsolation(unittest.TestCase):
@@ -67,7 +49,7 @@ class ProtocolIsolation(unittest.TestCase):
 
     def test_all_features_forward_to_the_dependency(self):
         import tomllib
-        versions = {"rss-contract": "0.1.0", "rss-axum": "0.1.0", "rss-runtime": "0.1.0"}
+        versions = {"rss-contract": "0.1.0", "rss-axum": "0.1.0", "rss-runtime": "0.1.0", "rss-request-context": "0.1.0"}
         manifest = tomllib.loads(PROOF.consumer_manifest("all", versions,
             ["default", "managed-server", "http1", "http2", "auto-protocol"]))
         for feature in ["managed-server", "http1", "http2", "auto-protocol"]:
@@ -76,7 +58,7 @@ class ProtocolIsolation(unittest.TestCase):
 
     def test_api_proof_does_not_supply_client_protocol_features(self):
         import tomllib
-        versions = {"rss-contract": "0.1.0", "rss-axum": "0.1.0", "rss-runtime": "0.1.0"}
+        versions = {"rss-contract": "0.1.0", "rss-axum": "0.1.0", "rss-runtime": "0.1.0", "rss-request-context": "0.1.0"}
         features = ["default", "managed-server", "http1", "http2", "auto-protocol"]
         api = tomllib.loads(PROOF.consumer_manifest("http1", versions, features))
         self.assertEqual(set(api["dependencies"]), {"rss-axum"})
@@ -147,11 +129,10 @@ class PlatformExecution(unittest.TestCase):
         import json
         from unittest.mock import patch
         import subprocess
-        with patch.object(PROOF.subprocess, "run", return_value=subprocess.CompletedProcess(
-                [], 0, json.dumps(self.receipt()), "")) as run:
+        with patch.object(PROOF, "cargo", return_value=json.dumps(self.receipt())) as run:
             self.assertEqual(PROOF.run_platform(Path("consumer"), {}), self.receipt())
-            self.assertEqual(run.call_args.args[0], ["cargo", "run", "--locked", "--offline", "--quiet"])
-        with patch.object(PROOF.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "failed")):
+            self.assertEqual(run.call_args.args[0], ["run", "--locked", "--offline", "--quiet"])
+        with patch.object(PROOF, "cargo", side_effect=ValueError("execution failed")):
             with self.assertRaisesRegex(ValueError, "execution failed"):
                 PROOF.run_platform(Path("consumer"), {})
 
@@ -198,16 +179,3 @@ class PlatformExecution(unittest.TestCase):
             facts = {"packages": [{"name": name, "source": None, "manifest_path": str(allowed[name])}]}
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "closure"):
                 PROOF.verify_platform_resolution(facts, consumer, allowed)
-
-    def test_source_does_not_depend_on_aggregate_release_metadata(self):
-        from contextlib import redirect_stdout
-        from io import StringIO
-        from unittest.mock import patch
-        with tempfile.TemporaryDirectory() as temp, patch.object(PROOF, "ROOT", Path(temp)), \
-                patch("sys.argv", ["proof", "--source"]), \
-                patch.object(PROOF, "platform_source", return_value="fn main() {}"), \
-                patch.object(PROOF, "source_consumer", return_value=self.receipt()) as consumer, \
-                patch.object(PROOF, "closure", side_effect=RuntimeError("unrelated release failure")):
-            with redirect_stdout(StringIO()):
-                PROOF.main()
-            consumer.assert_called_once()

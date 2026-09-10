@@ -9,6 +9,9 @@ publish = false
 workspace = true
 
 [dev-dependencies]
+ring.workspace = true
+rss-examples = { path = "../../crates/examples", features = ["ledger-messaging"] }
+serde_json.workspace = true
 rss-ledger.workspace = true
 rss-ledger-postgres = { workspace = true, features = ["integration", "messaging"] }
 rss-request-context.workspace = true

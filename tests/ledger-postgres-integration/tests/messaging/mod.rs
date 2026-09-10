@@ -1,3 +1,4 @@
+use super::fence_fixture;
 use super::{CancellationToken, Control, Duration, PgLedger, PgPool, auth, committed, request};
 use rss_request_context::{Clock as MessageClock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::{
@@ -11,8 +12,6 @@ use rss_transactional_messaging_postgres::{
     PgPrivateCa, PgRuntime, PgTransaction, PgTransactionFault,
 };
 use std::sync::Arc;
-#[path = "../../../fixtures/message_fence.rs"]
-mod fence_fixture;
 mod helpers;
 use helpers::{binding, deadline, message};
 impl MessageClock for super::Clock {

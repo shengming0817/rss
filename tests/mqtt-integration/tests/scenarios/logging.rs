@@ -1,5 +1,5 @@
 //! Regression for the explicitly accepted consumer-owned logging restriction (#2308).
-#[path = "../../../../crates/mqtt/examples/support/logging.rs"]
+#[path = "../../../../crates/examples/src/mqtt/logging.rs"]
 mod consumer_logging;
 use super::support::{self, FileStore, Timer, wire::Peer};
 use rumqttc::mqttbytes::v5::{ConnectReturnCode, Packet, Subscribe, SubscribeFilter};

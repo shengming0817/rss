@@ -158,9 +158,17 @@ unsupported-QoS error, never a reliable delivery with fabricated ACK authority.
 real private-CA/mTLS Mosquitto, PostgreSQL Outbox/relay, ACK-loss proxy, durable session reconstruction,
 backpressure, and scripted TLS protocol failure windows. The integration package owns test-only
 storage and fault endpoints; no production broker/backend is included here.
-`python3 hack/mqtt-package-proof.py` checks isolated consumption of packaged artifacts.
+`python3 hack/mqtt-package-proof.py --source` runs isolated source consumers;
+`--artifacts DIR --revision SHA` executes the same scenarios against fixed package artifacts.
 
 Historical extraction source: `baseline/pre-community-core-20260902`, commit
 `5b63e10a1b396b0ff70b7d1e6e55db296cd7a891:adapters/mqtt`.
 Primary implementation reference: `thehouseisonfire/rumqtt`, commit
 `aa7a694f9b76b17d4c31200cf73d79616acae9b3`, `rumqttc-v5/src/{client,eventloop,state,notice,session}.rs`.
+
+Independent consumers require explicit `--source` or `--artifacts DIR --revision SHA`;
+implicit dirty repackaging is no longer supported. Scenarios live in `crates/examples`,
+share their source between both modes, and execute under the existing provider fixtures.
+Candidate validation checks embedded Cargo identity and dependency origins before execution;
+VCS metadata is not cryptographic provenance. Compilation, fixed-artifact execution and registry
+publication are distinct results.
