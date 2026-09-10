@@ -27,10 +27,13 @@ use rss_transactional_messaging::transport::{
 };
 use rss_transactional_messaging_testkit::ConformanceError;
 use rss_transactional_messaging_testkit::consumer::{ConsumerTxDriver, run_consumer_conformance};
-use rss_transactional_messaging_testkit::inbox::{InboxDriver, run_inbox_conformance};
+use rss_transactional_messaging_testkit::inbox::{
+    InboxDriver, StaleReleaseEvidence, run_inbox_conformance,
+};
 use rss_transactional_messaging_testkit::memory::FakeClock;
 use rss_transactional_messaging_testkit::outbox::{
-    OutboxDriver, ReclaimEvidence, run_outbox_conformance,
+    OutboxDriver, ReclaimEvidence, StaleSettlementEvidence, TenantSettlement,
+    run_outbox_conformance,
 };
 
 use rss_transactional_messaging_testkit::transport::{
@@ -41,6 +44,19 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Defect {
+    OutboxTenantCollision,
+    OutboxTenantMessageMismatch,
+    OutboxTenantUnsettled,
+    OutboxStaleSettlement,
+    OutboxSuccessorLost,
+    InboxTenantCollision,
+    InboxTenantMessageMismatch,
+    InboxTenantGroupMismatch,
+    InboxTenantContractMismatch,
+    InboxTenantDispositionA,
+    InboxTenantDispositionB,
+    InboxStaleRelease,
+    InboxTerminalChanged,
     OutboxAfterPublishBeforeSettle,
     OutboxTransientPublishFailure,
     OutboxConfirmLostChannelClose,
@@ -168,24 +184,68 @@ impl OutboxFixture {
 }
 
 impl OutboxDriver for OutboxFixture {
+    async fn cross_tenant_completion(&self) -> Result<[TenantSettlement; 2], ConformanceError> {
+        let a = TenantId::parse("11111111-1111-1111-1111-111111111111")
+            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
+        let b = TenantId::parse("22222222-2222-2222-2222-222222222222")
+            .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?;
+        Ok([
+            TenantSettlement {
+                tenant: a,
+                message_id: fixture_id("same")?,
+                settlement: OutboxDisposition::Published,
+            },
+            TenantSettlement {
+                tenant: if self.is(Defect::OutboxTenantCollision) {
+                    a
+                } else {
+                    b
+                },
+                message_id: fixture_id(if self.is(Defect::OutboxTenantMessageMismatch) {
+                    "other"
+                } else {
+                    "same"
+                })?,
+                settlement: if self.is(Defect::OutboxTenantUnsettled) {
+                    OutboxDisposition::Retry
+                } else {
+                    OutboxDisposition::Published
+                },
+            },
+        ])
+    }
+
     async fn retry_settlement_reclaims_same_message(
         &self,
     ) -> Result<ReclaimEvidence, ConformanceError> {
         Ok(ReclaimEvidence {
             claimed_message_ids: vec![fixture_id("retry")?, fixture_id("retry")?],
             settlement: OutboxDisposition::Retry,
+            successor_settlement: if self.is(Defect::OutboxSuccessorLost) {
+                OutboxDisposition::Retry
+            } else {
+                OutboxDisposition::Published
+            },
         })
     }
     async fn reclaim_after_publish_before_settle(
         &self,
-    ) -> Result<ReclaimEvidence, ConformanceError> {
-        Ok(ReclaimEvidence {
-            claimed_message_ids: if self.is(Defect::OutboxAfterPublishBeforeSettle) {
-                vec![]
+    ) -> Result<StaleSettlementEvidence, ConformanceError> {
+        Ok(StaleSettlementEvidence {
+            stale_result: if self.is(Defect::OutboxStaleSettlement) {
+                Ok(())
             } else {
-                vec![fixture_id("reclaim")?, fixture_id("reclaim")?]
+                Err(MessagingErrorKind::OwnershipLost)
             },
-            settlement: OutboxDisposition::Published,
+            reclaim: ReclaimEvidence {
+                claimed_message_ids: if self.is(Defect::OutboxAfterPublishBeforeSettle) {
+                    vec![]
+                } else {
+                    vec![fixture_id("reclaim")?, fixture_id("reclaim")?]
+                },
+                settlement: OutboxDisposition::Published,
+                successor_settlement: OutboxDisposition::Published,
+            },
         })
     }
 
@@ -280,6 +340,87 @@ impl InboxFixture {
 }
 
 impl InboxDriver for InboxFixture {
+    async fn cross_tenant_completion(&self) -> Result<[TerminalReceipt; 2], ConformanceError> {
+        let a = terminal_receipt().map_err(|e| ConformanceError::fixture(e.kind()))?;
+        let tenant = if self.defect == Some(Defect::InboxTenantCollision) {
+            a.consumer().tenant_id()
+        } else {
+            TenantId::parse("22222222-2222-2222-2222-222222222222")
+                .map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?
+        };
+        let fixture_error = |_| ConformanceError::fixture(MessagingErrorKind::Invariant);
+        let b = TerminalReceipt::from_durable(
+            ConsumerIdentity::new(
+                tenant,
+                if self.defect == Some(Defect::InboxTenantGroupMismatch) {
+                    ConsumerGroup::parse("other-group").map_err(fixture_error)?
+                } else {
+                    a.consumer().group().clone()
+                },
+                if self.defect == Some(Defect::InboxTenantMessageMismatch) {
+                    fixture_id("other")?
+                } else {
+                    a.message_id().clone()
+                },
+                if self.defect == Some(Defect::InboxTenantContractMismatch) {
+                    ContractIdentity::new(
+                        ContractId::parse("other.contract").map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?,
+                        ContractVersion::from_major(1).map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?,
+                        SchemaDigest::parse("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").map_err(|_| ConformanceError::fixture(MessagingErrorKind::Invariant))?,
+                    )
+                } else {
+                    a.consumer().contract().clone()
+                },
+            ),
+            a.fingerprint(),
+            if self.defect == Some(Defect::InboxTenantDispositionB) {
+                TerminalDisposition::Rejected(
+                    rss_transactional_messaging::transaction::RejectKind::Permanent,
+                )
+            } else {
+                a.disposition()
+            },
+        );
+        let a = if self.defect == Some(Defect::InboxTenantDispositionA) {
+            TerminalReceipt::from_durable(
+                a.consumer().clone(),
+                a.fingerprint(),
+                TerminalDisposition::Rejected(
+                    rss_transactional_messaging::transaction::RejectKind::Permanent,
+                ),
+            )
+        } else {
+            a
+        };
+        Ok([a, b])
+    }
+    async fn stale_release(&self) -> Result<[StaleReleaseEvidence; 2], ConformanceError> {
+        let evidence = || -> Result<StaleReleaseEvidence, ConformanceError> {
+            let expected = terminal_receipt().map_err(|e| ConformanceError::fixture(e.kind()))?;
+            let actual = TerminalReceipt::from_durable(
+                expected.consumer().clone(),
+                expected.fingerprint(),
+                if self.defect == Some(Defect::InboxTerminalChanged) {
+                    TerminalDisposition::Rejected(
+                        rss_transactional_messaging::transaction::RejectKind::Permanent,
+                    )
+                } else {
+                    expected.disposition()
+                },
+            );
+            Ok(StaleReleaseEvidence {
+                expected,
+                actual,
+                release_result: if self.defect == Some(Defect::InboxStaleRelease) {
+                    Ok(())
+                } else {
+                    Err(MessagingErrorKind::OwnershipLost)
+                },
+            })
+        };
+        Ok([evidence()?, evidence()?])
+    }
+
     type Claim = ();
 
     fn reset(&self) {}
@@ -771,5 +912,61 @@ async fn provider_failures_identify_the_publisher_scenario() {
         let error = result.expect_err("provider failure must propagate");
         assert_eq!(error.stage(), stage);
         assert_eq!(error.provider_phase_label(), Some("publish"));
+    }
+}
+
+#[tokio::test]
+async fn durable_identity_faults_are_rejected_by_public_suites() {
+    for (defect, stage) in [
+        (Defect::OutboxTenantCollision, "outbox.tenants.tenant"),
+        (
+            Defect::OutboxTenantMessageMismatch,
+            "outbox.tenants.message-id",
+        ),
+        (Defect::OutboxTenantUnsettled, "outbox.tenants.settlement"),
+        (Defect::OutboxStaleSettlement, "outbox.reclaim.stale"),
+        (Defect::OutboxSuccessorLost, "outbox.retry.successor"),
+    ] {
+        assert_eq!(
+            run_outbox_conformance(
+                &OutboxFixture::new(Some(defect)),
+                &FakeClock::new(),
+                ExecutionBudget::STANDARD
+            )
+            .await
+            .err()
+            .map(ConformanceError::stage),
+            Some(stage)
+        );
+    }
+    for (defect, stage) in [
+        (Defect::InboxTenantCollision, "inbox.tenants.tenant"),
+        (
+            Defect::InboxTenantMessageMismatch,
+            "inbox.tenants.message-id",
+        ),
+        (Defect::InboxTenantGroupMismatch, "inbox.tenants.group"),
+        (
+            Defect::InboxTenantContractMismatch,
+            "inbox.tenants.contract",
+        ),
+        (Defect::InboxTenantDispositionA, "inbox.tenants.disposition"),
+        (Defect::InboxTenantDispositionB, "inbox.tenants.disposition"),
+        (Defect::InboxStaleRelease, "inbox.stale-release.terminal"),
+        (Defect::InboxTerminalChanged, "inbox.stale-release.terminal"),
+    ] {
+        assert_eq!(
+            run_inbox_conformance(
+                &InboxFixture {
+                    defect: Some(defect)
+                },
+                &FakeClock::new(),
+                ExecutionBudget::STANDARD
+            )
+            .await
+            .err()
+            .map(ConformanceError::stage),
+            Some(stage)
+        );
     }
 }

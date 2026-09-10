@@ -12,7 +12,25 @@ use rss_transactional_messaging_postgres::{
     PgConsumerEffect, PgConsumerEffectFailure, PgError, PgOutboxStore, PgRuntime, PgTransaction,
 };
 use std::sync::Arc;
-/// The application supplies an already configured runtime and authenticated command/message.
+/// Initialize device authority once at the application's bootstrap boundary.
+/// Retries of an existing command use `enqueue` directly, even after authority advances.
+pub async fn bootstrap(
+    runtime: &PgRuntime,
+    outbox: Arc<PgOutboxStore<()>>,
+    scope: Scope,
+    coordinate: Coordinate,
+    deadline: OperationDeadline,
+) -> LocalTxAttempt<(), PgError> {
+    runtime
+        .local_tx(scope.tenant(), deadline, move |tx| {
+            Box::pin(async move {
+                let store = PgStore::new(tx, outbox).await?;
+                store.initialize(tx, scope, coordinate).await
+            })
+        })
+        .await
+}
+/// Queue or exactly replay an authenticated command/message under previously bootstrapped authority.
 pub async fn enqueue(
     runtime: &PgRuntime,
     outbox: Arc<PgOutboxStore<()>>,
@@ -24,9 +42,6 @@ pub async fn enqueue(
         .local_tx(spec.scope().tenant(), deadline, move |tx| {
             Box::pin(async move {
                 let store = PgStore::new(tx, outbox).await?;
-                store
-                    .initialize(tx, spec.scope(), spec.coordinate())
-                    .await?;
                 store.queue(tx, spec, message).await
             })
         })

@@ -36,7 +36,17 @@ fn envelope(
     id: &str,
     payload: &[u8],
 ) -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error>> {
-    let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+    envelope_for_tenant(
+        id,
+        payload,
+        TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+    )
+}
+fn envelope_for_tenant(
+    id: &str,
+    payload: &[u8],
+    tenant: TenantId,
+) -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error>> {
     let metadata = MessageMetadata::new(
         AuthoredMessageMetadata::new(
             tenant,
@@ -328,6 +338,22 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         LeaseStatus::Lost
     );
 
+    let successor = match store.claim(&identity, deadline(&clock)?).await? {
+        IdempotencyDisposition::Acquired(claim) => claim,
+        _ => return Err("successor must acquire".into()),
+    };
+    assert_eq!(
+        store
+            .release(claim.clone(), deadline(&clock)?)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        Some(MessagingErrorKind::OwnershipLost)
+    );
+    assert!(matches!(
+        store.extend(&successor, deadline(&clock)?).await?,
+        LeaseStatus::Held { .. }
+    ));
     store.store_terminal(
         identity.clone(),
         MessageFingerprint::of(&message),
@@ -337,9 +363,43 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         store.claim(&identity, deadline(&clock)?).await?,
         IdempotencyDisposition::Terminal(_)
     ));
+    assert_eq!(
+        store
+            .release(claim, deadline(&clock)?)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        Some(MessagingErrorKind::OwnershipLost)
+    );
     store.expire(&identity);
+    let IdempotencyDisposition::Terminal(receipt) =
+        store.claim(&identity, deadline(&clock)?).await?
+    else {
+        return Err("terminal lost".into());
+    };
+    assert!(receipt.matches(&identity, MessageFingerprint::of(&message)));
+    assert_eq!(receipt.disposition(), TerminalDisposition::Succeeded);
+    let other = ConsumerIdentity::new(
+        TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+        identity.group().clone(),
+        identity.message_id().clone(),
+        identity.contract().clone(),
+    );
+    assert!(matches!(
+        store.claim(&other, deadline(&clock)?).await?,
+        IdempotencyDisposition::Acquired(_)
+    ));
+    store.store_terminal(
+        other.clone(),
+        MessageFingerprint::of(&message),
+        TerminalDisposition::Succeeded,
+    );
     assert!(matches!(
         store.claim(&identity, deadline(&clock)?).await?,
+        IdempotencyDisposition::Terminal(_)
+    ));
+    assert!(matches!(
+        store.claim(&other, deadline(&clock)?).await?,
         IdempotencyDisposition::Terminal(_)
     ));
 
@@ -437,5 +497,126 @@ async fn publisher_and_settlement_record_only_core_values() -> TestResult {
         .await?;
     assert_eq!(settlement.settlements(), [SettlementKind::Requeue]);
     assert_eq!(settlement.abandon_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_same_message_id_is_independent_across_tenants() -> TestResult {
+    let clock = FakeClock::new();
+    let store = MemoryOutboxStore::<Vec<u8>>::new();
+    let tenants = [
+        TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+        TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+    ];
+    for tenant in tenants {
+        assert_eq!(
+            store
+                .append(
+                    &mut (),
+                    PendingMessage::new(envelope_for_tenant("shared-id", b"payload", tenant)?)
+                )
+                .await?,
+            AppendOutcome::Inserted
+        );
+    }
+    let mut claims = store
+        .claim_partition_heads(NonZeroUsize::new(2).ok_or("limit")?, deadline(&clock)?)
+        .await?
+        .into_iter();
+    let a = claims.next().ok_or("tenant A claim")?;
+    let b = claims.next().ok_or("tenant B claim")?;
+    store
+        .settle(a, OutboxSettlement::Published(()), deadline(&clock)?)
+        .await?;
+    assert!(matches!(
+        store.lease_status(&b, deadline(&clock)?).await?,
+        OutboxLeaseStatus::Held { .. }
+    ));
+    store
+        .settle(b, OutboxSettlement::Published(()), deadline(&clock)?)
+        .await?;
+    assert_eq!(store.pending_len(), 0);
+    for tenant in tenants {
+        assert_eq!(
+            store
+                .append(
+                    &mut (),
+                    PendingMessage::new(envelope_for_tenant("shared-id", b"payload", tenant)?)
+                )
+                .await?,
+            AppendOutcome::AlreadyPresent
+        );
+    }
+    Ok(())
+}
+#[tokio::test]
+async fn outbox_old_attempt_cannot_change_successor_or_terminal() -> TestResult {
+    for retry in [false, true] {
+        let clock = FakeClock::new();
+        let store = MemoryOutboxStore::<Vec<u8>>::new();
+        store
+            .append(
+                &mut (),
+                PendingMessage::new(envelope("retry-id", b"payload")?),
+            )
+            .await?;
+        let limit = NonZeroUsize::new(1).ok_or("limit")?;
+        let old = store
+            .claim_partition_heads(limit, deadline(&clock)?)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or("old")?;
+        if retry {
+            store
+                .settle(old.clone(), OutboxSettlement::Retry, deadline(&clock)?)
+                .await?;
+        } else {
+            store.fence_claims();
+        }
+        let current = store
+            .claim_partition_heads(limit, deadline(&clock)?)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or("successor")?;
+        for (budget, expected) in [
+            (deadline(&clock)?, MessagingErrorKind::OwnershipLost),
+            (
+                expired_deadline(&clock)?,
+                MessagingErrorKind::DeadlineElapsed,
+            ),
+        ] {
+            let result = store
+                .settle(old.clone(), OutboxSettlement::Published(()), budget)
+                .await;
+            assert_eq!(result.err().map(|error| error.kind()), Some(expected));
+            assert!(matches!(
+                store.lease_status(&current, deadline(&clock)?).await?,
+                OutboxLeaseStatus::Held { .. }
+            ));
+        }
+        store
+            .settle(current, OutboxSettlement::DeadLetter, deadline(&clock)?)
+            .await?;
+        assert_eq!(
+            store
+                .settle(old, OutboxSettlement::Retry, deadline(&clock)?)
+                .await
+                .err()
+                .map(|error| error.kind()),
+            Some(MessagingErrorKind::OwnershipLost)
+        );
+        assert!(
+            store
+                .claim_partition_heads(limit, deadline(&clock)?)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            store.settlements().last(),
+            Some(&rss_transactional_messaging::outbox::OutboxDisposition::DeadLetter)
+        );
+    }
     Ok(())
 }

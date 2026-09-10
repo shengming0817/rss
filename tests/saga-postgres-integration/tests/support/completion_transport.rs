@@ -9,6 +9,8 @@ pub struct CompletionFault {
     pub armed: AtomicBool,
     pub arm: std::sync::Arc<std::sync::atomic::AtomicU8>,
     pub when: EventKind,
+    pub interrupt_renewal: bool,
+    pub committed: tokio::sync::Notify,
 }
 impl Store for CompletionFault {
     async fn register<T: Timer>(
@@ -33,6 +35,10 @@ impl Store for CompletionFault {
         t: Duration,
         c: &Control<'_, T>,
     ) -> Result<(), Error> {
+        if self.interrupt_renewal {
+            self.committed.notified().await;
+            return Err(Error::new(ErrorKind::Store));
+        }
         self.store.renew(l, t, c).await
     }
     async fn release<T: Timer>(&self, l: &Lease, c: &Control<'_, T>) -> Result<(), Error> {
@@ -57,6 +63,12 @@ impl Store for CompletionFault {
         c: &Control<'_, T>,
     ) -> Result<(), Error> {
         if m.event().kind == self.when && self.armed.swap(false, Ordering::SeqCst) {
+            if self.interrupt_renewal {
+                // Real PG commit completes, but its acknowledgement is withheld from the executor.
+                self.store.commit(l, m, c).await?;
+                self.committed.notify_one();
+                return std::future::pending().await;
+            }
             self.arm.store(1, Ordering::SeqCst);
         }
         self.store.commit(l, m, c).await

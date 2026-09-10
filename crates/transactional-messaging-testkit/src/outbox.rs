@@ -1,6 +1,6 @@
 //! Outbox identity, lease, publication and settlement conformance.
 
-use rss_request_context::ExecutionTimer;
+use rss_request_context::{ExecutionTimer, TenantId};
 use std::future::Future;
 
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
@@ -12,6 +12,10 @@ use crate::{ConformanceError, suite_deadline, within_budget};
 
 /// Provider-owned outbox scenarios expressed only through core outcomes.
 pub trait OutboxDriver: Send + Sync {
+    /// Complete the same message ID independently for two different tenants.
+    fn cross_tenant_completion(
+        &self,
+    ) -> impl Future<Output = Result<[TenantSettlement; 2], ConformanceError>>;
     /// Reset the isolated fixture before one scenario.
     fn reset(&self);
     /// Append a new stable message fact.
@@ -40,7 +44,7 @@ pub trait OutboxDriver: Send + Sync {
     /// Expire a claim after publication but before settlement, then reclaim and mark Published.
     fn reclaim_after_publish_before_settle(
         &self,
-    ) -> impl Future<Output = Result<ReclaimEvidence, ConformanceError>>;
+    ) -> impl Future<Output = Result<StaleSettlementEvidence, ConformanceError>>;
 }
 
 /// Store-owned claim identities and final durable settlement observed by one scenario.
@@ -49,6 +53,26 @@ pub struct ReclaimEvidence {
     pub claimed_message_ids: Vec<MessageId>,
     /// Actual durable disposition recorded by the store.
     pub settlement: OutboxDisposition,
+    /// Final disposition read from storage after the successor settles.
+    pub successor_settlement: OutboxDisposition,
+}
+
+/// Actual same-ID completion observed in one tenant.
+pub struct TenantSettlement {
+    /// Tenant read from the stored record.
+    pub tenant: TenantId,
+    /// Message identity read from the stored record.
+    pub message_id: MessageId,
+    /// Final stored disposition.
+    pub settlement: OutboxDisposition,
+}
+
+/// A stale contender must fail without stopping the successor from completing.
+pub struct StaleSettlementEvidence {
+    /// Old claim settlement result, before successor settlement.
+    pub stale_result: Result<(), MessagingErrorKind>,
+    /// Actual claim identities and stored settlement facts.
+    pub reclaim: ReclaimEvidence,
 }
 
 /// Run the provider-neutral outbox conformance suite.
@@ -58,6 +82,35 @@ pub async fn run_outbox_conformance<D: OutboxDriver>(
     budget: ExecutionBudget,
 ) -> Result<(), ConformanceError> {
     let deadline = suite_deadline(timer, budget)?;
+    driver.reset();
+    let [a, b] = within_budget(
+        timer,
+        deadline,
+        "outbox.tenants.budget",
+        driver.cross_tenant_completion(),
+    )
+    .await??;
+    if a.tenant == b.tenant {
+        return Err(ConformanceError::mismatch(
+            "outbox.tenants.tenant",
+            "different",
+            "same",
+        ));
+    }
+    if a.message_id != b.message_id {
+        return Err(ConformanceError::mismatch(
+            "outbox.tenants.message-id",
+            "same",
+            "different",
+        ));
+    }
+    for result in [a, b] {
+        expect_disposition_value(
+            "outbox.tenants.settlement",
+            result.settlement,
+            OutboxDisposition::Published,
+        )?;
+    }
     driver.reset();
     expect_append(
         "outbox.append.first",
@@ -135,6 +188,19 @@ pub async fn run_outbox_conformance<D: OutboxDriver>(
         driver.reclaim_after_publish_before_settle(),
     )
     .await??;
+    if recovered.stale_result != Err(MessagingErrorKind::OwnershipLost) {
+        return Err(ConformanceError::mismatch(
+            "outbox.reclaim.stale",
+            "ownership-lost",
+            "incorrect-result",
+        ));
+    }
+    let recovered = recovered.reclaim;
+    expect_disposition_value(
+        "outbox.reclaim.successor",
+        recovered.successor_settlement,
+        OutboxDisposition::Published,
+    )?;
     expect_count(
         "outbox.reclaim.claims",
         2,
@@ -154,6 +220,11 @@ pub async fn run_outbox_conformance<D: OutboxDriver>(
         driver.retry_settlement_reclaims_same_message(),
     )
     .await??;
+    expect_disposition_value(
+        "outbox.retry.successor",
+        retried.successor_settlement,
+        OutboxDisposition::Published,
+    )?;
     expect_count("outbox.retry.claims", 2, retried.claimed_message_ids.len())?;
     expect_same_ids("outbox.retry.identity", &retried.claimed_message_ids)?;
     expect_disposition_value(

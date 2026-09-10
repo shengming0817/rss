@@ -2,8 +2,8 @@ use crate::{
     DeadLetterId, OperationId, Version,
     protection::{Capsule, CaptureContext},
 };
-use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_request_context::{Deadline, ExecutionTimer, TenantId};
+use rss_transactional_messaging::policy::{OperationDeadline, within};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -201,13 +201,19 @@ impl AuthorizedRequest {
         &self.0
     }
 }
-/// Obtain exact request authority.
-pub async fn authorize<A: Authorizer>(
+/// Obtain exact request authority under a core-enforced absolute cutoff.
+/// An elapsed cutoff never invokes the authorizer; timeout cannot produce an authorized request.
+pub async fn authorize<A: Authorizer, C: ExecutionTimer>(
     authorizer: &A,
     request: Request,
-    deadline: OperationDeadline,
+    clock: &C,
+    cutoff: Deadline,
 ) -> Result<AuthorizedRequest, Error> {
-    let proof = authorizer.authorize(Challenge(&request), deadline).await?;
+    let proof = within(clock, cutoff, |deadline| {
+        authorizer.authorize(Challenge(&request), deadline)
+    })
+    .await
+    .map_err(|_| Error::Deadline)??;
     if proof.0 != request.digest() {
         return Err(Error::Unauthorized);
     }

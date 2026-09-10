@@ -6,6 +6,18 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Durable execution and recovery (#2373)
+
+- Saga preserves `CommitUnknown` and provider diagnostics when renewal cancels a pending commit;
+  recovery uses durable state without releasing uncertain write authority.
+- Replace archive authorization's duration-only argument with an injected timer and absolute cutoff;
+  migrate all callers, with no compatibility overload. Non-returning authorities are bounded by core.
+- Split device-command example bootstrap from replayable enqueue; exact retries after authority
+  advancement return the original command's current durable state.
+- Fix Memory outbox tenant identity and per-claim fencing. Extend required Inbox/Outbox conformance
+  methods and evidence for cross-tenant completion, stale settlement and stale release, with real PG
+  consumers migrated atomically. No legacy driver defaults, schema migration or wire change.
+
 ### Execution consumer proofs (#2318 / #2294)
 
 - Consolidate Reconcile, Device Command, Projection and Saga public examples in rss-examples;
