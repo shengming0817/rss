@@ -39,11 +39,21 @@ def main():
             forbidden.add("aws-sdk-s3")
         if name != "managed":
             forbidden.add("rss-runtime")
+        # Independent scenario contract: a missing forwarding edge must fail.
+        required = {"rss-transactional-messaging-recovery": set()}
+        if name in {"postgres", "combined", "managed"}:
+            required["rss-transactional-messaging-postgres"] = {"default", "recovery"}
+        if name in {"s3", "combined", "managed"}:
+            required["rss-transactional-messaging-recovery-s3"] = set()
+        if name == "managed":
+            required["rss-transactional-messaging-postgres"].add("rss-runtime")
+            required["rss-runtime"] = {"default"}
         record_graph(
             directory,
             allowed,
             {"default", "producer", "consumer"},
             forbidden,
+            required_features=required,
             required_dependencies=deps,
         )
         probe = "recovery-core.rs" if name == "core" else "recovery-api.rs"

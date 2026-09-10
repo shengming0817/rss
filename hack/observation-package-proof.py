@@ -43,7 +43,19 @@ def main():
             forbidden.add("rss-projection")
         if name != "projection-postgres":
             forbidden.add("rss-projection-postgres")
-        record_graph(directory, allowed, set(), forbidden, required_dependencies=deps)
+        # Independent scenario contract: a missing forwarding edge must fail.
+        required = {"rss-observation": {"default"}}
+        if name != "core":
+            required["rss-observation-postgres"] = {
+                "adapter": {"default"},
+                "projection": {"default", "projection"},
+                "projection-postgres": {"default", "projection", "projection-postgres"},
+            }[name]
+        if name in {"projection", "projection-postgres"}:
+            required["rss-projection"] = {"default"}
+        if name == "projection-postgres":
+            required["rss-projection-postgres"] = {"default"}
+        record_graph(directory, allowed, set(), forbidden, required_features=required, required_dependencies=deps)
         if name == "core":
             shutil.copyfile(
                 ROOT / "crates/examples/probes/observation-core.rs",

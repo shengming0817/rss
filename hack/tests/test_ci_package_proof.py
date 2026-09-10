@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from contextlib import contextmanager
 
 SCRIPT = Path(__file__).resolve().parents[1] / "package_proof.py"
 spec = importlib.util.spec_from_file_location("extract_proof", SCRIPT)
@@ -24,10 +25,10 @@ class ArtifactProof(unittest.TestCase):
         self.versions = {"rss-sample": "0.1.0"}
         self.archive()
 
-    def archive(self, revision=REVISION, dirty=False, extra=None):
-        name = "rss-sample-0.1.0"
+    def archive(self, revision=REVISION, dirty=False, extra=None, package="rss-sample"):
+        name = f"{package}-0.1.0"
         files = {
-            "Cargo.toml": b'[package]\nname="rss-sample"\nversion="0.1.0"\n',
+            "Cargo.toml": f'[package]\nname="{package}"\nversion="0.1.0"\n'.encode(),
             ".cargo_vcs_info.json": json.dumps({"git": {"sha1": revision, "dirty": dirty}}).encode(),
             "src/lib.rs": b"pub fn value() -> u8 { 1 }",
         }
@@ -38,22 +39,68 @@ class ArtifactProof(unittest.TestCase):
                 entry = tarfile.TarInfo(name + "/" + member)
                 entry.size = len(content)
                 archive.addfile(entry, io.BytesIO(content))
-        (self.root / "packages.tsv").write_text(f"rss-sample\t0.1.0\t{REVISION}\n")
-        (self.root / "SHA256SUMS").write_text(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name + "\n")
+        mode = "w" if package == "rss-sample" else "a"
+        with (self.root / "packages.tsv").open(mode) as inventory:
+            inventory.write(f"{package}\t0.1.0\t{REVISION}\n")
+        with (self.root / "SHA256SUMS").open(mode) as sums:
+            sums.write(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name + "\n")
         return path
 
     def validate(self):
-        with proof.candidate_archives(self.root, REVISION, self.versions) as archives:
-            return set(archives)
+        with tempfile.TemporaryDirectory() as temp:
+            return proof.extract_candidates(self.root, REVISION, self.versions, Path(temp) / "extracted")
 
     def test_replacing_source_after_validation_cannot_change_extracted_bytes(self):
-        with proof.candidate_archives(self.root, REVISION, self.versions) as archives:
+        validate = proof.reject_source_dependencies
+
+        def replace_input(manifest):
+            validate(manifest)
             self.archive(extra={"src/lib.rs": b"pub fn changed() {}"})
-            archive, _digest = archives["rss-sample"]
+
+        with patch.object(proof, "reject_source_dependencies", side_effect=replace_input):
             extracted = self.root / "extracted"
-            archive.extractall(extracted, filter="data")
-            self.assertEqual((extracted / "rss-sample-0.1.0/src/lib.rs").read_bytes(),
-                             b"pub fn value() -> u8 { 1 }")
+            proof.extract_candidates(self.root, REVISION, self.versions, extracted)
+        self.assertEqual((extracted / "rss-sample-0.1.0/src/lib.rs").read_bytes(),
+                         b"pub fn value() -> u8 { 1 }")
+
+    def test_archive_snapshots_close_before_next_package_and_on_failure(self):
+        self.archive(package="rss-second")
+        self.versions["rss-second"] = "0.1.0"
+        original = proof.tempfile.TemporaryFile
+        live = []
+        peak = 0
+
+        @contextmanager
+        def snapshot():
+            nonlocal peak
+            with original() as stream:
+                live.append(stream)
+                peak = max(peak, len(live))
+                try:
+                    yield stream
+                finally:
+                    live.remove(stream)
+
+        with patch.object(proof.tempfile, "TemporaryFile", side_effect=snapshot):
+            self.validate()
+            self.assertEqual(live, [])
+            self.assertLessEqual(peak, 2, "snapshots accumulated across packages")
+            path = self.root / "rss-second-0.1.0.crate"
+            path.write_bytes(path.read_bytes() + b"corruption")
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                self.validate()
+            self.assertEqual(live, [])
+            self.archive()  # Reset the inventory before replacing its second row.
+            self.archive(package="rss-second", revision="b" * 40)
+            with self.assertRaisesRegex(ValueError, "revision mismatch"):
+                self.validate()
+            self.assertEqual(live, [])
+            self.archive()
+            self.archive(package="rss-second")
+            with patch.object(tarfile.TarFile, "extractall", side_effect=OSError("extraction failed")):
+                with self.assertRaisesRegex(OSError, "extraction failed"):
+                    self.validate()
+            self.assertEqual(live, [])
 
     def test_exact_artifact_passes(self):
         self.assertEqual(set(self.validate()), {"rss-sample"})
@@ -134,6 +181,14 @@ class GraphProof(unittest.TestCase):
                 {"id": "core", "features": list(features)},
             ]},
         }
+
+    def test_missing_dependency_diagnostic_lists_all_names_in_order(self):
+        root = Path("/proof/consumer")
+        allowed = {"rss-transactional-messaging": Path("/proof/core")}
+        graph = self.graph(root, allowed["rss-transactional-messaging"])
+        with self.assertRaisesRegex(ValueError, "consumer dependencies missing: rss-ledger, rss-runtime$"):
+            proof.validate_graph(graph, root, allowed, set(), set(),
+                                 required_dependencies={"rss-runtime", "rss-ledger", "rss-transactional-messaging"})
 
     def test_source_escape_and_unified_features_fail(self):
         root = Path("/proof/consumer")

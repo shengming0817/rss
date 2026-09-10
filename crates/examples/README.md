@@ -62,6 +62,7 @@ stdout/stderr 并发排空，各保留至多 16 KiB 尾部；失败时输出脱�
 artifact 模式要求 checkout 与候选为同一 clean revision，读取既有 `packages.tsv` 和 `SHA256SUMS`，
 校验实际 `.crate` 字节、Cargo 内嵌 VCS revision、版本、安全成员路径和 normalized manifest。
 摘要、身份校验与提取使用同一份有界私有快照；校验后替换原归档不会改变被提取的内容。
+逐包完成快照、校验和提取后立即关闭临时文件；同时仅持有一个包的压缩与 TAR 快照，失败也释放。
 每包限制为压缩输入 16 MiB、完整 TAR 流 64 MiB、4096 个成员、单成员 8 MiB、累计内容 32 MiB；
 摘要流式计算，先限制解压流再解析 TAR（包含扩展 header 和 padding），超限立即失败。
 RSS 依赖只允许指向该次解包的候选闭包，不能回到主仓源码或 internal package。
@@ -155,6 +156,9 @@ a command or outbox row. A new command with the old coordinate remains fenced.
 Each entry requires `--source` or `--artifacts DIR --revision SHA`; no implicit packaging mode
 remains. Source and artifact consumers use the same examples at the exact candidate revision.
 All consumers have independent manifests, locks, targets and validated dependency graphs.
+Ledger, Observation and Recovery pin exact capability-package features for every scenario
+independently of the example manifest, so deleting a feature forwarding edge fails validation.
+Missing dependencies are reported together in sorted package-name order.
 
 ```sh
 python3 hack/mqtt-package-proof.py --source

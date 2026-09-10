@@ -36,6 +36,16 @@ def main():
             forbidden |= {"sqlx", "rss-ledger-postgres", "rss-transactional-messaging"}
         if name in {"core", "pg"}:
             forbidden.add("rss-transactional-messaging-postgres")
+        # Independent scenario contract: a missing forwarding edge must fail.
+        required = {"rss-ledger": {"default"}}
+        if name != "core":
+            required["rss-ledger-postgres"] = {
+                "pg": {"default"},
+                "messaging": {"default", "messaging"},
+                "all": {"default", "messaging", "integration"},
+            }[name]
+        if name in {"messaging", "all"}:
+            required["rss-transactional-messaging-postgres"] = {"default"}
         record_graph(
             directory,
             allowed,
@@ -45,6 +55,7 @@ def main():
                 else set()
             ),
             forbidden,
+            required_features=required,
             required_dependencies=deps,
         )
         if name == "core":

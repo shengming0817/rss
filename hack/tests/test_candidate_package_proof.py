@@ -129,3 +129,40 @@ class Entrances(unittest.TestCase):
                         timeout=5,
                     )
                     self.assertEqual(result.returncode, 2, result.stderr)
+
+
+class FeatureForwarding(unittest.TestCase):
+    def test_removed_forwarding_fails_each_entry_before_build_or_provider(self):
+        """Resolve mutated consumer manifests with real Cargo; never edit the workspace."""
+        import tomllib
+        import copy
+
+        root = HACK.parent
+        manifest = tomllib.loads((root / "crates/examples/Cargo.toml").read_text())
+        workspace = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
+        allowed = {
+            tomllib.loads(path.read_text())["package"]["name"]: path.parent
+            for path in (root / "crates").glob("*/Cargo.toml")
+        }
+        cases = (
+            ("ledger", "all", "ledger-all", "rss-ledger-postgres/integration"),
+            ("observation", "projection", "observation-projection", "rss-observation-postgres/projection"),
+            ("observation", "projection-postgres", "observation-handoff", "rss-observation-postgres/projection-postgres"),
+            ("recovery", "postgres", "recovery-pg", "rss-transactional-messaging-postgres/recovery"),
+            ("recovery", "managed", "recovery-managed", "rss-transactional-messaging-postgres/rss-runtime"),
+        )
+        for entry, scenario, feature, forwarding in cases:
+            spec = importlib.util.spec_from_file_location(entry, HACK / f"{entry}-package-proof.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            mutated = copy.deepcopy(manifest)
+            mutated["features"][feature].remove(forwarding)
+            features, deps = package_proof.selected_dependencies(mutated, [feature], workspace)
+            with self.subTest(forwarding=forwarding), tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+                stack.enter_context(patch.object(sys, "argv", [entry, "--source", "--scenario", scenario]))
+                stack.enter_context(patch.object(module, "example_dependencies", return_value={scenario: (features, deps)}))
+                stack.enter_context(patch.object(module, "prepare_sources", return_value=(Path(temp), allowed)))
+                stack.enter_context(patch.object(module, "cargo", side_effect=AssertionError("mutated graph reached build")))
+                stack.enter_context(patch.object(module, "provider_consumer", side_effect=AssertionError("mutated graph reached provider")))
+                with self.assertRaisesRegex(ValueError, "feature mismatch"):
+                    module.main()

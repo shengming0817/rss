@@ -3,7 +3,7 @@
 
 import hashlib
 import gzip
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager
 import json
 import argparse
 import os
@@ -69,9 +69,8 @@ def checked_members(archive, prefix):
         yield member
 
 
-@contextmanager
-def candidate_archives(directory, revision, versions):
-    """Validate inventory, bytes, Cargo identity and safe extraction before using any archive."""
+def extract_candidates(directory, revision, versions, extracted):
+    """Validate and extract one private snapshot at a time, then close it."""
     rows = {}
     for line in (directory / "packages.tsv").read_text().splitlines():
         name, version, sha = line.split("\t")
@@ -86,16 +85,17 @@ def candidate_archives(directory, revision, versions):
         if filename in sums:
             raise ValueError(f"duplicate checksum: {filename}")
         sums[filename] = digest
-    with ExitStack() as stack:
-        result = {}
-        for name, version in versions.items():
-            if rows.get(name) != version:
-                raise ValueError(f"missing package or version mismatch: {name}")
-            path = directory / f"{name}-{version}.crate"
-            digest = sums.get(path.name)
-            archive = stack.enter_context(bounded_archive(path, digest))
+    if not versions:
+        raise ValueError("empty artifact selection")
+    extracted.mkdir()
+    for name, version in versions.items():
+        if rows.get(name) != version:
+            raise ValueError(f"missing package or version mismatch: {name}")
+        path = directory / f"{name}-{version}.crate"
+        digest = sums.get(path.name)
+        with bounded_archive(path, digest) as archive:
             prefix = f"{name}-{version}"
-            list(checked_members(archive, prefix))
+            members = list(checked_members(archive, prefix))
             vcs = json.load(archive.extractfile(f"{prefix}/.cargo_vcs_info.json"))["git"]
             if not isinstance(vcs, dict) or vcs.get("sha1") != revision or vcs.get("dirty", False) is not False:
                 raise ValueError(f"revision mismatch or dirty archive: {name}")
@@ -103,21 +103,9 @@ def candidate_archives(directory, revision, versions):
             if (manifest["package"]["name"], manifest["package"]["version"]) != (name, version):
                 raise ValueError(f"archive package version mismatch: {name}")
             reject_source_dependencies(manifest)
-            result[name] = (archive, digest)
-        if not result:
-            raise ValueError("empty artifact selection")
-        yield result
-
-
-def extract_candidates(directory, revision, versions, extracted):
-    """Materialize the validated snapshots without reopening mutable input paths."""
-    with candidate_archives(directory, revision, versions) as archives:
-        extracted.mkdir()
-        for name, (archive, digest) in archives.items():
-            members = list(checked_members(archive, f'{name}-{versions[name]}'))
-            archive.extractall(extracted, members=members, filter='data')
-            print(f'artifact\t{name}\t{versions[name]}\t{revision}\t{digest}', flush=True)
-    return {name: extracted / f'{name}-{version}' for name, version in versions.items()}
+            archive.extractall(extracted, members=members, filter="data")
+        print(f"artifact\t{name}\t{version}\t{revision}\t{digest}", flush=True)
+    return {name: extracted / f"{name}-{version}" for name, version in versions.items()}
 
 
 def reject_source_dependencies(table):
@@ -158,8 +146,9 @@ def validate_graph(facts, consumer_root, allowed_paths, expected_message_feature
                 raise ValueError(f"message feature mismatch: {actual} != {expected_message_features}")
 
     resolved = {p['name']: set(nodes[p['id']]['features']) for p in facts['packages'] if p['id'] in nodes}
-    if not set(required_dependencies) <= resolved.keys():
-        raise ValueError('consumer dependency missing')
+    missing = set(required_dependencies) - resolved.keys()
+    if missing:
+        raise ValueError(f"consumer dependencies missing: {', '.join(sorted(missing))}")
     for name, expected in (required_features or {}).items():
         actual = resolved.get(name)
         if actual != expected:
