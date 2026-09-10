@@ -233,14 +233,12 @@ fn code_kind(code: Option<&str>) -> ErrorKind {
         Some("P1003") => ErrorKind::Conflict,
         Some("P1004") => ErrorKind::OutOfOrder,
         Some("23514" | "22003") => ErrorKind::InvalidInput,
-        Some(code)
-            if code == "55P03"
-                || ["08", "40", "53", "57", "58"]
-                    .iter()
-                    .any(|class| code.starts_with(class)) =>
-        {
-            ErrorKind::Unavailable
-        }
+        // Explicit recoverable conditions only, not entire SQLSTATE classes.
+        // ref: PostgreSQL 16 Appendix A (errcodes-appendix.html).
+        Some(
+            "08000" | "08001" | "08003" | "08006" | "08007" | "40001" | "40P01" | "53200" | "53300"
+            | "55P03" | "57014" | "57P01" | "57P02" | "57P03",
+        ) => ErrorKind::Unavailable,
         _ => ErrorKind::StorageContract,
     }
 }
@@ -352,7 +350,8 @@ mod regression {
             assert_eq!(code_kind(Some(code)), ErrorKind::Unavailable, "{code}");
         }
         for code in [
-            "28P01", "28000", "3D000", "42703", "42P01", "42501", "ZZ999",
+            "28P01", "28000", "3D000", "42703", "42P01", "42501", "ZZ999", "58P01", "58P02",
+            "57P04", "53400", "08P01", "40002", "53100",
         ] {
             assert_ne!(code_kind(Some(code)), ErrorKind::Unavailable, "{code}");
         }

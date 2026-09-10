@@ -272,10 +272,25 @@ fn code_kind(code: Option<&str>) -> ErrorKind {
     }
 }
 fn transient_code(code: &str) -> bool {
-    code == "55P03"
-        || ["08", "40", "53", "57", "58"]
-            .iter()
-            .any(|class| code.starts_with(class))
+    // Explicit recoverable conditions only; a class also contains configuration/protocol failures.
+    // ref: PostgreSQL 16 Appendix A (errcodes-appendix.html).
+    matches!(
+        code,
+        "08000"
+            | "08001"
+            | "08003"
+            | "08006"
+            | "08007"
+            | "40001"
+            | "40P01"
+            | "53200"
+            | "53300"
+            | "55P03"
+            | "57014"
+            | "57P01"
+            | "57P02"
+            | "57P03"
+    )
 }
 fn application_sql(error: sqlx::Error) -> Error {
     let kind = if classify(&error) == ErrorKind::Transient {
@@ -380,7 +395,8 @@ mod regression {
             assert_eq!(code_kind(Some(code)), ErrorKind::Transient, "{code}");
         }
         for code in [
-            "28P01", "28000", "3D000", "42703", "42P01", "42501", "ZZ999",
+            "28P01", "28000", "3D000", "42703", "42P01", "42501", "ZZ999", "58P01", "58P02",
+            "57P04", "53400", "08P01", "40002", "53100",
         ] {
             assert_ne!(code_kind(Some(code)), ErrorKind::Transient, "{code}");
         }

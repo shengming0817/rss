@@ -66,3 +66,8 @@ ref: launchbadge/sqlx `sqlx-core/src/transaction.rs@v0.9.0`；PostgreSQL 16 expl
 SQLx 解码、列、配置与关闭池错误不会因缺少 SQLSTATE 被视为暂时故障；应用 SQL 将这些错误
 归为 `Permanent`，组件结构错误归为 `StorageContract`。认证失败及缺数据库不自动重试。
 锁不可用 `55P03` 为 `Transient`，仍须结合事务结果与剩余期限决定恢复。
+
+Transient SQLSTATE classification uses an explicit allowlist. Undefined/duplicate files (`58P01`,
+`58P02`), dropped databases (`57P04`), configuration limits (`53400`), protocol violations (`08P01`)
+and disk exhaustion (`53100`) require correction, rather than automatic retries based on their class.
+Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .

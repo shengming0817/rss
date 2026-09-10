@@ -184,3 +184,8 @@ SQLx decoding, column, configuration and closed-pool failures are not transient.
 missing database and unknown component failures are `StorageContract`; application SQL maps
 non-transient failures to `Rejected`. Real lock unavailability (`55P03`) is `Unavailable`, subject
 to the enclosing transaction outcome and caller budget.
+
+Transient SQLSTATE classification uses an explicit allowlist. Undefined/duplicate files (`58P01`,
+`58P02`), dropped databases (`57P04`), configuration limits (`53400`), protocol violations (`08P01`)
+and disk exhaustion (`53100`) require correction, rather than automatic retries based on their class.
+Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .
