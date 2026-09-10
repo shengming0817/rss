@@ -722,7 +722,6 @@ async fn rebuilt_checkpoint(
 }
 
 pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
-    use rss_projection::{ErrorKind as Kind, Phase};
     let input = seed(f).await?;
     let events = input
         .source
@@ -745,10 +744,21 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.admin)
     .await?;
     assert_eq!(changed.rows_affected(), 1);
+    assert_source_failures(f, &input, &execution, bad, &control).await?;
+    assert_restore_settlement(&input, &execution, bad).await
+}
+async fn assert_source_failures(
+    f: &Fixture,
+    input: &Inputs,
+    execution: &Session,
+    bad: &Event,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    use rss_projection::ErrorKind as Kind;
     let error = rss_projection::run(
         input.source.as_ref(),
-        &execution,
-        &control,
+        execution,
+        control,
         RunLimit::new(BatchLimit::new(2)?, 2)?,
     )
     .await
@@ -766,7 +776,7 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("bad row resolved"))?;
     assert_restore_error(&error, Kind::StorageContract, bad.position())?;
     let error = execution
-        .execute(None, bad, &control)
+        .execute(None, bad, control)
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("bad row applied"))?;
@@ -774,6 +784,14 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(execution.checkpoint().await?.position, None);
     assert!(values(f, "bad-row", "inside").await?.is_empty());
 
+    Ok(())
+}
+async fn assert_restore_settlement(
+    input: &Inputs,
+    execution: &Session,
+    bad: &Event,
+) -> anyhow::Result<()> {
+    use rss_projection::{ErrorKind as Kind, Phase};
     // Settlement uncertainty overrides the earlier restore failure; its coordinate is not evidence of rollback.
     input
         .store
