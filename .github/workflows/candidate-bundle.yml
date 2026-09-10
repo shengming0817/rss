@@ -90,7 +90,7 @@ jobs:
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_ci_package_proof.py
+          python3 -m unittest discover -s hack/tests -p '*package_proof.py'
           cargo test --locked -p rss-examples --all-features
           for features in '' rss-runtime; do
             RSS_TEST_RUN_ID="extract-internal-${features:-self-host}" \
@@ -113,7 +113,7 @@ jobs:
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_mqtt_package_proof.py
+          python3 hack/mqtt-package-proof.py --source
           python3 hack/mqtt-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
 
       - name: Verify independent Axum and shared Contract artifact consumption
@@ -135,7 +135,7 @@ jobs:
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_ledger_package_proof.py
+          python3 hack/ledger-package-proof.py --source
           python3 hack/ledger-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
 
       - name: Verify independent Saga artifact consumption
@@ -160,13 +160,14 @@ jobs:
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
-          python3 -m unittest discover -s hack/tests -p test_observation_package_proof.py
+          python3 hack/observation-package-proof.py --source
           python3 hack/observation-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
 
       - name: Verify independent Recovery artifact consumption
         env:
           RSS_PACKAGE_PROOF: ${{ runner.temp }}/rss-candidate-package-proof
         run: |
+          python3 hack/recovery-package-proof.py --source
           python3 hack/recovery-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$GITHUB_SHA"
 
       - name: Preserve independent consumer commands and resolved graphs

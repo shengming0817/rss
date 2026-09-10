@@ -1,4 +1,5 @@
 //! Ephemeral PostgreSQL input shared by the four independent public consumers.
+#[cfg(any(feature = "execution-pg", feature = "outbox-writer"))]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use std::io::Read as _;
 
@@ -13,6 +14,7 @@ pub struct Input {
     pub pg_ca: String,
     pub tenant: String,
 }
+#[cfg(any(feature = "execution-pg", feature = "outbox-writer"))]
 impl Input {
     pub async fn pool(&self) -> anyhow::Result<sqlx::PgPool> {
         Ok(PgPoolOptions::new()

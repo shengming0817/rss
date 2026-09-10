@@ -7,7 +7,7 @@ use rss_projection::{
 use rss_projection_postgres::PgFault;
 use sqlx::Row;
 use std::time::Duration;
-#[path = "../../../../crates/observation-postgres/examples/handoff/model.rs"]
+#[path = "../../../../crates/examples/src/observation/model.rs"]
 pub(super) mod model;
 fn up(key: &str, n: u8) -> anyhow::Result<Change> {
     Ok(Change::upsert(Id::new(key)?, vec![n]))

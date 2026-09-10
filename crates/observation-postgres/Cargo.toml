@@ -30,11 +30,3 @@ tokio-util.workspace = true
 anyhow.workspace = true
 [lints]
 workspace = true
-
-[[example]]
-name = "handoff"
-required-features = ["projection-postgres"]
-
-[[example]]
-name = "handoff-install"
-required-features = ["projection-postgres"]

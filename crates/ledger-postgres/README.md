@@ -135,3 +135,10 @@ T1：协议向量、篡改、边界、窗口和 SQL 转换；T2：`ledger-postgr
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
 ref: baseline 5b63e10 adapters/postgres/src/audit_repo.rs
 #2312 接纳，0.1 实验版本线；构建/隔离消费与实际发布是不同事实，示例不是生产消费证明。
+
+Independent consumers require explicit `--source` or `--artifacts DIR --revision SHA`;
+implicit dirty repackaging is no longer supported. Scenarios live in `crates/examples`,
+share their source between both modes, and execute under the existing provider fixtures.
+Candidate validation checks embedded Cargo identity and dependency origins before execution;
+VCS metadata is not cryptographic provenance. Compilation, fixed-artifact execution and registry
+publication are distinct results.

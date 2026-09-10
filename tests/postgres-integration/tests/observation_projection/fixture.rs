@@ -1,4 +1,4 @@
-#[path = "../../../../crates/observation-postgres/examples/handoff/install.rs"]
+#[path = "../../../../crates/examples/src/observation/install.rs"]
 mod installer;
 use rss_observation::*;
 use rss_observation_postgres::{PgSource, PgStore};
@@ -147,7 +147,7 @@ impl Fixture {
                 .await?;
             sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_observation,rss_projection TO handoff_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_observation,rss_projection TO handoff_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation,rss_projection TO handoff_runtime;").execute(&owner).await?;
             sqlx::raw_sql(include_str!(
-                "../../../../crates/observation-postgres/examples/handoff/facts.sql"
+                "../../../../crates/examples/src/observation/facts.sql"
             ))
             .execute(&owner)
             .await?;

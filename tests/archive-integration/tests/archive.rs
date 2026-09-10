@@ -1161,3 +1161,5 @@ async fn lease_budget(
     );
     Ok(())
 }
+
+mod examples;

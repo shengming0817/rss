@@ -43,6 +43,22 @@ device-command-core = ["dep:rss-device-command", "dep:rss-request-context"]
 projection-core = ["dep:rss-projection", "dep:rss-request-context"]
 saga-core = ["dep:rss-saga", "dep:rss-request-context", "dep:rss-contract"]
 
+mqtt = ["dep:rss-mqtt", "dep:rss-request-context", "core", "rss-transactional-messaging/producer", "dep:rumqttc-v5-next", "dep:rustls", "dep:rustls-pki-types", "dep:tokio", "tokio/fs", "tokio/io-util", "dep:serde", "dep:serde_json", "dep:tracing-subscriber", "dep:rss-contract"]
+mqtt-consumer = ["mqtt", "rss-mqtt/consumer"]
+observation-core = ["dep:rss-observation", "dep:rss-contract"]
+observation-pg = ["observation-core", "execution-pg", "dep:rss-observation-postgres"]
+observation-projection = ["observation-pg", "rss-observation-postgres/projection", "dep:rss-projection"]
+observation-handoff = ["observation-projection", "rss-observation-postgres/projection-postgres", "dep:rss-projection-postgres"]
+ledger-core = ["dep:rss-ledger", "dep:rss-request-context"]
+ledger-pg = ["ledger-core", "core", "execution-pg", "dep:rss-ledger-postgres"]
+ledger-all = ["ledger-messaging", "rss-ledger-postgres/integration"]
+ledger-messaging = ["ledger-pg", "rss-ledger-postgres/messaging", "dep:rss-transactional-messaging-postgres", "core", "rss-transactional-messaging/producer", "dep:rss-contract"]
+recovery-core = ["dep:rss-transactional-messaging-recovery", "core", "dep:rss-request-context", "dep:tokio"]
+recovery-pg = ["recovery-core", "execution-pg", "dep:rss-transactional-messaging-postgres", "rss-transactional-messaging-postgres/recovery", "dep:rss-data-protection", "dep:ring", "dep:rss-contract"]
+recovery-s3 = ["recovery-core", "dep:rss-transactional-messaging-recovery-s3", "dep:aws-sdk-s3", "dep:aws-smithy-http-client", "dep:rss-data-protection", "dep:ring", "dep:serde", "dep:serde_json"]
+recovery-archive = ["recovery-pg", "recovery-s3"]
+recovery-managed = ["recovery-archive", "rss-transactional-messaging-postgres/rss-runtime"]
+
 [dependencies]
 anyhow.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, optional = true }
@@ -80,6 +96,19 @@ rss-projection-postgres = { workspace = true, optional = true }
 rss-saga = { workspace = true, optional = true }
 rss-saga-postgres = { workspace = true, optional = true }
 
+rss-mqtt = { workspace = true, optional = true }
+rss-observation = { workspace = true, optional = true }
+rss-observation-postgres = { workspace = true, optional = true }
+rss-ledger = { workspace = true, optional = true }
+rss-ledger-postgres = { workspace = true, optional = true }
+rss-transactional-messaging-recovery = { workspace = true, optional = true }
+rss-transactional-messaging-recovery-s3 = { workspace = true, optional = true }
+rumqttc-v5-next = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-smithy-http-client = { workspace = true, optional = true }
+
 [[bin]]
 name = "providers"
 path = "src/bin/providers.rs"
@@ -109,3 +138,43 @@ required-features = ["saga-pg"]
 name = "outbox-writer"
 path = "src/bin/outbox-writer.rs"
 required-features = ["outbox-writer"]
+
+[[bin]]
+name = "mqtt"
+path = "src/bin/mqtt.rs"
+required-features = ["mqtt"]
+
+[[bin]]
+name = "observation"
+path = "src/bin/observation.rs"
+required-features = ["observation-handoff"]
+
+[[bin]]
+name = "observation-install"
+path = "src/bin/observation-install.rs"
+required-features = ["observation-handoff"]
+
+[[bin]]
+name = "ledger"
+path = "src/bin/ledger.rs"
+required-features = ["ledger-pg"]
+
+[[bin]]
+name = "ledger-install"
+path = "src/bin/ledger-install.rs"
+required-features = ["ledger-pg"]
+
+[[bin]]
+name = "recovery"
+path = "src/bin/recovery.rs"
+required-features = ["recovery-pg"]
+
+[[bin]]
+name = "recovery-install"
+path = "src/bin/recovery-install.rs"
+required-features = ["recovery-pg"]
+
+[[bin]]
+name = "recovery-archive"
+path = "src/bin/recovery-archive.rs"
+required-features = ["recovery-archive"]

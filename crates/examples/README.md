@@ -147,3 +147,40 @@ Command composition explicitly separates `bootstrap` from `enqueue`. Bootstrap i
 authority once; enqueue only queues or exactly replays the original spec/message. After authority
 advances, an exact replay returns the original command at its current durable state, without adding
 a command or outbox row. A new command with the old coordinate remains fenced.
+
+
+### Fixed-candidate MQTT, Observation, Ledger and Recovery (#2375)
+
+Each entry requires `--source` or `--artifacts DIR --revision SHA`; no implicit packaging mode
+remains. Source and artifact consumers use the same examples at the exact candidate revision.
+All consumers have independent manifests, locks, targets and validated dependency graphs.
+
+```sh
+python3 hack/mqtt-package-proof.py --source
+python3 hack/observation-package-proof.py --source
+python3 hack/ledger-package-proof.py --source
+python3 hack/recovery-package-proof.py --source
+# The same entries accept an exact clean candidate bundle:
+python3 hack/recovery-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$RSS_REVISION"
+```
+
+MQTT runs Outbox publication, receive, durable file handoff and ACK against a real TLS broker.
+Its consumer feature has a separate graph; this example does not claim Inbox/database atomicity.
+The logging restriction remains consumer-owned in `src/mqtt/logging.rs`.
+Observation runs snapshot/delta core decisions and the single `observation` handoff against PG;
+`observation-install` installs both candidate-owned component schemas with a dedicated owner.
+Its model, installer and facts SQL have moved from the adapter examples to `src/observation`.
+Ledger independently runs core chain verification, standalone PG and the borrowed messaging
+transaction: commit and rollback are checked against both durable stores.
+Recovery runs core authorization/plan decisions, PG Outbox redrive with the original delivery
+window, and one PG + Object Lock S3 archive with exact-version readback and HOT cleanup.
+S3-only and managed combinations retain their own capability graphs; complete fault matrices
+remain with the component integration owners.
+
+Provider credentials and temporary key bytes arrive through bounded stdin, not logs. The existing
+fixture launcher owns resources; candidate installers supply component migrations. A successful
+process exit also requires durable postconditions, and missing/duplicate execution fails proof.
+The five proof entrances (including Axum) share bounded archive validation, environment checks,
+resolved graphs and command logs. `--scenario` is for development selection; final acceptance runs
+all scenarios. These instructions are not execution receipts: issue/PR evidence binds the exact
+revision, package versions, archive digests and actual results.

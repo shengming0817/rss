@@ -31,3 +31,5 @@ async fn corrupt_rows_keep_safe_coordinates_and_settlement() -> anyhow::Result<(
     })
     .await?
 }
+
+mod examples;

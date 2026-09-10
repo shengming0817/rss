@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 [dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["recovery-archive"] }
 rss-transactional-messaging-recovery.workspace = true
 rss-transactional-messaging-recovery-s3.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, features = ["recovery", "integration"] }

@@ -173,3 +173,5 @@ async fn admission(store: &PgLedger, control: &Control<'_, Clock>) -> anyhow::Re
     ));
     Ok(())
 }
+
+mod examples;

@@ -93,7 +93,7 @@ def candidate_archives(directory, revision, versions):
         with bounded_archive(path) as archive:
             list(checked_members(archive, prefix))
             vcs = json.load(archive.extractfile(f"{prefix}/.cargo_vcs_info.json"))["git"]
-            if vcs.get("sha1") != revision or vcs.get("dirty", False):
+            if not isinstance(vcs, dict) or vcs.get("sha1") != revision or vcs.get("dirty", False) is not False:
                 raise ValueError(f"revision mismatch or dirty archive: {name}")
             manifest = tomllib.loads(archive.extractfile(f"{prefix}/Cargo.toml").read().decode())
             if (manifest["package"]["name"], manifest["package"]["version"]) != (name, version):
@@ -441,3 +441,25 @@ def compiler_config(table):
         if isinstance(value, dict) and compiler_config(value):
             return True
     return False
+
+
+def provider_consumer(directory, package, target, test_name, binaries, *, environment=None):
+    """Run already-built isolated binaries under the existing provider fixture owner."""
+    env = dict(cargo_environment(os.environ), RSS_TEST_RUN_ID=directory.parent.name + '-' + directory.name)
+    env.update(environment or {})
+    env.update({key: str(directory / 'target/debug' / name) for key, name in binaries.items()})
+    command = ['cargo', 'run', '--locked', '-p', 'testkit', '--features', 'containers',
+               '--bin', 'rss-test-launcher', '--', '--', 'cargo', 'test', '--locked',
+               '-p', package, '--test', target, test_name, '--', '--exact', '--nocapture']
+    path = directory / 'provider-integration.log'
+    with path.open('w') as log:
+        run_command(command, ROOT, env, log, timeout=900).check_returncode()
+    validate_execution(path.read_text(), test_name, [env[key] for key in binaries])
+
+
+def record_graph(directory, allowed, message_features, forbidden, *, required_features=None, required_dependencies=()):
+    facts = json.loads(cargo(['metadata', '--format-version', '1'], directory))
+    validate_graph(facts, directory, allowed, message_features, forbidden,
+                   required_features=required_features, required_dependencies=required_dependencies)
+    (directory / 'resolved.json').write_text(json.dumps(facts, indent=2) + '\n')
+    return facts
