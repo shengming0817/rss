@@ -152,15 +152,41 @@ async fn bridge_network_diagnostics_contain_no_docker_output() -> Result<()> {
             .output(),
     )
     .await??;
+    check_bridge_diagnostic_child(&output)
+}
+
+fn check_bridge_diagnostic_child(output: &std::process::Output) -> Result<()> {
     anyhow::ensure!(
         output.status.success(),
-        "child failed: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "bridge diagnostic child failed: exit={:?} stdout_bytes={} stderr_bytes={}",
+        output.status.code(),
+        output.stdout.len(),
+        output.stderr.len()
     );
     anyhow::ensure!(
         String::from_utf8_lossy(&output.stdout).contains("1 passed"),
         "child did not run its assertion"
     );
+    Ok(())
+}
+
+#[test]
+fn failed_bridge_diagnostic_child_does_not_expose_captured_output() -> Result<()> {
+    use std::os::unix::process::ExitStatusExt as _;
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from_raw(7 << 8),
+        stdout: b"secret-stdout".to_vec(),
+        stderr: b"secret-stderr".to_vec(),
+    };
+    let error = check_bridge_diagnostic_child(&output)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("failed child was accepted"))?;
+    assert_eq!(
+        error.to_string(),
+        "bridge diagnostic child failed: exit=Some(7) stdout_bytes=13 stderr_bytes=13"
+    );
+    for cause in error.chain() {
+        assert!(!format!("{cause} {cause:?}").contains("secret"));
+    }
     Ok(())
 }
