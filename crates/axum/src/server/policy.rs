@@ -1,33 +1,78 @@
 //! Explicit, validated transport and protocol budgets.
 use std::time::Duration;
 
+/// Closed field identity for policy diagnostics; never stores rejected configuration values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServePolicyField {
+    /// Maximum simultaneous preparing and established connections.
+    ConnectionLimit,
+    /// Product preparation's total duration.
+    PreparationTimeout,
+    /// Duration before the first request reaches the service.
+    EstablishmentTimeout,
+    /// Managed runtime drain duration.
+    ShutdownTimeout,
+    /// HTTP/1 request header read duration.
+    HeaderReadTimeout,
+    /// HTTP/1 header count bound.
+    MaxHeaders,
+    /// HTTP/1 buffer bound.
+    MaxBufferSize,
+}
+
+impl std::fmt::Display for ServePolicyField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ConnectionLimit => "connection_limit",
+            Self::PreparationTimeout => "preparation_timeout",
+            Self::EstablishmentTimeout => "establishment_timeout",
+            Self::ShutdownTimeout => "shutdown_timeout",
+            Self::HeaderReadTimeout => "header_read_timeout",
+            Self::MaxHeaders => "max_headers",
+            Self::MaxBufferSize => "max_buffer_size",
+        })
+    }
+}
+
 /// Invalid listener policy. Diagnostics never retain the rejected input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ServePolicyError {
     /// Connections and headers require a positive capacity.
-    #[error("capacity must be nonzero")]
-    ZeroCapacity,
+    #[error("{0} must be nonzero")]
+    ZeroCapacity(ServePolicyField),
     /// Each phase must have a positive time budget.
-    #[error("timeout must be nonzero")]
-    ZeroTimeout,
+    #[error("{0} must be nonzero")]
+    ZeroTimeout(ServePolicyField),
     /// Listener phase budgets support at most 24 hours.
-    #[error("timeout must not exceed 24 hours")]
-    TimeoutTooLarge,
+    #[error("{0} must not exceed 24 hours")]
+    TimeoutTooLarge(ServePolicyField),
     /// Hyper requires at least 8192 bytes for its HTTP/1 buffer.
-    #[error("HTTP/1 buffer must be at least 8192 bytes")]
+    #[error("max_buffer_size must be at least 8192 bytes")]
     BufferTooSmall,
+}
+
+impl ServePolicyError {
+    /// Identify the rejected field without parsing Display text.
+    pub fn field(&self) -> ServePolicyField {
+        match self {
+            Self::ZeroCapacity(field) | Self::ZeroTimeout(field) | Self::TimeoutTooLarge(field) => {
+                *field
+            }
+            Self::BufferTooSmall => ServePolicyField::MaxBufferSize,
+        }
+    }
 }
 
 // A stable supported horizon, not a check against the instant at construction time.
 // HTTP listener phases are finite operational budgets, not calendar-scale scheduling.
 const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-fn validate_timeout(timeout: Duration) -> Result<(), ServePolicyError> {
+fn validate_timeout(timeout: Duration, field: ServePolicyField) -> Result<(), ServePolicyError> {
     if timeout.is_zero() {
-        return Err(ServePolicyError::ZeroTimeout);
+        return Err(ServePolicyError::ZeroTimeout(field));
     }
     if timeout > MAX_TIMEOUT {
-        return Err(ServePolicyError::TimeoutTooLarge);
+        return Err(ServePolicyError::TimeoutTooLarge(field));
     }
     Ok(())
 }
@@ -55,11 +100,16 @@ impl ServePolicy {
         shutdown_timeout: Duration,
     ) -> Result<Self, ServePolicyError> {
         if connection_limit == 0 {
-            return Err(ServePolicyError::ZeroCapacity);
+            return Err(ServePolicyError::ZeroCapacity(
+                ServePolicyField::ConnectionLimit,
+            ));
         }
-        validate_timeout(preparation_timeout)?;
-        validate_timeout(establishment_timeout)?;
-        validate_timeout(shutdown_timeout)?;
+        validate_timeout(preparation_timeout, ServePolicyField::PreparationTimeout)?;
+        validate_timeout(
+            establishment_timeout,
+            ServePolicyField::EstablishmentTimeout,
+        )?;
+        validate_timeout(shutdown_timeout, ServePolicyField::ShutdownTimeout)?;
         Ok(Self {
             connection_limit,
             preparation_timeout,
@@ -89,9 +139,9 @@ impl Http1ServePolicy {
         max_headers: usize,
         max_buffer_size: usize,
     ) -> Result<Self, ServePolicyError> {
-        validate_timeout(header_read_timeout)?;
+        validate_timeout(header_read_timeout, ServePolicyField::HeaderReadTimeout)?;
         if max_headers == 0 {
-            return Err(ServePolicyError::ZeroCapacity);
+            return Err(ServePolicyError::ZeroCapacity(ServePolicyField::MaxHeaders));
         }
         if max_buffer_size < 8192 {
             return Err(ServePolicyError::BufferTooSmall);

@@ -218,7 +218,9 @@ There are no old-signature wrappers or parallel TLS constructors. Existing plain
 accepted connections, including preparation, and has no unlimited mode. ServePolicy::new takes
 capacity, preparation_timeout, establishment_timeout, shutdown_timeout in that order. All phase
 budgets must be positive and at most 24 hours: the supported range is independent of when policy
-is constructed or used; H1 header capacity is positive and its buffer is at least 8192 bytes.
+is constructed or used; H1 header capacity is positive and its buffer is at least 8192 bytes. `ServePolicyError`
+retains a closed `ServePolicyField` identity (also available through `field()`), so products can
+identify the rejected configuration field without parsing text or retaining the rejected value.
 
 A product implements `ConnectionTransport::prepare` over the TCP stream and socket peer supplied
 by RSS. It performs admission, TLS/ALPN and client verification, then returns

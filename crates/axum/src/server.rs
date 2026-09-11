@@ -15,7 +15,7 @@ mod policy;
 mod transport;
 #[cfg(feature = "http1")]
 pub use policy::Http1ServePolicy;
-pub use policy::{ServePolicy, ServePolicyError};
+pub use policy::{ServePolicy, ServePolicyError, ServePolicyField};
 pub use transport::{
     AcceptedConnectionInfo, ConnectionTransport, EstablishedTransport, PlainTransport,
 };

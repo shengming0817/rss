@@ -22,5 +22,5 @@ pub use server::Http1ServePolicy;
 #[cfg(any(feature = "http1", feature = "http2"))]
 pub use server::{
     AcceptedConnectionInfo, ConnectionTransport, EstablishedTransport, PlainTransport, ServePolicy,
-    ServePolicyError,
+    ServePolicyError, ServePolicyField,
 };
