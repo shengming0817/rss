@@ -179,3 +179,38 @@ class PlatformExecution(unittest.TestCase):
             facts = {"packages": [{"name": name, "source": None, "manifest_path": str(allowed[name])}]}
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "closure"):
                 PROOF.verify_platform_resolution(facts, consumer, allowed)
+
+
+class TlsConsumption(unittest.TestCase):
+    def test_tls_mode_keeps_h1_feature_isolation(self):
+        PROOF.verify_features(ProtocolIsolation.facts(["http1"], runtime=True), "tls")
+        self.assertEqual(PROOF.feature_args("tls"), ["--features", "http1"])
+        with self.assertRaises(ValueError):
+            PROOF.verify_features(ProtocolIsolation.facts(["http1", "http2"], runtime=True), "tls")
+
+    def test_tls_requires_success_and_exact_behavior_receipt(self):
+        self.assertEqual(PROOF.tls_receipt(0, PROOF.TLS_RECEIPT + "\n"), "BEHAVIOR PASS")
+        for code, output in [(1, PROOF.TLS_RECEIPT), (0, ""), (0, "compiled"),
+                             (0, PROOF.TLS_RECEIPT.replace("verified", "unchecked")),
+                             (0, PROOF.TLS_RECEIPT + "\n" + PROOF.TLS_RECEIPT)]:
+            with self.subTest(code=code, output=output), self.assertRaises(ValueError):
+                PROOF.tls_receipt(code, output)
+
+    def test_tls_dependencies_are_only_added_to_behavior_consumer(self):
+        import tomllib
+        versions = {name: "0.1.0" for name in ["rss-axum", "rss-runtime", "rss-contract", "rss-request-context"]}
+        features = ["http1", "managed-server"]
+        api = tomllib.loads(PROOF.consumer_manifest("tls", versions, features))
+        smoke = tomllib.loads(PROOF.consumer_manifest("tls", versions, features, smoke=True))
+        self.assertNotIn("tokio-rustls", api["dependencies"])
+        self.assertIn("tokio-rustls", smoke["dependencies"])
+        self.assertIn("rcgen", smoke["dependencies"])
+        self.assertTrue({"io-util", "sync"} <= set(smoke["dependencies"]["tokio"]["features"]))
+
+    def test_tls_copies_the_packaged_shared_scenario(self):
+        with tempfile.TemporaryDirectory() as temp:
+            consumer = Path(temp)
+            (consumer / "src").mkdir()
+            PROOF.copy_smoke(consumer, PROOF.ROOT / "crates/axum", "tls")
+            self.assertEqual((consumer / "src/support/tls.rs").read_bytes(),
+                             (PROOF.ROOT / "crates/axum/examples/support/tls.rs").read_bytes())

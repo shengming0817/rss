@@ -1,11 +1,13 @@
 #![cfg(feature = "http2")]
+#[path = "support/registration.rs"]
+mod registration;
 #[path = "support/timer.rs"]
 mod timer;
 use axum::{Router, routing::get};
 use http_body_util::{BodyExt, Empty};
 use hyper::{body::Bytes, client::conn::http2::SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rss_axum::serve_http2_registration;
+use registration::http2 as serve_http2_registration;
 use rss_runtime::{ShutdownFailureKind, ShutdownStack, TaskExit, TaskState, TotalDrainBudget};
 use std::{
     net::SocketAddr,
@@ -92,7 +94,7 @@ fn constructors() -> Vec<Register> {
     vec![
         serve_http2_registration,
         #[cfg(feature = "auto-protocol")]
-        rss_axum::serve_auto_registration,
+        registration::auto,
     ]
 }
 
@@ -412,7 +414,7 @@ async fn auto_establishment_deadline_does_not_limit_admitted_h2_streams() {
         )
     };
     let (addr, owner) = start_with(
-        rss_axum::serve_auto_registration,
+        registration::auto,
         app,
         Duration::from_secs(1),
         Duration::from_secs(2),
@@ -441,9 +443,17 @@ async fn auto_establishment_deadline_does_not_limit_admitted_h2_streams() {
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
-async fn accepted_peer_is_available_to_standard_extractor() {
+async fn accepted_peer_is_bound_to_rss_connection_info() {
     for register in constructors() {
-        let app = Router::new().route("/", get(|axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>| async move { peer.to_string() }));
+        let app =
+            Router::new().route(
+                "/",
+                get(
+                    |axum::Extension(info): axum::Extension<
+                        rss_axum::AcceptedConnectionInfo<()>,
+                    >| async move { info.socket_peer().to_string() },
+                ),
+            );
         let (address, owner) = start_with(
             register,
             app,

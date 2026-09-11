@@ -12,6 +12,7 @@ members = [
   "crates/mqtt",
   "tests/mqtt-integration",
   "crates/axum",
+  "tests/axum-integration",
   "crates/transactional-messaging-recovery",
   "crates/saga",
   "crates/saga-postgres",
@@ -96,6 +97,7 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-axum = { path = "crates/axum", version = "0.1.0", default-features = false }
 libc = "0.2"
 windows-sys = { version = "0.61", default-features = false }
 arc-swap = "1.9.2"

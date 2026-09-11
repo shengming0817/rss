@@ -739,6 +739,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-integration"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "rss-axum",
+ "rss-request-context",
+ "rss-runtime",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3406,6 +3423,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "rcgen",
  "rss-contract",
  "rss-platform",
  "rss-redact",
@@ -3415,6 +3433,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tracing",

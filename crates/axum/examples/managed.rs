@@ -19,13 +19,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(any(feature = "http1", feature = "http2"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let policy = rss_axum::ServePolicy::new(
+        128,
+        Duration::from_secs(8),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    )?;
+    #[cfg(feature = "http1")]
+    let h1 = rss_axum::Http1ServePolicy::new(policy, Duration::from_secs(10), 64, 32768)?;
     tokio::time::timeout(Duration::from_secs(5), async {
         #[cfg(feature = "http1")]
-        smoke(rss_axum::serve_http1_registration, true, false).await?;
+        smoke(
+            |listener, router| {
+                rss_axum::serve_http1_registration(
+                    listener,
+                    router,
+                    rss_axum::PlainTransport,
+                    "http",
+                    h1,
+                )
+            },
+            true,
+            false,
+        )
+        .await?;
         #[cfg(feature = "http2")]
-        smoke(rss_axum::serve_http2_registration, false, true).await?;
+        smoke(
+            |listener, router| {
+                rss_axum::serve_http2_registration(
+                    listener,
+                    router,
+                    rss_axum::PlainTransport,
+                    "http",
+                    policy,
+                )
+            },
+            false,
+            true,
+        )
+        .await?;
         #[cfg(feature = "auto-protocol")]
-        smoke(rss_axum::serve_auto_registration, true, true).await?;
+        smoke(
+            |listener, router| {
+                rss_axum::serve_auto_registration(
+                    listener,
+                    router,
+                    rss_axum::PlainTransport,
+                    "http",
+                    h1,
+                )
+            },
+            true,
+            true,
+        )
+        .await?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })
     .await?
@@ -33,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(any(feature = "http1", feature = "http2"))]
 async fn smoke(
-    register: fn(TcpListener, Router, &'static str, Duration) -> ManagedTaskRegistration,
+    register: impl FnOnce(TcpListener, Router) -> ManagedTaskRegistration,
     _h1: bool,
     _h2: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -45,7 +92,7 @@ async fn smoke(
         std::sync::Arc::new(timer::TokioTimer),
     )?;
     let mut startup = owner.startup()?;
-    startup.stage_task_with_token(register(listener, router, "http", Duration::from_secs(1)));
+    startup.stage_task_with_token(register(listener, router));
     startup.commit().finish();
     #[cfg(feature = "http1")]
     if _h1 {

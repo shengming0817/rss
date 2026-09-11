@@ -24,7 +24,7 @@ README_END = "<!-- platform-execution:end -->"
 MODES = {
     "base": [], "managed": ["managed-server"], "http1": ["http1"],
     "http2": ["http2"], "both": ["http1", "http2"],
-    "auto": ["auto-protocol"], "all": None, "platform": [],
+    "auto": ["auto-protocol"], "all": None, "platform": [], "tls": ["http1"],
 }
 
 
@@ -34,7 +34,7 @@ def feature_args(mode):
 
 
 def expected_protocols(mode):
-    return ({"http1"} if mode == "http1" else {"http2"} if mode == "http2"
+    return ({"http1"} if mode in {"http1", "tls"} else {"http2"} if mode == "http2"
             else {"http1", "http2"} if mode in {"both", "auto", "all"} else set())
 
 
@@ -101,6 +101,10 @@ def consumer_manifest(mode, versions, features, *, smoke=False):
         manifest += f'rss-runtime={{version="={versions["rss-runtime"]}",default-features=false,optional=true}}\n'
         manifest += 'axum={version="0.8",default-features=false,features=["json"]}\ntokio={version="1",features=["rt","macros","net","time"]}\n'
         manifest += 'hyper={version="1",default-features=false,optional=true,features=["client"]}\nhyper-util={version="0.1",default-features=false,optional=true,features=["tokio"]}\nhttp-body-util={version="0.1",optional=true}\n'
+    if smoke and mode == 'tls':
+        manifest = manifest.replace('features=["rt","macros","net","time"]',
+                                    'features=["rt","macros","net","time","io-util","sync"]')
+        manifest += 'tokio-rustls={version="0.26",default-features=false,features=["ring"]}\nrcgen="0.14.8"\n'
     manifest += '[features]\ndefault=[]\n'
     for feature in features:
         if feature == "default":
@@ -124,10 +128,28 @@ def api_source(mode):
         symbols.append("serve_auto_registration")
     # Infer the external argument/return types without directly depending on their owners.
     calls = "\n".join(
-        f'let _ = |listener, router| rss_axum::{symbol}(listener, router, "http", std::time::Duration::from_secs(1));'
+        f'let _ = |listener, router, policy| rss_axum::{symbol}(listener, router, rss_axum::PlainTransport, "http", policy);'
         for symbol in symbols)
     return ('fn main() {\nlet _ = rss_axum::RequestBudget::new(std::time::Duration::from_secs(1));\n'
             + calls + '\n}\n')
+
+
+TLS_RECEIPT = "TLS_BEHAVIOR_PASS peer=socket certificate=verified guard=released drain=clean"
+
+
+def tls_receipt(returncode, stdout):
+    if returncode != 0 or stdout.splitlines().count(TLS_RECEIPT) != 1:
+        raise ValueError("TLS consumer did not prove peer, certificate and owned drain")
+    return "BEHAVIOR PASS"
+
+
+def copy_smoke(consumer, source_root, mode):
+    example = 'base.rs' if mode == 'base' else 'tls.rs' if mode == 'tls' else 'managed.rs'
+    (consumer / 'src/main.rs').write_text((source_root / 'examples' / example).read_text())
+    if mode == 'tls':
+        support = consumer / 'src/support'
+        support.mkdir()
+        (support / 'tls.rs').write_text((source_root / 'examples/support/tls.rs').read_text())
 
 
 def verify_example_failure(returncode, stderr):
@@ -231,10 +253,9 @@ def main():
             results[mode] = run_platform(directory, env)
         else:
             check_unavailable(directory, mode, env)
-            if mode in {'base', 'managed', 'http1', 'http2', 'auto'}:
+            if mode in {'base', 'managed', 'http1', 'http2', 'auto', 'tls'}:
                 (directory / 'Cargo.toml').write_text(consumer_manifest(mode, versions, features, smoke=True) + patch)
-                example = 'base.rs' if mode == 'base' else 'managed.rs'
-                (directory / 'src/main.rs').write_text((allowed['rss-axum'] / 'examples' / example).read_text())
+                copy_smoke(directory, allowed['rss-axum'], mode)
                 graph()  # Validate the actual smoke graph after adding the client capabilities.
                 if mode == 'managed':
                     cargo(['build', '--locked', '--offline', *flags], directory)
@@ -242,10 +263,13 @@ def main():
                         result = run_command([str(directory/'target/debug'/f'axum-{mode}-consumer')], directory, env, log, timeout=30)
                     verify_example_failure(result.returncode, result.stderr)
                 else:
-                    cargo(['run', '--locked', '--offline', *flags], directory)
-            results[mode] = 'BEHAVIOR PASS' if mode in {'base', 'managed', 'http1', 'http2', 'auto'} else 'GRAPH PASS'
+                    stdout = cargo(['run', '--locked', '--offline', *flags], directory)
+                    if mode == 'tls':
+                        tls_receipt(0, stdout)
+            results[mode] = 'BEHAVIOR PASS' if mode in {'base', 'managed', 'http1', 'http2', 'auto', 'tls'} else 'GRAPH PASS'
         shutil.rmtree(directory / 'target')
-    print(json.dumps({'revision': args.revision, 'scenarioSha256': hashlib.sha256(source.encode()).hexdigest(), 'consumers': results}, indent=2))
+    tls_source = b''.join((allowed['rss-axum'] / path).read_bytes() for path in ['examples/tls.rs', 'examples/support/tls.rs'])
+    print(json.dumps({'tlsScenarioSha256': hashlib.sha256(tls_source).hexdigest(), 'revision': args.revision, 'scenarioSha256': hashlib.sha256(source.encode()).hexdigest(), 'consumers': results}, indent=2))
 
 
 if __name__ == '__main__':

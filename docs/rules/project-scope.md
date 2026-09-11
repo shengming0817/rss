@@ -20,7 +20,8 @@ rss-runtime 拥有局部生命周期作用域、即时资源接管、阶段注�
 
 rss-axum 拥有已接纳公共能力到 Axum 的可选协议适配：类型化契约绑定、请求处理预算与
 只读上下文、安全错误投影和 listener 到 rss-runtime 的资源交接；可选 H1/H2/Auto transport
-复用 Hyper/hyper-util 的协议实现并拥有连接生命周期。TLS/ALPN、认证授权、产品协议与业务编解码、
+复用 Hyper/hyper-util 的协议实现并拥有连接生命周期；产品异步 transport 准备、连接 guard 与
+HTTP futures 由同一 owner 持有，执行产品明确选择的容量与时限，并绑定真实 TCP peer 与产品 metadata。TLS/ALPN、认证授权、产品协议与业务编解码、
 最终路由组合、响应流限制与产品 readiness 由消费方拥有，不恢复通用 Web/装配平台。
 
 消息 recovery 拥有已接纳的 consumer 死信归档格式、验证证明与安全清理算法；PG owner 持有组件归档 schema 和原子持久化，专属 S3 adapter 实现 Object Lock port。产品拥有保留/hold 决策、密钥、调度和 bucket 生命周期。

@@ -16,3 +16,11 @@ pub use server::serve_auto_registration;
 pub use server::serve_http1_registration;
 #[cfg(feature = "http2")]
 pub use server::serve_http2_registration;
+
+#[cfg(feature = "http1")]
+pub use server::Http1ServePolicy;
+#[cfg(any(feature = "http1", feature = "http2"))]
+pub use server::{
+    AcceptedConnectionInfo, ConnectionTransport, EstablishedTransport, PlainTransport, ServePolicy,
+    ServePolicyError, ServePolicyField,
+};
