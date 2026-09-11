@@ -205,6 +205,7 @@ class TlsConsumption(unittest.TestCase):
         self.assertNotIn("tokio-rustls", api["dependencies"])
         self.assertIn("tokio-rustls", smoke["dependencies"])
         self.assertIn("rcgen", smoke["dependencies"])
+        self.assertTrue({"io-util", "sync"} <= set(smoke["dependencies"]["tokio"]["features"]))
 
     def test_tls_copies_the_packaged_shared_scenario(self):
         with tempfile.TemporaryDirectory() as temp:

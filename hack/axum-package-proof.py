@@ -102,6 +102,8 @@ def consumer_manifest(mode, versions, features, *, smoke=False):
         manifest += 'axum={version="0.8",default-features=false,features=["json"]}\ntokio={version="1",features=["rt","macros","net","time"]}\n'
         manifest += 'hyper={version="1",default-features=false,optional=true,features=["client"]}\nhyper-util={version="0.1",default-features=false,optional=true,features=["tokio"]}\nhttp-body-util={version="0.1",optional=true}\n'
     if smoke and mode == 'tls':
+        manifest = manifest.replace('features=["rt","macros","net","time"]',
+                                    'features=["rt","macros","net","time","io-util","sync"]')
         manifest += 'tokio-rustls={version="0.26",default-features=false,features=["ring"]}\nrcgen="0.14.8"\n'
     manifest += '[features]\ndefault=[]\n'
     for feature in features:
