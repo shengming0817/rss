@@ -46,7 +46,7 @@ impl Drop for Guard {
 
 struct Probe {
     first: First,
-    calls: AtomicUsize,
+    calls: Arc<AtomicUsize>,
     active: Arc<AtomicUsize>,
     entered: Arc<Notify>,
 }
@@ -93,14 +93,21 @@ async fn start(
     preparation: Duration,
     drain: Duration,
     router: Router,
-) -> (SocketAddr, ShutdownStack, Arc<AtomicUsize>, Arc<Notify>) {
+) -> (
+    SocketAddr,
+    ShutdownStack,
+    Arc<AtomicUsize>,
+    Arc<Notify>,
+    Arc<AtomicUsize>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let active = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
     let probe = Probe {
         first,
-        calls: AtomicUsize::new(0),
+        calls: calls.clone(),
         active: active.clone(),
         entered: entered.clone(),
     };
@@ -110,7 +117,7 @@ async fn start(
     )
     .unwrap();
     let policy = Http1ServePolicy::new(
-        ServePolicy::new(limit, preparation, drain).unwrap(),
+        ServePolicy::new(limit, preparation, Duration::from_secs(30), drain).unwrap(),
         WAIT,
         64,
         32768,
@@ -126,7 +133,7 @@ async fn start(
             "transport",
             policy,
         ));
-    (addr, owner, active, entered)
+    (addr, owner, active, entered, calls)
 }
 
 fn router() -> Router {
@@ -156,7 +163,7 @@ async fn request(addr: SocketAddr, expected_id: usize) {
 #[tokio::test]
 #[allow(clippy::unwrap_used)] // reason: wait for actual preparation before asserting cancellation.
 async fn slow_preparation_does_not_block_healthy_peer_and_cancels_with_guard() {
-    let (addr, owner, active, entered) = start(First::Pending, 2, WAIT, WAIT, router()).await;
+    let (addr, owner, active, entered, _) = start(First::Pending, 2, WAIT, WAIT, router()).await;
     let _slow = TcpStream::connect(addr).await.unwrap();
     tokio::time::timeout(WAIT, entered.notified())
         .await
@@ -170,27 +177,34 @@ async fn slow_preparation_does_not_block_healthy_peer_and_cancels_with_guard() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)] // reason: first timeout must free the only connection slot.
 async fn capacity_includes_preparation_and_timeout_releases_slot() {
-    let (addr, owner, active, entered) = start(
-        First::Pending,
-        1,
-        Duration::from_millis(200),
-        WAIT,
-        router(),
-    )
-    .await;
+    // Establish the first real socket before pausing; its budget exceeds the test runner limit.
+    let (addr, owner, active, entered, calls) =
+        start(First::Pending, 1, Duration::from_secs(300), WAIT, router()).await;
     let _slow = TcpStream::connect(addr).await.unwrap();
     tokio::time::timeout(WAIT, entered.notified())
         .await
         .unwrap();
-    let healthy = request(addr, 1);
-    tokio::pin!(healthy);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), &mut healthy)
-            .await
-            .is_err()
-    );
+    let mut healthy = TcpStream::connect(addr).await.unwrap();
+    healthy
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::pause();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(active.load(Ordering::SeqCst), 1);
-    healthy.await;
+    tokio::time::advance(Duration::from_secs(301)).await;
+    tokio::time::resume();
+    let mut response = String::new();
+    tokio::time::timeout(WAIT, healthy.read_to_string(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.ends_with(":1"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(owner.shutdown().join().await.unwrap().is_clean());
     assert_eq!(active.load(Ordering::SeqCst), 0);
 }
@@ -199,7 +213,7 @@ async fn capacity_includes_preparation_and_timeout_releases_slot() {
 #[allow(clippy::unwrap_used)] // reason: peer failure must not stop the managed listener.
 async fn factory_panic_poll_panic_and_error_isolate_the_peer() {
     for first in [First::FactoryPanic, First::PollPanic, First::Error] {
-        let (addr, owner, active, _) = start(first, 1, WAIT, WAIT, router()).await;
+        let (addr, owner, active, _, _) = start(first, 1, WAIT, WAIT, router()).await;
         let mut bad = TcpStream::connect(addr).await.unwrap();
         let mut byte = [0];
         let result = tokio::time::timeout(WAIT, bad.read(&mut byte))
@@ -226,7 +240,7 @@ async fn http_timeout_releases_the_non_sync_guard_after_handler_starts() {
             }
         }),
     );
-    let (addr, owner, active, _) =
+    let (addr, owner, active, _, _) =
         start(First::Ready, 1, WAIT, Duration::from_millis(30), app).await;
     let mut client = TcpStream::connect(addr).await.unwrap();
     client
@@ -250,7 +264,8 @@ fn external_runtime_termination_drops_preparation_and_guard() {
         .build()
         .unwrap();
     let (owner, active, _client) = runtime.block_on(async {
-        let (addr, owner, active, entered) = start(First::Pending, 1, WAIT, WAIT, router()).await;
+        let (addr, owner, active, entered, _) =
+            start(First::Pending, 1, WAIT, WAIT, router()).await;
         let client = TcpStream::connect(addr).await.unwrap();
         tokio::time::timeout(WAIT, entered.notified())
             .await
@@ -261,4 +276,100 @@ fn external_runtime_termination_drops_preparation_and_guard() {
     drop(runtime);
     assert_eq!(active.load(Ordering::SeqCst), 0);
     drop(owner);
+}
+
+struct OrderedDrop {
+    event: &'static str,
+    events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+impl Drop for OrderedDrop {
+    fn drop(&mut self) {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(self.event);
+    }
+}
+struct OrderedTransport(Arc<std::sync::Mutex<Vec<&'static str>>>);
+impl ConnectionTransport for OrderedTransport {
+    type Io = TcpStream;
+    type Metadata = ();
+    type Guard = OrderedDrop;
+    type Error = std::convert::Infallible;
+    async fn prepare(
+        &self,
+        stream: TcpStream,
+        _: SocketAddr,
+    ) -> Result<EstablishedTransport<TcpStream, (), OrderedDrop>, Self::Error> {
+        Ok(EstablishedTransport::new(
+            stream,
+            (),
+            OrderedDrop {
+                event: "guard",
+                events: self.0.clone(),
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)] // reason: observe destructor order at forced drain, not only final states.
+async fn forced_drain_drops_body_before_connection_guard() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let entered = Arc::new(Notify::new());
+    let app = Router::new().route(
+        "/",
+        get({
+            let entered = entered.clone();
+            let events = events.clone();
+            move || {
+                let entered = entered.clone();
+                let events = events.clone();
+                async move {
+                    axum::body::Body::from_stream(futures::stream::once(async move {
+                        let _body = OrderedDrop {
+                            event: "body",
+                            events,
+                        };
+                        entered.notify_one();
+                        std::future::pending::<Result<axum::body::Bytes, std::io::Error>>().await
+                    }))
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut owner = ShutdownStack::try_new(
+        TotalDrainBudget::new(WAIT).unwrap(),
+        Arc::new(timer::TokioTimer),
+    )
+    .unwrap();
+    let policy = Http1ServePolicy::new(
+        ServePolicy::new(1, WAIT, Duration::from_secs(30), Duration::from_millis(30)).unwrap(),
+        WAIT,
+        64,
+        32768,
+    )
+    .unwrap();
+    let mut startup = owner.startup().unwrap();
+    startup.stage_task_with_token(rss_axum::serve_http1_registration(
+        listener,
+        app,
+        OrderedTransport(events.clone()),
+        "guard-order",
+        policy,
+    ));
+    startup.commit().finish();
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .unwrap();
+    assert!(events.lock().unwrap().is_empty());
+    assert!(!owner.shutdown().join().await.unwrap().is_clean());
+    assert_eq!(*events.lock().unwrap(), ["body", "guard"]);
 }

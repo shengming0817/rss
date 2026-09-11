@@ -7,7 +7,8 @@ use tokio::net::TcpListener;
 
 #[allow(clippy::expect_used)] // reason: fixed valid scenario budgets.
 fn policy(drain: Duration) -> ServePolicy {
-    ServePolicy::new(128, Duration::from_secs(8), drain).expect("valid policy")
+    ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(30), drain)
+        .expect("valid policy")
 }
 #[cfg(feature = "http1")]
 #[allow(clippy::expect_used)] // reason: existing tests exercise the 30-second header deadline.

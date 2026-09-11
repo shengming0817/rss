@@ -19,7 +19,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(any(feature = "http1", feature = "http2"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let policy = rss_axum::ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(10))?;
+    let policy = rss_axum::ServePolicy::new(
+        128,
+        Duration::from_secs(8),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    )?;
     #[cfg(feature = "http1")]
     let h1 = rss_axum::Http1ServePolicy::new(policy, Duration::from_secs(10), 64, 32768)?;
     tokio::time::timeout(Duration::from_secs(5), async {

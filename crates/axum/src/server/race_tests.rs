@@ -64,7 +64,13 @@ async fn cancellation_precedes_factory_and_ready_transport_promotion() {
             clones: clones.clone(),
         });
         let policy = Http1ServePolicy::new(
-            ServePolicy::new(1, Duration::from_secs(1), Duration::from_secs(1)).unwrap(),
+            ServePolicy::new(
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(30),
+                Duration::from_secs(1),
+            )
+            .unwrap(),
             Duration::from_secs(1),
             64,
             32768,
@@ -77,7 +83,8 @@ async fn cancellation_precedes_factory_and_ready_transport_promotion() {
                 peer,
                 transport,
                 token,
-                Protocol::Http1(policy)
+                Protocol::Http1(policy),
+                Arc::from("race-test")
             )
             .await,
             ConnectionExit::Clean

@@ -10,36 +10,39 @@ pub enum ServePolicyError {
     /// Each phase must have a positive time budget.
     #[error("timeout must be nonzero")]
     ZeroTimeout,
-    /// The monotonic clock cannot represent this deadline.
-    #[error("timeout is not representable")]
-    TimeoutOverflow,
+    /// Listener phase budgets support at most 24 hours.
+    #[error("timeout must not exceed 24 hours")]
+    TimeoutTooLarge,
     /// Hyper requires at least 8192 bytes for its HTTP/1 buffer.
     #[error("HTTP/1 buffer must be at least 8192 bytes")]
     BufferTooSmall,
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "transport owns the monotonic deadline domain"
-)]
+// A stable supported horizon, not a check against the instant at construction time.
+// HTTP listener phases are finite operational budgets, not calendar-scale scheduling.
+const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 fn validate_timeout(timeout: Duration) -> Result<(), ServePolicyError> {
     if timeout.is_zero() {
         return Err(ServePolicyError::ZeroTimeout);
     }
-    tokio::time::Instant::now()
-        .checked_add(timeout)
-        .ok_or(ServePolicyError::TimeoutOverflow)?;
+    if timeout > MAX_TIMEOUT {
+        return Err(ServePolicyError::TimeoutTooLarge);
+    }
     Ok(())
 }
 
-/// Required connection capacity, complete preparation budget and runtime drain budget.
+/// Required capacity and budgets for preparation, first request and runtime drain.
 ///
 /// Capacity counts both preparing and established connections. Preparation includes any
 /// product failure handling; choose a budget that covers all work before HTTP starts.
+/// Establishment ends at the first service call and never limits admitted handlers/bodies.
+/// Each duration must be in (0, 24 hours]; this stable range remains valid after storage.
 #[derive(Debug, Clone, Copy)]
 pub struct ServePolicy {
     pub(super) connection_limit: usize,
     pub(super) preparation_timeout: Duration,
+    pub(super) establishment_timeout: Duration,
     pub(super) shutdown_timeout: Duration,
 }
 
@@ -48,16 +51,19 @@ impl ServePolicy {
     pub fn new(
         connection_limit: usize,
         preparation_timeout: Duration,
+        establishment_timeout: Duration,
         shutdown_timeout: Duration,
     ) -> Result<Self, ServePolicyError> {
         if connection_limit == 0 {
             return Err(ServePolicyError::ZeroCapacity);
         }
         validate_timeout(preparation_timeout)?;
+        validate_timeout(establishment_timeout)?;
         validate_timeout(shutdown_timeout)?;
         Ok(Self {
             connection_limit,
             preparation_timeout,
+            establishment_timeout,
             shutdown_timeout,
         })
     }

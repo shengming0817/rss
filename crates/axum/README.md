@@ -136,7 +136,7 @@ use rss_runtime::{ShutdownStack, TotalDrainBudget};
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 let registration = rss_axum::serve_http2_registration(
     listener, axum::Router::new(), rss_axum::PlainTransport, "http",
-    rss_axum::ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(5))?);
+    rss_axum::ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(30), Duration::from_secs(5))?);
 let status = registration.status();
 let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?, timer)?;
 let mut startup = owner.startup()?;
@@ -172,15 +172,16 @@ protocol features alone does not expose the Auto constructor. Hyper owns parsing
 and graceful close; hyper-util owns Auto detection. H1 drain disables keep-alive while allowing
 an active request/response body to finish; Auto drain also cancels unfinished protocol detection.
 H1 request headers use the explicit Http1ServePolicy timeout, including later requests on a
-keep-alive connection. Auto additionally allows 30 seconds from connection driving until the
-first decoded request reaches the service, bounding idle/partial protocol detection and initial
-headers without duplicating Hyper's parser. This establishment deadline is disabled before the
+keep-alive connection. All three protocols additionally use ServePolicy establishment_timeout
+from prepared connection driving until the first decoded request reaches the service. This
+bounds silent H2 peers and partial protocol detection/headers without duplicating Hyper's parser. This establishment deadline is disabled before the
 handler runs: it does not bound admitted handlers, request bodies, response bodies or subsequent
 H2 streams. These transport deadlines are independent of the product's RequestBudget.
 A connection panic or protocol failure terminates that connection without taking unrelated
 clients down. H2 stream panics are additionally isolated within the connection-owned executor.
 Managed serving emits DEBUG tracing events under `rss_axum::server` with closed `outcome`
-(`peer_error`, `panic`, `preparation_error`, `preparation_timeout`, `establishment_timeout`) and `scope` (`connection`, `stream`) fields.
+(`peer_error`, `panic`, `preparation_error`, `preparation_timeout`, `establishment_timeout`),
+`scope` (`connection`, `stream`) and safely rendered `listener` fields.
 RSS does not record error text, peer input or panic payloads in those events, and installs no
 subscriber; the product owns filtering/export and the process panic hook.
 
@@ -192,7 +193,7 @@ A product can select different policies in the same binary:
 use std::time::Duration;
 let device = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
 let admin = tokio::net::TcpListener::bind("127.0.0.1:8081").await?;
-let policy = rss_axum::ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(5))?;
+let policy = rss_axum::ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(30), Duration::from_secs(5))?;
 let h1 = rss_axum::Http1ServePolicy::new(policy, Duration::from_secs(10), 64, 32768)?;
 let device = rss_axum::serve_auto_registration(
     device, axum::Router::new(), rss_axum::PlainTransport, "device", h1);
@@ -214,8 +215,10 @@ h2c Upgrade, WebSocket or CONNECT tunnels, or hand upgraded IO to another owner.
 All three constructors now require an explicit `ConnectionTransport` and validated policy.
 There are no old-signature wrappers or parallel TLS constructors. Existing plain consumers pass
 `PlainTransport`, `ServePolicy` (H2) or `Http1ServePolicy` (H1/Auto). Policy capacity counts all
-accepted connections, including preparation, and has no unlimited mode. All durations must be
-positive and representable; H1 header capacity is positive and its buffer is at least 8192 bytes.
+accepted connections, including preparation, and has no unlimited mode. ServePolicy::new takes
+capacity, preparation_timeout, establishment_timeout, shutdown_timeout in that order. All phase
+budgets must be positive and at most 24 hours: the supported range is independent of when policy
+is constructed or used; H1 header capacity is positive and its buffer is at least 8192 bytes.
 
 A product implements `ConnectionTransport::prepare` over the TCP stream and socket peer supplied
 by RSS. It performs admission, TLS/ALPN and client verification, then returns
@@ -227,7 +230,8 @@ product verifier is correct; authentication and tenant/device authority stay wit
 
 The preparation budget covers the entire product future, including failure handling. For a
 product doing five seconds of TLS followed by up to two seconds of failure audit, select an
-explicit larger total budget (the example uses eight seconds). No separate audit hook or
+explicit larger total budget (the example uses eight seconds, then a separate 30-second first
+request budget and ten-second shutdown budget). No separate audit hook or
 background task is needed. A preparation error, factory/poll panic or preparation timeout closes
 only that connection. Cancellation wins over preparation and prevents a ready transport from
 being promoted to HTTP; already-established HTTP connections retain graceful drain.
@@ -306,3 +310,8 @@ Retry overhead is bounded independently of ServePolicy capacity. The connection 
 the caller-selected limit over preparation and established connections; HTTP handler concurrency
 alone cannot bound TCP connections. Product hosts own capacity values, readiness, alerting,
 traffic removal and exit/restart. No automatic restart or fixed listener failure window is installed.
+
+Capacity emits DEBUG `capacity_saturated` / `capacity_recovered` transitions with safe `listener`
+and caller-selected `limit`. Repeated polls while full do not repeat saturation; shutdown while
+full does not report recovery because acceptance will not resume. These events describe local
+capacity, not product readiness or a guarantee that later network requests can succeed.

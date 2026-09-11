@@ -1,7 +1,7 @@
 //! Connection futures owned directly by the one runtime task, never detached.
 #[cfg(feature = "http2")]
 use std::{future::Future, pin::Pin};
-use std::{panic::AssertUnwindSafe, time::Duration};
+use std::{panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 use axum::Router;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -54,7 +54,7 @@ pub fn serve_http2_registration<T: ConnectionTransport>(
 /// Register an HTTP/1 and HTTP/2 listener with explicit transport and lifecycle policy.
 /// Hyper-util detects the protocol on prepared IO. Products own TLS/ALPN consistency; RSS
 /// does not negotiate ALPN or h2c Upgrade. Preparation is bounded by policy, then the first
-/// request must reach the service within 30 seconds. This latter deadline does not limit
+/// request must reach the service within the explicit establishment budget. This latter deadline does not limit
 /// admitted handlers or response bodies. Cancellation stops detection and drains HTTP;
 /// runtime timeout drops remaining work. All work must yield.
 #[cfg(feature = "auto-protocol")]
@@ -68,9 +68,6 @@ pub fn serve_auto_registration<T: ConnectionTransport>(
     registration(listener, router, transport, name, Protocol::Auto(policy))
 }
 
-#[cfg(feature = "auto-protocol")]
-const ESTABLISHMENT_TIMEOUT: Duration = Duration::from_secs(30);
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConnectionExit {
     Clean,
@@ -78,7 +75,6 @@ enum ConnectionExit {
     Panic,
     PreparationError,
     PreparationTimeout,
-    #[cfg(feature = "auto-protocol")]
     EstablishmentTimeout,
 }
 
@@ -104,11 +100,15 @@ fn classify<E: Into<Box<dyn std::error::Error + Send + Sync>>>(
     }
 }
 
-fn record_connection(result: std::thread::Result<ConnectionExit>) {
-    record_exit(result.unwrap_or(ConnectionExit::Panic), "connection");
+fn record_connection(result: std::thread::Result<ConnectionExit>, listener: &str) {
+    record_exit(
+        result.unwrap_or(ConnectionExit::Panic),
+        "connection",
+        listener,
+    );
 }
 
-fn record_exit(exit: ConnectionExit, scope: &'static str) {
+fn record_exit(exit: ConnectionExit, scope: &'static str, listener: &str) {
     let outcome = match exit {
         // reason: clean completion is not a failure diagnostic.
         ConnectionExit::Clean => return,
@@ -116,12 +116,11 @@ fn record_exit(exit: ConnectionExit, scope: &'static str) {
         ConnectionExit::Panic => "panic",
         ConnectionExit::PreparationError => "preparation_error",
         ConnectionExit::PreparationTimeout => "preparation_timeout",
-        #[cfg(feature = "auto-protocol")]
         ConnectionExit::EstablishmentTimeout => "establishment_timeout",
     };
     // Only closed, low-cardinality classifications: never error text or panic payloads.
     // ref: tokio-rs/axum axum/src/serve/mod.rs@axum-v0.8.9
-    tracing::debug!(target: "rss_axum::server", outcome, scope, "transport work ended");
+    tracing::debug!(target: "rss_axum::server", outcome, scope, listener, "transport work ended");
 }
 
 #[derive(Clone, Copy)]
@@ -284,8 +283,12 @@ async fn serve_owned<T: ConnectionTransport>(
     name: &str,
 ) -> Result<(), ShutdownError> {
     let name = ListenerLogName(name);
-    let transport = std::sync::Arc::new(transport);
+    let transport = Arc::new(transport);
+    let listener_label: Arc<str> =
+        rss_redact::safe(&name, rss_redact::RedactScope::ServerLog).into();
+    let limit = protocol.policy().connection_limit;
     let mut connections = FuturesUnordered::new();
+    let mut saturated = false;
     let mut retry_wait: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
         tokio::select! {
@@ -293,20 +296,28 @@ async fn serve_owned<T: ConnectionTransport>(
             () = token.cancelled() => break,
             // Completed/failed peers leave the set without terminating unrelated clients.
             Some(result) = connections.next(), if !connections.is_empty() => {
-                record_connection(result);
+                record_connection(result, &listener_label);
+                if saturated && !token.is_cancelled() {
+                    tracing::debug!(target: "rss_axum::server", outcome = "capacity_recovered", listener = %listener_label, limit, "listener has capacity");
+                    saturated = false;
+                }
             },
-            accepted = accept_with_retry(&mut listener, &mut retry_wait, &name), if connections.len() < protocol.policy().connection_limit => {
+            accepted = accept_with_retry(&mut listener, &mut retry_wait, &name), if connections.len() < limit => {
                 let Some((stream, peer)) = accepted? else { continue; };
                 // H1 handlers run inside the connection future. Isolate their panics too.
                 connections.push(AssertUnwindSafe(prepared_connection(
-                    stream, router.clone(), peer, transport.clone(), token.clone(), protocol,
+                    stream, router.clone(), peer, transport.clone(), token.clone(), protocol, listener_label.clone(),
                 )).catch_unwind());
+                if connections.len() == limit {
+                    saturated = true;
+                    tracing::debug!(target: "rss_axum::server", outcome = "capacity_saturated", listener = %listener_label, limit, "listener at capacity");
+                }
             }
         }
     }
     drop(listener);
     while let Some(result) = connections.next().await {
-        record_connection(result);
+        record_connection(result, &listener_label);
     }
     Ok(())
 }
@@ -315,9 +326,10 @@ async fn prepared_connection<T: ConnectionTransport>(
     stream: TcpStream,
     router: Router,
     peer: std::net::SocketAddr,
-    transport: std::sync::Arc<T>,
+    transport: Arc<T>,
     token: CancellationToken,
     protocol: Protocol,
+    listener_label: Arc<str>,
 ) -> ConnectionExit {
     // The factory call also executes inside this async body and its outer catch_unwind.
     let prepared = tokio::select! {
@@ -343,7 +355,7 @@ async fn prepared_connection<T: ConnectionTransport>(
         socket_peer: peer,
         metadata,
     };
-    let result = connection(io, router, info, token, protocol).await;
+    let result = connection(io, router, info, token, protocol, listener_label).await;
     // Keep product permits alive for the complete HTTP lifetime, never in cloned metadata.
     drop(guard);
     result
@@ -355,6 +367,7 @@ async fn connection<I, M>(
     info: AcceptedConnectionInfo<M>,
     token: CancellationToken,
     protocol: Protocol,
+    _listener_label: Arc<str>,
 ) -> ConnectionExit
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -362,76 +375,87 @@ where
 {
     let io = TokioIo::new(stream);
     let service = TowerToHyperService::new(router.layer(axum::Extension(info)));
-    match protocol {
-        #[cfg(feature = "http1")]
-        Protocol::Http1(policy) => {
-            let mut builder = hyper::server::conn::http1::Builder::new();
-            builder
-                .timer(TokioTimer::new())
-                .header_read_timeout(policy.header_read_timeout)
-                .max_headers(policy.max_headers)
-                .max_buf_size(policy.max_buffer_size);
-            let connection = builder.serve_connection(io, service);
-            tokio::pin!(connection);
-            tokio::select! {
-                biased;
-                () = token.cancelled() => {
-                    connection.as_mut().graceful_shutdown();
-                    classify(connection.await, true)
+    use hyper::service::Service as _;
+    let admitted = CancellationToken::new();
+    let started = admitted.clone();
+    let service = hyper::service::service_fn(move |request| {
+        started.cancel();
+        service.call(request)
+    });
+    let closing = token.clone();
+    let connection = async move {
+        match protocol {
+            #[cfg(feature = "http1")]
+            Protocol::Http1(policy) => {
+                let mut builder = hyper::server::conn::http1::Builder::new();
+                builder
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(policy.header_read_timeout)
+                    .max_headers(policy.max_headers)
+                    .max_buf_size(policy.max_buffer_size);
+                let connection = builder.serve_connection(io, service);
+                tokio::pin!(connection);
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        connection.as_mut().graceful_shutdown();
+                        classify(connection.await, true)
+                    }
+                    result = &mut connection => classify(result, false)
                 }
-                result = &mut connection => classify(result, false)
+            }
+            #[cfg(feature = "http2")]
+            Protocol::Http2(_) => {
+                let (sender, pending) = tokio::sync::mpsc::unbounded_channel();
+                let mut builder = hyper::server::conn::http2::Builder::new(ConnectionExecutor {
+                    sender,
+                    listener: _listener_label,
+                });
+                builder.timer(TokioTimer::new());
+                drive_streams(
+                    builder.serve_connection(io, service),
+                    pending,
+                    token,
+                    |connection| {
+                        connection.graceful_shutdown();
+                    },
+                )
+                .await
+            }
+            #[cfg(feature = "auto-protocol")]
+            Protocol::Auto(policy) => {
+                let (sender, pending) = tokio::sync::mpsc::unbounded_channel();
+                let mut builder =
+                    hyper_util::server::conn::auto::Builder::new(ConnectionExecutor {
+                        sender,
+                        listener: _listener_label,
+                    });
+                builder
+                    .http1()
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(policy.header_read_timeout)
+                    .max_headers(policy.max_headers)
+                    .max_buf_size(policy.max_buffer_size);
+                builder.http2().timer(TokioTimer::new());
+                drive_streams(
+                    builder.serve_connection(io, service),
+                    pending,
+                    token,
+                    |connection| connection.graceful_shutdown(),
+                )
+                .await
             }
         }
-        #[cfg(feature = "http2")]
-        Protocol::Http2(_) => {
-            let (sender, pending) = tokio::sync::mpsc::unbounded_channel();
-            let mut builder = hyper::server::conn::http2::Builder::new(ConnectionExecutor(sender));
-            builder.timer(TokioTimer::new());
-            drive_streams(
-                builder.serve_connection(io, service),
-                pending,
-                token,
-                |connection| {
-                    connection.graceful_shutdown();
-                },
-            )
-            .await
+    };
+    tokio::pin!(connection);
+    tokio::select! {
+        biased;
+        () = closing.cancelled() => {
+            if admitted.is_cancelled() { connection.await } else { ConnectionExit::Clean }
         }
-        #[cfg(feature = "auto-protocol")]
-        Protocol::Auto(policy) => {
-            use hyper::service::Service as _;
-            let (sender, pending) = tokio::sync::mpsc::unbounded_channel();
-            let mut builder =
-                hyper_util::server::conn::auto::Builder::new(ConnectionExecutor(sender));
-            builder
-                .http1()
-                .timer(TokioTimer::new())
-                .header_read_timeout(policy.header_read_timeout)
-                .max_headers(policy.max_headers)
-                .max_buf_size(policy.max_buffer_size);
-            builder.http2().timer(TokioTimer::new());
-            let admitted = CancellationToken::new();
-            let started = admitted.clone();
-            let service = hyper::service::service_fn(move |request| {
-                started.cancel();
-                service.call(request)
-            });
-            let connection = drive_streams(
-                builder.serve_connection(io, service),
-                pending,
-                token,
-                |connection| connection.graceful_shutdown(),
-            );
-            tokio::pin!(connection);
-            // Upstream hides its detection state. Bound establishment until the first service
-            // call instead of duplicating the preface parser or timing the entire connection.
-            tokio::select! {
-                biased;
-                result = &mut connection => result,
-                () = admitted.cancelled() => connection.await,
-                () = tokio::time::sleep(ESTABLISHMENT_TIMEOUT) => ConnectionExit::EstablishmentTimeout,
-            }
-        }
+        result = &mut connection => result,
+        () = admitted.cancelled() => connection.await,
+        () = tokio::time::sleep(protocol.policy().establishment_timeout) => ConnectionExit::EstablishmentTimeout,
     }
 }
 
@@ -441,7 +465,10 @@ type StreamJob = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// Hyper's required executor seam feeds the owning connection, not a runtime spawn API.
 #[cfg(feature = "http2")]
 #[derive(Clone)]
-struct ConnectionExecutor(tokio::sync::mpsc::UnboundedSender<StreamJob>);
+struct ConnectionExecutor {
+    sender: tokio::sync::mpsc::UnboundedSender<StreamJob>,
+    listener: Arc<str>,
+}
 
 #[cfg(feature = "http2")]
 impl<F> hyper::rt::Executor<F> for ConnectionExecutor
@@ -450,10 +477,11 @@ where
 {
     fn execute(&self, future: F) {
         // A failed send drops the future immediately when its connection owner is gone.
-        let _ = self.0.send(Box::pin(async move {
+        let listener = self.listener.clone();
+        let _ = self.sender.send(Box::pin(async move {
             // Isolate a stream panic without allowing its task to escape the connection.
             if AssertUnwindSafe(future).catch_unwind().await.is_err() {
-                record_exit(ConnectionExit::Panic, "stream");
+                record_exit(ConnectionExit::Panic, "stream", &listener);
             }
         }));
     }
@@ -493,3 +521,6 @@ mod accept_tests;
 
 #[cfg(all(test, feature = "http1"))]
 mod race_tests;
+
+#[cfg(all(test, feature = "http1"))]
+mod diagnostic_tests;

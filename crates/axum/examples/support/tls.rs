@@ -151,6 +151,7 @@ pub fn serve_policy() -> Result<ServePolicy, Error> {
     Ok(ServePolicy::new(
         128,
         Duration::from_secs(8),
+        Duration::from_secs(30),
         Duration::from_secs(10),
     )?)
 }
@@ -168,7 +169,9 @@ pub fn owner(registration: ManagedTaskRegistration) -> Result<ShutdownStack, Err
         TotalDrainBudget::new(Duration::from_secs(12))?,
         Arc::new(Timer),
     )?;
-    owner.startup()?.stage_task_with_token(registration);
+    let mut startup = owner.startup()?;
+    startup.stage_task_with_token(registration);
+    startup.commit().finish();
     Ok(owner)
 }
 

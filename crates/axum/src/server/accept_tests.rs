@@ -377,8 +377,13 @@ fn listener_diagnostics_are_bounded_and_never_exported_to_wire() {
 fn test_protocol() -> Protocol {
     Protocol::Http1(
         Http1ServePolicy::new(
-            ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(2))
-                .expect("valid policy"),
+            ServePolicy::new(
+                128,
+                Duration::from_secs(8),
+                Duration::from_secs(30),
+                Duration::from_secs(2),
+            )
+            .expect("valid policy"),
             Duration::from_secs(30),
             64,
             32768,

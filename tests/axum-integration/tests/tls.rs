@@ -75,7 +75,7 @@ async fn real_tls_preparation_timeout_frees_the_only_slot() -> Result<(), Error>
     let entered = transport.entered.clone();
     let slots = transport.slots.clone();
     let policy = rss_axum::Http1ServePolicy::new(
-        rss_axum::ServePolicy::new(1, Duration::from_millis(200), WAIT)?,
+        rss_axum::ServePolicy::new(1, Duration::from_millis(200), Duration::from_secs(30), WAIT)?,
         WAIT,
         64,
         32768,
@@ -178,7 +178,12 @@ async fn tls_slow_http_request_is_dropped_with_its_connection_permit() -> Result
     let transport = fixture.transport();
     let slots = transport.slots.clone();
     let policy = rss_axum::Http1ServePolicy::new(
-        rss_axum::ServePolicy::new(128, WAIT, Duration::from_millis(30))?,
+        rss_axum::ServePolicy::new(
+            128,
+            WAIT,
+            Duration::from_secs(30),
+            Duration::from_millis(30),
+        )?,
         WAIT,
         64,
         32768,
@@ -207,7 +212,7 @@ async fn tls_http1_limits_reject_bad_headers_without_stopping_listener() -> Resu
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let policy = rss_axum::Http1ServePolicy::new(
-        rss_axum::ServePolicy::new(128, WAIT, WAIT)?,
+        rss_axum::ServePolicy::new(128, WAIT, Duration::from_secs(30), WAIT)?,
         Duration::from_millis(100),
         64,
         32768,
@@ -248,8 +253,7 @@ impl Drop for BodyDropped {
 }
 
 #[tokio::test]
-async fn tls_response_body_is_retired_before_connection_guard_release_completes()
--> Result<(), Error> {
+async fn tls_response_body_and_connection_guard_are_retired() -> Result<(), Error> {
     let fixture = Fixture::new(&[b"http/1.1"])?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -276,7 +280,12 @@ async fn tls_response_body_is_retired_before_connection_guard_release_completes(
     let transport = fixture.transport();
     let slots = transport.slots.clone();
     let policy = rss_axum::Http1ServePolicy::new(
-        rss_axum::ServePolicy::new(128, WAIT, Duration::from_millis(30))?,
+        rss_axum::ServePolicy::new(
+            128,
+            WAIT,
+            Duration::from_secs(30),
+            Duration::from_millis(30),
+        )?,
         WAIT,
         64,
         32768,
@@ -325,6 +334,36 @@ async fn tls_http_panic_does_not_stop_healthy_peer() -> Result<(), Error> {
         .await?;
     assert!(tokio::time::timeout(WAIT, stream.read_u8()).await?.is_err());
     fixture::request(address, fixture.client).await?;
+    assert!(owner.shutdown().join().await?.is_clean());
+    assert_eq!(slots.available_permits(), 128);
+    Ok(())
+}
+
+#[tokio::test]
+async fn silent_tls_h2_peer_expires_and_releases_capacity_for_a_healthy_peer() -> Result<(), Error>
+{
+    let fixture = Fixture::new(&[b"h2"])?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let transport = fixture.transport();
+    let slots = transport.slots.clone();
+    let policy = rss_axum::ServePolicy::new(1, WAIT, Duration::from_millis(100), WAIT)?;
+    let owner = fixture::owner(rss_axum::serve_http2_registration(
+        listener,
+        fixture.router(),
+        transport,
+        "tls-h2-establishment",
+        policy,
+    ))?;
+    let (mut silent, _) = fixture::connect(address, fixture.client.clone(), b"h2").await?;
+    // Complete TLS but never send the H2 preface. Read any server SETTINGS until it closes.
+    let mut server_bytes = Vec::new();
+    let closed = tokio::time::timeout(WAIT, silent.read_to_end(&mut server_bytes)).await;
+    assert!(
+        closed.is_ok(),
+        "H2 establishment must not retain a slot indefinitely"
+    );
+    tokio::time::timeout(WAIT, h2_request(address, fixture.client)).await??;
     assert!(owner.shutdown().join().await?.is_clean());
     assert_eq!(slots.available_permits(), 128);
     Ok(())
