@@ -135,7 +135,8 @@ use std::time::Duration;
 use rss_runtime::{ShutdownStack, TotalDrainBudget};
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 let registration = rss_axum::serve_http2_registration(
-    listener, axum::Router::new(), "http", Duration::from_secs(5));
+    listener, axum::Router::new(), rss_axum::PlainTransport, "http",
+    rss_axum::ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(5))?);
 let status = registration.status();
 let mut owner = ShutdownStack::try_new(TotalDrainBudget::new(Duration::from_secs(10))?, timer)?;
 let mut startup = owner.startup()?;
@@ -149,10 +150,10 @@ let _exit = status.wait_stopped().await;
 ```
 
 Only adoption starts the task. Dropping an unadopted registration closes its socket. The
-managed task directly owns a FuturesUnordered set of Hyper connection futures; it does
+managed task directly owns one FuturesUnordered set of preparation-to-HTTP connection futures; it does
 not spawn independent connection tasks. Hyper's executor submits stream futures to a private
-connection-owned queue and future set, so HTTP/2 stream work shares the same cancellation owner. Cancellation first stops accept, then requests graceful
-shutdown of all existing connections. The runtime's drain timeout cancels the same owning task
+connection-owned queue and future set, so HTTP/2 stream work shares the same cancellation owner. Cancellation first stops accept and cancels incomplete preparation, then requests graceful
+shutdown of established connections. The runtime's drain timeout cancels the same owning task
 and its remaining request/response-body futures, so they cannot resume when later dependencies
 shut down. A timeout is still a failed drain, not successful completion of those requests.
 
@@ -170,7 +171,7 @@ policy even when another dependency enables additional features.
 protocol features alone does not expose the Auto constructor. Hyper owns parsing, keep-alive
 and graceful close; hyper-util owns Auto detection. H1 drain disables keep-alive while allowing
 an active request/response body to finish; Auto drain also cancels unfinished protocol detection.
-H1 request headers have an explicit 30-second read timeout, including later requests on a
+H1 request headers use the explicit Http1ServePolicy timeout, including later requests on a
 keep-alive connection. Auto additionally allows 30 seconds from connection driving until the
 first decoded request reaches the service, bounding idle/partial protocol detection and initial
 headers without duplicating Hyper's parser. This establishment deadline is disabled before the
@@ -179,7 +180,7 @@ H2 streams. These transport deadlines are independent of the product's RequestBu
 A connection panic or protocol failure terminates that connection without taking unrelated
 clients down. H2 stream panics are additionally isolated within the connection-owned executor.
 Managed serving emits DEBUG tracing events under `rss_axum::server` with closed `outcome`
-(`peer_error`, `panic`, `establishment_timeout`) and `scope` (`connection`, `stream`) fields.
+(`peer_error`, `panic`, `preparation_error`, `preparation_timeout`, `establishment_timeout`) and `scope` (`connection`, `stream`) fields.
 RSS does not record error text, peer input or panic payloads in those events, and installs no
 subscriber; the product owns filtering/export and the process panic hook.
 
@@ -191,10 +192,12 @@ A product can select different policies in the same binary:
 use std::time::Duration;
 let device = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
 let admin = tokio::net::TcpListener::bind("127.0.0.1:8081").await?;
+let policy = rss_axum::ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(5))?;
+let h1 = rss_axum::Http1ServePolicy::new(policy, Duration::from_secs(10), 64, 32768)?;
 let device = rss_axum::serve_auto_registration(
-    device, axum::Router::new(), "device", Duration::from_secs(5));
+    device, axum::Router::new(), rss_axum::PlainTransport, "device", h1);
 let admin = rss_axum::serve_http2_registration(
-    admin, axum::Router::new(), "admin", Duration::from_secs(5));
+    admin, axum::Router::new(), rss_axum::PlainTransport, "admin", policy);
 // Stage both registrations in the product's ShutdownStack to start them.
 # drop((device, admin));
 # Ok(()) }
@@ -206,13 +209,50 @@ independent of this choice. These are plain TCP transports: TLS/ALPN and the TLS
 needed for direct HTTPS remain product responsibilities. Auto does not itself implement HTTPS,
 h2c Upgrade, WebSocket or CONNECT tunnels, or hand upgraded IO to another owner.
 
-### Migration from the initial experimental API
+### Transport preparation and migration (#2418)
 
-Replace dependency feature `managed-server` with `http2` and calls to the removed
-`serve_registration` with `serve_http2_registration` to retain the initial H2-only behavior.
-Select `http1` or `auto-protocol` and their explicit constructors when those policies are needed.
-There is no compatibility alias or implicit protocol fallback. The current Release Surface
-records an uncommitted Rust API (#2315); this replacement retains the 0.1.0 package version.
+All three constructors now require an explicit `ConnectionTransport` and validated policy.
+There are no old-signature wrappers or parallel TLS constructors. Existing plain consumers pass
+`PlainTransport`, `ServePolicy` (H2) or `Http1ServePolicy` (H1/Auto). Policy capacity counts all
+accepted connections, including preparation, and has no unlimited mode. All durations must be
+positive and representable; H1 header capacity is positive and its buffer is at least 8192 bytes.
+
+A product implements `ConnectionTransport::prepare` over the TCP stream and socket peer supplied
+by RSS. It performs admission, TLS/ALPN and client verification, then returns
+`EstablishedTransport::new(io, metadata, guard)`. RSS polls this entire preparation future in the
+same connection future that subsequently drives HTTP. Metadata is Clone + Send + Sync; the guard
+only needs Send and remains owned through HTTP completion or cancellation. Keep connection
+permits in the guard, not in metadata cloned into requests. Generic metadata is not proof that a
+product verifier is correct; authentication and tenant/device authority stay with the product.
+
+The preparation budget covers the entire product future, including failure handling. For a
+product doing five seconds of TLS followed by up to two seconds of failure audit, select an
+explicit larger total budget (the example uses eight seconds). No separate audit hook or
+background task is needed. A preparation error, factory/poll panic or preparation timeout closes
+only that connection. Cancellation wins over preparation and prevents a ready transport from
+being promoted to HTTP; already-established HTTP connections retain graceful drain.
+
+Requests receive only `Extension<AcceptedConnectionInfo<M>>`, with `socket_peer()` and
+`metadata()`. RSS privately binds these after preparation succeeds; a transport cannot override
+the original TCP peer. Forwarding headers are never interpreted. Trusted in-process middleware
+and the semantics of product metadata remain outside this construction guarantee.
+
+This is a breaking replacement of the experimental Rust API (uncommitted under #2315), retaining
+version 0.1.0. Update all listener calls and replace `ConnectInfo<SocketAddr>` extraction with
+`Extension<AcceptedConnectionInfo<M>>` (M = () for PlainTransport). Consumers mounting third-party
+routers that require standard ConnectInfo must explicitly map the RSS context at their product
+integration boundary. There is no standard ConnectInfo duplicate projection inside RSS.
+
+`cargo run -p rss-axum --example tls --features http1` runs the real rustls public consumer with
+verified client certificate metadata, actual TCP peer and permit release. Its source is reused
+by `axum-integration` and `hack/axum-package-proof.py` for isolated source/artifact consumption.
+Rustls/rcgen are example and test dependencies only. These assertions do not promise TLS
+close_notify, production certificate configuration, MDM migration or Windows T3.
+
+MDM #998 must later upgrade its fixed RSS revision, migrate both Windows TLS listeners and the
+browser registration, and remove its duplicate Hyper/futures lifecycle. Its F4 remains blocked
+until that product migration and real PG/TLS acceptance complete; #2418 library proof alone does
+not close the product finding.
 
 Cancellation remains cooperative: handlers must yield and the original Tokio runtime must
 continue being driven. Blocking code, product-spawned tasks and remote effects are not made
@@ -227,7 +267,7 @@ Source: `baseline/pre-community-core-20260902` at
 Historical sources are not test evidence. #2299 owns retirement of the old packages; this package
 never forwards to them. Tests cover compile-time binding, budgets, safe errors and real sockets.
 `hack/axum-package-proof.py` checks isolated artifact consumers for base, lifecycle-only,
-H1-only, H2-only, H1+H2, Auto and all features, plus the shared contract/platform composition.
+H1-only, H2-only, H1+H2, Auto, all features and a real TLS consumer, plus the shared contract/platform composition.
 It verifies actual protocol feature resolution and missing API boundaries, and runs real requests
 and shutdown for H1, H2 and Auto. Candidate mode binds revision, version and archive digest.
 The managed example is shared with those artifact consumers; component tests own the fault matrix.
@@ -244,9 +284,9 @@ ref: hyperium/hyper src/server/conn/http2.rs@v1.10.1
 ref: hyperium/hyper-util src/server/conn/auto/mod.rs@v0.1.20
 ref: rust-lang/futures-rs futures-util/src/stream/futures_unordered/mod.rs@0.3.32
 
-Managed listeners inject the accepted TCP peer as standard Axum `ConnectInfo<SocketAddr>`
-on every request, for HTTP/1, HTTP/2 and Auto. They never interpret proxy headers;
-products own trusted proxy normalization and client attribution.
+Managed listeners expose the accepted TCP peer and preparation metadata through
+`Extension<AcceptedConnectionInfo<M>>` for HTTP/1, HTTP/2 and Auto. Products own trusted proxy
+normalization and client attribution; network headers cannot construct this RSS context.
 
 ### Listener recovery
 
@@ -262,8 +302,7 @@ recovery emit closed `accept_retry` / `accept_recovered` events with the stable 
 data. Other names render as `<redacted>`; wire projection always redacts the name. Repeated failures
 do not grow logs. Raw error text and peer data are not included in these recovery events.
 
-This bounds retry overhead, not total server capacity: the current connection set has no explicit
-connection-count limit. Product hosts own readiness, alerting, traffic removal, exit/restart and
-capacity values. A future local connection limit must be enforced by this connection owner; HTTP
-handler concurrency alone cannot bound TCP connections. No automatic restart or fixed listener
-failure window is installed by this adapter.
+Retry overhead is bounded independently of ServePolicy capacity. The connection owner enforces
+the caller-selected limit over preparation and established connections; HTTP handler concurrency
+alone cannot bound TCP connections. Product hosts own capacity values, readiness, alerting,
+traffic removal and exit/restart. No automatic restart or fixed listener failure window is installed.

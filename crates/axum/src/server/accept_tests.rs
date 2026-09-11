@@ -109,8 +109,9 @@ async fn accept_pressure_retains_healthy_connection_and_recovers_after_thirty_se
                 error: || std::io::Error::from(std::io::ErrorKind::OutOfMemory),
             },
             Router::new().route("/", axum::routing::get(|| async { "ok" })),
+            PlainTransport,
             token.clone(),
-            Protocol::Http1,
+            test_protocol(),
             "pressure-listener",
         )
         .with_subscriber(subscriber),
@@ -162,8 +163,9 @@ async fn accept_recovery_has_bounded_attempts_and_cancels_without_waiting_for_re
             error: || std::io::Error::from(std::io::ErrorKind::OutOfMemory),
         },
         Router::new(),
+        PlainTransport,
         token.clone(),
-        Protocol::Http1,
+        test_protocol(),
         "pressure-listener",
     );
     tokio::pin!(server);
@@ -199,8 +201,9 @@ async fn unknown_accept_error_is_terminal() {
             error: || std::io::Error::other("private"),
         },
         Router::new(),
+        PlainTransport,
         CancellationToken::new(),
-        Protocol::Http1,
+        test_protocol(),
         "pressure-listener",
     )
     .await
@@ -289,8 +292,9 @@ async fn cancellation_during_accept_recovery_drains_existing_connection() {
             error: || std::io::Error::from(std::io::ErrorKind::OutOfMemory),
         },
         Router::new().route("/", axum::routing::get(|| async { "ok" })),
+        PlainTransport,
         token.clone(),
-        Protocol::Http1,
+        test_protocol(),
         "pressure-listener",
     ));
     let mut stream = TcpStream::connect(addr).await.expect("connect");
@@ -332,8 +336,9 @@ async fn accept_recovery_redacts_untrusted_listener_name() {
             error: || std::io::Error::from(std::io::ErrorKind::OutOfMemory),
         },
         Router::new(),
+        PlainTransport,
         token.clone(),
-        Protocol::Http1,
+        test_protocol(),
         "amqps://user:password@private/tenant\nforged-event",
     )
     .with_subscriber(subscriber);
@@ -366,4 +371,18 @@ fn listener_diagnostics_are_bounded_and_never_exported_to_wire() {
         safe(&ListenerLogName("http-main_1"), RedactScope::Wire),
         "<redacted>"
     );
+}
+
+#[allow(clippy::expect_used)] // reason: fixed valid policies for accept fault injection.
+fn test_protocol() -> Protocol {
+    Protocol::Http1(
+        Http1ServePolicy::new(
+            ServePolicy::new(128, Duration::from_secs(8), Duration::from_secs(2))
+                .expect("valid policy"),
+            Duration::from_secs(30),
+            64,
+            32768,
+        )
+        .expect("valid H1 policy"),
+    )
 }

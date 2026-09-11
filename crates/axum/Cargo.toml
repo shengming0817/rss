@@ -41,6 +41,8 @@ libc = { workspace = true, optional = true }
 windows-sys = { workspace = true, optional = true, features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
+tokio-rustls.workspace = true
+rcgen.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
@@ -59,3 +61,7 @@ workspace = true
 [[example]]
 name = "managed"
 required-features = ["managed-server"]
+
+[[example]]
+name = "tls"
+required-features = ["http1"]

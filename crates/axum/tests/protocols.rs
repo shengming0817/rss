@@ -1,4 +1,6 @@
 #![cfg(feature = "http1")]
+#[path = "support/registration.rs"]
+mod registration;
 #[path = "support/timer.rs"]
 mod timer;
 
@@ -25,9 +27,9 @@ type Register = fn(TcpListener, Router, &'static str, Duration) -> ManagedTaskRe
 
 fn constructors() -> Vec<Register> {
     vec![
-        rss_axum::serve_http1_registration,
+        registration::http1,
         #[cfg(feature = "auto-protocol")]
-        rss_axum::serve_auto_registration,
+        registration::auto,
     ]
 }
 
@@ -355,7 +357,7 @@ async fn http1_listener_does_not_dispatch_h2_preface() {
             }),
         )
     };
-    let (addr, owner) = start(rss_axum::serve_http1_registration, router, WAIT).await;
+    let (addr, owner) = start(registration::http1, router, WAIT).await;
     let mut peer = TcpStream::connect(addr).await.unwrap();
     peer.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
         .await
@@ -373,7 +375,7 @@ async fn http1_listener_does_not_dispatch_h2_preface() {
 #[allow(clippy::unwrap_used)]
 async fn auto_accepts_both_protocols_on_one_listener() {
     let (addr, owner) = start(
-        rss_axum::serve_auto_registration,
+        registration::auto,
         Router::new().route("/", get(|| async { "auto" })),
         WAIT,
     )
@@ -412,7 +414,7 @@ async fn auto_accepts_both_protocols_on_one_listener() {
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
 async fn auto_drain_cancels_idle_and_partial_preface_connections() {
-    let (addr, owner) = start(rss_axum::serve_auto_registration, Router::new(), WAIT).await;
+    let (addr, owner) = start(registration::auto, Router::new(), WAIT).await;
     let mut idle = TcpStream::connect(addr).await.unwrap();
     let mut partial = TcpStream::connect(addr).await.unwrap();
     partial.write_all(b"PRI * HTTP/2").await.unwrap();
@@ -575,7 +577,7 @@ async fn establishment_deadline_closes_partial_headers_without_stopping_listener
 #[allow(clippy::unwrap_used)]
 async fn establishment_deadline_closes_partial_exact_h2_preface() {
     for prefix in [b"".as_slice(), b"PRI * HTTP/2.0\r\n\r\nSM\r\n".as_slice()] {
-        let (addr, owner) = start(rss_axum::serve_auto_registration, Router::new(), WAIT).await;
+        let (addr, owner) = start(registration::auto, Router::new(), WAIT).await;
         let mut slow = TcpStream::connect(addr).await.unwrap();
         slow.write_all(prefix).await.unwrap();
         let mut ready = Client::connect(addr).await;
@@ -641,9 +643,17 @@ async fn establishment_deadline_does_not_limit_an_admitted_handler() {
 
 #[tokio::test]
 #[allow(clippy::unwrap_used)]
-async fn accepted_peer_is_available_to_standard_extractor() {
+async fn accepted_peer_is_bound_to_rss_connection_info() {
     for register in constructors() {
-        let app = Router::new().route("/", get(|axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>| async move { peer.to_string() }));
+        let app =
+            Router::new().route(
+                "/",
+                get(
+                    |axum::Extension(info): axum::Extension<
+                        rss_axum::AcceptedConnectionInfo<()>,
+                    >| async move { info.socket_peer().to_string() },
+                ),
+            );
         let (address, owner) = start(register, app, WAIT).await;
         let mut client = Client::connect(address).await;
         let response = client.request("/").await.unwrap();

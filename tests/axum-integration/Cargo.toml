@@ -1,0 +1,22 @@
+[package]
+name = "axum-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rss-axum = { workspace = true, features = ["auto-protocol"] }
+rss-runtime.workspace = true
+rss-request-context.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio-rustls.workspace = true
+rcgen.workspace = true
+futures.workspace = true
+hyper = { workspace = true, features = ["client", "http2"] }
+hyper-util.workspace = true
+http-body-util.workspace = true

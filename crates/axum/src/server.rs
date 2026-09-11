@@ -11,63 +11,63 @@ use rss_runtime::{ManagedTask, ManagedTaskRegistration, ShutdownError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
-/// Register an HTTP/1-only TCP listener without starting work.
-///
-/// Adoption transfers the listener and all connection/request/response-body futures to one
-/// runtime task. Cancellation stops accept and disables keep-alive, allowing active responses
-/// to finish. A runtime drain timeout drops the remaining futures and reports a failed drain.
-/// Handlers must yield; product-spawned work and remote effects remain outside this owner.
-/// Each H1 request header has a 30-second read timeout.
-/// TLS/ALPN, WebSocket, CONNECT and upgraded IO are not provided.
+mod policy;
+mod transport;
 #[cfg(feature = "http1")]
-pub fn serve_http1_registration(
+pub use policy::Http1ServePolicy;
+pub use policy::{ServePolicy, ServePolicyError};
+pub use transport::{
+    AcceptedConnectionInfo, ConnectionTransport, EstablishedTransport, PlainTransport,
+};
+
+/// Register a prepared HTTP/1 listener without starting work.
+/// Products provide TLS/ALPN and admission through `transport`. RSS owns preparation, IO,
+/// requests and response bodies. Cancellation stops preparation and gracefully drains HTTP;
+/// runtime timeout drops remaining futures. Handlers and preparation must yield.
+/// Upgraded IO, product-spawned work and remote effects are outside this owner.
+#[cfg(feature = "http1")]
+pub fn serve_http1_registration<T: ConnectionTransport>(
     listener: TcpListener,
     router: Router,
+    transport: T,
     name: impl Into<String>,
-    shutdown_timeout: Duration,
+    policy: Http1ServePolicy,
 ) -> ManagedTaskRegistration {
-    registration(listener, router, name, shutdown_timeout, Protocol::Http1)
+    registration(listener, router, transport, name, Protocol::Http1(policy))
 }
 
-/// Register an HTTP/2 prior-knowledge TCP listener without starting work.
-///
-/// This listener remains H2-only even when other protocol features are enabled. Adoption
-/// transfers all connections and H2 stream futures to one runtime task. Cancellation stops
-/// accept and requests graceful shutdown; a runtime drain timeout drops remaining request and
-/// response-body futures and reports a failed drain. Handlers must yield and the runtime must
-/// remain driven. Product-spawned work, remote effects, TLS/ALPN and tunnels are outside this owner.
+/// Register an HTTP/2-only listener with explicit transport and lifecycle policy.
+/// RSS retains ownership of preparation and every H2 stream future, including response bodies.
+/// Products choose TLS/ALPN; this constructor always serves HTTP/2. Cancellation requests
+/// graceful shutdown; runtime timeout drops remaining futures. All work must yield.
 #[cfg(feature = "http2")]
-pub fn serve_http2_registration(
+pub fn serve_http2_registration<T: ConnectionTransport>(
     listener: TcpListener,
     router: Router,
+    transport: T,
     name: impl Into<String>,
-    shutdown_timeout: Duration,
+    policy: ServePolicy,
 ) -> ManagedTaskRegistration {
-    registration(listener, router, name, shutdown_timeout, Protocol::Http2)
+    registration(listener, router, transport, name, Protocol::Http2(policy))
 }
 
-/// Register one TCP listener accepting HTTP/1 and HTTP/2 prior knowledge without starting work.
-///
-/// Hyper-util detects the protocol. This does not perform TLS/ALPN or h2c Upgrade negotiation.
-/// Adoption transfers every connection and stream future to one runtime task. Cancellation
-/// stops accept, cancels pending protocol detection and drains established connections; a
-/// runtime drain timeout drops remaining futures and reports a failed drain. Handlers must
-/// yield; product-spawned work, remote effects and upgraded IO are outside this owner.
-/// The first decoded request must reach the service within 30 seconds (including protocol
-/// detection); that deadline is then disabled, so it does not limit handlers or response bodies.
-/// H1 request headers also have their own 30-second read timeout.
+/// Register an HTTP/1 and HTTP/2 listener with explicit transport and lifecycle policy.
+/// Hyper-util detects the protocol on prepared IO. Products own TLS/ALPN consistency; RSS
+/// does not negotiate ALPN or h2c Upgrade. Preparation is bounded by policy, then the first
+/// request must reach the service within 30 seconds. This latter deadline does not limit
+/// admitted handlers or response bodies. Cancellation stops detection and drains HTTP;
+/// runtime timeout drops remaining work. All work must yield.
 #[cfg(feature = "auto-protocol")]
-pub fn serve_auto_registration(
+pub fn serve_auto_registration<T: ConnectionTransport>(
     listener: TcpListener,
     router: Router,
+    transport: T,
     name: impl Into<String>,
-    shutdown_timeout: Duration,
+    policy: Http1ServePolicy,
 ) -> ManagedTaskRegistration {
-    registration(listener, router, name, shutdown_timeout, Protocol::Auto)
+    registration(listener, router, transport, name, Protocol::Auto(policy))
 }
 
-#[cfg(feature = "http1")]
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(feature = "auto-protocol")]
 const ESTABLISHMENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -76,6 +76,8 @@ enum ConnectionExit {
     Clean,
     PeerError,
     Panic,
+    PreparationError,
+    PreparationTimeout,
     #[cfg(feature = "auto-protocol")]
     EstablishmentTimeout,
 }
@@ -112,6 +114,8 @@ fn record_exit(exit: ConnectionExit, scope: &'static str) {
         ConnectionExit::Clean => return,
         ConnectionExit::PeerError => "peer_error",
         ConnectionExit::Panic => "panic",
+        ConnectionExit::PreparationError => "preparation_error",
+        ConnectionExit::PreparationTimeout => "preparation_timeout",
         #[cfg(feature = "auto-protocol")]
         ConnectionExit::EstablishmentTimeout => "establishment_timeout",
     };
@@ -123,29 +127,42 @@ fn record_exit(exit: ConnectionExit, scope: &'static str) {
 #[derive(Clone, Copy)]
 enum Protocol {
     #[cfg(feature = "http1")]
-    Http1,
+    Http1(Http1ServePolicy),
     #[cfg(feature = "http2")]
-    Http2,
+    Http2(ServePolicy),
     #[cfg(feature = "auto-protocol")]
-    Auto,
+    Auto(Http1ServePolicy),
 }
 
-/// INVARIANT: AXUM-CONNECTION-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "private connection futures live in the managed task's FuturesUnordered; HTTP/2 executor enqueues futures into a private connection-owned set, never a Tokio task or upgraded IO handoff" }.
+impl Protocol {
+    fn policy(self) -> ServePolicy {
+        match self {
+            #[cfg(feature = "http1")]
+            Self::Http1(policy) => policy.serve,
+            #[cfg(feature = "http2")]
+            Self::Http2(policy) => policy,
+            #[cfg(feature = "auto-protocol")]
+            Self::Auto(policy) => policy.serve,
+        }
+    }
+}
+
+/// INVARIANT: AXUM-CONNECTION-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "private preparation-to-HTTP futures and their guards live in the managed task's one FuturesUnordered; HTTP/2 executor enqueues futures into a private connection-owned set, never a Tokio task or upgraded IO handoff" }.
 /// ref: hyperium/hyper src/server/conn/http1.rs@v1.10.1
 /// ref: hyperium/hyper src/server/conn/http2.rs@v1.10.1
 /// ref: hyperium/hyper-util src/server/conn/auto/mod.rs@v0.1.20
 /// ref: rust-lang/futures-rs futures-util/src/stream/futures_unordered/mod.rs@0.3.32
-fn registration(
+fn registration<T: ConnectionTransport>(
     listener: TcpListener,
     router: Router,
+    transport: T,
     name: impl Into<String>,
-    shutdown_timeout: Duration,
     protocol: Protocol,
 ) -> ManagedTaskRegistration {
     let name = name.into();
-    let (start, _) = ManagedTask::prepare(name.clone(), shutdown_timeout);
+    let (start, _) = ManagedTask::prepare(name.clone(), protocol.policy().shutdown_timeout);
     start.into_registration(move |token| async move {
-        serve_owned(listener, router, token, protocol, &name).await
+        serve_owned(listener, router, transport, token, protocol, &name).await
     })
 }
 
@@ -258,14 +275,16 @@ async fn accept_with_retry(
     }
 }
 
-async fn serve_owned(
+async fn serve_owned<T: ConnectionTransport>(
     mut listener: impl Accept,
     router: Router,
+    transport: T,
     token: CancellationToken,
     protocol: Protocol,
     name: &str,
 ) -> Result<(), ShutdownError> {
     let name = ListenerLogName(name);
+    let transport = std::sync::Arc::new(transport);
     let mut connections = FuturesUnordered::new();
     let mut retry_wait: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
@@ -276,11 +295,11 @@ async fn serve_owned(
             Some(result) = connections.next(), if !connections.is_empty() => {
                 record_connection(result);
             },
-            accepted = accept_with_retry(&mut listener, &mut retry_wait, &name) => {
+            accepted = accept_with_retry(&mut listener, &mut retry_wait, &name), if connections.len() < protocol.policy().connection_limit => {
                 let Some((stream, peer)) = accepted? else { continue; };
                 // H1 handlers run inside the connection future. Isolate their panics too.
-                connections.push(AssertUnwindSafe(connection(
-                    stream, router.clone(), peer, token.clone(), protocol,
+                connections.push(AssertUnwindSafe(prepared_connection(
+                    stream, router.clone(), peer, transport.clone(), token.clone(), protocol,
                 )).catch_unwind());
             }
         }
@@ -292,23 +311,66 @@ async fn serve_owned(
     Ok(())
 }
 
-async fn connection(
+async fn prepared_connection<T: ConnectionTransport>(
     stream: TcpStream,
     router: Router,
     peer: std::net::SocketAddr,
+    transport: std::sync::Arc<T>,
     token: CancellationToken,
     protocol: Protocol,
 ) -> ConnectionExit {
+    // The factory call also executes inside this async body and its outer catch_unwind.
+    let prepared = tokio::select! {
+        biased;
+        () = token.cancelled() => return ConnectionExit::Clean,
+        result = tokio::time::timeout(protocol.policy().preparation_timeout, async { transport.prepare(stream, peer).await }) => {
+            match result {
+                Ok(Ok(prepared)) => prepared,
+                Ok(Err(_)) => return ConnectionExit::PreparationError,
+                Err(_) => return ConnectionExit::PreparationTimeout,
+            }
+        }
+    };
+    if token.is_cancelled() {
+        return ConnectionExit::Clean;
+    }
+    let EstablishedTransport {
+        io,
+        metadata,
+        guard,
+    } = prepared;
+    let info = AcceptedConnectionInfo {
+        socket_peer: peer,
+        metadata,
+    };
+    let result = connection(io, router, info, token, protocol).await;
+    // Keep product permits alive for the complete HTTP lifetime, never in cloned metadata.
+    drop(guard);
+    result
+}
+
+async fn connection<I, M>(
+    stream: I,
+    router: Router,
+    info: AcceptedConnectionInfo<M>,
+    token: CancellationToken,
+    protocol: Protocol,
+) -> ConnectionExit
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    M: Clone + Send + Sync + 'static,
+{
     let io = TokioIo::new(stream);
-    let service =
-        TowerToHyperService::new(router.layer(axum::Extension(axum::extract::ConnectInfo(peer))));
+    let service = TowerToHyperService::new(router.layer(axum::Extension(info)));
     match protocol {
         #[cfg(feature = "http1")]
-        Protocol::Http1 => {
+        Protocol::Http1(policy) => {
             let mut builder = hyper::server::conn::http1::Builder::new();
             builder
                 .timer(TokioTimer::new())
-                .header_read_timeout(HEADER_READ_TIMEOUT);
+                .header_read_timeout(policy.header_read_timeout)
+                .max_headers(policy.max_headers)
+                .max_buf_size(policy.max_buffer_size);
             let connection = builder.serve_connection(io, service);
             tokio::pin!(connection);
             tokio::select! {
@@ -321,7 +383,7 @@ async fn connection(
             }
         }
         #[cfg(feature = "http2")]
-        Protocol::Http2 => {
+        Protocol::Http2(_) => {
             let (sender, pending) = tokio::sync::mpsc::unbounded_channel();
             let mut builder = hyper::server::conn::http2::Builder::new(ConnectionExecutor(sender));
             builder.timer(TokioTimer::new());
@@ -336,7 +398,7 @@ async fn connection(
             .await
         }
         #[cfg(feature = "auto-protocol")]
-        Protocol::Auto => {
+        Protocol::Auto(policy) => {
             use hyper::service::Service as _;
             let (sender, pending) = tokio::sync::mpsc::unbounded_channel();
             let mut builder =
@@ -344,7 +406,9 @@ async fn connection(
             builder
                 .http1()
                 .timer(TokioTimer::new())
-                .header_read_timeout(HEADER_READ_TIMEOUT);
+                .header_read_timeout(policy.header_read_timeout)
+                .max_headers(policy.max_headers)
+                .max_buf_size(policy.max_buffer_size);
             builder.http2().timer(TokioTimer::new());
             let admitted = CancellationToken::new();
             let started = admitted.clone();
@@ -426,3 +490,6 @@ where
 
 #[cfg(all(test, feature = "http1"))]
 mod accept_tests;
+
+#[cfg(all(test, feature = "http1"))]
+mod race_tests;
