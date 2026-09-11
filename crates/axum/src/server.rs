@@ -274,6 +274,32 @@ async fn accept_with_retry(
     }
 }
 
+// Capacity is derived from the one connection set; this stores only transition history.
+struct Capacity {
+    limit: usize,
+    saturated: bool,
+}
+
+impl Capacity {
+    fn accepts(&self, active: usize) -> bool {
+        active < self.limit
+    }
+
+    fn observe(&mut self, active: usize, closing: bool, listener: &str) {
+        let saturated = !self.accepts(active);
+        if closing || saturated == self.saturated {
+            return;
+        }
+        self.saturated = saturated;
+        let outcome = if saturated {
+            "capacity_saturated"
+        } else {
+            "capacity_recovered"
+        };
+        tracing::debug!(target: "rss_axum::server", outcome, listener, limit = self.limit, "listener capacity changed");
+    }
+}
+
 async fn serve_owned<T: ConnectionTransport>(
     mut listener: impl Accept,
     router: Router,
@@ -286,9 +312,11 @@ async fn serve_owned<T: ConnectionTransport>(
     let transport = Arc::new(transport);
     let listener_label: Arc<str> =
         rss_redact::safe(&name, rss_redact::RedactScope::ServerLog).into();
-    let limit = protocol.policy().connection_limit;
+    let mut capacity = Capacity {
+        limit: protocol.policy().connection_limit,
+        saturated: false,
+    };
     let mut connections = FuturesUnordered::new();
-    let mut saturated = false;
     let mut retry_wait: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
         tokio::select! {
@@ -297,21 +325,15 @@ async fn serve_owned<T: ConnectionTransport>(
             // Completed/failed peers leave the set without terminating unrelated clients.
             Some(result) = connections.next(), if !connections.is_empty() => {
                 record_connection(result, &listener_label);
-                if saturated && !token.is_cancelled() {
-                    tracing::debug!(target: "rss_axum::server", outcome = "capacity_recovered", listener = %listener_label, limit, "listener has capacity");
-                    saturated = false;
-                }
+                capacity.observe(connections.len(), token.is_cancelled(), &listener_label);
             },
-            accepted = accept_with_retry(&mut listener, &mut retry_wait, &name), if connections.len() < limit => {
+            accepted = accept_with_retry(&mut listener, &mut retry_wait, &name), if capacity.accepts(connections.len()) => {
                 let Some((stream, peer)) = accepted? else { continue; };
                 // H1 handlers run inside the connection future. Isolate their panics too.
                 connections.push(AssertUnwindSafe(prepared_connection(
                     stream, router.clone(), peer, transport.clone(), token.clone(), protocol, listener_label.clone(),
                 )).catch_unwind());
-                if connections.len() == limit {
-                    saturated = true;
-                    tracing::debug!(target: "rss_axum::server", outcome = "capacity_saturated", listener = %listener_label, limit, "listener at capacity");
-                }
+                capacity.observe(connections.len(), token.is_cancelled(), &listener_label);
             }
         }
     }
