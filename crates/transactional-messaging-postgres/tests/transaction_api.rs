@@ -61,3 +61,14 @@ fn writer_needs_only_the_callers_transaction() {
     }
     let _ = (construct, append);
 }
+
+#[test]
+fn producer_can_validate_companion_transaction_without_appending() {
+    fn validate(
+        writer: &rss_transactional_messaging_postgres::PgOutboxWriter,
+        tx: &PgTransaction<'_>,
+    ) -> Result<(), rss_transactional_messaging_postgres::PgError> {
+        writer.validate_transaction(tx)
+    }
+    let _ = validate;
+}

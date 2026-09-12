@@ -18,6 +18,12 @@
 - tenant 表必须 ENABLE/FORCE RLS；跨租 relay 仅通过专属 NOLOGIN/NOBYPASSRLS 函数角色和 Outbox
   显式 policy 获得最小权限，runtime 不得成为该角色成员。
 
+## Companion transaction admission
+
+`PgOutboxWriter::validate_transaction` 通过私有 runtime provenance 拒绝其它 runtime 的事务。
+companion repository 在任何读写之前调用，包括不会追加消息的读取、幂等重放和无变化操作。
+校验不执行 SQL、不提交事务，不要求构造 relay store 或 delivery budget；tenant 授权和业务组合仍归宿主。
+
 ## Relay
 
 - publish success 后 settle 前崩溃允许 duplicate；ambiguous outcome 必须用原 event ID 重试。

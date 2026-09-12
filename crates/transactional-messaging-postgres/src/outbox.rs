@@ -30,7 +30,10 @@ impl PgOutboxWriter {
     }
     /// Reject a transaction from a different runtime before any companion operation.
     /// Transaction provenance is private and minted by the enclosing runtime, never caller data.
-    fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
+    /// Companion repositories must call this before reads or writes, including operations that
+    /// append no message. This performs no SQL, grants no relay capability, and does not commit.
+    /// It proves runtime ownership only; the host still owns tenant authorization and composition.
+    pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
         if !tx.belongs_to(&self.runtime) {
             tracing::warn!(
                 phase = "transaction",

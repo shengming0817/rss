@@ -65,6 +65,7 @@ async fn interoperability(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
         runtime
             .local_tx(tenant, deadline(), move |tx| {
                 Box::pin(async move {
+                    writer.validate_transaction(tx)?;
                     let first = PendingMessage::new(message(id));
                     let second = PendingMessage::new(message(id));
                     let (inserted, repeated) = if full_first {
@@ -114,10 +115,22 @@ async fn rejection(runtime: Arc<PgRuntime>, config: PgConfig) -> anyhow::Result<
         (runtime.clone(), other_tenant, "integration"),
         (runtime.clone(), tenant, "wrong-domain"),
     ] {
+        let same_runtime = Arc::ptr_eq(&owner, &runtime);
         let writer = PgOutboxWriter::new(owner, MessagingDomain::parse(domain)?);
         let outcome = runtime
             .local_tx(tx_tenant, deadline(), move |tx| {
                 Box::pin(async move {
+                    let validated = writer.validate_transaction(tx);
+                    if same_runtime {
+                        validated?;
+                    } else {
+                        assert_eq!(
+                            validated
+                                .expect_err("no-event companion rejects foreign runtime")
+                                .kind(),
+                            MessagingErrorKind::Invariant
+                        );
+                    }
                     writer
                         .append(tx, PendingMessage::new(message("writer-rejected")))
                         .await?;
