@@ -569,7 +569,17 @@ pub(super) async fn filtered_receipts(
             .await?
             .is_settled()
     );
-    let duplicate = event(&s, 1, "fact", b"x")?;
+    filtered_duplicate(&execution, owner, &s, &calls, control).await
+}
+
+async fn filtered_duplicate(
+    execution: &PgProjection<Filter>,
+    owner: &PgPool,
+    s: &ProjectionScope,
+    calls: &std::sync::atomic::AtomicU64,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let duplicate = event(s, 1, "fact", b"x")?;
     assert_eq!(
         execution
             .execute(Some(Position::new(0)?), &duplicate, control)
@@ -581,6 +591,6 @@ pub(super) async fn filtered_receipts(
         execution.checkpoint().await?.position,
         Some(Position::new(1)?)
     );
-    assert_eq!(count(owner, &s).await?, 0);
+    assert_eq!(count(owner, s).await?, 0);
     Ok(())
 }

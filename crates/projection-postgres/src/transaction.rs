@@ -77,10 +77,42 @@ impl PgStore {
             .await
             .map_err(Error::uncertain)
     }
+    pub(crate) async fn controlled_read<T: Timer, R: Send, F>(
+        &self,
+        scope: &SourceScope,
+        control: &Control<'_, T>,
+        operation: F,
+    ) -> Result<R, Error>
+    where
+        F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, Error>> + Send,
+    {
+        control.check()?;
+        control
+            .run(self.transact_with_mode(
+                scope.tenant(),
+                control.remaining(),
+                TransactionMode::ReadOnly,
+                operation,
+            ))
+            .await
+    }
     pub(crate) async fn transact<R: Send, E: Into<Error> + Send, F>(
         &self,
         tenant: TenantId,
         timeout: Duration,
+        operation: F,
+    ) -> Result<R, Error>
+    where
+        F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, E>> + Send,
+    {
+        self.transact_with_mode(tenant, timeout, TransactionMode::ReadWrite, operation)
+            .await
+    }
+    async fn transact_with_mode<R: Send, E: Into<Error> + Send, F>(
+        &self,
+        tenant: TenantId,
+        timeout: Duration,
+        mode: TransactionMode,
         operation: F,
     ) -> Result<R, Error>
     where
@@ -94,11 +126,11 @@ impl PgStore {
                 .map_err(|e| sql_error(e, Phase::Acquire))?,
             quarantine: true,
         };
-        let mut tx = lease
-            .connection
-            .begin()
-            .await
-            .map_err(|e| sql_error(e, Phase::Begin))?;
+        let mut tx = match mode {
+            TransactionMode::ReadOnly => lease.connection.begin_with("BEGIN READ ONLY").await,
+            TransactionMode::ReadWrite => lease.connection.begin().await,
+        }
+        .map_err(|e| sql_error(e, Phase::Begin))?;
         #[cfg(feature = "integration")]
         let fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
         let result = async {
@@ -117,23 +149,31 @@ impl PgStore {
                 if fault == PgFault::CommitPending as u8 {
                     std::future::pending::<()>().await;
                 }
-                tx.commit()
-                    .await
-                    .map_err(|e| evidence(e, ErrorKind::CommitUnknown, Phase::Commit))?;
+                tx.commit().await.map_err(|e| {
+                    evidence(
+                        e,
+                        mode.settlement_error(ErrorKind::CommitUnknown),
+                        Phase::Commit,
+                    )
+                })?;
                 #[cfg(feature = "integration")]
                 if fault == PgFault::CommitUnknownAfterAck as u8 {
-                    return Err(Error::new(ErrorKind::CommitUnknown));
+                    return Err(Error::new(mode.settlement_error(ErrorKind::CommitUnknown)));
                 }
                 lease.quarantine = false;
                 Ok(value)
             }
             Err(error) => {
-                tx.rollback()
-                    .await
-                    .map_err(|e| evidence(e, ErrorKind::RollbackFailed, Phase::Rollback))?;
+                tx.rollback().await.map_err(|e| {
+                    evidence(
+                        e,
+                        mode.settlement_error(ErrorKind::RollbackFailed),
+                        Phase::Rollback,
+                    )
+                })?;
                 #[cfg(feature = "integration")]
                 if fault == PgFault::RollbackFailedAfterAck as u8 {
-                    return Err(Error::new(ErrorKind::RollbackFailed));
+                    return Err(Error::new(mode.settlement_error(ErrorKind::RollbackFailed)));
                 }
                 lease.quarantine = false;
                 Err(error)
@@ -158,6 +198,19 @@ pub enum PgFault {
     CommitPending = 2,
     /// Rollback completes but its acknowledgment is hidden.
     RollbackFailedAfterAck = 3,
+}
+#[derive(Clone, Copy)]
+enum TransactionMode {
+    ReadOnly,
+    ReadWrite,
+}
+impl TransactionMode {
+    fn settlement_error(self, mutating: ErrorKind) -> ErrorKind {
+        match self {
+            Self::ReadOnly => ErrorKind::Unavailable,
+            Self::ReadWrite => mutating,
+        }
+    }
 }
 struct Lease {
     connection: PoolConnection<Postgres>,

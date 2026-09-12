@@ -90,7 +90,10 @@ stored definition is `Conflict`; neither reads nor rejected queries supersede th
 Settled includes filtered facts and imported baseline receipts, so it does not assert application
 payload bytes or an external target's exactly-once effect. Pending does not prove rollback or
 prevent later settlement. The application owns read authorization and interprets the receipt for
-its mapping; it never queries the adapter's private tables.
+its mapping; it never queries the adapter's private tables. PostgreSQL enforces a read-only
+transaction with the same tenant/RLS and watchdog setup. Interrupted queries preserve
+`Cancelled`/`Deadline`; settlement failure returns `Unavailable`. Interrupted or unsettled
+connections are quarantined, and this read path never reports durable write uncertainty.
 
 ## Source-checkout runnable example
 

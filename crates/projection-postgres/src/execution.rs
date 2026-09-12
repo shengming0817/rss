@@ -36,6 +36,8 @@ impl PgStore {
     /// A missing generation is Uninitialized; a changed definition returns Conflict.
     /// Settled includes filtered facts and imported baseline receipts, and never proves an
     /// external target's exactly-once effect. Pending is an observation, not proof of rollback.
+    /// The transaction is read-only: interruptions retain Cancelled/Deadline; failed settlement
+    /// returns Unavailable and quarantines the connection, without asserting write uncertainty.
     pub async fn receipt_status<T: Timer>(
         &self,
         query: &ReceiptQuery,
@@ -43,7 +45,7 @@ impl PgStore {
     ) -> Result<ReceiptStatus, Error> {
         let query = query.clone();
         let source = query.scope().source().clone();
-        self.controlled_tx(&source, control, move |tx| Box::pin(async move {
+        self.controlled_read(&source, control, move |tx| Box::pin(async move {
             let scope = query.scope();
             // One statement snapshot binds the receipt to the immutable stored definition.
             let row = sqlx::query("SELECT c.definition_identity,c.position,c.replay,c.end_position,EXISTS(SELECT 1 FROM rss_projection.receipts r WHERE r.tenant_id=c.tenant_id AND r.source_id=c.source_id AND r.projection_id=c.projection_id AND r.generation=c.generation AND r.event_id=$5) AS settled FROM rss_projection.checkpoints c WHERE c.tenant_id=$1::uuid AND c.source_id=$2 AND c.projection_id=$3 AND c.generation=$4")
