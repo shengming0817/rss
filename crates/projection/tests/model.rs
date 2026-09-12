@@ -163,3 +163,23 @@ fn restore_diagnostic_keeps_only_safe_position() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn receipt_query_validates_exact_identity_and_redacts_debug() -> anyhow::Result<()> {
+    use rss_projection::{DefinitionIdentity, ProjectionScope, ReceiptQuery};
+    let source = SourceScope::new(
+        TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+        "journal",
+    )?;
+    let scope = ProjectionScope::new(source, "model", "v1")?;
+    let definition = DefinitionIdentity::new([1; 32]);
+    for invalid in ["", "bad value", &"x".repeat(129)] {
+        assert!(ReceiptQuery::new(scope.clone(), definition, invalid).is_err());
+    }
+    let query = ReceiptQuery::new(scope.clone(), definition, "sensitive-id")?;
+    assert_eq!(query.scope(), &scope);
+    assert_eq!(query.definition_identity(), &definition);
+    assert_eq!(query.event_id(), "sensitive-id");
+    assert!(!format!("{query:?}").contains("sensitive"));
+    Ok(())
+}

@@ -139,6 +139,48 @@ impl ProjectionScope {
         &self.generation
     }
 }
+/// Read-only lookup of a stable fact identity in one exact projection definition.
+/// This value grants no authentication or worker authority. It does not assert payload bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReceiptQuery {
+    scope: ProjectionScope,
+    definition: DefinitionIdentity,
+    event_id: String,
+}
+impl ReceiptQuery {
+    /// Bind the generation, expected definition and validated stable event ID.
+    pub fn new(
+        scope: ProjectionScope,
+        definition: DefinitionIdentity,
+        event_id: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let event_id = event_id.into();
+        validate_name(&event_id)?;
+        Ok(Self {
+            scope,
+            definition,
+            event_id,
+        })
+    }
+    /// Exact tenant/source/projection/generation being inspected.
+    pub const fn scope(&self) -> &ProjectionScope {
+        &self.scope
+    }
+    /// Definition the reader expects for this generation.
+    pub const fn definition_identity(&self) -> &DefinitionIdentity {
+        &self.definition
+    }
+    /// Stable source fact ID, independent of its delivery position.
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+}
+impl std::fmt::Debug for ReceiptQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReceiptQuery(<redacted>)")
+    }
+}
+
 /// Immutable fact with encoded application payload. Debug never exposes payload bytes.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Event {
@@ -212,6 +254,30 @@ pub struct Checkpoint {
     /// Generation's immutable replay boundary.
     pub bound: ReplayBound,
 }
+/// Read-only observation of one generation and event identity. No worker authority is granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptStatus {
+    /// The requested generation has not been initialized.
+    Uninitialized,
+    /// The generation exists, but this fact has no committed receipt at the observed snapshot.
+    Pending(Checkpoint),
+    /// The fact has a committed receipt, including filtered facts and imported baseline facts.
+    Settled(Checkpoint),
+}
+impl ReceiptStatus {
+    /// Progress from the same database snapshot as the receipt lookup.
+    pub const fn checkpoint(self) -> Option<Checkpoint> {
+        match self {
+            Self::Uninitialized => None,
+            Self::Pending(checkpoint) | Self::Settled(checkpoint) => Some(checkpoint),
+        }
+    }
+    /// Whether the stable fact identity has a receipt; not a payload or external effect assertion.
+    pub const fn is_settled(self) -> bool {
+        matches!(self, Self::Settled(_))
+    }
+}
+
 /// Successful settlement of an event and its checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyOutcome {

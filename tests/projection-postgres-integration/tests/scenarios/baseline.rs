@@ -27,6 +27,12 @@ pub(crate) async fn baseline_receipts_prevent_cross_start_duplicates(
             control,
         )
         .await?;
+    assert!(
+        store
+            .receipt_status(&ReceiptQuery::new(s.clone(), DEFINITION, "one")?, control)
+            .await?
+            .is_settled()
+    );
     let projection = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
     let repeated = event(&s, 1, "one", b"one")?;
     assert_eq!(

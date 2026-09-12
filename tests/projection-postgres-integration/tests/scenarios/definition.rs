@@ -32,6 +32,7 @@ pub(crate) async fn binding(
         .execute(None, &event(&s, 0, "one", b"one")?, control)
         .await?;
     assert_eq!(count(owner, &s).await?, 1);
+    receipt_queries(store, owner, &s, a, b, control).await?;
     resumed_checkpoint(store, &s, &a, &b, &execution, control).await?;
     identity_drift(store, owner, &s, &a, &b, control).await?;
     invalid_sql_identity(owner).await?;
@@ -234,5 +235,98 @@ async fn invalid_sql_identity(owner: &PgPool) -> anyhow::Result<()> {
             tx.rollback().await?;
         }
     }
+    Ok(())
+}
+
+async fn receipt_queries(
+    store: &PgStore,
+    owner: &PgPool,
+    scope: &ProjectionScope,
+    definition: DefinitionIdentity,
+    wrong: DefinitionIdentity,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    use rss_projection::ReceiptQuery;
+    let before = state(owner, scope).await?;
+    let query = ReceiptQuery::new(scope.clone(), definition, "one")?;
+    let observed = store.receipt_status(&query, control).await?;
+    assert!(matches!(observed, ReceiptStatus::Settled(_)));
+    assert_eq!(
+        observed
+            .checkpoint()
+            .and_then(|checkpoint| checkpoint.position),
+        Some(Position::new(0)?)
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let timer = Clock::new();
+    assert_eq!(
+        store
+            .receipt_status(
+                &query,
+                &Control::new(&timer, Duration::from_secs(1), &cancelled)
+            )
+            .await,
+        Err(ErrorKind::Cancelled.into())
+    );
+
+    assert!(
+        store
+            .receipt_status(
+                &ReceiptQuery::new(scope.clone(), definition, "one")?,
+                control
+            )
+            .await?
+            .is_settled()
+    );
+    assert!(
+        !store
+            .receipt_status(
+                &ReceiptQuery::new(scope.clone(), definition, "absent")?,
+                control
+            )
+            .await?
+            .is_settled()
+    );
+    assert_eq!(
+        store
+            .receipt_status(&ReceiptQuery::new(scope.clone(), wrong, "one")?, control)
+            .await,
+        Err(ErrorKind::Conflict.into())
+    );
+    for other in [
+        ProjectionScope::new(
+            SourceScope::new(TenantId::parse(OTHER)?, scope.source().source())?,
+            scope.projection(),
+            scope.generation(),
+        )?,
+        ProjectionScope::new(
+            SourceScope::new(scope.source().tenant(), "other-source")?,
+            scope.projection(),
+            scope.generation(),
+        )?,
+        ProjectionScope::new(
+            scope.source().clone(),
+            "other-projection",
+            scope.generation(),
+        )?,
+        ProjectionScope::new(
+            scope.source().clone(),
+            scope.projection(),
+            "other-generation",
+        )?,
+    ] {
+        assert!(
+            !store
+                .receipt_status(&ReceiptQuery::new(other, definition, "one")?, control)
+                .await?
+                .is_settled()
+        );
+    }
+    assert_eq!(
+        before,
+        state(owner, scope).await?,
+        "receipt query changed worker ownership"
+    );
     Ok(())
 }

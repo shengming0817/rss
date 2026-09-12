@@ -563,6 +563,12 @@ pub(super) async fn filtered_receipts(
         ),
         (1, 0, 0, Some(Position::new(0)?), Stop::EventLimit)
     );
+    assert!(
+        store
+            .receipt_status(&ReceiptQuery::new(s.clone(), DEFINITION, "fact")?, control)
+            .await?
+            .is_settled()
+    );
     let duplicate = event(&s, 1, "fact", b"x")?;
     assert_eq!(
         execution
