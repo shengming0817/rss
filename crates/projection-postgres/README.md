@@ -83,6 +83,18 @@ the same exact tenant/source predicate. The library never merges source position
 Public Source/checkpoint reads have a 30-second provider statement bound; `run` additionally enforces
 its caller's total deadline. Public mutating operations require `Control`.
 
+`receipt_status(&ReceiptQuery, control)` inspects an exact tenant/source/projection/generation,
+expected definition and stable event ID without taking a worker claim. It returns `Uninitialized`,
+`Pending(checkpoint)` or `Settled(checkpoint)` from one database statement snapshot. A mismatched
+stored definition is `Conflict`; neither reads nor rejected queries supersede the live worker.
+Settled includes filtered facts and imported baseline receipts, so it does not assert application
+payload bytes or an external target's exactly-once effect. Pending does not prove rollback or
+prevent later settlement. The application owns read authorization and interprets the receipt for
+its mapping; it never queries the adapter's private tables. PostgreSQL enforces a read-only
+transaction with the same tenant/RLS and watchdog setup. Interrupted queries preserve
+`Cancelled`/`Deadline`; settlement failure returns `Unavailable`. Interrupted or unsettled
+connections are quarantined, and this read path never reports durable write uncertainty.
+
 ## Source-checkout runnable example
 
 The counter scenario and its application fixture have moved to [`rss-examples`](../examples/README.md).

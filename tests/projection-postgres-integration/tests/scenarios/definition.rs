@@ -1,3 +1,4 @@
+mod receipts;
 use super::*;
 
 async fn state(pool: &PgPool, s: &ProjectionScope) -> anyhow::Result<String> {
@@ -32,6 +33,7 @@ pub(crate) async fn binding(
         .execute(None, &event(&s, 0, "one", b"one")?, control)
         .await?;
     assert_eq!(count(owner, &s).await?, 1);
+    receipts::queries(store, owner, &s, a, b, control).await?;
     resumed_checkpoint(store, &s, &a, &b, &execution, control).await?;
     identity_drift(store, owner, &s, &a, &b, control).await?;
     invalid_sql_identity(owner).await?;

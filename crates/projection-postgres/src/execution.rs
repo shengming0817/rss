@@ -5,7 +5,8 @@ use crate::{
 };
 use rss_projection::{
     ApplyOutcome, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event, Execution,
-    ExternalCheckpoint, GenerationStart, Position, ProjectionScope, ReplayBound, Timer,
+    ExternalCheckpoint, GenerationStart, Position, ProjectionScope, ReceiptQuery, ReceiptStatus,
+    ReplayBound, Timer,
 };
 use sqlx::Row;
 use std::{future::Future, sync::Arc, time::Duration};
@@ -31,6 +32,40 @@ impl PgClaim {
     }
 }
 impl PgStore {
+    /// Inspect a committed fact receipt without acquiring or superseding a worker claim.
+    /// A missing generation is Uninitialized; a changed definition returns Conflict.
+    /// Settled includes filtered facts and imported baseline receipts, and never proves an
+    /// external target's exactly-once effect. Pending is an observation, not proof of rollback.
+    /// The transaction is read-only: interruptions retain Cancelled/Deadline; failed settlement
+    /// returns Unavailable and quarantines the connection, without asserting write uncertainty.
+    pub async fn receipt_status<T: Timer>(
+        &self,
+        query: &ReceiptQuery,
+        control: &Control<'_, T>,
+    ) -> Result<ReceiptStatus, Error> {
+        let query = query.clone();
+        let source = query.scope().source().clone();
+        self.controlled_read(&source, control, move |tx| Box::pin(async move {
+            let scope = query.scope();
+            // One statement snapshot binds the receipt to the immutable stored definition.
+            let row = sqlx::query("SELECT c.definition_identity,c.position,c.replay,c.end_position,EXISTS(SELECT 1 FROM rss_projection.receipts r WHERE r.tenant_id=c.tenant_id AND r.source_id=c.source_id AND r.projection_id=c.projection_id AND r.generation=c.generation AND r.event_id=$5) AS settled FROM rss_projection.checkpoints c WHERE c.tenant_id=$1::uuid AND c.source_id=$2 AND c.projection_id=$3 AND c.generation=$4")
+                .bind(scope.source().tenant().to_string()).bind(scope.source().source()).bind(scope.projection()).bind(scope.generation()).bind(query.event_id())
+                .fetch_optional(&mut *tx.connection).await.map_err(map_sql)?;
+            let Some(row) = row else { return Ok(ReceiptStatus::Uninitialized); };
+            if row.try_get::<Vec<u8>, _>("definition_identity").map_err(map_sql)?.as_slice() != query.definition_identity().as_bytes() {
+                return Err(Error::new(ErrorKind::Conflict));
+            }
+            let checkpoint = Checkpoint {
+                position: row.try_get::<Option<i64>, _>("position").map_err(map_sql)?.map(decode_position).transpose()?,
+                bound: if row.try_get::<bool, _>("replay").map_err(map_sql)? {
+                    ReplayBound::Through(row.try_get::<Option<i64>, _>("end_position").map_err(map_sql)?.map(decode_position).transpose()?)
+                } else { ReplayBound::Live },
+            };
+            Ok(if row.try_get::<bool, _>("settled").map_err(map_sql)? {
+                ReceiptStatus::Settled(checkpoint)
+            } else { ReceiptStatus::Pending(checkpoint) })
+        })).await
+    }
     /// Create an immutable generation definition, or verify an identical existing definition.
     /// For replay, obtain the upper bound from Source::high_water under the caller's Control.
     pub async fn initialize<T: Timer>(

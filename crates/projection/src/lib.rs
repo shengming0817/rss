@@ -9,7 +9,8 @@ mod runner;
 pub use control::{Control, Timer};
 pub use model::{
     ApplyOutcome, BaselineReceipt, BatchLimit, Checkpoint, DefinitionIdentity, Event,
-    GenerationStart, Position, ProjectionScope, ReplayBound, SourceScope,
+    GenerationStart, Position, ProjectionScope, ReceiptQuery, ReceiptStatus, ReplayBound,
+    SourceScope,
 };
 pub use observation::{ConfirmedProgress, ObservationStatus, RunObservation};
 pub use ports::{AtLeastOnce, Execution, ExternalCheckpoint, ExternalTarget, Source};

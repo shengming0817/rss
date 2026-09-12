@@ -128,3 +128,7 @@ Provider diagnostics contain a closed phase, validated SQLSTATE and optional sou
 `Phase::Restore` identifies persisted-row reconstruction; unknown positions remain `None`.
 `Error::provider(kind, phase, sqlstate, position, source)` requires callers to supply that context
 explicitly. Raw sources remain redacted, and position/phase do not change recovery classification.
+
+`ReceiptQuery` binds a read to an exact projection definition and validated stable event ID.
+`ReceiptStatus` carries generation progress from the same snapshot and distinguishes an absent
+generation, a pending fact and a settled fact. These values grant no worker or authentication authority.

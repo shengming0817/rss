@@ -5,8 +5,8 @@ const DEFINITION: rss_projection::DefinitionIdentity = rss_projection::Definitio
     56, 173, 45, 32, 8, 173, 6, 218, 162, 142, 19, 36,
 ]);
 use rss_projection::{
-    BatchLimit, Control, Event, GenerationStart, ObservationStatus, ProjectionScope, ReplayBound,
-    RunLimit, Source, SourceScope, Timer,
+    BatchLimit, Control, Event, GenerationStart, ObservationStatus, ProjectionScope, ReceiptQuery,
+    ReplayBound, RunLimit, Source, SourceScope, Timer,
 };
 use rss_projection_postgres::{
     PgEffect, PgEffectOutcome, PgOperationError, PgStore, PgTransaction,
@@ -109,6 +109,28 @@ async fn replay_snapshot(
     Ok(())
 }
 
+async fn verify_receipts(
+    store: &PgStore,
+    live: &ProjectionScope,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let receipt = ReceiptQuery::new(live.clone(), DEFINITION, "one")?;
+    anyhow::ensure!(store.receipt_status(&receipt, control).await?.is_settled());
+    anyhow::ensure!(
+        !store
+            .receipt_status(
+                &ReceiptQuery::new(live.clone(), DEFINITION, "absent")?,
+                control
+            )
+            .await?
+            .is_settled()
+    );
+    anyhow::ensure!(
+        matches!(store.receipt_status(&ReceiptQuery::new(live.clone(), rss_projection::DefinitionIdentity::new([0; 32]), "one")?, control).await, Err(error) if error.kind() == rss_projection::ErrorKind::Conflict)
+    );
+    Ok(())
+}
+
 pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
@@ -125,6 +147,8 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
             &control,
         )
         .await?;
+    let receipt = ReceiptQuery::new(live.clone(), DEFINITION, "one")?;
+    anyhow::ensure!(!store.receipt_status(&receipt, &control).await?.is_settled());
     let worker = store.projection(store.takeover(&live, &DEFINITION, &control).await?, Counter)?;
     use rss_projection::Execution as _;
     let high_water = control.run(store.high_water(&source)).await?;
@@ -146,6 +170,7 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
         control.run(worker.checkpoint()).await?.position == high_water,
         "checkpoint not persisted"
     );
+    verify_receipts(store, &live, &control).await?;
     // A second invocation resumes the same checkpoint and produces no extra effect.
     let resumed = rss_projection::run(store, &worker, &control, limits)
         .await
