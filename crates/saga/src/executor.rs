@@ -3,17 +3,17 @@
 //! ref: tokio-rs/tokio tokio/src/macros/select.rs@tokio-1.52.3
 use crate::action::Registered;
 use crate::{
-    Control, Definition, EffectContext, EffectOutcome, Error, Event, EventKind, HistoryCapacity,
-    HistoryHead, Lease, Mutation, Phase, ReadBudget, ReceiptContext, ReceiptProtection, Registry,
-    SagaReceiptProtector, Scope, Snapshot, Status, Store, Timer,
+    CandidateFilter, Control, Definition, EffectContext, EffectOutcome, Error, Event, EventKind,
+    HistoryCapacity, HistoryHead, HistoryLimit, Lease, Mutation, Phase, ReadBudget, ReceiptContext,
+    ReceiptProtection, Registry, SagaReceiptProtector, Scope, Snapshot, Status, Store, Timer,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Why a bounded invocation stopped after acknowledged durable progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStop {
-    /// No new intent fits this capacity or invocation allowance; inspect the head before retrying.
-    HistoryLimited,
+    /// No new intent fits the resource bound named by the reason; inspect the same head before acting.
+    HistoryLimited(HistoryLimit),
     /// All effects succeeded or their compensation completed.
     Completed,
     /// A compensation requires an explicit revision-checked resume.
@@ -114,7 +114,9 @@ struct AuthenticationWork(u64);
 impl AuthenticationWork {
     fn require_open(&self) -> Result<(), Error> {
         if self.0 < crate::history::PLAINTEXT_BYTES {
-            return Err(crate::ErrorKind::HistoryLimited.into());
+            return Err(
+                crate::ErrorKind::HistoryLimited(HistoryLimit::AuthenticationAllowance).into(),
+            );
         }
         Ok(())
     }
@@ -308,7 +310,13 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             snapshot
                 .head()
                 .check_admission(self.read)
-                .map_err(|_| Error::new(crate::ErrorKind::HistoryReadLimit))?;
+                .map_err(|error| {
+                    if error.kind() == crate::ErrorKind::HistoryLimited(HistoryLimit::ReadBudget) {
+                        Error::new(crate::ErrorKind::HistoryReadLimit)
+                    } else {
+                        error
+                    }
+                })?;
         }
         let mut authentication = AuthenticationWork(self.read.authentication_bytes());
         self.verify_receipts(lease.scope(), &snapshot, &mut authentication, control)
@@ -316,11 +324,6 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         if let Some(revision) = resume {
             if revision != snapshot.revision() || snapshot.status() != Status::CompensationFailed {
                 return Err(Error::new(crate::ErrorKind::Conflict));
-            }
-            if authentication.require_open().is_err() {
-                let mut result = report(lease.scope(), &snapshot, 0);
-                result.stop = RunStop::HistoryLimited;
-                return Ok(result);
             }
             let step = snapshot
                 .progress()
@@ -334,14 +337,21 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 receipt: None,
             };
             if let Err(error) = self
-                .commit(lease, &mut snapshot, event, control, commit_inflight)
+                .commit_admission(
+                    lease,
+                    &mut snapshot,
+                    event,
+                    &authentication,
+                    control,
+                    commit_inflight,
+                )
                 .await
             {
-                if error.kind() != crate::ErrorKind::HistoryLimited {
+                let crate::ErrorKind::HistoryLimited(reason) = error.kind() else {
                     return Err(error);
-                }
+                };
                 let mut result = report(lease.scope(), &snapshot, 0);
-                result.stop = RunStop::HistoryLimited;
+                result.stop = RunStop::HistoryLimited(reason);
                 return Ok(result);
             }
         }
@@ -361,11 +371,11 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 )
                 .await
             {
-                if error.kind() != crate::ErrorKind::HistoryLimited {
+                let crate::ErrorKind::HistoryLimited(reason) = error.kind() else {
                     return Err(error);
-                }
+                };
                 let mut result = report(lease.scope(), &snapshot, advances);
-                result.stop = RunStop::HistoryLimited;
+                result.stop = RunStop::HistoryLimited(reason);
                 return Ok(result);
             }
         }
@@ -463,6 +473,36 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         commit_inflight: &AtomicBool,
     ) -> Result<(), Error> {
         let mutation = Mutation::new(lease.scope(), snapshot, event)?;
+        self.persist(lease, snapshot, mutation, control, commit_inflight)
+            .await
+    }
+    async fn commit_admission<T: Timer>(
+        &self,
+        lease: &Lease,
+        snapshot: &mut Snapshot,
+        event: Event,
+        authentication: &AuthenticationWork,
+        control: &Control<'_, T>,
+        commit_inflight: &AtomicBool,
+    ) -> Result<(), Error> {
+        let mutation = Mutation::new(lease.scope(), snapshot, event)?;
+        if matches!(
+            mutation.event().kind,
+            EventKind::CompensationIntent | EventKind::Resume
+        ) {
+            authentication.require_open()?;
+        }
+        self.persist(lease, snapshot, mutation, control, commit_inflight)
+            .await
+    }
+    async fn persist<T: Timer>(
+        &self,
+        lease: &Lease,
+        snapshot: &mut Snapshot,
+        mutation: Mutation,
+        control: &Control<'_, T>,
+        commit_inflight: &AtomicBool,
+    ) -> Result<(), Error> {
         // Cancellation by the sibling renewal future must retain the pending write fact.
         // Clear only after this await returns; a dropped work future leaves it set.
         commit_inflight.store(true, Ordering::SeqCst);
@@ -488,51 +528,21 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         let intent = if let Some(event) = snapshot.progress().pending {
             event.event(snapshot.revision())
         } else {
-            let p = snapshot.progress();
-            let (step, attempt, kind) = if p.status == Status::Compensating {
-                authentication.require_open()?;
-                let step = p
-                    .compensation
-                    .ok_or(Error::new(crate::ErrorKind::Integrity))?;
-                (
-                    step,
-                    p.compensation_attempt
-                        .checked_add(1)
-                        .ok_or(Error::new(crate::ErrorKind::Integrity))?,
-                    EventKind::CompensationIntent,
-                )
-            } else {
-                let step = p.forward;
-                let attempts = p.forward_attempt;
-                if p.forward_failures >= entry.definition.steps()[step].max_failures() {
-                    let event = Event {
-                        seq: snapshot.revision(),
-                        step,
-                        attempt: attempts,
-                        kind: EventKind::Abort,
-                        receipt: None,
-                    };
-                    return self
-                        .commit(lease, snapshot, event, control, commit_inflight)
-                        .await;
-                }
-                (
-                    step,
-                    attempts
-                        .checked_add(1)
-                        .ok_or(Error::new(crate::ErrorKind::Integrity))?,
-                    EventKind::ForwardIntent,
-                )
-            };
-            let event = Event {
-                seq: snapshot.revision(),
-                step,
-                attempt,
-                kind,
-                receipt: None,
-            };
-            self.commit(lease, snapshot, event.clone(), control, commit_inflight)
-                .await?;
+            let event = snapshot.next_event()?.ok_or(crate::ErrorKind::Integrity)?;
+            if event.kind == EventKind::Abort {
+                return self
+                    .commit(lease, snapshot, event, control, commit_inflight)
+                    .await;
+            }
+            self.commit_admission(
+                lease,
+                snapshot,
+                event.clone(),
+                authentication,
+                control,
+                commit_inflight,
+            )
+            .await?;
             event
         };
         let event = if intent.kind == EventKind::ForwardIntent {
@@ -650,6 +660,32 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             receipt: None,
         })
     }
+    /// Discover capacity-blocked scopes without loading history. Page independently from run_once and inspect history_head before explicit growth.
+    pub async fn capacity_blocked<T: Timer>(
+        &self,
+        tenant: rss_request_context::TenantId,
+        cursor: Option<Scope>,
+        limit: u32,
+        control: &Control<'_, T>,
+    ) -> Result<Vec<Scope>, Error> {
+        if limit == 0 || limit > 10_000 {
+            return Err(crate::ErrorKind::InvalidBudget.into());
+        }
+        if cursor.is_some_and(|s| s.tenant() != tenant) {
+            return Err(crate::ErrorKind::Definition.into());
+        }
+        let scopes = control
+            .run(self.store.candidates(
+                CandidateFilter::CapacityBlocked,
+                tenant,
+                cursor.map(|s| s.id()),
+                limit,
+                control,
+            ))
+            .await?;
+        validate_candidates(&scopes, tenant, cursor, limit)?;
+        Ok(scopes)
+    }
     /// Run one fair page. Pass back `next_cursor` on the next call; None restarts at the beginning.
     /// Each admitted instance receives at most one advance, including probes. Instance errors are
     /// retained in the report; cancellation/deadline returns all already observed progress.
@@ -665,10 +701,13 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         }
         let limit = budget.instances.min(budget.advances);
         let candidates = control
-            .run(
-                self.store
-                    .candidates(tenant, cursor.map(|s| s.id()), limit, control),
-            )
+            .run(self.store.candidates(
+                CandidateFilter::Runnable,
+                tenant,
+                cursor.map(|s| s.id()),
+                limit,
+                control,
+            ))
             .await?;
         validate_candidates(&candidates, tenant, cursor, limit)?;
         let mut report = SweepReport {

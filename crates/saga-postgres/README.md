@@ -76,7 +76,7 @@ Capacity exhaustion stops a new intent at a safe boundary. Existing pending effe
 space for authoritative probing and settlement. `history_head` reads small metadata even if a
 worker cannot load the history; `extend_history` performs monotonic finite growth using the live
 lease, expected revision and expected capacity. It does not append a journal event or reset time.
-Candidates use the same admission predicate to exclude capacity-blocked new intents while keeping
+`CandidateFilter::Runnable` and `CandidateFilter::CapacityBlocked` expose disjoint, bounded pages from the same admission predicate. Blocked discovery returns only scope metadata for explicit history_head/extend_history handling. Runnable discovery excludes capacity-blocked new intents while keeping
 pending settlements recoverable.
 
 Upgrade initializes each existing capacity to its observed use plus mandatory remaining obligations

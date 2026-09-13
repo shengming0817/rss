@@ -125,7 +125,7 @@ fn sql_error_at(phase: DiagnosticPhase, error: sqlx::Error) -> Error {
         Some("RS001") => ErrorKind::Fenced,
         Some("RS002") => ErrorKind::Conflict,
         Some("RS003") => ErrorKind::Integrity,
-        Some("RS004") => ErrorKind::HistoryLimited,
+        Some("RS004") => ErrorKind::HistoryLimited(rss_saga::HistoryLimit::DurableCapacity),
         _ => ErrorKind::Store,
     };
     Error::provider(kind, phase, code.as_deref(), error)
@@ -390,6 +390,7 @@ impl Store for PgStore {
     }
     async fn candidates<T: Timer>(
         &self,
+        filter: rss_saga::CandidateFilter,
         tenant: rss_request_context::TenantId,
         after: Option<uuid::Uuid>,
         limit: u32,
@@ -399,7 +400,7 @@ impl Store for PgStore {
             return Err(Error::new(rss_saga::ErrorKind::InvalidBudget));
         }
         self.transact(tenant,control,|c|Box::pin(async move {
-            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit) AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).fetch_all(c).await.map_err(sql_error)?;
+            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND progress->>'status' IN ('Ready','Running','Compensating') AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)=$4 AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).bind(filter==rss_saga::CandidateFilter::Runnable).fetch_all(c).await.map_err(sql_error)?;
             Ok(ids.into_iter().map(|id|Scope::new(tenant,id)).collect())
         })).await
     }

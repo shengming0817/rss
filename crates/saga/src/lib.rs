@@ -47,8 +47,8 @@ pub use control::{Control, LeasePolicy, Timer};
 pub use definition::{ActionGeneration, Definition, EffectKey, Identity, StepSpec};
 pub use error::{Diagnostic, DiagnosticPhase, Error, ErrorKind};
 pub use history::{
-    DEFINITION_BYTES, EVENT_BYTES, HistoryCapacity, HistoryHead, PLAINTEXT_BYTES, RECEIPT_BYTES,
-    ReadBudget,
+    DEFINITION_BYTES, EVENT_BYTES, HistoryCapacity, HistoryHead, HistoryLimit, PLAINTEXT_BYTES,
+    RECEIPT_BYTES, ReadBudget,
 };
 pub use integrity::{
     SagaReceiptFingerprint, SagaReceiptIntegrityError, SagaReceiptIntegrityKeyId,
@@ -59,7 +59,7 @@ pub use receipt::{
     Ciphertext, EffectContext, ProtectedReceipt, ReceiptContext, ReceiptProtection,
     SagaReceiptProtector,
 };
-pub use store::{Lease, Mutation, Store};
+pub use store::{CandidateFilter, Lease, Mutation, Store};
 mod executor;
 pub use executor::{
     Executor, Failure, FailureKind, InstanceResult, Report, RunStop, SuccessReference, SweepBudget,

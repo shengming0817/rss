@@ -37,7 +37,7 @@ fn history_capacity_blocks_new_intent_but_preserves_pending_settlement() -> anyh
             .apply(event(2, 2, EventKind::ForwardIntent))
             .err()
             .map(|e| e.kind()),
-        Some(ErrorKind::HistoryLimited)
+        Some(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity))
     );
     assert_eq!(snapshot.revision(), 2);
     assert_eq!(snapshot.status(), Status::Ready);
@@ -110,7 +110,7 @@ fn authentication_work_is_reserved_before_admitting_an_effect() -> anyhow::Resul
             .apply(event(0, 1, EventKind::ForwardIntent))
             .err()
             .map(|e| e.kind()),
-        Some(ErrorKind::HistoryLimited)
+        Some(ErrorKind::HistoryLimited(HistoryLimit::ReadBudget))
     );
     assert_eq!(snapshot.revision(), 0);
     assert!(HistoryCapacity::new(u64::MAX, 1).is_err());
@@ -139,5 +139,23 @@ fn a_durable_sequence_gap_is_integrity_failure_and_does_not_advance_replay() -> 
         Some(ErrorKind::Integrity)
     );
     assert_eq!(snapshot.revision(), 0);
+    Ok(())
+}
+
+#[test]
+fn encoded_byte_read_limit_rejects_the_first_event_with_entries_available() -> anyhow::Result<()> {
+    let capacity = HistoryCapacity::new(100, 64 * 1024 * 1024)?;
+    let read = ReadBudget::new(HistoryCapacity::new(100, EVENT_BYTES - 1)?, PLAINTEXT_BYTES)?;
+    let mut snapshot = Snapshot::empty(definition()?, capacity, read)?;
+    assert_eq!(
+        snapshot
+            .replay(event(0, 1, EventKind::ForwardIntent))
+            .err()
+            .map(|e| e.kind()),
+        Some(ErrorKind::HistoryReadLimit)
+    );
+    assert_eq!(snapshot.revision(), 0);
+    assert_eq!(snapshot.head().encoded_bytes(), 0);
+    assert_eq!(snapshot.status(), Status::Ready);
     Ok(())
 }

@@ -4,6 +4,17 @@ use crate::model::Progress;
 use crate::{Error, ErrorKind, Status};
 use serde::{Deserialize, Serialize};
 
+/// Resource owner that determines how a limited invocation can continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryLimit {
+    /// Explicitly extend the durable instance capacity before admitting more effects.
+    DurableCapacity,
+    /// Supply a larger finite read budget so the admitted result remains recoverable.
+    ReadBudget,
+    /// This invocation spent its authentication allowance; a fresh invocation can continue.
+    AuthenticationAllowance,
+}
+
 /// Conservative bytes for a receipt-free event, including its persisted effect key.
 pub const EVENT_BYTES: u64 = 256;
 /// Existing V1 maximum plaintext bytes, also the conservative work charged per authentication.
@@ -142,26 +153,30 @@ impl HistoryHead {
     pub fn reserve(&self) -> Result<(u64, u64), Error> {
         self.progress.reserve()
     }
-    /// Check admission against durable capacity and the worker's ability to recover its settlement.
-    pub fn check_admission(&self, read: ReadBudget) -> Result<(), Error> {
+    pub(crate) fn check_capacity(&self) -> Result<(u64, u64), Error> {
         let (entries, bytes) = self.reserve()?;
         let entries = self
             .revision
             .checked_add(entries)
-            .ok_or(ErrorKind::HistoryLimited)?;
+            .ok_or(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity))?;
         let bytes = self
             .encoded_bytes
             .checked_add(bytes)
-            .ok_or(ErrorKind::HistoryLimited)?;
+            .ok_or(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity))?;
         if !self.capacity.contains(entries, bytes) {
-            return Err(ErrorKind::HistoryLimited.into());
+            return Err(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity).into());
         }
+        Ok((entries, bytes))
+    }
+    /// Check admission against durable capacity and the worker's ability to recover its settlement.
+    pub fn check_admission(&self, read: ReadBudget) -> Result<(), Error> {
+        let (entries, bytes) = self.check_capacity()?;
         let receipts = self.progress.forward
             + usize::from(
                 self.progress.pending.is_some()
                     || self.progress.last_kind == Some(crate::EventKind::Resume),
             );
         read.check(entries, bytes, receipts)
-            .map_err(|_| ErrorKind::HistoryLimited.into())
+            .map_err(|_| ErrorKind::HistoryLimited(HistoryLimit::ReadBudget).into())
     }
 }

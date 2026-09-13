@@ -1,9 +1,9 @@
 /// Closed recovery decisions; diagnostics never change their meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ErrorKind {
-    /// No new effect may start until explicit finite capacity is available.
-    #[error("saga history capacity exhausted")]
-    HistoryLimited,
+    /// A new effect is blocked by the specified finite resource owner.
+    #[error("saga history limited: {0:?}")]
+    HistoryLimited(crate::HistoryLimit),
     /// History cannot be loaded or authenticated within this caller's finite read budget.
     #[error("saga history read budget exhausted")]
     HistoryReadLimit,

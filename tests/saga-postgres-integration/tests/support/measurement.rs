@@ -64,12 +64,13 @@ impl Store for Meter<'_> {
     }
     async fn candidates<T: Timer>(
         &self,
+        filter: CandidateFilter,
         t: TenantId,
         after: Option<uuid::Uuid>,
         limit: u32,
         c: &Control<'_, T>,
     ) -> Result<Vec<Scope>, Error> {
-        self.store.candidates(t, after, limit, c).await
+        self.store.candidates(filter, t, after, limit, c).await
     }
     async fn commit<T: Timer>(
         &self,

@@ -180,7 +180,8 @@ BEGIN
  ELSE step_:=(p->>'forward')::bigint; attempt_:=(p->>'forwardAttempt')::bigint+1; kind_:='ForwardIntent';
   IF (p->>'forwardFailures')::bigint>=(d->'steps'->step_::integer->>'max_failures')::bigint THEN RETURN true; END IF;
  END IF;
- IF attempt_>4294967295 THEN RETURN false; END IF;
+ -- Exhausted attempt ordinals cannot be resolved by capacity growth; exclude both discovery sets.
+ IF attempt_>4294967295 THEN RETURN NULL; END IF;
  e:=jsonb_build_object('seq',q,'step',step_,'attempt',attempt_,'kind',kind_,'receipt',null);
  next_:=rss_saga.next_progress(p,d,e); reserve_:=rss_saga.history_reserve(next_);
  RETURN q::numeric+1+(reserve_->>'entries')::numeric<=entries AND bytes_::numeric+256+(reserve_->>'bytes')::numeric<=capacity_bytes;

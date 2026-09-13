@@ -83,6 +83,14 @@ impl Mutation {
         snapshot.accept(self.event, self.after);
     }
 }
+/// Independent, fairly pageable discovery sets derived from the same durable admission rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateFilter {
+    /// Work that can advance within its durable capacity, including pending settlements.
+    Runnable,
+    /// Work awaiting explicit capacity growth. Does not include terminal or paused instances.
+    CapacityBlocked,
+}
 /// Trusted provider boundary for tenant-scoped, lease-fenced atomic Saga persistence.
 pub trait Store: Send + Sync {
     /// Atomically register scope, exact definition and capacity. An existing scope must match both definition and current capacity; changes require explicit growth. Caller owns authorization.
@@ -142,9 +150,10 @@ pub trait Store: Send + Sync {
         mutation: &Mutation,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
-    /// Return at most limit runnable unleased/expired scopes for this tenant, strictly ascending after the optional UUID. Exclude terminal and explicitly paused instances.
+    /// Return at most limit unleased/expired scopes in the selected discovery set, strictly ascending after the optional UUID. Exclude terminal, explicitly paused and ordinal-exhausted instances.
     fn candidates<T: Timer>(
         &self,
+        filter: CandidateFilter,
         tenant: rss_request_context::TenantId,
         after: Option<uuid::Uuid>,
         limit: u32,

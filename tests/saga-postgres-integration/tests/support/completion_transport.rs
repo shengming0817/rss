@@ -74,12 +74,13 @@ impl Store for CompletionFault {
     }
     async fn candidates<T: Timer>(
         &self,
+        filter: CandidateFilter,
         t: rss_request_context::TenantId,
         after: Option<uuid::Uuid>,
         n: u32,
         c: &Control<'_, T>,
     ) -> Result<Vec<Scope>, Error> {
-        self.store.candidates(t, after, n, c).await
+        self.store.candidates(filter, t, after, n, c).await
     }
     async fn commit<T: Timer>(
         &self,

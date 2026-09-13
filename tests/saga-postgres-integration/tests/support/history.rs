@@ -20,7 +20,7 @@ pub(super) async fn bounds(
     executor.register(s, &d, small, control).await?;
     assert_eq!(
         executor.run(s, 10, control).await?.stop,
-        RunStop::HistoryLimited
+        RunStop::HistoryLimited(HistoryLimit::DurableCapacity)
     );
     assert!(
         effects
@@ -31,7 +31,13 @@ pub(super) async fn bounds(
     );
     assert!(
         store
-            .candidates(TenantId::parse(HISTORY_TENANT)?, None, 10, control)
+            .candidates(
+                CandidateFilter::Runnable,
+                TenantId::parse(HISTORY_TENANT)?,
+                None,
+                10,
+                control
+            )
             .await?
             .is_empty()
     );
@@ -40,6 +46,7 @@ pub(super) async fn bounds(
     inline_pair(owner, s).await?;
     reject_corrupt_rows(&executor, owner, s, control).await?;
     read_and_byte_bounds(store, &d, effects, s, control).await?;
+    capacity_discovery(store, control).await?;
 
     Ok(())
 }
@@ -111,14 +118,12 @@ async fn read_and_byte_bounds(
         registry(d.clone(), effects.clone(), false)?,
         ReadBudget::new(HistoryCapacity::new(100, 64 * 1024 * 1024)?, 1024 * 1024)?,
     );
-    let tiny = Executor::new(
-        store.clone(),
-        protection()?,
-        registry(d.clone(), effects.clone(), false)?,
-        ReadBudget::new(HistoryCapacity::new(1, 256)?, 1024 * 1024)?,
-    );
-    assert!(matches!(tiny.run(s,1,control).await,Err(e) if e.kind()==ErrorKind::HistoryReadLimit));
-    assert_eq!(tiny.history_head(s, control).await?.revision(), 2);
+    for capacity in [
+        HistoryCapacity::new(1, 32 * 1024 * 1024)?,
+        HistoryCapacity::new(100, 256)?,
+    ] {
+        assert_read_limited(store, d, effects.clone(), s, capacity, control).await?;
+    }
     let byte_scope = scope(HISTORY_TENANT)?;
     let byte_small = HistoryCapacity::new(100, 5 * EVENT_BYTES + RECEIPT_BYTES - 1)?;
     executor
@@ -126,7 +131,7 @@ async fn read_and_byte_bounds(
         .await?;
     assert_eq!(
         executor.run(byte_scope, 1, control).await?.stop,
-        RunStop::HistoryLimited
+        RunStop::HistoryLimited(HistoryLimit::DurableCapacity)
     );
     Ok(())
 }
@@ -290,7 +295,7 @@ async fn verify_paused(
 ) -> anyhow::Result<()> {
     assert_eq!(
         executor.resume(s, head.revision(), 20, control).await?.stop,
-        RunStop::HistoryLimited
+        RunStop::HistoryLimited(HistoryLimit::DurableCapacity)
     );
     executor
         .extend_history(s, head.revision(), head.capacity(), read.history(), control)
@@ -366,6 +371,7 @@ async fn verify_upgraded(
         );
         let head = snapshot.head().clone();
         store.release(&lease, control).await?;
+        verify_candidate_projection(store, &snapshot, *s, control).await?;
         let executor = Executor::new(
             store.clone(),
             protection()?,
@@ -478,5 +484,144 @@ async fn install_upgrade(
     measure_upgrade(owner, &mut connection).await?;
     sqlx::raw_sql("RESET ROLE; GRANT SELECT ON ALL TABLES IN SCHEMA rss_saga TO saga_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_saga TO saga_runtime").execute(&mut *connection).await?;
     drop(connection);
+    Ok(())
+}
+
+async fn assert_read_limited(
+    store: &PgStore,
+    d: &Definition,
+    effects: Arc<Effects>,
+    s: Scope,
+    capacity: HistoryCapacity,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let executor = Executor::new(
+        store.clone(),
+        protection()?,
+        registry(d.clone(), effects, false)?,
+        ReadBudget::new(capacity, PLAINTEXT_BYTES)?,
+    );
+    assert!(matches!(executor.run(s,1,c).await,Err(e) if e.kind()==ErrorKind::HistoryReadLimit));
+    assert_eq!(executor.history_head(s, c).await?.revision(), 2);
+    Ok(())
+}
+
+async fn capacity_discovery(store: &PgStore, c: &Control<'_, Clock>) -> anyhow::Result<()> {
+    let tenant = TenantId::parse("63636363-2222-4333-8444-555555555555")?;
+    let d = definition(&["one"])?;
+    let effects = Arc::new(Effects::default());
+    let executor = Executor::new(
+        store.clone(),
+        protection()?,
+        registry(d.clone(), effects.clone(), false)?,
+        ReadBudget::new(HistoryCapacity::new(1, 1)?, 1)?,
+    );
+    let small = HistoryCapacity::new(4, 32 * 1024 * 1024)?;
+    let enough = HistoryCapacity::new(5, 32 * 1024 * 1024)?;
+    let mut blocked = vec![
+        Scope::new(tenant, uuid::Uuid::new_v4()),
+        Scope::new(tenant, uuid::Uuid::new_v4()),
+    ];
+    blocked.sort_by_key(|s| s.id());
+    for s in &blocked {
+        executor.register(*s, &d, small, c).await?;
+    }
+    let ready = Scope::new(tenant, uuid::Uuid::new_v4());
+    executor.register(ready, &d, enough, c).await?;
+    discovery_pages(&executor, tenant, &blocked, c).await?;
+    assert_eq!(
+        store
+            .candidates(CandidateFilter::Runnable, tenant, None, 10, c)
+            .await?,
+        vec![ready]
+    );
+    let report = executor
+        .run_once(tenant, None, SweepBudget::new(1, 1)?, c)
+        .await?;
+    assert_eq!(report.items[0].scope, ready);
+    assert_eq!(
+        report.items[0].result.as_ref().map_err(Clone::clone)?.stop,
+        RunStop::HistoryLimited(HistoryLimit::ReadBudget)
+    );
+    let head = executor.history_head(blocked[0], c).await?;
+    executor
+        .extend_history(blocked[0], head.revision(), head.capacity(), enough, c)
+        .await?;
+    assert_eq!(
+        executor.capacity_blocked(tenant, None, 10, c).await?,
+        vec![blocked[1]]
+    );
+    assert!(
+        effects
+            .calls
+            .lock()
+            .map_err(|_| ErrorKind::Store)?
+            .is_empty()
+    );
+    Ok(())
+}
+async fn discovery_pages(
+    executor: &Executor<PgStore, Crypto>,
+    tenant: TenantId,
+    blocked: &[Scope],
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    assert_eq!(
+        executor.capacity_blocked(tenant, None, 1, c).await?,
+        vec![blocked[0]]
+    );
+    assert_eq!(
+        executor
+            .capacity_blocked(tenant, Some(blocked[0]), 1, c)
+            .await?,
+        vec![blocked[1]]
+    );
+    assert!(
+        executor
+            .capacity_blocked(tenant, Some(blocked[1]), 1, c)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        executor
+            .capacity_blocked(TenantId::parse(OTHER)?, None, 10, c)
+            .await?
+            .is_empty()
+    );
+    discovery_inputs(executor, tenant, blocked[0], c).await?;
+    Ok(())
+}
+
+async fn discovery_inputs(
+    executor: &Executor<PgStore, Crypto>,
+    tenant: TenantId,
+    first: Scope,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    assert!(
+        matches!(executor.capacity_blocked(TenantId::parse(OTHER)?,Some(first),10,c).await,Err(e) if e.kind()==ErrorKind::Definition)
+    );
+    assert!(
+        matches!(executor.capacity_blocked(tenant,None,0,c).await,Err(e) if e.kind()==ErrorKind::InvalidBudget)
+    );
+    Ok(())
+}
+
+async fn verify_candidate_projection(
+    store: &PgStore,
+    snapshot: &Snapshot,
+    s: Scope,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let expected = snapshot.candidate_filter()?;
+    for filter in [CandidateFilter::Runnable, CandidateFilter::CapacityBlocked] {
+        assert_eq!(
+            store
+                .candidates(filter, s.tenant(), None, 1000, c)
+                .await?
+                .contains(&s),
+            expected == Some(filter)
+        );
+    }
     Ok(())
 }

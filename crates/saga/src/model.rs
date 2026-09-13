@@ -1,6 +1,7 @@
 //! One replay algorithm for live execution and restart.
 use crate::{
-    Definition, Error, ErrorKind, HistoryCapacity, HistoryHead, ProtectedReceipt, ReadBudget,
+    CandidateFilter, Definition, Error, ErrorKind, HistoryCapacity, HistoryHead, HistoryLimit,
+    ProtectedReceipt, ReadBudget,
 };
 use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
@@ -441,26 +442,81 @@ impl Snapshot {
             }
             .into());
         }
-        let progress = self.head.progress.transition(&self.definition, event)?;
-        let after = HistoryHead {
-            revision: self
-                .revision()
-                .checked_add(1)
-                .ok_or(ErrorKind::HistoryLimited)?,
-            encoded_bytes: self
-                .head
-                .encoded_bytes
-                .checked_add(event.encoded_bytes()?)
-                .ok_or(ErrorKind::HistoryLimited)?,
-            capacity: self.head.capacity,
-            progress,
-        };
+        let after = self.transition(event)?;
         if admission {
             after.check_admission(self.read)?;
         } else {
             after.check_read(self.read)?;
         }
         Ok(after)
+    }
+    fn transition(&self, event: &Event) -> Result<HistoryHead, Error> {
+        let progress = self.head.progress.transition(&self.definition, event)?;
+        let after = HistoryHead {
+            revision: self
+                .revision()
+                .checked_add(1)
+                .ok_or(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity))?,
+            encoded_bytes: self
+                .head
+                .encoded_bytes
+                .checked_add(event.encoded_bytes()?)
+                .ok_or(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity))?,
+            capacity: self.head.capacity,
+            progress,
+        };
+        Ok(after)
+    }
+    /// Classify a validated snapshot independently of the worker's read budget. Terminal, paused and ordinal-exhausted instances belong to neither discovery set.
+    pub fn candidate_filter(&self) -> Result<Option<CandidateFilter>, Error> {
+        if self.status().is_terminal() || self.status() == Status::CompensationFailed {
+            return Ok(None);
+        }
+        if self.progress().pending.is_some() {
+            return Ok(Some(CandidateFilter::Runnable));
+        }
+        let Some(event) = self.next_event()? else {
+            return Ok(None);
+        };
+        match self.transition(&event)?.check_capacity() {
+            Ok(_) => Ok(Some(CandidateFilter::Runnable)),
+            Err(e) if e.kind() == ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity) => {
+                Ok(Some(CandidateFilter::CapacityBlocked))
+            }
+            Err(e) => Err(e),
+        }
+    }
+    pub(crate) fn next_event(&self) -> Result<Option<Event>, Error> {
+        let p = self.progress();
+        let (step, attempt, kind) = if p.status == Status::Compensating {
+            (
+                p.compensation.ok_or(ErrorKind::Integrity)?,
+                p.compensation_attempt.checked_add(1),
+                EventKind::CompensationIntent,
+            )
+        } else {
+            let spec = self
+                .definition
+                .steps()
+                .get(p.forward)
+                .ok_or(ErrorKind::Integrity)?;
+            if p.forward_failures >= spec.max_failures() {
+                (p.forward, Some(p.forward_attempt), EventKind::Abort)
+            } else {
+                (
+                    p.forward,
+                    p.forward_attempt.checked_add(1),
+                    EventKind::ForwardIntent,
+                )
+            }
+        };
+        Ok(attempt.map(|attempt| Event {
+            seq: self.revision(),
+            step,
+            attempt,
+            kind,
+            receipt: None,
+        }))
     }
     pub(crate) fn accept(&mut self, event: Event, head: HistoryHead) {
         if event.kind == EventKind::ForwardApplied {

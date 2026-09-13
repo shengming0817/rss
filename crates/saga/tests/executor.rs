@@ -180,19 +180,22 @@ impl Store for Memory {
     }
     async fn candidates<T: Timer>(
         &self,
+        filter: CandidateFilter,
         t: rss_request_context::TenantId,
         after: Option<uuid::Uuid>,
         n: u32,
         _: &Control<'_, T>,
     ) -> Result<Vec<Scope>, Error> {
-        let mut scopes = self
-            .0
-            .lock()
-            .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?
-            .keys()
-            .filter(|s| s.tenant() == t && after.is_none_or(|id| s.id() > id))
-            .copied()
-            .collect::<Vec<_>>();
+        let data = self.0.lock().map_err(|_| ErrorKind::Store)?;
+        let mut scopes = Vec::new();
+        for (scope, (snapshot, _)) in data.iter() {
+            if scope.tenant() == t
+                && after.is_none_or(|id| scope.id() > id)
+                && snapshot.candidate_filter()? == Some(filter)
+            {
+                scopes.push(*scope);
+            }
+        }
         scopes.sort_by_key(|s| s.id());
         scopes.truncate(n as usize);
         Ok(scopes)
@@ -863,7 +866,10 @@ async fn repeated_crash_negative_probes_stop_before_new_effect_and_extend_by_cas
         assert_eq!(executor.run(scope, 1, &c).await?.stop, RunStop::Yielded);
     }
     let blocked = executor.run(scope, 1, &c).await?;
-    assert_eq!(blocked.stop, RunStop::HistoryLimited);
+    assert_eq!(
+        blocked.stop,
+        RunStop::HistoryLimited(HistoryLimit::DurableCapacity)
+    );
     assert_eq!(blocked.head().revision(), 6);
     assert!(
         effects
@@ -913,7 +919,10 @@ async fn compensation_retry_requires_new_space_and_never_spends_earlier_steps_re
     let again = executor
         .resume(scope, paused.head().revision(), 20, &c)
         .await?;
-    assert_eq!(again.stop, RunStop::HistoryLimited);
+    assert_eq!(
+        again.stop,
+        RunStop::HistoryLimited(HistoryLimit::DurableCapacity)
+    );
     assert_eq!(again.head().revision(), paused.head().revision());
     executor
         .extend_history(
@@ -983,7 +992,10 @@ async fn authentication_budget_covers_verification_and_each_compensation_without
     let partial = executor
         .resume(scope, paused.head().revision(), 20, &c)
         .await?;
-    assert_eq!(partial.stop, RunStop::HistoryLimited);
+    assert_eq!(
+        partial.stop,
+        RunStop::HistoryLimited(HistoryLimit::AuthenticationAllowance)
+    );
     assert_eq!(partial.head().status(), Status::Compensating);
     assert_eq!(partial.head().revision(), paused.head().revision() + 3);
     assert_eq!(count.load(Ordering::SeqCst), 3);
@@ -1071,5 +1083,42 @@ async fn registration_requires_the_acknowledged_current_capacity() -> anyhow::Re
     memory.extend_history(&lease, 0, a, b, &c).await?;
     assert!(matches!(memory.register(s,&d,a,&c).await,Err(e) if e.kind()==ErrorKind::Conflict));
     memory.register(s, &d, b, &c).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_reports_configured_read_shortfall_before_invocation_exhaustion()
+-> anyhow::Result<()> {
+    let d = definition(&["one", "two"])?;
+    let effects = Arc::new(Effects::default());
+    effects.fail_undo.store(true, Ordering::SeqCst);
+    let memory = Memory::default();
+    let s = scope()?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+    let setup = Executor::new(
+        memory.clone(),
+        protection()?,
+        registry(d.clone(), effects.clone(), true)?,
+        read_budget()?,
+    );
+    setup.register(s, &d, history_capacity()?, &c).await?;
+    let paused = setup.run(s, 20, &c).await?;
+    assert_eq!(paused.stop, RunStop::Paused);
+    let executor = Executor::new(
+        memory,
+        protection()?,
+        registry(d, effects, true)?,
+        ReadBudget::new(history_capacity()?, PLAINTEXT_BYTES)?,
+    );
+    for _ in 0..2 {
+        let report = executor.resume(s, paused.head().revision(), 20, &c).await?;
+        assert_eq!(
+            report.stop,
+            RunStop::HistoryLimited(HistoryLimit::ReadBudget)
+        );
+        assert_eq!(report.head(), paused.head());
+    }
     Ok(())
 }

@@ -218,7 +218,7 @@ historical receipt before any protector `open` call.
 
 The caller's read budget limits full history replay and authentication. Each receipt open consumes the maximum plaintext size from one invocation-wide allowance, including replay verification and subsequent compensation opens. Running out at a safe boundary returns `HistoryLimited` before another intent or Resume is written; another invocation may continue with a fresh finite allowance. Before admitting an intent,
 the executor also verifies that its maximum settlement remains readable under that budget.
-`RunStop::HistoryLimited` means the next intent cannot fit. It preserves business status and
+`RunStop::HistoryLimited(reason)` preserves a closed resource owner: `DurableCapacity` requires explicit growth, `ReadBudget` requires a larger configured read budget, and `AuthenticationAllowance` means a fresh invocation can continue. Static admission is checked before charging the current allowance, so a permanently insufficient read budget is never reported as a retryable invocation yield. It preserves business status and
 reports the acknowledged `HistoryHead`; it is distinct from advance-budget `Yielded`, failed
 compensation and an unknown effect. Capacity exhaustion does not automatically abort a Saga.
 
@@ -228,6 +228,13 @@ intent/settlement pair. Pending effects settle from these reservations. A negati
 compensation is a safe boundary at which another attempt can be refused. Finite capacity cannot
 promise unlimited retries or crashes. Serialization/protection contract failures remain separate
 from history capacity and never prove that an effect was absent.
+
+`Executor::capacity_blocked(tenant, cursor, limit, control)` fairly pages capacity-blocked scopes
+without loading history, independently of `run_once`'s runnable page. Products can call
+`history_head` for each discovered scope and authorize a finite `extend_history` using the same
+head's revision and capacity. `Store::candidates(CandidateFilter, ...)` uses the same durable
+admission predicate for both sets; terminal, explicitly paused and ordinal-exhausted instances
+belong to neither. This adds no persisted pause state and does not continuously replay blocked history.
 
 `Executor::history_head(scope, control)` remains available without loading journal payloads.
 `extend_history(scope, expected_revision, expected_capacity, larger_capacity, control)` performs
