@@ -25,20 +25,26 @@ WITH assessment AS MATERIALIZED (
                 + octet_length(e.payload)::bigint), 0) AS required_bytes,
             coalesce(h.key_id <> $6 OR bool_or(e.key_id <> $6), false) AS wrong_key,
             coalesce(h.encoding_version <> 1 OR bool_or(e.encoding_version <> 1), false) AS wrong_version,
-            coalesce(h.seq < 0 OR octet_length(h.tag) <> 32, false)
-                OR coalesce(bool_or(e.seq IS NOT NULL AND NOT (
+            -- NULL is corruption for an existing head/entry, not an absent LEFT JOIN row.
+            -- Only a non-malformed assessment may use the aggregate charge to admit payloads.
+            coalesce(h.tenant_id IS NOT NULL AND (
+                h.key_id IS NULL OR h.encoding_version IS NULL
+                OR h.seq < 0 OR octet_length(h.tag) IS DISTINCT FROM 32
+            ), false)
+                OR coalesce(bool_or(e.seq IS NOT NULL AND ((
+                    e.encoding_version IS NOT NULL AND
                     octet_length(convert_to(e.chain_id, 'UTF8')) BETWEEN 1 AND 255
                     AND octet_length(convert_to(e.record_id, 'UTF8')) BETWEEN 1 AND 255
                     AND octet_length(convert_to(e.key_id, 'UTF8')) BETWEEN 1 AND 255
                     AND octet_length(e.payload) <= $8::bigint
                     AND octet_length(e.previous_tag) = 32
                     AND octet_length(e.tag) = 32
-                )), false) AS malformed
+                ) IS NOT TRUE)), false) AS malformed
         FROM (VALUES (1)) AS seed(value)
         LEFT JOIN rss_ledger.heads h ON h.tenant_id = $1::uuid AND h.chain_id = $2
         LEFT JOIN rss_ledger.entries e ON e.tenant_id = h.tenant_id AND e.chain_id = h.chain_id
             AND e.seq BETWEEN greatest($3::bigint - 1, 0) AND $4::bigint
-        GROUP BY h.seq, h.key_id, h.encoding_version, octet_length(h.tag)
+        GROUP BY h.tenant_id, h.seq, h.key_id, h.encoding_version, octet_length(h.tag)
     ) AS facts
 )
 SELECT true AS header, a.status, a.observed_tail, a.expected_records, a.required_bytes,

@@ -1,6 +1,7 @@
 //! Public read behavior and the exact production SQL's pre-transfer boundary.
 use super::*;
 use sqlx::{Row, postgres::PgRow};
+mod nulls;
 
 const SQL: &str = include_str!("../../../../crates/ledger-postgres/src/window.sql");
 
@@ -71,6 +72,7 @@ pub async fn run(
     empty_windows(store, &ledger, control).await?;
     pre_transfer(pool, &ledger, total).await?;
     corruption(store, owner, control).await?;
+    nulls::run(store, pool, owner, control).await?;
     snapshot(store, pool, owner, control).await?;
     Ok(())
 }
