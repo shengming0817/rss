@@ -135,6 +135,13 @@ async fn append_message(
     runtime
         .local_tx(tenant, deadline(Duration::from_secs(3))?, move |tx| {
             Box::pin(async move {
+                let partitions = envelope
+                    .metadata()
+                    .partition()
+                    .cloned()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                tx.prepare_outbox_partitions(&partitions).await?;
                 append
                     .append(tx, PendingMessage::new(envelope))
                     .await
