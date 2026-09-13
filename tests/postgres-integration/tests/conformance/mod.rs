@@ -370,6 +370,7 @@ impl InboxDriver for Harness {
 }
 
 pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
+    Box::pin(outbox::Driver::reverse_commit_ordering(runtime.clone(), owner)).await?;
     let timer = Timer::new();
     Box::pin(
         rss_transactional_messaging_testkit::localtx::run_localtx_conformance(

@@ -10,6 +10,71 @@ pub(super) struct Driver {
     head: tokio::sync::Mutex<Option<PgOutboxClaim>>,
 }
 impl Driver {
+    // INVARIANT: OUTBOX-PARTITION-ORDER-01 — an invisible predecessor must fence admission.
+    pub(super) async fn reverse_commit_ordering(
+        runtime: Arc<PgRuntime>,
+        owner: &sqlx::PgPool,
+    ) -> anyhow::Result<()> {
+        let mut race = Self::new(runtime.clone(), owner);
+        race.h.prefix = "reverse-commit-order";
+        let first = race.envelope("-first", vec![1]);
+        let second = race.envelope("-second", vec![2]);
+        let tenant = first.metadata().tenant_id();
+        let inserted = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let completed = std::sync::atomic::AtomicBool::new(false);
+        let notify = inserted.clone();
+        let gate = release.clone();
+        let store = race.store();
+        let predecessor = runtime.local_tx(tenant, deadline(), move |tx| {
+            Box::pin(async move {
+                store.append(tx, PendingMessage::new(first)).await?;
+                notify.notify_one();
+                gate.notified().await;
+                Ok(())
+            })
+        });
+        let store = race.store();
+        let successor = async {
+            inserted.notified().await;
+            let result = runtime.local_tx(tenant, deadline(), move |tx| {
+                Box::pin(async move {
+                    store.append(tx, PendingMessage::new(second)).await.map_err(Into::into)
+                })
+            }).await;
+            completed.store(true, Ordering::SeqCst);
+            result
+        };
+        let observe = async {
+            let blocked = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if completed.load(Ordering::SeqCst) { return Ok::<_, sqlx::Error>(false); }
+                    let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='rss-transactional-messaging-postgres' AND wait_event_type='Lock')")
+                        .fetch_one(owner).await?;
+                    if blocked { return Ok(true); }
+                    tokio::task::yield_now().await;
+                }
+            }).await;
+            let claims = race.store().claim_partition_heads(NonZeroUsize::MIN, deadline()).await;
+            release.notify_one();
+            (blocked, claims)
+        };
+        let (predecessor, successor, (blocked, claims)) = tokio::join!(predecessor, successor, observe);
+        predecessor.fold(Ok, Err, Err, Err, Err, Err)?;
+        successor.fold(Ok, Err, Err, Err, Err, Err)?;
+        let count = claims?.len();
+        assert!(blocked??, "successor committed before its predecessor settled; early claims={count}");
+        assert_eq!(count, 0, "an uncommitted predecessor must block same-partition admission");
+        let first = race.claim().await?;
+        assert!(PgOutboxStore::<()>::message(&first).message_id().as_str().ends_with("-first"));
+        assert!(race.store().claim_partition_heads(NonZeroUsize::MIN, deadline()).await?.is_empty());
+        race.store().settle(first, OutboxSettlement::Published(()), deadline()).await?;
+        let second = race.claim().await?;
+        assert!(PgOutboxStore::<()>::message(&second).message_id().as_str().ends_with("-second"));
+        race.store().settle(second, OutboxSettlement::Published(()), deadline()).await?;
+        Ok(())
+    }
+
     pub(super) fn new(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> Self {
         Self {
             h: Harness::new(runtime, owner, "outbox-conformance"),
