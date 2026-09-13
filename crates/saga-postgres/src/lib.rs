@@ -396,7 +396,7 @@ impl Store for PgStore {
         control: &Control<'_, T>,
     ) -> Result<Vec<Scope>, Error> {
         if limit == 0 || limit > 10_000 {
-            return Err(Error::new(rss_saga::ErrorKind::Budget));
+            return Err(Error::new(rss_saga::ErrorKind::InvalidBudget));
         }
         self.transact(tenant,control,|c|Box::pin(async move {
             let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit) AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).fetch_all(c).await.map_err(sql_error)?;

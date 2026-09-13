@@ -78,12 +78,17 @@ impl SagaReceiptProtector for Crypto {
     }
 }
 pub fn protection() -> Result<ReceiptProtection<Crypto>, Error> {
+    protection_with(Crypto)
+}
+pub fn protection_with<P: SagaReceiptProtector>(
+    provider: P,
+) -> Result<ReceiptProtection<P>, Error> {
     let id = SagaReceiptIntegrityKeyId::parse("integrity-v1")
         .map_err(|_| Error::new(rss_saga::ErrorKind::Protection))?;
     let key = VersionedSagaReceiptIntegrityKey::from_bytes(id, vec![13; 32])
         .map_err(|_| Error::new(rss_saga::ErrorKind::Protection))?;
     Ok(ReceiptProtection::new(
-        Crypto,
+        provider,
         SagaReceiptIntegrityKeyring::new(key, vec![])
             .map_err(|_| Error::new(rss_saga::ErrorKind::Protection))?,
     ))
@@ -95,6 +100,8 @@ pub struct Effects {
     pub fail_undo: AtomicBool,
     pub unknown_once: AtomicBool,
     pub unknown_undo_once: AtomicBool,
+    pub unknown_probe: AtomicBool,
+    pub unknown_undo_probe: AtomicBool,
     pub calls: Mutex<Vec<String>>,
 }
 pub struct Action {
@@ -134,6 +141,9 @@ impl Step for Action {
         if let Ok(mut calls) = self.effects.calls.lock() {
             calls.push(format!("probe:{}", self.name));
         }
+        if self.effects.unknown_probe.load(Ordering::SeqCst) {
+            return ProbeOutcome::Unknown;
+        }
         match self.effects.applied.lock() {
             Ok(map) => map
                 .get(&context.idempotency_key().to_hex())
@@ -161,6 +171,9 @@ impl Step for Action {
         }
     }
     async fn probe_compensation(&self, _: EffectContext, receipt: String) -> ProbeOutcome<()> {
+        if self.effects.unknown_undo_probe.load(Ordering::SeqCst) {
+            return ProbeOutcome::Unknown;
+        }
         match self.effects.undo.lock() {
             Ok(undo) => {
                 if undo.contains(&receipt) {

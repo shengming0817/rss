@@ -85,7 +85,7 @@ impl Mutation {
 }
 /// Trusted provider boundary for tenant-scoped, lease-fenced atomic Saga persistence.
 pub trait Store: Send + Sync {
-    /// Atomically register immutable scope/definition metadata. Same identity with changed metadata is a conflict; caller owns authorization.
+    /// Atomically register scope, exact definition and capacity. An existing scope must match both definition and current capacity; changes require explicit growth. Caller owns authorization.
     fn register<T: Timer>(
         &self,
         scope: Scope,

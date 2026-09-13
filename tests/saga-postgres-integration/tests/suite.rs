@@ -10,6 +10,8 @@ mod history;
 #[path = "support/measurement.rs"]
 mod measurement;
 mod process;
+#[path = "support/receipt_domain.rs"]
+mod receipt_domain;
 #[path = "support/redis_effect.rs"]
 mod redis_effect;
 use common::*;
@@ -63,6 +65,7 @@ async fn suite() -> anyhow::Result<()> {
     run_scenarios(&store, &owner, &pool, &fixture, &d, &control).await?;
     eprintln!("saga T2: history bounds");
     history::bounds(&store, &owner, &control).await?;
+    receipt_domain::writes(&store, &owner, &pool, &control).await?;
     assert_eq!(store.close(&control).await, CloseOutcome::Drained);
     owner.close().await;
     drop(fixture);

@@ -43,9 +43,9 @@ pub enum ErrorKind {
     #[error("saga effect outcome unknown")]
     /// An admitted external effect has an uncertain outcome and must be probed.
     EffectUnknown,
-    #[error("saga execution budget exhausted")]
-    /// A supplied execution bound is invalid; normal budget yield uses Report instead.
-    Budget,
+    #[error("invalid saga resource budget")]
+    /// A supplied execution, history capacity, or authentication bound is invalid.
+    InvalidBudget,
     /// The configured database schema or runtime role violates the storage contract.
     #[error("saga storage contract not accepted")]
     StorageContract,

@@ -22,6 +22,30 @@ pub(super) async fn drift(
             format!("REVOKE {privilege} ON {object} FROM PUBLIC"),
         ));
     }
+    for (object, privilege) in [
+        ("SCHEMA rss_saga", "USAGE"),
+        ("rss_saga.instances", "SELECT"),
+        ("rss_saga.journal", "SELECT"),
+        ("FUNCTION rss_saga.register(uuid,jsonb,jsonb)", "EXECUTE"),
+        (
+            "FUNCTION rss_saga.extend_history(uuid,uuid,bigint,bigint,jsonb,jsonb)",
+            "EXECUTE",
+        ),
+        (
+            "FUNCTION rss_saga.commit_event(uuid,uuid,bigint,jsonb,bytea,jsonb,jsonb)",
+            "EXECUTE",
+        ),
+        (
+            "FUNCTION rss_saga.runnable(jsonb,jsonb,bigint,bigint,bigint,bigint)",
+            "EXECUTE",
+        ),
+    ] {
+        cases.push((
+            format!("missing required {object} {privilege}"),
+            format!("REVOKE {privilege} ON {object} FROM saga_runtime"),
+            format!("GRANT {privilege} ON {object} TO saga_runtime"),
+        ));
+    }
     history_cases(&mut cases);
     policy_cases(&mut cases);
     for table in ["instances", "journal"] {

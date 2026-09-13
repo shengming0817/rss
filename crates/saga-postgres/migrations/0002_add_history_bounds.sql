@@ -33,6 +33,13 @@ BEGIN
  IF jsonb_array_length(r->'ciphertext'->'bytes') NOT BETWEEN 1 AND 2097152 OR jsonb_array_length(r->'aad')>4096 OR jsonb_array_length(r->'digest')<>32 OR octet_length(r->'ciphertext'->>'key_ref') NOT BETWEEN 1 AND 1024 OR octet_length(r->>'key_id') NOT BETWEEN 1 AND 64 THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt bound'; END IF;
  n:=256+1024+6*(octet_length(r->'ciphertext'->>'key_ref')+octet_length(r->>'key_id'))::bigint+5*(jsonb_array_length(r->'ciphertext'->'bytes')+jsonb_array_length(r->'aad')+jsonb_array_length(r->'digest'))::bigint;
  IF octet_length(r::text)>n-256 THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt encoding'; END IF;
+ -- Validate the u8 domain before any typed Rust reader can receive this envelope.
+ IF EXISTS(SELECT FROM (
+    SELECT value FROM jsonb_array_elements(r->'ciphertext'->'bytes')
+    UNION ALL SELECT value FROM jsonb_array_elements(r->'aad')
+    UNION ALL SELECT value FROM jsonb_array_elements(r->'digest')
+ ) b WHERE jsonb_typeof(value)<>'number' OR value::text !~ '^(0|[1-9][0-9]{0,2})$' OR value>'255'::jsonb)
+ THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt byte domain'; END IF;
  RETURN n;
 END $$;
 CREATE FUNCTION rss_saga.history_reserve(p jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path=pg_catalog,rss_saga AS $$
@@ -125,8 +132,7 @@ BEGIN
  IF EXISTS(SELECT FROM rss_saga.instances WHERE tenant_id=t AND definition->'identity'->>'contract'=p_definition->'identity'->>'contract' AND definition->'identity'->>'version'=p_definition->'identity'->>'version' AND definition<>p_definition) THEN RAISE EXCEPTION USING ERRCODE='RS002',MESSAGE='saga version conflict'; END IF;
  INSERT INTO rss_saga.instances(tenant_id,saga_id,definition,history_entry_limit,history_byte_limit) VALUES(t,p_id,p_definition,entries,bytes_) ON CONFLICT DO NOTHING;
  SELECT * INTO existing FROM rss_saga.instances WHERE tenant_id=t AND saga_id=p_id FOR UPDATE;
- IF existing.definition IS DISTINCT FROM p_definition THEN RAISE EXCEPTION USING ERRCODE='RS002',MESSAGE='saga definition conflict'; END IF;
- -- Registration never replaces an existing capacity, including a previously acknowledged increase.
+ IF existing.definition IS DISTINCT FROM p_definition OR existing.history_entry_limit IS DISTINCT FROM entries OR existing.history_byte_limit IS DISTINCT FROM bytes_ THEN RAISE EXCEPTION USING ERRCODE='RS002',MESSAGE='saga registration conflict'; END IF;
 END $$;
 CREATE OR REPLACE FUNCTION rss_saga.lock_instance(p_id uuid,p_token uuid,p_epoch bigint) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_saga AS $$
 DECLARE row_ rss_saga.instances; t uuid:=current_setting('rss.tenant_id')::uuid;

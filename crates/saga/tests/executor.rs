@@ -35,7 +35,7 @@ impl Store for Memory {
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
         if let Some((snapshot, _)) = data.get(&scope) {
-            if snapshot.definition() != d {
+            if snapshot.definition() != d || snapshot.head().capacity != capacity {
                 return Err(Error::new(rss_saga::ErrorKind::Conflict));
             }
         } else {
@@ -881,7 +881,7 @@ async fn compensation_retry_requires_new_space_and_never_spends_earlier_steps_re
         memory,
         protection()?,
         registry(d.clone(), effects.clone(), true)?,
-        ReadBudget::new(capacity, 3 * 1024 * 1024)?,
+        ReadBudget::new(capacity, 4 * 1024 * 1024)?,
     );
     executor
         .register(scope, &d, HistoryCapacity::new(13, 64 * 1024 * 1024)?, &c)
@@ -905,5 +905,138 @@ async fn compensation_retry_requires_new_space_and_never_spends_earlier_steps_re
             .status,
         Status::Compensated
     );
+    Ok(())
+}
+
+struct CountingCrypto(Arc<std::sync::atomic::AtomicUsize>);
+impl SagaReceiptProtector for CountingCrypto {
+    async fn seal(&self, p: &[u8], c: &ReceiptContext) -> Result<Ciphertext, Error> {
+        Crypto.seal(p, c).await
+    }
+    async fn open(
+        &self,
+        p: &Ciphertext,
+        c: &ReceiptContext,
+    ) -> Result<rss_data_protection::Plaintext, Error> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Crypto.open(p, c).await
+    }
+}
+#[tokio::test]
+async fn authentication_budget_covers_verification_and_each_compensation_without_reset()
+-> anyhow::Result<()> {
+    let d = definition(&["one", "two", "three"])?;
+    let effects = Arc::new(Effects::default());
+    effects.fail_undo.store(true, Ordering::SeqCst);
+    let memory = Memory::default();
+    let scope = scope()?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+    let setup = Executor::new(
+        memory.clone(),
+        protection()?,
+        registry(d.clone(), effects.clone(), true)?,
+        read_budget()?,
+    );
+    setup.register(scope, &d, history_capacity()?, &c).await?;
+    let paused = setup.run(scope, 20, &c).await?;
+    assert_eq!(paused.status, Status::CompensationFailed);
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = Executor::new(
+        memory.clone(),
+        protection_with(CountingCrypto(count.clone()))?,
+        registry(d, effects, true)?,
+        ReadBudget::new(history_capacity()?, 3 * PLAINTEXT_BYTES)?,
+    );
+    let partial = executor.resume(scope, paused.revision, 20, &c).await?;
+    assert_eq!(partial.stop, RunStop::HistoryLimited);
+    assert_eq!(partial.status, Status::Compensating);
+    assert_eq!(partial.revision, paused.revision + 3);
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    count.store(0, Ordering::SeqCst);
+    assert_eq!(
+        executor.run(scope, 20, &c).await?.status,
+        Status::Compensated
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_probes_preserve_pending_forward_and_compensation_history() -> anyhow::Result<()> {
+    for compensation in [false, true] {
+        let d = definition(&["one", "two"])?;
+        let effects = Arc::new(Effects::default());
+        effects.unknown_once.store(!compensation, Ordering::SeqCst);
+        effects
+            .unknown_undo_once
+            .store(compensation, Ordering::SeqCst);
+        let memory = Memory::default();
+        let s = scope()?;
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+        let e = Executor::new(
+            memory.clone(),
+            protection()?,
+            registry(d.clone(), effects.clone(), compensation)?,
+            read_budget()?,
+        );
+        e.register(s, &d, HistoryCapacity::new(9, 64 * 1024 * 1024)?, &c)
+            .await?;
+        assert!(matches!(e.run(s,20,&c).await,Err(e) if e.kind()==ErrorKind::EffectUnknown));
+        let before = memory
+            .0
+            .lock()
+            .map_err(|_| ErrorKind::Store)?
+            .get(&s)
+            .ok_or(ErrorKind::Store)?
+            .0
+            .clone();
+        let applied = effects
+            .applied
+            .lock()
+            .map_err(|_| ErrorKind::Store)?
+            .clone();
+        let undo = effects.undo.lock().map_err(|_| ErrorKind::Store)?.clone();
+        effects.unknown_probe.store(true, Ordering::SeqCst);
+        effects.unknown_undo_probe.store(true, Ordering::SeqCst);
+        for _ in 0..2 {
+            assert!(matches!(e.run(s,20,&c).await,Err(e) if e.kind()==ErrorKind::EffectUnknown));
+            let lease = memory.claim(s, Duration::from_secs(30), &c).await?;
+            let after = memory.snapshot(&lease, read_budget()?, &c).await?;
+            assert_eq!(after.head(), before.head());
+            assert_eq!(
+                serde_json::to_vec(after.events())?,
+                serde_json::to_vec(before.events())?
+            );
+            assert_eq!(
+                *effects.applied.lock().map_err(|_| ErrorKind::Store)?,
+                applied
+            );
+            assert_eq!(*effects.undo.lock().map_err(|_| ErrorKind::Store)?, undo);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn registration_requires_the_acknowledged_current_capacity() -> anyhow::Result<()> {
+    let d = definition(&["one"])?;
+    let memory = Memory::default();
+    let s = scope()?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+    let a = HistoryCapacity::new(5, 32 * 1024 * 1024)?;
+    let b = HistoryCapacity::new(6, 32 * 1024 * 1024)?;
+    memory.register(s, &d, a, &c).await?;
+    memory.register(s, &d, a, &c).await?;
+    assert!(matches!(memory.register(s,&d,b,&c).await,Err(e) if e.kind()==ErrorKind::Conflict));
+    let lease = memory.claim(s, Duration::from_secs(30), &c).await?;
+    memory.extend_history(&lease, 0, a, b, &c).await?;
+    assert!(matches!(memory.register(s,&d,a,&c).await,Err(e) if e.kind()==ErrorKind::Conflict));
+    memory.register(s, &d, b, &c).await?;
     Ok(())
 }

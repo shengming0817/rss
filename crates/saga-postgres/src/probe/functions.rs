@@ -16,6 +16,7 @@ actual AS (
 SELECT e.signature, p.prosrc, p.prosecdef, pg_get_function_identity_arguments(p.oid) AS arguments,
     p.prorettype=to_regtype(e.result) AND NOT p.proretset
     AND p.proowner=p.nspowner AND p.prokind='f'
+    AND has_function_privilege(current_user,p.oid,'EXECUTE')
     AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
     AND NOT p.proisstrict AND NOT p.proleakproof AND p.provolatile='v' AND p.proparallel='u'
     AND p.pronargdefaults=0 AND p.provariadic=0 AND p.proargmodes IS NULL

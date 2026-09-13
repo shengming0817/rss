@@ -205,7 +205,7 @@ async fn checkout<S: Store>(store: S, scope: Scope, encryption_key: aead::Unboun
 
 Construct `Executor::new(store, protection, registry, read_budget)` with an explicit
 `ReadBudget::new(history_capacity, authentication_bytes)?`. Register each scope with
-`register(scope, definition, capacity, control)`. There is no unbounded default or legacy overload.
+`register(scope, definition, capacity, control)`. Retries must match both the exact definition and current capacity; a different capacity returns `Conflict`, including an outdated value after growth. There is no unbounded default or legacy overload.
 The example's 10,000 events and 256 MiB are explicit caller choices, not a production SLO.
 
 `HistoryCapacity` bounds the committed journal plus required reservations in entries and charged
@@ -216,7 +216,7 @@ change receipt encoding or measure database physical storage. Definitions have a
 bound in the provider. Authentication work reserves the existing 1 MiB maximum plaintext per
 historical receipt before any protector `open` call.
 
-The caller's read budget limits full history replay and authentication. Before admitting an intent,
+The caller's read budget limits full history replay and authentication. Each receipt open consumes the maximum plaintext size from one invocation-wide allowance, including replay verification and subsequent compensation opens. Running out at a safe boundary returns `HistoryLimited` before another intent or Resume is written; another invocation may continue with a fresh finite allowance. Before admitting an intent,
 the executor also verifies that its maximum settlement remains readable under that budget.
 `RunStop::HistoryLimited` means the next intent cannot fit. It preserves business status and
 reports the acknowledged `HistoryHead`; it is distinct from advance-budget `Yielded`, failed

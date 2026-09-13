@@ -11,6 +11,7 @@ WITH reachable AS (
     SELECT * FROM pg_roles WHERE rolname=current_user OR pg_has_role(current_user,oid,'SET')
 )
 SELECT current_user=session_user AND NOT o.rolsuper AND NOT o.rolbypassrls
+    AND has_schema_privilege(current_user,n.oid,'USAGE')
     AND NOT pg_has_role(current_user,n.nspowner,'MEMBER')
     AND NOT EXISTS(SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole)
     AND NOT EXISTS(SELECT FROM reachable r
@@ -39,7 +40,7 @@ WITH reachable AS (
     SELECT * FROM pg_roles WHERE rolname=current_user OR pg_has_role(current_user,oid,'SET')
 )
 SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity,c.relowner=n.nspowner AS owned,
-    c.relpersistence='p'
+    c.relpersistence='p' AND has_table_privilege(current_user,c.oid,'SELECT')
         AND NOT EXISTS(SELECT FROM pg_rewrite WHERE ev_class=c.oid)
         AND NOT EXISTS(SELECT FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
             WHERE a.grantee=0)

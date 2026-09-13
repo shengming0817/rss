@@ -35,6 +35,7 @@ pub(super) async fn bounds(
             .await?
             .is_empty()
     );
+    registration_capacity(&executor, &d, s, small, control).await?;
     grow_and_settle(&executor, effects.clone(), s, small, control).await?;
     inline_pair(owner, s).await?;
     reject_corrupt_rows(&executor, owner, s, control).await?;
@@ -53,7 +54,7 @@ pub(super) async fn upgrade(
     let store = PgStore::new(pool.clone(), control).await?;
     let read = ReadBudget::new(
         HistoryCapacity::new(2000, 64 * 1024 * 1024)?,
-        3 * 1024 * 1024,
+        4 * 1024 * 1024,
     )?;
     let effects = Arc::new(Effects::default());
     let mut captured = Vec::new();
@@ -76,16 +77,10 @@ pub(super) async fn upgrade(
         .collect();
     captured.push((long, events));
     seed_v1(owner, &d, &captured).await?;
-    let mut connection = owner.acquire().await?;
-    assert!(
-        matches!(PgStore::new(pool.clone(),control).await,Err(e) if e.kind()==ErrorKind::StorageContract)
-    );
-    sqlx::raw_sql("SET ROLE saga_owner")
-        .execute(&mut *connection)
-        .await?;
-    measure_upgrade(owner, &mut connection).await?;
-    sqlx::raw_sql("RESET ROLE; GRANT SELECT ON ALL TABLES IN SCHEMA rss_saga TO saga_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_saga TO saga_runtime").execute(&mut *connection).await?;
-    drop(connection);
+    receipt_domain::upgrade(owner).await?;
+    // Reconstruct the same committed V1 history to exclude failed-upgrade bloat from measurement.
+    seed_v1(owner, &d, &captured).await?;
+    install_upgrade(owner, pool, control).await?;
     let store = PgStore::new(pool.clone(), control).await?;
     verify_upgraded(&store, &d, effects, read, &captured, control).await?;
 
@@ -439,4 +434,42 @@ async fn measure_upgrade(
 }
 async fn component_size(owner: &PgPool) -> anyhow::Result<i64> {
     Ok(sqlx::query_scalar("SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='rss_saga' AND c.relkind='r'").fetch_one(owner).await?)
+}
+
+async fn registration_capacity(
+    executor: &Executor<PgStore, Crypto>,
+    d: &Definition,
+    s: Scope,
+    small: HistoryCapacity,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    executor.register(s, d, small, control).await?;
+    for changed in [
+        HistoryCapacity::new(5, 32 * 1024 * 1024)?,
+        HistoryCapacity::new(4, 33 * 1024 * 1024)?,
+    ] {
+        assert!(
+            matches!(executor.register(s,d,changed,control).await,Err(e) if e.kind()==ErrorKind::Conflict)
+        );
+        assert_eq!(executor.history_head(s, control).await?.capacity, small);
+    }
+    Ok(())
+}
+
+async fn install_upgrade(
+    owner: &PgPool,
+    pool: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let mut connection = owner.acquire().await?;
+    assert!(
+        matches!(PgStore::new(pool.clone(),control).await,Err(e) if e.kind()==ErrorKind::StorageContract)
+    );
+    sqlx::raw_sql("SET ROLE saga_owner")
+        .execute(&mut *connection)
+        .await?;
+    measure_upgrade(owner, &mut connection).await?;
+    sqlx::raw_sql("RESET ROLE; GRANT SELECT ON ALL TABLES IN SCHEMA rss_saga TO saga_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_saga TO saga_runtime").execute(&mut *connection).await?;
+    drop(connection);
+    Ok(())
 }

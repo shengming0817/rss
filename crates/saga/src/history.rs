@@ -41,7 +41,7 @@ impl HistoryCapacity {
             || max_entries > i64::MAX as u64
             || max_encoded_bytes > i64::MAX as u64
         {
-            return Err(ErrorKind::Budget.into());
+            return Err(ErrorKind::InvalidBudget.into());
         }
         Ok(Self {
             max_entries,
@@ -77,7 +77,7 @@ impl ReadBudget {
     /// Bound loaded history and conservative authenticated plaintext work separately.
     pub fn new(history: HistoryCapacity, authentication_bytes: u64) -> Result<Self, Error> {
         if authentication_bytes == 0 || authentication_bytes > i64::MAX as u64 {
-            return Err(ErrorKind::Budget.into());
+            return Err(ErrorKind::InvalidBudget.into());
         }
         Ok(Self {
             history,
@@ -140,9 +140,8 @@ impl HistoryHead {
         }
         let receipts = self.progress.forward
             + usize::from(
-                self.progress
-                    .pending
-                    .is_some_and(|p| p.kind == crate::EventKind::ForwardIntent),
+                self.progress.pending.is_some()
+                    || self.progress.last_kind == Some(crate::EventKind::Resume),
             );
         read.check(entries, bytes, receipts)
             .map_err(|_| ErrorKind::HistoryLimited.into())

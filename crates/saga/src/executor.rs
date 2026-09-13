@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Why a bounded invocation stopped after acknowledged durable progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStop {
-    /// No new intent fits; explicit capacity/read-budget growth is required.
+    /// No new intent fits this capacity or invocation allowance; inspect the head before retrying.
     HistoryLimited,
     /// All effects succeeded or their compensation completed.
     Completed,
@@ -108,6 +108,21 @@ fn report(scope: Scope, snapshot: &Snapshot, advances: u32) -> Report {
         stop,
         failure,
         success,
+    }
+}
+/// One invocation's authentication allowance, shared by replay and every subsequent open.
+struct AuthenticationWork(u64);
+impl AuthenticationWork {
+    fn require_open(&self) -> Result<(), Error> {
+        if self.0 < crate::history::PLAINTEXT_BYTES {
+            return Err(crate::ErrorKind::HistoryLimited.into());
+        }
+        Ok(())
+    }
+    fn charge(&mut self) -> Result<(), Error> {
+        self.require_open()?;
+        self.0 -= crate::history::PLAINTEXT_BYTES;
+        Ok(())
     }
 }
 /// Caller-driven execution and recovery with exact definitions and mandatory receipt protection.
@@ -232,7 +247,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         control: &Control<'_, T>,
     ) -> Result<Report, Error> {
         if budget == 0 {
-            return Err(Error::new(crate::ErrorKind::Budget));
+            return Err(Error::new(crate::ErrorKind::InvalidBudget));
         }
         control.check()?;
         let lease = control
@@ -296,11 +311,17 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 .check_admission(self.read)
                 .map_err(|_| Error::new(crate::ErrorKind::HistoryReadLimit))?;
         }
-        self.verify_receipts(lease.scope(), &snapshot, control)
+        let mut authentication = AuthenticationWork(self.read.authentication_bytes());
+        self.verify_receipts(lease.scope(), &snapshot, &mut authentication, control)
             .await?;
         if let Some(revision) = resume {
             if revision != snapshot.revision() || snapshot.status() != Status::CompensationFailed {
                 return Err(Error::new(crate::ErrorKind::Conflict));
+            }
+            if authentication.require_open().is_err() {
+                let mut result = report(lease.scope(), &snapshot, 0);
+                result.stop = RunStop::HistoryLimited;
+                return Ok(result);
             }
             let step = snapshot
                 .progress()
@@ -331,7 +352,14 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 return Ok(report(lease.scope(), &snapshot, advances));
             }
             if let Err(error) = self
-                .advance(lease, &mut snapshot, &entry, control, commit_inflight)
+                .advance(
+                    lease,
+                    &mut snapshot,
+                    &entry,
+                    &mut authentication,
+                    control,
+                    commit_inflight,
+                )
                 .await
             {
                 if error.kind() != crate::ErrorKind::HistoryLimited {
@@ -388,7 +416,10 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             event.attempt,
             event.seq,
         )?;
-        let plaintext = control.run(self.protection.open(receipt, &context)).await?;
+        let mut authentication = AuthenticationWork(self.read.authentication_bytes());
+        let plaintext = self
+            .open_receipt(receipt, &context, &mut authentication, control)
+            .await?;
         serde_json::from_slice(plaintext.expose())
             .map_err(|_| Error::new(crate::ErrorKind::ReceiptType))
     }
@@ -396,6 +427,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         &self,
         scope: Scope,
         snapshot: &Snapshot,
+        authentication: &mut AuthenticationWork,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
         for event in snapshot.events() {
@@ -407,10 +439,21 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                     event.attempt,
                     event.seq,
                 )?;
-                control.run(self.protection.open(receipt, &context)).await?;
+                self.open_receipt(receipt, &context, authentication, control)
+                    .await?;
             }
         }
         Ok(())
+    }
+    async fn open_receipt<T: Timer>(
+        &self,
+        receipt: &crate::ProtectedReceipt,
+        context: &ReceiptContext,
+        authentication: &mut AuthenticationWork,
+        control: &Control<'_, T>,
+    ) -> Result<rss_data_protection::Plaintext, Error> {
+        authentication.charge()?;
+        control.run(self.protection.open(receipt, context)).await
     }
     async fn commit<T: Timer>(
         &self,
@@ -438,6 +481,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         lease: &Lease,
         snapshot: &mut Snapshot,
         entry: &Registered,
+        authentication: &mut AuthenticationWork,
         control: &Control<'_, T>,
         commit_inflight: &AtomicBool,
     ) -> Result<(), Error> {
@@ -447,6 +491,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         } else {
             let p = snapshot.progress();
             let (step, attempt, kind) = if p.status == Status::Compensating {
+                authentication.require_open()?;
                 let step = p
                     .compensation
                     .ok_or(Error::new(crate::ErrorKind::Integrity))?;
@@ -495,8 +540,15 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             self.forward(lease.scope(), snapshot, entry, &intent, recovery, control)
                 .await?
         } else {
-            self.compensate(lease.scope(), snapshot, entry, &intent, recovery, control)
-                .await?
+            self.compensate(
+                lease.scope(),
+                snapshot,
+                entry,
+                authentication,
+                recovery,
+                control,
+            )
+            .await?
         };
         self.commit(lease, snapshot, event, control, commit_inflight)
             .await
@@ -549,10 +601,14 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         scope: Scope,
         snapshot: &Snapshot,
         entry: &Registered,
-        intent: &Event,
+        authentication: &mut AuthenticationWork,
         probe: bool,
         control: &Control<'_, T>,
     ) -> Result<Event, Error> {
+        let intent = snapshot
+            .progress()
+            .pending
+            .ok_or(crate::ErrorKind::Integrity)?;
         let step = snapshot
             .progress()
             .compensation
@@ -572,7 +628,9 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             receipt.attempt(),
             receipt.completed_seq(),
         )?;
-        let plaintext = control.run(self.protection.open(receipt, &context)).await?;
+        let plaintext = self
+            .open_receipt(receipt, &context, authentication, control)
+            .await?;
         let effect_context =
             EffectContext::new(scope, &entry.definition, step, Phase::Compensation)?;
         let outcome = control
@@ -687,7 +745,7 @@ impl SweepBudget {
     /// Require nonzero bounds and at most 10,000 candidate instances per sweep.
     pub fn new(instances: u32, advances: u32) -> Result<Self, Error> {
         if instances == 0 || instances > 10_000 || advances == 0 {
-            return Err(Error::new(crate::ErrorKind::Budget));
+            return Err(Error::new(crate::ErrorKind::InvalidBudget));
         }
         Ok(Self {
             instances,
