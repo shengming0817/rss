@@ -29,7 +29,8 @@ CREATE FUNCTION rss_saga.history_charge(r jsonb) RETURNS bigint LANGUAGE plpgsql
 DECLARE n bigint;
 BEGIN
  IF r IS NULL OR r='null'::jsonb THEN RETURN 256; END IF;
- IF (jsonb_typeof(r)='object' AND jsonb_typeof(r->'ciphertext')='object' AND jsonb_typeof(r->'ciphertext'->'bytes')='array' AND jsonb_typeof(r->'aad')='array' AND jsonb_typeof(r->'digest')='array' AND jsonb_typeof(r->'ciphertext'->'key_ref')='string' AND jsonb_typeof(r->'key_id')='string' AND (r->>'format')::integer=1) IS DISTINCT FROM true THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt shape'; END IF;
+ IF (jsonb_typeof(r)='object' AND jsonb_typeof(r->'ciphertext')='object' AND jsonb_typeof(r->'ciphertext'->'bytes')='array' AND jsonb_typeof(r->'aad')='array' AND jsonb_typeof(r->'digest')='array' AND jsonb_typeof(r->'ciphertext'->'key_ref')='string' AND jsonb_typeof(r->'key_id')='string' AND jsonb_typeof(r->'format')='number' AND r->>'format'='1' AND jsonb_typeof(r->'attempt')='number' AND jsonb_typeof(r->'seq')='number') IS DISTINCT FROM true THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt shape'; END IF;
+ IF r->>'attempt' !~ '^[1-9][0-9]{0,9}$' OR r->'attempt'>'4294967295'::jsonb OR r->>'seq' !~ '^(0|[1-9][0-9]{0,18})$' OR r->'seq'>'9223372036854775807'::jsonb THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt coordinates'; END IF;
  IF jsonb_array_length(r->'ciphertext'->'bytes') NOT BETWEEN 1 AND 2097152 OR jsonb_array_length(r->'aad')>4096 OR jsonb_array_length(r->'digest')<>32 OR octet_length(r->'ciphertext'->>'key_ref') NOT BETWEEN 1 AND 1024 OR octet_length(r->>'key_id') NOT BETWEEN 1 AND 64 THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt bound'; END IF;
  n:=256+1024+6*(octet_length(r->'ciphertext'->>'key_ref')+octet_length(r->>'key_id'))::bigint+5*(jsonb_array_length(r->'ciphertext'->'bytes')+jsonb_array_length(r->'aad')+jsonb_array_length(r->'digest'))::bigint;
  IF octet_length(r::text)>n-256 THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga receipt encoding'; END IF;
@@ -94,7 +95,7 @@ BEGIN
   FOR j IN SELECT * FROM rss_saga.journal WHERE tenant_id=i.tenant_id AND saga_id=i.saga_id ORDER BY seq LOOP
    IF j.seq<>q THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga upgrade sequence'; END IF;
    e:=jsonb_build_object('seq',j.seq,'step',j.step,'attempt',j.attempt,'kind',j.kind,'receipt',j.protected);
-   p:=rss_saga.next_progress(p,i.definition,e); bytes_:=bytes_+rss_saga.history_charge(j.protected); q:=q+1;
+   bytes_:=bytes_+rss_saga.history_charge(j.protected); p:=rss_saga.next_progress(p,i.definition,e); q:=q+1;
   END LOOP;
   IF q<>i.revision OR p->>'status'<>i.status OR (p->>'forward')::integer<>i.next_step THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga upgrade projection'; END IF;
   reserve_:=rss_saga.history_reserve(p);
@@ -112,8 +113,10 @@ BEGIN
  AND (p->'pending'='null'::jsonb OR (p->'pending'->>'kind' IN ('ForwardIntent','CompensationIntent') AND (p->'pending'->>'step')::bigint BETWEEN 0 AND 1023 AND (p->'pending'->>'attempt')::bigint BETWEEN 1 AND 4294967295))) IS TRUE;
 END $$;
 CREATE FUNCTION rss_saga.valid_journal(k text,q bigint,a bigint,p_key bytea,r jsonb,bytes_ bigint) RETURNS boolean LANGUAGE plpgsql SET search_path=pg_catalog,rss_saga AS $$
+DECLARE charged bigint;
 BEGIN
- RETURN (k IN ('ForwardIntent','ForwardApplied','ForwardNotApplied','ForwardProbeNotApplied','Abort','CompensationIntent','CompensationApplied','CompensationNotApplied','CompensationFailed','Resume') AND octet_length(p_key)=32 AND q>=0 AND a BETWEEN 1 AND 4294967295 AND bytes_=rss_saga.history_charge(r) AND (k='ForwardApplied')=(r IS NOT NULL) AND (r IS NULL OR ((r->>'seq')::bigint=q AND (r->>'attempt')::bigint=a))) IS TRUE;
+ charged:=rss_saga.history_charge(r);
+ RETURN (k IN ('ForwardIntent','ForwardApplied','ForwardNotApplied','ForwardProbeNotApplied','Abort','CompensationIntent','CompensationApplied','CompensationNotApplied','CompensationFailed','Resume') AND octet_length(p_key)=32 AND q>=0 AND a BETWEEN 1 AND 4294967295 AND bytes_=charged AND (k='ForwardApplied')=(r IS NOT NULL) AND (r IS NULL OR ((r->>'seq')::bigint=q AND (r->>'attempt')::bigint=a))) IS TRUE;
 END $$;
 ALTER TABLE rss_saga.instances ADD CONSTRAINT saga_history_instance CHECK(rss_saga.valid_instance(definition,progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit));
 ALTER TABLE rss_saga.journal ADD COLUMN encoded_bytes bigint NOT NULL DEFAULT 256;
@@ -160,7 +163,7 @@ BEGIN
   IF previous_key IS DISTINCT FROM p_key THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga pending key mismatch'; END IF;
  END IF;
  SELECT definition INTO d FROM rss_saga.instances WHERE tenant_id=t AND saga_id=p_id;
- p:=rss_saga.next_progress(h->'progress',d,e); n:=(h->>'encodedBytes')::bigint+rss_saga.history_charge(e->'receipt');
+ n:=(h->>'encodedBytes')::bigint+rss_saga.history_charge(e->'receipt'); p:=rss_saga.next_progress(h->'progress',d,e);
  actual:=jsonb_build_object('revision',q+1,'encodedBytes',n,'capacity',h->'capacity','progress',p);
  IF actual IS DISTINCT FROM p_after THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga projection mismatch'; END IF;
  reserve_:=rss_saga.history_reserve(p);

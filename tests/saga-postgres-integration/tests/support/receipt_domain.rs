@@ -19,6 +19,9 @@ fn corruptions() -> Vec<(Vec<String>, serde_json::Value)> {
             cases.push((path.iter().map(|p| p.to_string()).collect(), value));
         }
     }
+    for field in ["format", "seq", "attempt"] {
+        cases.push((vec![field.into()], serde_json::json!("1")));
+    }
     cases
 }
 
