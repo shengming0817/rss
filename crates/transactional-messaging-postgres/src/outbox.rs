@@ -381,15 +381,17 @@ pub(crate) async fn append_message<P: AsRef<[u8]>>(
         .await
         .map_err(PgError::port)?;
     let result = match outcome.as_str() {
-        "inserted" => Ok(AppendOutcome::Inserted),
-        "already_present" => Ok(AppendOutcome::AlreadyPresent),
-        "conflict" => Err(PgError::classified(
-            MessagingErrorKind::Conflict,
-            std::io::Error::other("same-ID fingerprint conflict"),
-        )
-        .port()),
+        "inserted" => AppendOutcome::Inserted,
+        "already_present" => AppendOutcome::AlreadyPresent,
+        "conflict" => {
+            return Err(PgError::classified(
+                MessagingErrorKind::Conflict,
+                std::io::Error::other("same-ID fingerprint conflict"),
+            )
+            .port());
+        }
         _ => return Err(PgError::invariant().port()),
     };
     tx.outbox_admission.complete();
-    result
+    Ok(result)
 }

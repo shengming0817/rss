@@ -118,8 +118,9 @@ sandbox. Claims continue respecting live leases, retry windows, unresolved DLQ h
 Replay decodes the protected original, prepares its partition, then uses this same append function.
 
 The Rust transaction view keeps only failure/reuse state, not a second partition collection.
-Failed/cancelled admission prevents commit even if a callback swallows its error. Logical same-ID
-conflict is an acknowledged result and keeps its existing caller-controlled transaction semantics.
+Failed/cancelled admission prevents commit even if a callback swallows its error. Rust restores
+admission only after Inserted/AlreadyPresent; fingerprint Conflict also prevents commit. SQL callers
+receive the closed conflict result and must roll back the associated business transaction.
 Consumer effect savepoint rollback releases allocator changes and disables further Outbox use of
 that view while allowing the legitimate rejection receipt/DLQ to commit. Successful release retains
 locks until outer transaction settlement.

@@ -103,6 +103,8 @@ pub(super) async fn run(
     Box::pin(rollback_and_independence(owner, raw)).await?;
     Box::pin(opposite_declarations(owner, raw)).await?;
     Box::pin(ignored_errors(runtime.clone(), owner)).await?;
+    Box::pin(ignored_conflict(runtime.clone(), owner)).await?;
+    Box::pin(ignored_foreign_partition(runtime.clone(), owner)).await?;
     Box::pin(cancelled_preparation(runtime.clone(), owner, raw)).await?;
     Box::pin(timed_out_preparation(runtime.clone(), owner, raw)).await?;
     Box::pin(rejected_effect(runtime.clone(), owner)).await?;
@@ -131,6 +133,8 @@ async fn sql_protocol(raw: &PgPool) -> anyhow::Result<()> {
         serde_json::json!([["ok", null]]),
         serde_json::json!([["bad space", "one"]]),
         serde_json::json!([["ok", "\n"]]),
+        serde_json::json!([["a".repeat(256), "one"]]),
+        serde_json::json!([["ok", "a".repeat(256)]]),
     ] {
         let mut tx = sql_tx(raw, tenant).await?;
         assert_eq!(
@@ -152,9 +156,12 @@ async fn sql_protocol(raw: &PgPool) -> anyhow::Result<()> {
     .await?;
     assert_eq!(sql_append(&mut tx, &item).await?, "inserted");
     assert_eq!(sql_append(&mut tx, &item).await?, "already_present");
+    tx.commit().await?;
+    let mut tx = sql_tx(raw, tenant).await?;
+    sql_prepare(&mut tx, serde_json::json!([["sql-protocol", "one"]])).await?;
     let conflict = MessageEnvelope::new(item.id().clone(), item.metadata().clone(), vec![9]);
     assert_eq!(sql_append(&mut tx, &conflict).await?, "conflict");
-    tx.commit().await?;
+    tx.rollback().await?;
     for pairs in [
         serde_json::json!([["sql-protocol", "one"]]),
         serde_json::json!([["sql-protocol", "two"]]),
@@ -190,6 +197,18 @@ async fn sql_protocol(raw: &PgPool) -> anyhow::Result<()> {
         Some("PZ002")
     );
     tx.rollback().await?;
+    let mut tx = sql_tx(raw, tenant).await?;
+    sql_prepare(&mut tx, serde_json::json!([["sql-protocol", "one"]])).await?;
+    assert_eq!(
+        code(
+            &sql_append(&mut tx, &ordered("outside-set", "sql-protocol", "two"))
+                .await
+                .expect_err("partition outside declared set")
+        )
+        .as_deref(),
+        Some("PZ002")
+    );
+    tx.rollback().await?;
     // The longest accepted domain and a non-ASCII partition use the same identity rules as Rust.
     let item = ordered("long-domain", &"a".repeat(255), "分区");
     let mut tx = sql_tx(raw, tenant).await?;
@@ -214,20 +233,31 @@ async fn sql_protocol(raw: &PgPool) -> anyhow::Result<()> {
         assert_eq!(code(&error).as_deref(), Some("42501"));
         tx.rollback().await?;
     }
-    let mut tx = sql_tx(raw, tenant).await?;
-    let item = message("mismatched-envelope");
-    let mut envelope = wire(&item);
-    envelope["partition"] = serde_json::json!("undeclared");
-    let error = sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2,NULL,$3,$4)")
-        .bind(item.id().as_str())
-        .bind(item.metadata().domain().as_str())
-        .bind(envelope)
-        .bind(MessageFingerprint::of(&item).as_bytes().as_slice())
-        .execute(&mut *tx)
-        .await
-        .expect_err("identity mismatch");
-    assert_eq!(code(&error).as_deref(), Some("22023"));
-    tx.rollback().await?;
+    for (field, value) in [
+        ("partition", serde_json::json!("undeclared")),
+        (
+            "tenant",
+            serde_json::json!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        ),
+        ("id", serde_json::json!("forged-id")),
+        ("domain", serde_json::json!("forged-domain")),
+    ] {
+        let mut tx = sql_tx(raw, tenant).await?;
+        let item = message("mismatched-envelope");
+        let mut envelope = wire(&item);
+        envelope[field] = value;
+        let error =
+            sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2,NULL,$3,$4)")
+                .bind(item.id().as_str())
+                .bind(item.metadata().domain().as_str())
+                .bind(envelope)
+                .bind(MessageFingerprint::of(&item).as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await
+                .expect_err("identity mismatch");
+        assert_eq!(code(&error).as_deref(), Some("22023"));
+        tx.rollback().await?;
+    }
     Ok(())
 }
 
@@ -658,6 +688,88 @@ async fn timed_out_preparation(
         |_| false
     ));
     let count:i64=sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox_partitions WHERE domain='timeout-order'").fetch_one(owner).await?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+async fn ignored_conflict(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Result<()> {
+    let tenant = message("ignored-conflict").metadata().tenant_id();
+    let first = ordered("ignored-conflict", "ignored-conflict", "one");
+    let conflict = MessageEnvelope::new(first.id().clone(), first.metadata().clone(), vec![9]);
+    let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("ignored-conflict")?);
+    runtime
+        .local_tx(tenant, deadline(), move |tx| {
+            Box::pin(async move {
+                tx.prepare_outbox_partitions(
+                    &first
+                        .metadata()
+                        .partition()
+                        .cloned()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
+                writer
+                    .append(tx, PendingMessage::new(first))
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err)?;
+    let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("ignored-conflict")?);
+    let result=runtime.local_tx(tenant,deadline(),move |tx|Box::pin(async move {
+        tx.prepare_outbox_partitions(&conflict.metadata().partition().cloned().into_iter().collect::<Vec<_>>()).await?;
+        tx.with_connection(|c|Box::pin(async {sqlx::query("INSERT INTO public.business_effects VALUES(current_setting('rss.tenant_id')::uuid,'ignored-conflict-effect')").execute(c).await.map(|_|())})).await?;
+        assert_eq!(writer.append(tx,PendingMessage::new(conflict)).await.expect_err("fingerprint conflict").kind(),rss_transactional_messaging::error::MessagingErrorKind::Conflict);
+        Ok(())
+    })).await;
+    assert!(
+        result.fold(
+            |_| false,
+            |_| false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false
+        ),
+        "swallowed fingerprint conflict must roll back the transaction"
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.business_effects WHERE id='ignored-conflict-effect'",
+    )
+    .fetch_one(owner)
+    .await?;
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+async fn ignored_foreign_partition(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Result<()> {
+    let tenant = message("foreign-partition").metadata().tenant_id();
+    let other = TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?;
+    let partition = ordered_in(other, "foreign-partition", "foreign-partition", "one")
+        .metadata()
+        .partition()
+        .expect("partition")
+        .clone();
+    let result=runtime.local_tx(tenant,deadline(),move |tx|Box::pin(async move {
+        tx.with_connection(|c|Box::pin(async {sqlx::query("INSERT INTO public.business_effects VALUES(current_setting('rss.tenant_id')::uuid,'ignored-foreign-partition')").execute(c).await.map(|_|())})).await?;
+        assert!(tx.prepare_outbox_partitions(&[partition]).await.is_err());
+        Ok(())
+    })).await;
+    assert!(result.fold(
+        |_| false,
+        |_| false,
+        |_| true,
+        |_| false,
+        |_| false,
+        |_| false
+    ));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.business_effects WHERE id='ignored-foreign-partition'",
+    )
+    .fetch_one(owner)
+    .await?;
     assert_eq!(count, 0);
     Ok(())
 }
