@@ -76,7 +76,7 @@ pub async fn run(
     sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
         .execute(owner)
         .await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO ledger_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO ledger_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO ledger_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO ledger_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO ledger_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO ledger_runtime;").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO ledger_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO ledger_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO ledger_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO ledger_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea) TO ledger_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO ledger_runtime;").execute(owner).await?;
     fence_fixture::provision(owner).await?;
     let p = fixture.params();
     let config = PgConfig::new(

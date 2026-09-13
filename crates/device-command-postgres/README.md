@@ -51,6 +51,8 @@ between payload and command intent remain product responsibilities.
 - A scope's authority lock serializes mutations; core Rust determines transitions and SQL saves
   them with version CAS. Authority advancement and supersession use the same transaction. Pages
   bound memory, while the original transaction deadline bounds the entire authority change.
+- For ordered dispatch, the composition owner calls `tx.prepare_outbox_partitions` with the complete
+  transaction partition set before command/authority mutations; repositories do not add locks incrementally.
 - Outbox append and command admission commit together. Broker publish itself is outside this
   transaction and remains at-least-once. Never mint a new message ID for an ambiguous attempt.
 - `recover` calls the messaging owner's `is_published` for the persisted domain/message/fingerprint. A scope may contain commands

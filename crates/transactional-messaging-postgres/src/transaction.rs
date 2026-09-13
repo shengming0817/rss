@@ -514,7 +514,9 @@ impl PgRuntime {
         let mut view = PgTransaction::new(transaction.connection(), tenant, cutoff, self);
         let result = within(&self.timer, cutoff, |_| async {
             view.setup_context(lock).await?;
-            operation(&mut context, &mut view).await
+            let value = operation(&mut context, &mut view).await?;
+            view.outbox_admission.check_commit()?;
+            Ok(value)
         })
         .await;
         let result = match result {
@@ -695,6 +697,7 @@ impl rss_runtime::ManagedResource for PgRuntime {
 /// ```
 pub struct PgTransaction<'tx> {
     pub(crate) connection: &'tx mut PgConnection,
+    pub(crate) outbox_admission: crate::outbox_admission::Admission,
     tenant: TenantId,
     cutoff: Deadline,
     timer: &'tx PgTimer,
@@ -709,6 +712,7 @@ impl PgTransaction<'_> {
     ) -> PgTransaction<'a> {
         PgTransaction {
             connection,
+            outbox_admission: crate::outbox_admission::Admission::Open,
             tenant,
             cutoff,
             timer: &owner.timer,

@@ -62,6 +62,15 @@ pub async fn run(
     committed(
         r7.local_tx(tenant(), deadline(), move |tx| {
             Box::pin(async move {
+                tx.prepare_outbox_partitions(
+                    &message("terminate-successor")
+                        .metadata()
+                        .partition()
+                        .cloned()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
                 append
                     .append(tx, PendingMessage::new(message("terminate-successor")))
                     .await?;

@@ -131,6 +131,15 @@ async fn replay<K: Aead>(
         original.payload(),
     );
     let pending = PendingMessage::new(replay);
+    tx.prepare_outbox_partitions(
+        &original
+            .metadata()
+            .partition()
+            .cloned()
+            .into_iter()
+            .collect::<Vec<_>>(),
+    )
+    .await?;
     let appended = append_message(tx, original.metadata().domain(), pending)
         .await
         .map_err(|e| PgError::classified(e.kind(), e))?;

@@ -181,8 +181,12 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
 }
 
 async fn seed_outbox(input: &crate::pg::Input) -> anyhow::Result<String> {
-    use rss_transactional_messaging::{message::MessagingDomain, outbox::OutboxWriter};
-    use rss_transactional_messaging_postgres::{PgOutboxWriter, PgRuntime};
+    use rss_transactional_messaging::{
+        message::MessagingDomain,
+        outbox::{OutboxRelayStore, OutboxSettlement, OutboxWriter},
+        policy::DeliveryBudget,
+    };
+    use rss_transactional_messaging_postgres::{PgOutboxStore, PgOutboxWriter, PgRuntime};
     let tenant = TenantId::parse(&input.tenant)?;
     let seed_config = PgConfig::new(
         &input.host,
@@ -198,6 +202,10 @@ async fn seed_outbox(input: &crate::pg::Input) -> anyhow::Result<String> {
     let result = runtime
         .local_tx(tenant, deadline()?, move |tx| {
             Box::pin(async move {
+                tx.prepare_outbox_partitions(
+                    &message.partition().cloned().into_iter().collect::<Vec<_>>(),
+                )
+                .await?;
                 writer
                     .append(tx, message)
                     .await
@@ -206,9 +214,30 @@ async fn seed_outbox(input: &crate::pg::Input) -> anyhow::Result<String> {
             })
         })
         .await;
-    runtime.close().await;
     settled(result)?;
-    // Fixture preparation uses the separately authorized operator; runtime privileges stay narrow.
+    // A public claim freezes the original delivery window. This fixture settles a
+    // simulated permanent failure; it does not claim to have executed a broker publish.
+    let relay = PgOutboxStore::<()>::new(
+        runtime.clone(),
+        MessagingDomain::parse("writer-example")?,
+        DeliveryBudget::new(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?,
+    )?;
+    let claim = relay
+        .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline()?)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("redrive fixture claim"))?;
+    relay
+        .settle(claim, OutboxSettlement::DeadLetter, deadline()?)
+        .await?;
+    runtime.close().await;
+    // The operator only reads the frozen deadline; no fixture broadens its UPDATE grants.
     let pool = input.pool().await?;
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
@@ -216,7 +245,7 @@ async fn seed_outbox(input: &crate::pg::Input) -> anyhow::Result<String> {
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("SET LOCAL rss.storage_target='01010101010101010101010101010101'; SET LOCAL rss.storage_lineage='02020202020202020202020202020202'; SET LOCAL rss.execution_epoch='1';").execute(&mut *tx).await?;
-    let original=sqlx::query_scalar("UPDATE rss_transactional_messaging.outbox SET status='dead_letter', automatic_retry_deadline=clock_timestamp()+interval '1 hour' WHERE message_id='redrive-example' RETURNING automatic_retry_deadline::text").fetch_one(&mut *tx).await?;
+    let original=sqlx::query_scalar("SELECT automatic_retry_deadline::text FROM rss_transactional_messaging.outbox WHERE message_id='redrive-example'").fetch_one(&mut *tx).await?;
     tx.commit().await?;
     pool.close().await;
     Ok(original)

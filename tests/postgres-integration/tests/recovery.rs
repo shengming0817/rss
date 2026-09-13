@@ -268,7 +268,7 @@ async fn run() -> anyhow::Result<()> {
         ),
         "committed rejection survives missing ACK"
     );
-    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE(recovery_version) ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
+    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE(recovery_version) ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE(status,recovery_version,lease_token,lease_until,retry_after) ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
     let operator_config = PgConfig::new(
         &params.host,
         params.port,
@@ -321,6 +321,12 @@ async fn run() -> anyhow::Result<()> {
     compensated(runtime.clone(), store.clone(), &owner).await?;
     privilege_failures(runtime.clone(), &operator_config, &owner).await?;
     schema_failures(&operator_config, &owner).await?;
+    Box::pin(replay_partition_race(
+        runtime.clone(),
+        store.clone(),
+        &owner,
+    ))
+    .await?;
     store.close().await;
     assert!(store.is_closed());
     let clock = Timer::new();
@@ -352,7 +358,7 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 async fn base_grants(owner: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea) TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
     Ok(())
 }
 async fn schema_signature(owner: &sqlx::PgPool) -> anyhow::Result<Vec<String>> {
@@ -520,6 +526,15 @@ async fn outbox_scenarios(
             runtime
                 .local_tx_with_context(tenant(), deadline(), (&outbox, id), |(outbox, id), tx| {
                     Box::pin(async move {
+                        tx.prepare_outbox_partitions(
+                            &message(id)
+                                .metadata()
+                                .partition()
+                                .cloned()
+                                .into_iter()
+                                .collect::<Vec<_>>(),
+                        )
+                        .await?;
                         outbox
                             .append(tx, PendingMessage::new(message(id)))
                             .await
@@ -905,6 +920,15 @@ async fn replay_conflicts(
                 (&outbox, original),
                 |(outbox, message), tx| {
                     Box::pin(async move {
+                        tx.prepare_outbox_partitions(
+                            &message
+                                .metadata()
+                                .partition()
+                                .cloned()
+                                .into_iter()
+                                .collect::<Vec<_>>(),
+                        )
+                        .await?;
                         outbox
                             .append(
                                 tx,
@@ -980,6 +1004,15 @@ async fn compensated(
                     (&outbox, authored),
                     |(store, message), tx| {
                         Box::pin(async move {
+                            tx.prepare_outbox_partitions(
+                                &message
+                                    .metadata()
+                                    .partition()
+                                    .cloned()
+                                    .into_iter()
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await?;
                             store
                                 .append(
                                     tx,
@@ -1041,3 +1074,135 @@ async fn compensated(
 
 #[path = "recovery/examples.rs"]
 mod examples;
+
+// INVARIANT: OUTBOX-PARTITION-ORDER-01 — public replay shares the producer allocator.
+async fn replay_partition_race(
+    runtime: Arc<PgRuntime>,
+    store: Arc<PgRecoveryStore<Key>>,
+    owner: &sqlx::PgPool,
+) -> anyhow::Result<()> {
+    let template = message("partition-replay-source");
+    let m = template.metadata();
+    let source = MessageEnvelope::new(
+        template.id().clone(),
+        MessageMetadata::new(
+            AuthoredMessageMetadata::new(
+                tenant(),
+                m.occurred_at(),
+                MessagingDomain::parse("replay-order")?,
+                m.route().clone(),
+                m.contract().clone(),
+            ),
+            MessageMetadataExtensions::new(
+                None,
+                Some(PartitionKey::parse("one")?),
+                None,
+                Default::default(),
+            ),
+        ),
+        template.payload().clone(),
+    );
+    let verified = binding(&source)?;
+    let inbox = PgInboxStore::new(
+        runtime.clone(),
+        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
+    )?;
+    let IdempotencyDisposition::Acquired(claim) =
+        inbox.claim(verified.identity(), deadline()).await?
+    else {
+        anyhow::bail!("replay source claim");
+    };
+    let capture = PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(1)), deadline()).await?;
+    let result = PgConsumerTx::with_recovery(Reject, capture)
+        .execute(&claim, &source, verified.receipt_intent(), deadline())
+        .await;
+    assert_eq!(
+        result.status(),
+        TransactionalMessagingTransactionStatus::Committed
+    );
+    let id:String=sqlx::query_scalar("SELECT id::text FROM rss_transactional_messaging.consumer_dead_letter WHERE message_id='partition-replay-source'").fetch_one(owner).await?;
+    let request = request(
+        Target::DeadLetter(DeadLetterId::parse(&id)?),
+        Version::new(1)?,
+        Action::Replay(MessageId::parse("partition-replayed")?),
+    )
+    .await?;
+    let outbox = Arc::new(PgOutboxStore::<()>::new(
+        runtime.clone(),
+        MessagingDomain::parse("replay-order")?,
+        DeliveryBudget::new(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?,
+    )?);
+    let predecessor = MessageEnvelope::new(
+        MessageId::parse("partition-predecessor")?,
+        source.metadata().clone(),
+        source.payload().clone(),
+    );
+    let inserted = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let notify = inserted.clone();
+    let gate = release.clone();
+    let writer = outbox.clone();
+    let first = runtime.local_tx(tenant(), deadline(), move |tx| {
+        Box::pin(async move {
+            tx.prepare_outbox_partitions(
+                &predecessor
+                    .metadata()
+                    .partition()
+                    .cloned()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+            writer.append(tx, PendingMessage::new(predecessor)).await?;
+            notify.notify_one();
+            gate.notified().await;
+            Ok(())
+        })
+    });
+    let second = async {
+        inserted.notified().await;
+        store.mutate(&request, deadline()).await
+    };
+    let unlock = async {
+        let waiting = tokio::time::timeout(Duration::from_secs(2),async {
+            loop {
+                let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='rss-transactional-messaging-postgres' AND wait_event_type='Lock' AND query LIKE 'SELECT rss_transactional_messaging.prepare_outbox_partitions%')").fetch_one(owner).await?;
+                if blocked {return Ok::<_,sqlx::Error>(());}
+                tokio::task::yield_now().await;
+            }
+        }).await;
+        release.notify_one();
+        waiting
+    };
+    let (a, b, waiting) = tokio::join!(first, second, unlock);
+    committed(a)?;
+    assert_eq!(committed(b)?.outcome, Outcome::Replayed);
+    waiting??;
+    for id in ["partition-predecessor", "partition-replayed"] {
+        let head = outbox
+            .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("replay ordered head"))?;
+        assert_eq!(
+            PgOutboxStore::<()>::message(&head).message_id().as_str(),
+            id
+        );
+        assert!(
+            outbox
+                .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+                .await?
+                .is_empty()
+        );
+        outbox
+            .settle(head, OutboxSettlement::Published(()), deadline())
+            .await?;
+    }
+    Ok(())
+}

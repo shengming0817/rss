@@ -373,6 +373,15 @@ async fn transfer(
     runtime
         .local_tx(tenant, timer.deadline()?, move |tx| {
             Box::pin(async move {
+                tx.prepare_outbox_partitions(
+                    &message
+                        .metadata()
+                        .partition()
+                        .cloned()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
                 append
                     .append(tx, PendingMessage::new(message))
                     .await

@@ -3,7 +3,7 @@ WITH runtime_role AS (
   SELECT oid, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user
 ), relay_role AS (
   SELECT oid FROM pg_roles WHERE rolname = 'rss_tmsg_relay'
-), required(name, privileges) AS (VALUES ('inbox','SELECT,INSERT,UPDATE,DELETE'), ('outbox',CASE WHEN $1 THEN 'SELECT,INSERT,UPDATE' ELSE 'SELECT,INSERT' END)),
+), required(name, privileges) AS (VALUES ('inbox','SELECT,INSERT,UPDATE,DELETE'), ('outbox','SELECT')),
 columns(relation, name, type, nullable) AS (VALUES
  ('policy','revision','integer',false), ('policy','automatic_window_seconds','bigint',false),
  ('policy','safety_seconds','bigint',false), ('policy','receipt_retention_seconds','bigint',false),
@@ -11,6 +11,9 @@ columns(relation, name, type, nullable) AS (VALUES
  ('inbox','consumer_group','text',false), ('inbox','contract','text',false),
  ('inbox','lease_token','uuid',false), ('inbox','lease_until','timestamp with time zone',false),
  ('inbox','receive_count','bigint',false), ('inbox','fingerprint','bytea',true), ('inbox','disposition','text',true),
+ ('outbox_partitions','tenant_id','uuid',false), ('outbox_partitions','domain','text',false),
+ ('outbox_partitions','partition_key','text',false), ('outbox_partitions','last_sequence','bigint',false),
+ ('outbox_partitions','prepared_by','xid8',false), ('outbox','partition_seq','bigint',true),
  ('outbox','seq','bigint',false), ('outbox','tenant_id','uuid',false), ('outbox','message_id','text',false),
  ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false),
  ('outbox','fingerprint','bytea',false), ('outbox','status','text',false), ('outbox','retry_count','integer',false),
@@ -20,13 +23,17 @@ functions(signature) AS (VALUES
  ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'),
  ('rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid)'),
  ('rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)')),
+write_functions(signature,result) AS (VALUES
+ ('rss_transactional_messaging.prepare_outbox_partitions(jsonb)','void'::regtype),
+ ('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)','text'::regtype)),
 tenant_predicate(value) AS (VALUES ($predicate$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$predicate$)),
 expected_policies(relation, name, roles, predicate) AS (
  SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
  UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
+ UNION ALL SELECT 'rss_transactional_messaging.outbox_partitions'::regclass, 'outbox_partition_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
  UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_relay', ARRAY[oid], 'true' FROM relay_role
 ), actual_policies AS (
- SELECT * FROM pg_policy WHERE polrelid IN ('rss_transactional_messaging.inbox'::regclass, 'rss_transactional_messaging.outbox'::regclass)
+ SELECT * FROM pg_policy WHERE polrelid IN ('rss_transactional_messaging.inbox'::regclass, 'rss_transactional_messaging.outbox'::regclass, 'rss_transactional_messaging.outbox_partitions'::regclass)
 ), expected_constraints(relation, name, definition) AS (VALUES
  ('inbox', 'inbox_pkey', 'PRIMARY KEY (tenant_id, message_id, consumer_group)'),
  ('inbox', 'inbox_receipt_shape', 'CHECK ((((fingerprint IS NULL) AND (disposition IS NULL)) OR ((fingerprint IS NOT NULL) AND (octet_length(fingerprint) = 32) AND (disposition IS NOT NULL) AND (disposition = ANY (ARRAY[''succeeded''::text, ''rejected_permanent''::text, ''rejected_invariant''::text])))))'),
@@ -34,6 +41,9 @@ expected_policies(relation, name, roles, predicate) AS (
  ('outbox', 'outbox_fingerprint_length', 'CHECK ((octet_length(fingerprint) = 32))'),
  ('outbox', 'outbox_lease_shape', 'CHECK (((status = ''publishing''::text) = ((lease_token IS NOT NULL) AND (lease_until IS NOT NULL))))'),
  ('outbox', 'outbox_recovery_version_check', 'CHECK ((recovery_version > 0))'),
+ ('outbox_partitions', 'outbox_partitions_pkey', 'PRIMARY KEY (tenant_id, domain, partition_key)'),
+ ('outbox_partitions', 'outbox_partitions_last_sequence_check', 'CHECK ((last_sequence >= 0))'),
+ ('outbox', 'outbox_partition_sequence_shape', 'CHECK ((((partition_key IS NULL) = (partition_seq IS NULL)) AND ((partition_seq IS NULL) OR (partition_seq > 0))))'),
  ('outbox', 'outbox_pkey', 'PRIMARY KEY (seq)'),
  ('outbox', 'outbox_retry_count_check', 'CHECK ((retry_count >= 0))'),
  ('outbox', 'outbox_status_check', 'CHECK ((status = ANY (ARRAY[''pending''::text, ''publishing''::text, ''published''::text, ''dead_letter''::text, ''resolved''::text])))'),
@@ -44,7 +54,7 @@ expected_policies(relation, name, roles, predicate) AS (
  ('policy', 'policy_revision_check', 'CHECK ((revision = 1))'),
  ('policy', 'policy_safety_seconds_check', 'CHECK ((safety_seconds = 86400))')
 ), expected_defaults(relation, name, expression) AS (VALUES
- ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
+ ('outbox_partitions','last_sequence','0'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
  ('outbox','retry_count','0'), ('outbox','retry_after','clock_timestamp()')
 ), checks(reason, valid) AS (VALUES
  ('policy', (EXISTS (SELECT 1 FROM rss_transactional_messaging.policy
@@ -81,16 +91,38 @@ expected_policies(relation, name, roles, predicate) AS (
  ('runtime_acl', (NOT has_schema_privilege(current_user, 'rss_transactional_messaging', 'CREATE'))),
  ('relay_acl', (NOT has_schema_privilege('rss_tmsg_relay', 'rss_transactional_messaging', 'CREATE'))),
  ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.policy', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
- ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.outbox', CASE WHEN $1 THEN 'DELETE,TRUNCATE,REFERENCES,TRIGGER' ELSE 'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER' END))),
+ ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.outbox', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
  ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.inbox', 'TRUNCATE,REFERENCES,TRIGGER'))),
  ('runtime_acl', (NOT $2 OR NOT has_any_column_privilege(current_user, 'rss_transactional_messaging.inbox', 'SELECT,INSERT,UPDATE,REFERENCES'))),
- ('runtime_acl', (has_sequence_privilege(current_user, 'rss_transactional_messaging.outbox_seq_seq', 'USAGE'))),
+ ('runtime_acl', (NOT has_sequence_privilege(current_user, 'rss_transactional_messaging.outbox_seq_seq', 'USAGE'))),
  ('runtime_acl', (NOT has_sequence_privilege(current_user, 'rss_transactional_messaging.outbox_seq_seq', 'SELECT,UPDATE'))),
- ('relay_acl', (NOT has_sequence_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox_seq_seq', 'USAGE,SELECT,UPDATE'))),
+ ('relay_acl', (has_sequence_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox_seq_seq', 'USAGE') AND NOT has_sequence_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox_seq_seq', 'SELECT,UPDATE'))),
  ('relay_acl', (has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox', 'SELECT'))),
  ('relay_acl', (has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox', 'UPDATE'))),
- ('relay_acl', (NOT has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox', 'INSERT,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
+ ('relay_acl', (NOT has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.outbox', 'DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
  ('relay_acl', (NOT has_table_privilege('rss_tmsg_relay', 'rss_transactional_messaging.inbox', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
+ ('runtime_acl', NOT has_any_column_privilege(current_user,'rss_transactional_messaging.outbox','INSERT,REFERENCES')
+  AND NOT EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid='rss_transactional_messaging.outbox'::regclass AND a.attnum>0 AND NOT a.attisdropped
+   AND has_column_privilege(current_user,a.attrelid,a.attnum,'UPDATE') IS DISTINCT FROM
+    ($1 AND a.attname=ANY(ARRAY['status','recovery_version','lease_token','lease_until','retry_after'])))),
+ ('runtime_acl', NOT has_table_privilege(current_user,'rss_transactional_messaging.outbox_partitions','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+  AND NOT has_any_column_privilege(current_user,'rss_transactional_messaging.outbox_partitions','SELECT,INSERT,UPDATE,REFERENCES')
+  AND EXISTS(SELECT 1 FROM pg_class WHERE oid='rss_transactional_messaging.outbox_partitions'::regclass AND relrowsecurity AND relforcerowsecurity AND NOT pg_has_role(current_user,relowner,'MEMBER'))),
+ ('relay_acl', has_table_privilege('rss_tmsg_relay','rss_transactional_messaging.outbox','INSERT')
+  AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['SELECT','INSERT','UPDATE']) p WHERE NOT has_table_privilege('rss_tmsg_relay','rss_transactional_messaging.outbox_partitions',p))
+  AND NOT has_table_privilege('rss_tmsg_relay','rss_transactional_messaging.outbox_partitions','DELETE,TRUNCATE,REFERENCES,TRIGGER')),
+ ('functions', NOT EXISTS(SELECT 1 FROM write_functions f LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
+  WHERE p.oid IS NULL OR p.prorettype<>f.result OR p.proretset OR p.provolatile<>'v' OR NOT p.prosecdef OR p.proowner<>(SELECT oid FROM relay_role)
+   OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp'=ANY(p.proconfig))
+   OR NOT has_function_privilege(current_user,p.oid,'EXECUTE')
+   OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))),
+ ('constraints', EXISTS(SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('rss_transactional_messaging.outbox_partition')
+  AND i.indrelid='rss_transactional_messaging.outbox'::regclass AND i.indisunique AND i.indisvalid AND i.indisready
+  AND pg_get_expr(i.indpred,i.indrelid)='(partition_key IS NOT NULL)'
+  AND (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(num,ord)
+   JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num)=ARRAY['tenant_id','domain','partition_key','partition_seq']::name[])),
+ ('columns', (SELECT count(*)=4 FROM pg_attribute a WHERE a.attrelid IN ('rss_transactional_messaging.outbox_partitions'::regclass,'rss_transactional_messaging.outbox'::regclass)
+  AND a.attname IN ('domain','partition_key') AND a.attcollation='pg_catalog."C"'::regcollation)),
  ('rls_policy', (NOT EXISTS (SELECT 1 FROM expected_policies e FULL JOIN actual_policies p ON p.polrelid = e.relation AND p.polname = e.name
     WHERE e.name IS NULL OR p.oid IS NULL OR NOT p.polpermissive OR p.polcmd <> '*'
       OR p.polroles IS DISTINCT FROM e.roles

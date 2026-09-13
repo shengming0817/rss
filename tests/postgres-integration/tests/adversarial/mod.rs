@@ -465,7 +465,10 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
         ),
         ("message_id='projection-other'", "integration"),
         ("domain='projection-other'", "projection-other"),
-        ("partition_key='projection-other'", "integration"),
+        (
+            "partition_key='projection-other',partition_seq=1",
+            "integration",
+        ),
     ] {
         // SQL safety: SQL fragments are literals from the fixture table below/above.
         let mut corrupt = owner.begin().await?;
@@ -489,7 +492,7 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
             .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
             .await
             .is_ok();
-        sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published', tenant_id='f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid, message_id='outbox-roundtrip', domain='integration', partition_key=NULL, lease_token=NULL, lease_until=NULL WHERE seq=$1").bind(seq).execute(owner).await?;
+        sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published', tenant_id='f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid, message_id='outbox-roundtrip', domain='integration', partition_key=NULL, partition_seq=NULL, lease_token=NULL, lease_until=NULL WHERE seq=$1").bind(seq).execute(owner).await?;
         assert!(
             !accepted,
             "mismatched relation projection must not become a claim: {mutation}"
