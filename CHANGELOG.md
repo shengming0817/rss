@@ -6,6 +6,15 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Projection startup budget (#2423)
+
+- Replace `rss_projection_postgres::PgStore::new(pool)` with `new(pool, &control)`.
+  Acquisition and schema/role/RLS admission share the caller's absolute deadline and cancellation;
+  interrupted probes retire their connection instead of retaining pool capacity while draining.
+- Migrate workspace examples and integration consumers together. Independently pinned products
+  must pass a Projection `Control` when upgrading their RSS revision. No legacy constructor,
+  default budget, schema migration, or wire format change is introduced.
+
 ### Durable execution and recovery (#2373)
 
 - Saga preserves `CommitUnknown` and provider diagnostics when renewal cancels a pending commit;

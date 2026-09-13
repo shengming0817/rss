@@ -128,20 +128,21 @@ async fn projection_postgres_suite() -> anyhow::Result<()> {
         sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_projection TO projection_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_projection TO projection_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_projection TO projection_runtime;").execute(&mut *migration).await?;
         drop(migration);
         sqlx::raw_sql("CREATE TABLE public.counts(tenant_id uuid NOT NULL,source_id text NOT NULL,projection_id text NOT NULL,generation text NOT NULL,n bigint NOT NULL,PRIMARY KEY(tenant_id,source_id,projection_id,generation)); ALTER TABLE public.counts ENABLE ROW LEVEL SECURITY; ALTER TABLE public.counts FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.counts USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT,UPDATE ON public.counts TO projection_runtime;").execute(&owner).await?;
+        let clock = Clock::new(); let cancel = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(180), &cancel);
         let disguised = PgPoolOptions::new().max_connections(1).after_connect(|conn, _| Box::pin(async move {
             sqlx::query("SET ROLE projection_runtime").execute(conn).await?; Ok(())
         })).connect_with(base.clone().username(&params.username).password(&params.password)).await?;
-        let admission = PgStore::new(disguised.clone()).await;
+        let admission = PgStore::new(disguised.clone(), &control).await;
         disguised.close().await;
         assert!(matches!(admission, Err(error) if error.kind() == ErrorKind::StorageContract), "administrator session must not hide behind SET ROLE");
         let runtime_options = base.username("projection_runtime").password("fixture-only");
         let pool = PgPoolOptions::new().max_connections(5).acquire_timeout(Duration::from_secs(5)).connect_with(runtime_options.clone()).await?;
-        assert!(matches!(PgStore::new(owner.clone()).await, Err(error) if error.kind() == rss_projection::ErrorKind::StorageContract));
-        let store = PgStore::new(pool.clone()).await?;
-        let clock = Clock::new(); let cancel = CancellationToken::new();
-        let control = Control::new(&clock, Duration::from_secs(180), &cancel);
+        assert!(matches!(PgStore::new(owner.clone(), &control).await, Err(error) if error.kind() == rss_projection::ErrorKind::StorageContract));
+        let store = PgStore::new(pool.clone(), &control).await?;
+        scenarios::startup::verify(&owner, &runtime_options).await?;
         scenarios::definition_binding(&store, &owner, &control).await?;
-        scenarios::rejects_dangerous_acl(&pool, &owner).await?;
+        scenarios::rejects_dangerous_acl(&pool, &owner, &control).await?;
         scenarios::borrowed_timeout_rolls_back(&pool, &store, &control).await?;
         scenarios::application_lock_timeout_rolls_back(&store, &owner, &control).await?;
         scenarios::application_error_cannot_claim_settlement(&store, &control).await?;

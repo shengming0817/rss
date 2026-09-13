@@ -1,3 +1,4 @@
+pub(super) mod startup;
 mod upgrade;
 pub(super) use upgrade::upgrade;
 mod definition;

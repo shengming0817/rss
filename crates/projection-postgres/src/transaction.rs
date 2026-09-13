@@ -17,9 +17,20 @@ pub struct PgStore {
 }
 impl PgStore {
     /// Adopt a runtime pool after checking schema identity, RLS and role separation.
-    /// No migrations or role grants are executed.
-    pub async fn new(pool: PgPool) -> Result<Self, Error> {
-        crate::probe::validate(&pool).await?;
+    /// Acquisition and the entire probe share the caller's absolute deadline and cancellation.
+    /// Failed or dropped probes retire their connection; cleanup may outlive this invocation.
+    /// Pool creation, migrations and role grants remain caller-owned.
+    pub async fn new<T: Timer>(pool: PgPool, control: &Control<'_, T>) -> Result<Self, Error> {
+        let mut lease = Lease {
+            connection: control
+                .run(async { pool.acquire().await.map_err(|e| sql_error(e, Phase::Acquire)) })
+                .await?,
+            quarantine: true,
+        };
+        control
+            .run(crate::probe::validate(&mut lease.connection))
+            .await?;
+        lease.quarantine = false;
         Ok(Self {
             pool,
             identity: Arc::new(()),

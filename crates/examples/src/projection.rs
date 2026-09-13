@@ -196,7 +196,10 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
 pub const FIXTURE_SQL: &str = include_str!("../fixtures/projection.sql");
 
 pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
-    let store = PgStore::new(input.pool().await?).await?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let startup = Control::new(&clock, clock.now() + Duration::from_secs(30), &cancel);
+    let store = PgStore::new(input.pool().await?, &startup).await?;
     let result = demo(&store, TenantId::parse(&input.tenant)?).await;
     let clock = Clock::new();
     let cancel = CancellationToken::new();

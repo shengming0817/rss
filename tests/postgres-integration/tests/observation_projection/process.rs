@@ -12,10 +12,10 @@ use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 const CRASH_TENANT: &str = "00000000-0000-0000-0000-000000000073";
 pub async fn crash(f: &Fixture) -> anyhow::Result<()> {
     let source = seed_source(f).await?;
-    let projection = f.projection().await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(40), &cancel);
+    let projection = f.projection(&control).await?;
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "crash")?;
     projection
         .initialize(
@@ -157,16 +157,17 @@ async fn worker_child() -> anyhow::Result<()> {
         JournalReadGrant::verify(&Trusted, TenantId::parse(CRASH_TENANT)?)?,
         rss_projection::SourceScope::new(TenantId::parse(CRASH_TENANT)?, "rss.observation.v1")?,
     )?);
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(60), &cancel);
     let projection = rss_projection_postgres::PgStore::new(
         PgPoolOptions::new()
             .max_connections(2)
             .connect_with(options)
             .await?,
+        &control,
     )
     .await?;
-    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(60), &cancel);
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "crash")?;
     let event = source
         .read(source.scope(), None, BatchLimit::new(1)?)

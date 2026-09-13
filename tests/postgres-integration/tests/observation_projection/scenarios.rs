@@ -103,10 +103,10 @@ async fn session(
 }
 pub async fn composition(f: &Fixture) -> anyhow::Result<()> {
     let input = seed(f).await?;
-    let projection = f.projection().await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(60), &cancel);
+    let projection = f.projection(&control).await?;
     let scope = ProjectionScope::new(input.source.scope().clone(), "facts", "live")?;
     let execution = session(&projection, &scope, &input.source, &control).await?;
     definition_and_source(f, &input, &projection, &scope, &execution, &control).await?;
@@ -310,7 +310,7 @@ async fn resumed_projection(
         saved,
         ..
     } = input;
-    let restart = f.projection().await?;
+    let restart = f.projection(control).await?;
     let resumed = restart.projection(
         restart.takeover(scope, &model::DEFINITION, control).await?,
         model::Facts::new(source.clone()),
@@ -601,10 +601,10 @@ async fn ack_loss(store: &ObsStore) -> anyhow::Result<()> {
     Ok(())
 }
 async fn isolated_effects(f: &Fixture, source: &Arc<ObsSource>) -> anyhow::Result<()> {
-    let projection = f.projection().await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let projection = f.projection(&control).await?;
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "isolation")?;
     projection
         .initialize(
@@ -729,10 +729,10 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert_eq!(events.len(), 2);
     let bad = &events[1];
-    let projection = f.projection().await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let projection = f.projection(&control).await?;
     let scope = ProjectionScope::new(input.source.scope().clone(), "facts", "bad-row")?;
     let execution = session(&projection, &scope, &input.source, &control).await?;
     let changed = sqlx::query(
