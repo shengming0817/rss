@@ -117,10 +117,25 @@ V1 是新的持久格式，无历史 audit migration 导入或双读兼容；必
 
 ## 窗口与资源
 
-`read_window(ledger,start,limit,control)` 的 start inclusive，limit 为 1..=1024。
-一条 SQL 在同一快照获取链尾、必要前驱及页内记录，验证连续性和预期页大小；缺必要前驱报错。
-合法尾后空窗返回零条；返回链尾只反映数据库同一快照，不是防截尾证明。
-每页最大约 1 GiB payload，消费方应选择满足内存预算的小 limit。
+`read_window(ledger,start,limit,control)` 的 start inclusive。
+`ReadLimit::new(records, max_encoded_bytes)` 两项必填，分别接受 1..=1024 条和
+1..=i64::MAX 字节；旧单参数构造器已删除，所有调用方必须显式选择预算。
+条数不含前驱，字节预算包含完整前驱与全部请求记录，按 core 的 `Entry::encoded_len()` 计费：
+127 字节 V1 固定开销加 chain/record/key 的 UTF-8 字节及 payload 字节，包含记录自身 tag。
+
+单条 SQL 在同一快照读取 head 和范围内的数量、字段长度，先验证小型元数据并评估总预算。
+长度阶段只汇总标量，不物化 payload；失败只传回小型状态行，通过后才返回完整记录。
+元数据可发现的 key/version、非法字段长度、缺口先拒绝，再判断字节预算；
+超过预算返回 `ReadBudgetExceeded`，不返回短页、不提供部分记录，也不宣称已认证拒绝页面。
+恰好达到预算成功；调用方可显式减少条数或增大预算后重新请求，新请求具有自己的快照。
+
+Rust 逐行解码，在预算内收齐后按序号排序，验证连续性、预期条数和 HMAC，再返回 `Window`。
+必要前驱缺失报错；start 恰为 tail+1 的空页仍需计费并认证前驱，start 更远则拒绝。
+不存在的链仅在 start=0 时可返回无前驱空窗。返回链尾只反映同一数据库快照，不是防截尾证明。
+
+预算约束逻辑编码总量，不是精确堆或进程内存上限。结果所有权占用随编码预算增长；
+SQLx 接收/解码及 canonical 认证暂存受单条上限约束，行/窗口元数据受最多 1025 条约束。
+使用逐行消费避免整页 `PgRow` 和 `Entry` 的双份驻留，不自动分配无限预算。
 
 `close(control)` 同步关闭 pool 新借用，再有界等待已借用连接归还；取消等待后 pool 仍保持关闭。
 传入 pool 及其所有 clone 共享这一生命周期。消息借用连接始终由消息 runtime 拥有。
@@ -129,7 +144,7 @@ V1 是新的持久格式，无历史 audit migration 导入或双读兼容；必
 ## 验证与交付
 
 T1：协议向量、篡改、边界、窗口和 SQL 转换；T2：`ledger-postgres-integration` 使用真实 TLS PostgreSQL，
-验证并发、幂等、RLS、权限/结构篡改、连接终止、结算未知、取消及 inbox 原子性。
+验证最大 payload、精确预算边界、前驱计费、拒绝响应无 payload、并发读取快照、幂等、RLS、权限/结构篡改、连接终止、结算未知、取消及 inbox 原子性。
 `hack/ledger-package-proof.py` 消费真实 archive，独立解析 core/PG/messaging/all 组合。
 
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0

@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let request = AppendRequest::new(ledger.clone(), RecordId::parse("one")?, vec![1])?;
     let entry = auth.append(&request, None)?;
+    assert_eq!(entry.encoded_len(), Authenticator::canonical_bytes(&entry)?.len() + 32);
     assert_eq!(auth.verify_chain(&ledger, &[entry])?.count(), 1);
     Ok(())
 }

@@ -82,7 +82,9 @@ impl PgLedger {
         })
         .await
     }
-    /// Read and authenticate a bounded snapshot window, including its predecessor.
+    /// Read and authenticate a complete snapshot window, including its predecessor.
+    /// Both count and encoded-byte budgets are required. SQL rejects an oversized result
+    /// before sending payloads; budget rejection does not authenticate the rejected contents.
     pub async fn read_window<T: Timer>(
         &self,
         ledger: &LedgerId,

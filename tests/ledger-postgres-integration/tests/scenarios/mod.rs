@@ -33,14 +33,24 @@ pub async fn run(
     let scope = request("concurrent", "x", b"")?.ledger().clone();
     let page = committed(
         store
-            .read_window(&scope, Sequence::new(0), ReadLimit::new(20)?, control)
+            .read_window(
+                &scope,
+                Sequence::new(0),
+                ReadLimit::new(20, 64 * 1024)?,
+                control,
+            )
             .await,
     )?;
     assert_eq!(page.entries().len(), 12);
     assert_eq!(page.observed_tail(), Some(Sequence::new(11)));
     let page = committed(
         store
-            .read_window(&scope, Sequence::new(12), ReadLimit::new(1)?, control)
+            .read_window(
+                &scope,
+                Sequence::new(12),
+                ReadLimit::new(1, 64 * 1024)?,
+                control,
+            )
             .await,
     )?;
     assert!(page.entries().is_empty());
@@ -48,7 +58,12 @@ pub async fn run(
     assert!(matches!(
         observe(
             store
-                .read_window(&scope, Sequence::new(13), ReadLimit::new(1)?, control)
+                .read_window(
+                    &scope,
+                    Sequence::new(13),
+                    ReadLimit::new(1, 64 * 1024)?,
+                    control
+                )
                 .await
         ),
         Observed::RolledBack(Error::Protocol(rss_ledger::Error::SequenceGap))
@@ -404,7 +419,7 @@ async fn exhaustion(
             .read_window(
                 last.ledger(),
                 Sequence::new(i64::MAX as u64),
-                ReadLimit::new(2)?,
+                ReadLimit::new(2, 64 * 1024)?,
                 control,
             )
             .await,

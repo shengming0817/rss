@@ -227,7 +227,10 @@ fn encoded_read_charge_matches_canonical_bytes() -> anyhow::Result<()> {
             None,
         )?;
         assert_eq!(entry.encoded_len(), 127 + 3 + 6 + 6 + size);
-        assert_eq!(entry.encoded_len(), Authenticator::canonical_bytes(&entry)?.len() + 32);
+        assert_eq!(
+            entry.encoded_len(),
+            Authenticator::canonical_bytes(&entry)?.len() + 32
+        );
         a.verify(&entry)?;
     }
     Ok(())

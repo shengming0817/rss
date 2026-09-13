@@ -40,6 +40,10 @@ pub enum Error {
     /// Live schema or role contract is unsafe or stored state is inconsistent.
     #[error("incompatible ledger storage contract")]
     StorageContract,
+    /// The complete window and predecessor exceed the caller's encoded byte budget.
+    /// No partial window is returned and payload authentication has not been performed.
+    #[error("ledger read byte budget exceeded")]
+    ReadBudgetExceeded,
     /// The caller rejected its business operation.
     #[error("ledger transaction operation rejected")]
     Rejected,
