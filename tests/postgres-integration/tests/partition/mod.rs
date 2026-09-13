@@ -99,6 +99,7 @@ pub(super) async fn run(
     raw: &PgPool,
     config: PgConfig,
 ) -> anyhow::Result<()> {
+    Box::pin(sql_digest_integrity(raw)).await?;
     Box::pin(sql_protocol(raw)).await?;
     Box::pin(rollback_and_independence(owner, raw)).await?;
     Box::pin(opposite_declarations(owner, raw)).await?;
@@ -771,5 +772,20 @@ async fn ignored_foreign_partition(runtime: Arc<PgRuntime>, owner: &PgPool) -> a
     .fetch_one(owner)
     .await?;
     assert_eq!(count, 0);
+    Ok(())
+}
+
+async fn sql_digest_integrity(raw: &PgPool) -> anyhow::Result<()> {
+    let item = ordered("digest-integrity", "sql-integrity", "one");
+    let mut tx = sql_tx(raw, item.metadata().tenant_id()).await?;
+    sql_prepare(&mut tx, serde_json::json!([["sql-integrity", "one"]])).await?;
+    assert_eq!(sql_append(&mut tx, &item).await?, "inserted");
+    let mut altered = wire(&item);
+    altered["payload"] = serde_json::json!([99]);
+    let outcome: String = sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2,$3,$4,$5)")
+        .bind(item.id().as_str()).bind("sql-integrity").bind("one").bind(altered)
+        .bind(MessageFingerprint::of(&item).as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+    assert_ne!(outcome, "already_present", "different authored facts cannot reuse an unverified digest");
+    tx.rollback().await?;
     Ok(())
 }
