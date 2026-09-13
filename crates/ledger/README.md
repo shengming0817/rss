@@ -34,6 +34,13 @@ assert_eq!(auth.verify_chain(&ledger, &[entry])?.count(), 1);
 不宣称编译器/密码原语的全部内部临时状态均可清零。产品拥有随机密钥生成、注入、托管及轮转策略。
 未知编码/密钥身份拒绝；key_id 不是轮转功能。同一链不支持跨密钥或编码代际追加。
 
+## 编码读取计费
+
+`Entry::encoded_len()` 无分配地计算完整记录的逻辑编码字节数：V1 固定开销
+`V1_ENTRY_FIXED_BYTES`（127 字节）加三个身份的 UTF-8 字节和 payload 字节。
+固定开销包含 canonical authentication input 的 framing 与记录自身的 32 字节 tag。
+前驱按完整记录计费；该数值不表示 allocator 或进程内存占用，也不改变 V1 持久格式。
+
 ## 验证与信任来源
 
 `Entry::from_parts` 只重建有界值，不提供认证证据；必须通过 Authenticator 验证。

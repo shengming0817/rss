@@ -29,7 +29,8 @@ impl Authenticator {
     }
     /// Exact canonical authentication input, suitable for independent protocol implementations.
     pub fn canonical_bytes(entry: &Entry) -> Result<Vec<u8>, Error> {
-        let mut bytes = b"rss.ledger.entry\0".to_vec();
+        let mut bytes = Vec::with_capacity(entry.encoded_len() - entry.tag().as_bytes().len());
+        bytes.extend_from_slice(b"rss.ledger.entry\0");
         bytes.extend_from_slice(&entry.encoding().get().to_be_bytes());
         bytes.extend_from_slice(&entry.ledger().tenant().octets());
         field(&mut bytes, entry.ledger().chain().as_str())?;
