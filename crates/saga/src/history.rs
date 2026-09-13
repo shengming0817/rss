@@ -1,6 +1,7 @@
 //! Finite V1 history accounting shared by admission and provider validation.
 //! ref: restatedev/restate crates/worker-api/src/invoker/invocation_reader.rs@7fcc614c75fac74d051b68b118e87421e90467cc
-use crate::{Error, ErrorKind, Progress};
+use crate::model::Progress;
+use crate::{Error, ErrorKind, Status};
 use serde::{Deserialize, Serialize};
 
 /// Conservative bytes for a receipt-free event, including its persisted effect key.
@@ -107,15 +108,32 @@ impl ReadBudget {
 /// Small provider metadata. Recovery independently replays history and compares this entire projection.
 pub struct HistoryHead {
     /// Journal sequence/count; growth does not change it.
-    pub revision: u64,
+    pub(crate) revision: u64,
     /// V1 conservative encoded history bytes.
-    pub encoded_bytes: u64,
+    pub(crate) encoded_bytes: u64,
     /// Durable finite instance capacity.
-    pub capacity: HistoryCapacity,
+    pub(crate) capacity: HistoryCapacity,
     /// Current transition projection, atomically maintained with the journal.
-    pub progress: Progress,
+    pub(crate) progress: Progress,
 }
 impl HistoryHead {
+    /// Journal sequence/count; metadata-only growth does not change it.
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+    /// V1 conservative encoded history bytes.
+    pub const fn encoded_bytes(&self) -> u64 {
+        self.encoded_bytes
+    }
+    /// Durable finite capacity from the same observation as the revision.
+    pub const fn capacity(&self) -> HistoryCapacity {
+        self.capacity
+    }
+    /// Acknowledged business state; resource exhaustion does not replace it.
+    pub const fn status(&self) -> Status {
+        self.progress.status()
+    }
+
     /// Check observed history before requesting any payload.
     pub fn check_read(&self, read: ReadBudget) -> Result<(), Error> {
         read.check(self.revision, self.encoded_bytes, self.progress.forward)

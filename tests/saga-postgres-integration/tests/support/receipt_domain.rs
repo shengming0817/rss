@@ -62,7 +62,7 @@ pub(super) async fn writes(
     let key = d.effect_key(s, 0, Phase::Forward)?;
     reject_definer(pool, &lease, &before, after, &event, &key).await?;
     store.release(&lease, c).await?;
-    assert_eq!(e.run(s, 1, c).await?.status, Status::Succeeded);
+    assert_eq!(e.run(s, 1, c).await?.head().status(), Status::Succeeded);
     reject_check(owner, s).await?;
     Ok(())
 }

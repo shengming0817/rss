@@ -127,7 +127,10 @@ async fn unresolved_restart(
         registry(d.clone(), effects.clone(), false)?,
         read_budget()?,
     );
-    assert_eq!(e.run(s, 30, control).await?.status, Status::Succeeded);
+    assert_eq!(
+        e.run(s, 30, control).await?.head().status(),
+        Status::Succeeded
+    );
     assert_eq!(
         *effects
             .calls
@@ -223,12 +226,13 @@ async fn compensation_roundtrip(
         .register(s, d, history_capacity()?, control)
         .await?;
     let report = executor.run(s, 30, control).await?;
-    assert_eq!(report.status, Status::CompensationFailed);
+    assert_eq!(report.head().status(), Status::CompensationFailed);
     assert_eq!(
         executor
-            .resume(s, report.revision, 30, control)
+            .resume(s, report.head().revision(), 30, control)
             .await?
-            .status,
+            .head()
+            .status(),
         Status::Compensated
     );
     assert_eq!(

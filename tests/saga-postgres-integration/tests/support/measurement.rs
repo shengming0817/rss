@@ -192,8 +192,8 @@ async fn seed_entries(
     let mut transaction = owner.begin().await?;
     sqlx::query("INSERT INTO rss_saga.journal(tenant_id,saga_id,seq,step,attempt,kind,effect_key,encoded_bytes) SELECT $1::text::uuid,$2,q,0,q/2+1,CASE WHEN q%2=0 THEN 'ForwardIntent' ELSE 'ForwardProbeNotApplied' END,$3,256 FROM generate_series(0,$4::bigint-1) q")
         .bind(s.tenant().to_string()).bind(s.id()).bind(d.effect_key(s,0,Phase::Forward)?.as_bytes().as_slice()).bind(n as i64).execute(&mut *transaction).await?;
-    sqlx::query("UPDATE rss_saga.instances SET revision=$3,history_encoded_bytes=$4,progress=$5 WHERE tenant_id=$1::text::uuid AND saga_id=$2")
-        .bind(s.tenant().to_string()).bind(s.id()).bind(n as i64).bind(snapshot.head().encoded_bytes as i64).bind(sqlx::types::Json(&snapshot.head().progress)).execute(&mut *transaction).await?;
+    sqlx::query("UPDATE rss_saga.instances SET revision=$3,history_encoded_bytes=$4,progress=$5->'progress' WHERE tenant_id=$1::text::uuid AND saga_id=$2")
+        .bind(s.tenant().to_string()).bind(s.id()).bind(n as i64).bind(snapshot.head().encoded_bytes() as i64).bind(sqlx::types::Json(snapshot.head())).execute(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -232,7 +232,7 @@ pub(super) async fn run(
     let snapshot = store.snapshot(&lease, read, c).await?;
     let read_ms = clock.now().saturating_sub(start).as_secs_f64() * 1000.0;
     let head = snapshot.head().clone();
-    assert_eq!(snapshot.events().len() as u64, head.revision);
+    assert_eq!(snapshot.events().len() as u64, head.revision());
     store.release(&lease, c).await?;
     let wire:i64=sqlx::query_scalar("SELECT coalesce(sum(100+octet_length(kind)+CASE WHEN protected IS NULL THEN 0 ELSE 1+octet_length(protected::text) END),0)::bigint FROM rss_saga.journal WHERE tenant_id=$1::text::uuid AND saga_id=$2").bind(s.tenant().to_string()).bind(s.id()).fetch_one(owner).await?;
     drop(snapshot);
@@ -259,15 +259,15 @@ pub(super) async fn run(
         if entries.is_some() { 2 } else { 1 }
     );
     assert_eq!(
-        report.revision,
-        head.revision + if entries.is_some() { 2 } else { 1 }
+        report.head().revision(),
+        head.revision() + if entries.is_some() { 2 } else { 1 }
     );
     eprintln!(
         "SAGA_HISTORY_MEASURE profile={profile} entries={} charged_bytes={} reserved_bytes={} capacity_bytes={} journal_data_row_bytes={wire} snapshot_ms={read_ms:.3} run_ms={run_ms:.3} receipt_opens={} receipt_open_ms={auth_ms:.3} commits={} commit_ms={:.3}",
-        head.revision,
-        head.encoded_bytes,
+        head.revision(),
+        head.encoded_bytes(),
         head.reserve()?.1,
-        head.capacity.max_encoded_bytes(),
+        head.capacity().max_encoded_bytes(),
         durations.len(),
         executor.store().writes.load(Ordering::SeqCst),
         executor.store().write_ns.load(Ordering::SeqCst) as f64 / 1_000_000.0
@@ -292,11 +292,11 @@ async fn seed_bytes(
             c,
         )
         .await?;
-    assert_eq!(executor.run(s, 1, c).await?.revision, 2);
+    assert_eq!(executor.run(s, 1, c).await?.head().revision(), 2);
     let head = executor.history_head(s, c).await?;
     // The next ForwardIntent adds one event, max receipt settlement and three reserve events.
     let needed =
-        head.encoded_bytes + EVENT_BYTES + head.reserve()?.1 + 3 * EVENT_BYTES + RECEIPT_BYTES;
+        head.encoded_bytes() + EVENT_BYTES + head.reserve()?.1 + 3 * EVENT_BYTES + RECEIPT_BYTES;
     let percent = match profile {
         "bytes-50" => 50,
         "bytes-95" => 95,
@@ -304,7 +304,7 @@ async fn seed_bytes(
     };
     let capacity = HistoryCapacity::new(20_000, (needed * 100).div_ceil(percent))?;
     executor
-        .extend_history(s, head.revision, head.capacity, capacity, c)
+        .extend_history(s, head.revision(), head.capacity(), capacity, c)
         .await?;
     assert!(matches!(executor.run(s,1,c).await,Err(e) if e.kind()==ErrorKind::EffectUnknown));
     Ok(big_registry(d.clone())?)

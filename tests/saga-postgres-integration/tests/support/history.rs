@@ -118,7 +118,7 @@ async fn read_and_byte_bounds(
         ReadBudget::new(HistoryCapacity::new(1, 256)?, 1024 * 1024)?,
     );
     assert!(matches!(tiny.run(s,1,control).await,Err(e) if e.kind()==ErrorKind::HistoryReadLimit));
-    assert_eq!(tiny.history_head(s, control).await?.revision, 2);
+    assert_eq!(tiny.history_head(s, control).await?.revision(), 2);
     let byte_scope = scope(HISTORY_TENANT)?;
     let byte_small = HistoryCapacity::new(100, 5 * EVENT_BYTES + RECEIPT_BYTES - 1)?;
     executor
@@ -139,10 +139,10 @@ async fn grow_and_settle(
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let head = executor.history_head(s, control).await?;
-    assert_eq!(head.revision, 0);
+    assert_eq!(head.revision(), 0);
     let enlarged = HistoryCapacity::new(5, 32 * 1024 * 1024)?;
     executor
-        .extend_history(s, head.revision, small, enlarged, control)
+        .extend_history(s, head.revision(), small, enlarged, control)
         .await?;
     assert!(
         matches!(executor.extend_history(s, 0, small, enlarged, control).await, Err(e) if e.kind()==ErrorKind::Conflict)
@@ -152,7 +152,7 @@ async fn grow_and_settle(
         matches!(executor.run(s, 10, control).await, Err(e) if e.kind()==ErrorKind::EffectUnknown)
     );
     assert_eq!(
-        executor.run(s, 10, control).await?.status,
+        executor.run(s, 10, control).await?.head().status(),
         Status::Succeeded
     );
     Ok(())
@@ -238,7 +238,7 @@ async fn capture_case(
         assert!(matches!(result,Err(e) if e.kind()==ErrorKind::EffectUnknown));
     } else {
         assert_eq!(
-            result?.status,
+            result?.head().status(),
             if kind == 1 {
                 Status::CompensationFailed
             } else {
@@ -261,20 +261,20 @@ async fn verify_pending(
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let settled = executor.run(s, 1, control).await?;
-    assert_eq!(settled.revision, 2);
-    assert_eq!(settled.status, Status::Running);
+    assert_eq!(settled.head().revision(), 2);
+    assert_eq!(settled.head().status(), Status::Running);
     let current = executor.history_head(s, control).await?;
     executor
         .extend_history(
             s,
-            current.revision,
-            current.capacity,
+            current.revision(),
+            current.capacity(),
             read.history(),
             control,
         )
         .await?;
     assert_eq!(
-        executor.run(s, 20, control).await?.status,
+        executor.run(s, 20, control).await?.head().status(),
         Status::Succeeded
     );
 
@@ -289,14 +289,18 @@ async fn verify_paused(
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     assert_eq!(
-        executor.resume(s, head.revision, 20, control).await?.stop,
+        executor.resume(s, head.revision(), 20, control).await?.stop,
         RunStop::HistoryLimited
     );
     executor
-        .extend_history(s, head.revision, head.capacity, read.history(), control)
+        .extend_history(s, head.revision(), head.capacity(), read.history(), control)
         .await?;
     assert_eq!(
-        executor.resume(s, head.revision, 20, control).await?.status,
+        executor
+            .resume(s, head.revision(), 20, control)
+            .await?
+            .head()
+            .status(),
         Status::Compensated
     );
 
@@ -310,7 +314,10 @@ async fn verify_terminal(
     _read: ReadBudget,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    assert_eq!(executor.run(s, 1, control).await?.status, Status::Succeeded);
+    assert_eq!(
+        executor.run(s, 1, control).await?.head().status(),
+        Status::Succeeded
+    );
 
     Ok(())
 }
@@ -332,11 +339,11 @@ async fn verify_long(
         ReadBudget::new(HistoryCapacity::new(10, 4096)?, 3 * 1024 * 1024)?,
     );
     assert!(matches!(tiny.run(s,1,control).await,Err(e) if e.kind()==ErrorKind::HistoryReadLimit));
-    assert_eq!(tiny.history_head(s, control).await?.revision, 400);
-    tiny.extend_history(s, head.revision, head.capacity, read.history(), control)
+    assert_eq!(tiny.history_head(s, control).await?.revision(), 400);
+    tiny.extend_history(s, head.revision(), head.capacity(), read.history(), control)
         .await?;
     assert_eq!(
-        executor.run(s, 20, control).await?.status,
+        executor.run(s, 20, control).await?.head().status(),
         Status::Succeeded
     );
     Ok(())
@@ -451,7 +458,7 @@ async fn registration_capacity(
         assert!(
             matches!(executor.register(s,d,changed,control).await,Err(e) if e.kind()==ErrorKind::Conflict)
         );
-        assert_eq!(executor.history_head(s, control).await?.capacity, small);
+        assert_eq!(executor.history_head(s, control).await?.capacity(), small);
     }
     Ok(())
 }

@@ -257,7 +257,10 @@ async fn recover_after_crash(
         redis_registry(d.clone(), pool.clone(), None, false)?,
         read_budget()?,
     );
-    assert_eq!(e.run(s, 30, control).await?.status, Status::Succeeded);
+    assert_eq!(
+        e.run(s, 30, control).await?.head().status(),
+        Status::Succeeded
+    );
     let first_key = d.effect_key(s, 0, Phase::Forward)?;
     let remote = redis_effect::RedisSagaEffectFixture::new(pool.clone());
     assert_eq!(

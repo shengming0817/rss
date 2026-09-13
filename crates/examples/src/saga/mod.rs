@@ -49,7 +49,7 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
         .await?;
     let report = executor.run(scope, 30, &c).await?;
     anyhow::ensure!(
-        report.status == Status::CompensationFailed,
+        report.head().status() == Status::CompensationFailed,
         "expected persisted compensation failure"
     );
     anyhow::ensure!(
@@ -67,9 +67,11 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
             1024 * 1024 * 1024,
         )?,
     );
-    let recovered = executor.resume(scope, report.revision, 30, &c).await?;
+    let recovered = executor
+        .resume(scope, report.head().revision(), 30, &c)
+        .await?;
     anyhow::ensure!(
-        recovered.status == Status::Compensated,
+        recovered.head().status() == Status::Compensated,
         "reconstructed executor did not compensate"
     );
     let lease = store.claim(scope, Duration::from_secs(5), &c).await?;

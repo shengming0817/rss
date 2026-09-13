@@ -35,7 +35,7 @@ impl Store for Memory {
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
         if let Some((snapshot, _)) = data.get(&scope) {
-            if snapshot.definition() != d || snapshot.head().capacity != capacity {
+            if snapshot.definition() != d || snapshot.head().capacity() != capacity {
                 return Err(Error::new(rss_saga::ErrorKind::Conflict));
             }
         } else {
@@ -233,7 +233,7 @@ async fn effect_unknown_recovers_by_probe_without_reexecuting() -> anyhow::Resul
         read_budget()?,
     );
     assert_eq!(
-        recovered.run(s, 10, &control).await?.status,
+        recovered.run(s, 10, &control).await?.head().status(),
         Status::Succeeded
     );
     assert_eq!(
@@ -263,9 +263,9 @@ async fn failed_compensation_resumes_once_in_reverse_order() -> anyhow::Result<(
     );
     e.register(s, &d, history_capacity()?, &control).await?;
     let paused = e.run(s, 20, &control).await?;
-    assert_eq!(paused.status, Status::CompensationFailed);
+    assert_eq!(paused.head().status(), Status::CompensationFailed);
     assert!(matches!(
-        e.resume(s, paused.revision - 1, 20, &control).await,
+        e.resume(s, paused.head().revision() - 1, 20, &control).await,
         Err(ref failure) if failure.kind()==rss_saga::ErrorKind::Conflict
     ));
     drop(e);
@@ -277,9 +277,10 @@ async fn failed_compensation_resumes_once_in_reverse_order() -> anyhow::Result<(
     );
     assert_eq!(
         recovered
-            .resume(s, paused.revision, 20, &control)
+            .resume(s, paused.head().revision(), 20, &control)
             .await?
-            .status,
+            .head()
+            .status(),
         Status::Compensated
     );
     assert_eq!(
@@ -376,7 +377,10 @@ async fn unknown_compensation_is_probed_after_restart() -> anyhow::Result<()> {
         registry(d, effects.clone(), true)?,
         read_budget()?,
     );
-    assert_eq!(e.run(s, 20, &control).await?.status, Status::Compensated);
+    assert_eq!(
+        e.run(s, 20, &control).await?.head().status(),
+        Status::Compensated
+    );
     let data = memory
         .0
         .lock()
@@ -416,7 +420,10 @@ async fn negative_probe_after_intent_crash_does_not_exhaust_one_attempt() -> any
     assert!(
         matches!(e.run(s,10,&control).await,Err(error) if error.kind()==ErrorKind::CommitUnknown)
     );
-    assert_eq!(e.run(s, 10, &control).await?.status, Status::Succeeded);
+    assert_eq!(
+        e.run(s, 10, &control).await?.head().status(),
+        Status::Succeeded
+    );
     assert_eq!(
         *effects
             .calls
@@ -533,7 +540,8 @@ async fn sweep_cursor_and_total_budget_prevent_unknown_instance_starvation() -> 
             .result
             .as_ref()
             .map_err(Clone::clone)?
-            .status,
+            .head()
+            .status(),
         Status::Succeeded
     );
     Ok(())
@@ -688,7 +696,10 @@ async fn managed_yield_and_pause_preserve_continuation_owner() -> anyhow::Result
         assert!(stack.shutdown().join().await?.is_clean());
         if expected == RunStop::Paused {
             assert_eq!(
-                e.resume(s, report.revision, 30, &control).await?.status,
+                e.resume(s, report.head().revision(), 30, &control)
+                    .await?
+                    .head()
+                    .status(),
                 Status::Compensated
             );
         }
@@ -753,7 +764,10 @@ async fn renewal_interrupts_commit_without_losing_settlement() -> anyhow::Result
                 usize::from(point == 3 && !fenced)
             );
             memory.4.point.store(0, Ordering::SeqCst);
-            assert_eq!(e.run(s, 10, &control).await?.status, Status::Succeeded);
+            assert_eq!(
+                e.run(s, 10, &control).await?.head().status(),
+                Status::Succeeded
+            );
             let calls = effects
                 .calls
                 .lock()
@@ -804,7 +818,10 @@ async fn caller_cancellation_preserves_pending_applied_commit() -> anyhow::Resul
         memory.4.point.store(0, Ordering::SeqCst);
         let fresh_cancel = CancellationToken::new();
         let fresh = Control::new(&clock, Duration::from_secs(5), &fresh_cancel);
-        assert_eq!(executor.run(s, 10, &fresh).await?.status, Status::Succeeded);
+        assert_eq!(
+            executor.run(s, 10, &fresh).await?.head().status(),
+            Status::Succeeded
+        );
         assert_eq!(
             effects
                 .calls
@@ -847,7 +864,7 @@ async fn repeated_crash_negative_probes_stop_before_new_effect_and_extend_by_cas
     }
     let blocked = executor.run(scope, 1, &c).await?;
     assert_eq!(blocked.stop, RunStop::HistoryLimited);
-    assert_eq!(blocked.revision, 6);
+    assert_eq!(blocked.head().revision(), 6);
     assert!(
         effects
             .applied
@@ -857,12 +874,15 @@ async fn repeated_crash_negative_probes_stop_before_new_effect_and_extend_by_cas
     );
     let next = HistoryCapacity::new(20, 64 * 1024 * 1024)?;
     executor
-        .extend_history(scope, blocked.revision, capacity, next, &c)
+        .extend_history(scope, blocked.head().revision(), capacity, next, &c)
         .await?;
     assert!(
-        matches!(executor.extend_history(scope,blocked.revision,capacity,next,&c).await,Err(e) if e.kind()==ErrorKind::Conflict)
+        matches!(executor.extend_history(scope,blocked.head().revision(),capacity,next,&c).await,Err(e) if e.kind()==ErrorKind::Conflict)
     );
-    assert_eq!(executor.run(scope, 1, &c).await?.status, Status::Succeeded);
+    assert_eq!(
+        executor.run(scope, 1, &c).await?.head().status(),
+        Status::Succeeded
+    );
     Ok(())
 }
 
@@ -888,21 +908,32 @@ async fn compensation_retry_requires_new_space_and_never_spends_earlier_steps_re
         .await?;
     effects.fail_undo.store(true, Ordering::SeqCst);
     let paused = executor.run(scope, 20, &c).await?;
-    assert_eq!(paused.status, Status::CompensationFailed);
+    assert_eq!(paused.head().status(), Status::CompensationFailed);
     effects.fail_undo.store(true, Ordering::SeqCst);
-    let again = executor.resume(scope, paused.revision, 20, &c).await?;
-    assert_eq!(again.stop, RunStop::HistoryLimited);
-    assert_eq!(again.revision, paused.revision);
-    executor
-        .extend_history(scope, again.revision, again.history.capacity, capacity, &c)
+    let again = executor
+        .resume(scope, paused.head().revision(), 20, &c)
         .await?;
-    let retried = executor.resume(scope, again.revision, 20, &c).await?;
-    assert_eq!(retried.status, Status::CompensationFailed);
+    assert_eq!(again.stop, RunStop::HistoryLimited);
+    assert_eq!(again.head().revision(), paused.head().revision());
+    executor
+        .extend_history(
+            scope,
+            again.head().revision(),
+            again.head().capacity(),
+            capacity,
+            &c,
+        )
+        .await?;
+    let retried = executor
+        .resume(scope, again.head().revision(), 20, &c)
+        .await?;
+    assert_eq!(retried.head().status(), Status::CompensationFailed);
     assert_eq!(
         executor
-            .resume(scope, retried.revision, 20, &c)
+            .resume(scope, retried.head().revision(), 20, &c)
             .await?
-            .status,
+            .head()
+            .status(),
         Status::Compensated
     );
     Ok(())
@@ -941,7 +972,7 @@ async fn authentication_budget_covers_verification_and_each_compensation_without
     );
     setup.register(scope, &d, history_capacity()?, &c).await?;
     let paused = setup.run(scope, 20, &c).await?;
-    assert_eq!(paused.status, Status::CompensationFailed);
+    assert_eq!(paused.head().status(), Status::CompensationFailed);
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let executor = Executor::new(
         memory.clone(),
@@ -949,14 +980,16 @@ async fn authentication_budget_covers_verification_and_each_compensation_without
         registry(d, effects, true)?,
         ReadBudget::new(history_capacity()?, 3 * PLAINTEXT_BYTES)?,
     );
-    let partial = executor.resume(scope, paused.revision, 20, &c).await?;
+    let partial = executor
+        .resume(scope, paused.head().revision(), 20, &c)
+        .await?;
     assert_eq!(partial.stop, RunStop::HistoryLimited);
-    assert_eq!(partial.status, Status::Compensating);
-    assert_eq!(partial.revision, paused.revision + 3);
+    assert_eq!(partial.head().status(), Status::Compensating);
+    assert_eq!(partial.head().revision(), paused.head().revision() + 3);
     assert_eq!(count.load(Ordering::SeqCst), 3);
     count.store(0, Ordering::SeqCst);
     assert_eq!(
-        executor.run(scope, 20, &c).await?.status,
+        executor.run(scope, 20, &c).await?.head().status(),
         Status::Compensated
     );
     assert_eq!(count.load(Ordering::SeqCst), 3);

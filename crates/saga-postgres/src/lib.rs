@@ -184,16 +184,16 @@ async fn load(
         .bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).bind(rss_saga::DEFINITION_BYTES as i64)
         .fetch_one(&mut *connection).await.map_err(sql_error)?;
     let definition = definition.ok_or(ErrorKind::HistoryReadLimit)?.0;
-    let mut snapshot = Snapshot::empty(definition, head.capacity, read)?;
+    let mut snapshot = Snapshot::empty(definition, head.capacity(), read)?;
     let mut rows = sqlx::query("SELECT seq,step,attempt,CASE WHEN octet_length(kind)<=32 THEN kind END AS kind,CASE WHEN octet_length(effect_key)=32 THEN effect_key END AS effect_key,encoded_bytes,CASE WHEN encoded_bytes<=$4 AND (protected IS NULL OR octet_length(protected::text)<=encoded_bytes-256) THEN protected END AS protected,octet_length(kind)<=32 AND octet_length(effect_key)=32 AND encoded_bytes<=$4 AND (protected IS NULL OR octet_length(protected::text)<=encoded_bytes-256) AS bounded FROM rss_saga.journal WHERE tenant_id=$1::text::uuid AND saga_id=$2 ORDER BY seq LIMIT $3")
-        .bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).bind(head.revision.saturating_add(1).min(i64::MAX as u64) as i64)
+        .bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).bind(head.revision().saturating_add(1).min(i64::MAX as u64) as i64)
         .bind((rss_saga::EVENT_BYTES + rss_saga::RECEIPT_BYTES).min(read.history().max_encoded_bytes()) as i64).fetch(&mut *connection);
     while let Some(row) = rows.try_next().await.map_err(sql_error)? {
         cooperate().await;
         if !row.try_get::<bool, _>("bounded").map_err(sql_error)? {
             return Err(ErrorKind::HistoryReadLimit.into());
         }
-        if snapshot.revision() >= head.revision {
+        if snapshot.revision() >= head.revision() {
             return Err(ErrorKind::Integrity.into());
         }
         let kind: String = row.try_get("kind").map_err(sql_error)?;

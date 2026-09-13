@@ -16,6 +16,18 @@
 //!     rss_saga::Mutation { event }
 //! }
 //! ```
+//! Acknowledged report state cannot be rewritten through duplicate public fields:
+//! ```compile_fail
+//! fn rewrite(report: &mut rss_saga::Report) { report.revision = 0; }
+//! ```
+//! History observations expose no independently mutable state coordinates:
+//! ```compile_fail
+//! fn rewrite(head: &mut rss_saga::HistoryHead) { head.revision = 0; }
+//! ```
+//! The durable progress representation is not a consumer-facing API:
+//! ```compile_fail
+//! fn expose(_: rss_saga::Progress) {}
+//! ```
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
@@ -42,7 +54,7 @@ pub use integrity::{
     SagaReceiptFingerprint, SagaReceiptIntegrityError, SagaReceiptIntegrityKeyId,
     SagaReceiptIntegrityKeyring, VersionedSagaReceiptIntegrityKey,
 };
-pub use model::{Event, EventKind, Phase, Progress, Scope, Snapshot, Status};
+pub use model::{Event, EventKind, Phase, Scope, Snapshot, Status};
 pub use receipt::{
     Ciphertext, EffectContext, ProtectedReceipt, ReceiptContext, ReceiptProtection,
     SagaReceiptProtector,

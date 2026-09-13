@@ -53,16 +53,11 @@ impl SuccessReference {
         &self.definition
     }
 }
-/// Acknowledged progress. Inspect `stop` and `status`; a yielded invocation is not Saga success.
+/// Acknowledged progress. Inspect `stop` and `head().status()`; a yielded invocation is not Saga success.
 #[derive(Debug)]
 #[must_use]
 pub struct Report {
-    /// Acknowledged finite capacity and observed use.
-    pub history: HistoryHead,
-    /// Durable status after this invocation's last acknowledged transition.
-    pub status: Status,
-    /// Revision used for explicit compensation resume CAS.
-    pub revision: u64,
+    head: HistoryHead,
     /// Number of driver advances consumed by this invocation.
     pub advances: u32,
     /// Completion, pause, or ordinary budget yield.
@@ -71,6 +66,12 @@ pub struct Report {
     pub failure: Option<Failure>,
     /// Present only for an acknowledged successful Saga.
     pub success: Option<SuccessReference>,
+}
+impl Report {
+    /// One immutable observation of acknowledged status, revision, capacity and usage.
+    pub const fn head(&self) -> &HistoryHead {
+        &self.head
+    }
 }
 fn report(scope: Scope, snapshot: &Snapshot, advances: u32) -> Report {
     let status = snapshot.status();
@@ -101,9 +102,7 @@ fn report(scope: Scope, snapshot: &Snapshot, advances: u32) -> Report {
         definition: snapshot.definition().clone(),
     });
     Report {
-        history: snapshot.head().clone(),
-        status,
-        revision: snapshot.revision(),
+        head: snapshot.head().clone(),
         advances,
         stop,
         failure,

@@ -146,7 +146,7 @@ impl Intent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 /// Fixed-size current projection. Storage data is checked against complete bounded replay.
-pub struct Progress {
+pub(crate) struct Progress {
     pub(crate) status: Status,
     pub(crate) forward: usize,
     pub(crate) forward_attempt: u32,
@@ -158,7 +158,7 @@ pub struct Progress {
 }
 impl Progress {
     /// Acknowledged business state; capacity exhaustion does not replace it.
-    pub const fn status(&self) -> Status {
+    pub(crate) const fn status(&self) -> Status {
         self.status
     }
     pub(crate) fn empty() -> Self {

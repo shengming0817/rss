@@ -91,7 +91,7 @@ fn maximum_envelope_fits_the_admitted_settlement_reservation() -> anyhow::Result
     })?;
     assert_eq!(snapshot.status(), Status::Succeeded);
     assert_eq!(
-        snapshot.head().encoded_bytes,
+        snapshot.head().encoded_bytes(),
         2 * EVENT_BYTES + RECEIPT_BYTES
     );
     Ok(())

@@ -65,7 +65,7 @@ key, and implement authoritative probing. This is not a distributed atomic trans
 
 `CommitUnknown`, `RollbackUnknown`, cancellation and deadlines do not prove rollback. Reload through
 the same recovery path after ownership is available; never substitute a new instance/effect key.
-Reports describe acknowledged state only and include the failed step and closed cause when compensating or paused. `DefinitionBuilder::last_step` returns a typed `Completion<R>` witness; use it with `Report.success` and `Executor::success_receipt` to retrieve the final authenticated receipt. The resolver checks scope, exact definition and the actual registered Rust receipt type before decoding. Application message ACKs must wait for the required
+Reports expose their single acknowledged `HistoryHead` through `head()`. Read status, revision, capacity and usage through that observation; for example, pass `head.revision()` and `head.capacity()` from the same head to `extend_history`. Report state has no duplicate public fields, and the stored progress representation is private. Reports include the failed step and closed cause when compensating or paused. `DefinitionBuilder::last_step` returns a typed `Completion<R>` witness; use it with `Report.success` and `Executor::success_receipt` to retrieve the final authenticated receipt. The resolver checks scope, exact definition and the actual registered Rust receipt type before decoding. Application message ACKs must wait for the required
 acknowledged durable transition. Saga does not own broker settlement, a DLQ, or a management API.
 
 ## Receipt protection

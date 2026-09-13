@@ -279,7 +279,7 @@ async fn completion(
         read_budget()?,
     );
     assert_eq!(
-        recovered.run(s, 30, control).await?.status,
+        recovered.run(s, 30, control).await?.head().status(),
         Status::Succeeded
     );
     let receipts: i64 = sqlx::query_scalar(
