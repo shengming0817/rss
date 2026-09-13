@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 mod fence_fixture;
 mod messaging;
 mod scenarios;
+mod window;
 struct Clock(Instant);
 impl Clock {
     #[allow(clippy::disallowed_methods)]
@@ -119,6 +120,7 @@ async fn run() -> anyhow::Result<()> {
     let control = Control::new(&clock, Duration::from_secs(150), &cancel);
     let store = PgLedger::new(pool.clone(), auth()?, &control).await?;
     scenarios::run(&store, &pool, &owner, &control).await?;
+    window::run(&store, &pool, &owner, &control).await?;
     scenarios::adversarial(&store, &pool, &owner, &control).await?;
     messaging::run(&store, &owner, &fixture).await?;
     admission(&store, &control).await?;

@@ -38,7 +38,7 @@ impl From<Error> for PgError {
             Error::StorageContract | Error::Admission(_) => MessagingErrorKind::Invariant,
             Error::Cancelled(_) => MessagingErrorKind::DeadlineElapsed,
             Error::Rollback { .. } => MessagingErrorKind::Transient,
-            Error::Rejected => MessagingErrorKind::Permanent,
+            Error::Rejected | Error::ReadBudgetExceeded => MessagingErrorKind::Permanent,
             Error::Protocol(error) => match error {
                 rss_ledger::Error::InvalidInput
                 | rss_ledger::Error::InvalidKey
@@ -85,6 +85,10 @@ mod tests {
                 MessagingErrorKind::Permanent
             );
         }
+        assert_eq!(
+            PgError::from(Error::ReadBudgetExceeded).kind(),
+            MessagingErrorKind::Permanent
+        );
         assert_eq!(
             PgError::from(Error::Conflict).kind(),
             MessagingErrorKind::Conflict

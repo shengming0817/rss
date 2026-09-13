@@ -1,6 +1,9 @@
 use crate::{Error, error::sql_error};
+use futures::TryStreamExt;
 use rss_ledger::*;
 use sqlx::{PgConnection, Row, postgres::PgRow};
+
+const WINDOW_SQL: &str = include_str!("window.sql");
 
 /// Checked conversion to the provider's signed storage range.
 pub(crate) fn encode_sequence(value: Sequence) -> Result<i64, Error> {
@@ -12,16 +15,25 @@ pub(crate) fn decode_sequence(value: i64) -> Result<Sequence, Error> {
         u64::try_from(value).map_err(|_| Error::StorageContract)?,
     ))
 }
-/// Positive bounded page size; each record also has a protocol payload bound.
+/// Required record-count and complete encoded-byte bounds for one snapshot window.
+/// The byte charge includes the predecessor; the record count excludes it.
 #[derive(Debug, Clone, Copy)]
-pub struct ReadLimit(u16);
+pub struct ReadLimit {
+    records: u16,
+    encoded_bytes: i64,
+}
 impl ReadLimit {
-    /// Accept 1..=1024 records.
-    pub fn new(value: u16) -> Result<Self, Error> {
-        if !(1..=1024).contains(&value) {
+    /// Accept 1..=1024 records and 1..=i64::MAX encoded bytes. Neither budget has a default.
+    pub fn new(records: u16, max_encoded_bytes: u64) -> Result<Self, Error> {
+        let encoded_bytes =
+            i64::try_from(max_encoded_bytes).map_err(|_| rss_ledger::Error::InvalidInput)?;
+        if !(1..=1024).contains(&records) || encoded_bytes == 0 {
             return Err(rss_ledger::Error::InvalidInput.into());
         }
-        Ok(Self(value))
+        Ok(Self {
+            records,
+            encoded_bytes,
+        })
     }
 }
 /// A record staged in a borrowed transaction, never a durable commit receipt.
@@ -154,35 +166,52 @@ pub(crate) async fn window(
     start: Sequence,
     limit: ReadLimit,
 ) -> Result<Window, Error> {
-    // One statement guarantees a single snapshot even under READ COMMITTED.
-    let rows=sqlx::query("SELECT e.*,e.tenant_id::text AS tenant_text,h.seq AS observed_tail,h.key_id AS head_key,h.encoding_version AS head_version FROM rss_ledger.heads h LEFT JOIN rss_ledger.entries e ON e.tenant_id=h.tenant_id AND e.chain_id=h.chain_id AND e.seq>=$3 AND e.seq<=$4 WHERE h.tenant_id=$1::uuid AND h.chain_id=$2 ORDER BY e.seq")
-        .bind(ledger.tenant().to_string()).bind(ledger.chain().as_str())
-        .bind(encode_sequence(Sequence::new(start.get().saturating_sub(1)))?)
-        .bind(encode_sequence(start)?.checked_add(i64::from(limit.0)-1).unwrap_or(i64::MAX))
-        .fetch_all(connection).await.map_err(sql_error)?;
+    // SQL admits the complete encoded result before any payload reaches SQLx. Streaming alone
+    // cannot do that: SQLx yields only after receiving a complete DataRow.
+    // ref: launchbadge/sqlx sqlx-postgres/src/connection/executor.rs@75bc0487eb661da811bb7a3c5d158f1bd463fef4
+    let start_sql = encode_sequence(start)?;
+    let end = start_sql
+        .checked_add(i64::from(limit.records) - 1)
+        .unwrap_or(i64::MAX);
+    let mut rows = sqlx::query(WINDOW_SQL)
+        .bind(ledger.tenant().to_string())
+        .bind(ledger.chain().as_str())
+        .bind(start_sql)
+        .bind(end)
+        .bind(limit.encoded_bytes)
+        .bind(auth.key_id().as_str())
+        .bind(i64::try_from(V1_ENTRY_FIXED_BYTES).map_err(|_| Error::StorageContract)?)
+        .bind(i64::try_from(MAX_PAYLOAD_BYTES).map_err(|_| Error::StorageContract)?)
+        .fetch(connection);
+    let mut header = None;
     let mut entries = Vec::new();
-    let mut observed_tail = None;
-    for row in rows {
-        let key: String = row.try_get("head_key").map_err(sql_error)?;
-        if key != auth.key_id().as_str() {
-            return Err(rss_ledger::Error::UnsupportedKey.into());
-        }
-        if row.try_get::<i16, _>("head_version").map_err(sql_error)? != 1 {
-            return Err(rss_ledger::Error::UnsupportedEncoding.into());
-        }
-        observed_tail = row
-            .try_get::<Option<i64>, _>("observed_tail")
-            .map_err(sql_error)?
-            .map(decode_sequence)
-            .transpose()?;
-        if row
-            .try_get::<Option<i64>, _>("seq")
-            .map_err(sql_error)?
-            .is_some()
-        {
+    while let Some(row) = rows.try_next().await.map_err(sql_error)? {
+        if row.try_get::<bool, _>("header").map_err(sql_error)? {
+            if header.is_some() {
+                return Err(Error::StorageContract);
+            }
+            header = Some(read_header(&row)?);
+        } else {
+            if entries.len() >= usize::from(limit.records) + usize::from(start.get() > 0) {
+                return Err(Error::StorageContract);
+            }
             entries.push(decode(row)?);
         }
     }
+    let (observed_tail, expected, required_bytes) = header.ok_or(Error::StorageContract)?;
+    if entries.len() != expected {
+        return Err(rss_ledger::Error::SequenceGap.into());
+    }
+    // Detect a disagreement between the SQL length calculation and the canonical core owner.
+    let decoded_bytes = entries.iter().try_fold(0u64, |total, entry| {
+        total
+            .checked_add(entry.encoded_len() as u64)
+            .ok_or(Error::StorageContract)
+    })?;
+    if decoded_bytes != required_bytes || decoded_bytes > limit.encoded_bytes as u64 {
+        return Err(Error::StorageContract);
+    }
+    entries.sort_unstable_by_key(Entry::sequence);
     let predecessor = if start.get() > 0 {
         if entries
             .first()
@@ -195,24 +224,37 @@ pub(crate) async fn window(
         None
     };
     auth.verify_window(ledger, predecessor.as_ref(), &entries)?;
-    let expected = match observed_tail {
-        Some(t) if t >= start => t
-            .get()
-            .checked_sub(start.get())
-            .and_then(|n| n.checked_add(1))
-            .ok_or(Error::StorageContract)?
-            .min(u64::from(limit.0)),
-        _ => 0,
-    };
-    if u64::try_from(entries.len()).map_err(|_| Error::StorageContract)? != expected {
-        return Err(rss_ledger::Error::SequenceGap.into());
-    }
     Ok(Window {
         predecessor,
         entries,
         observed_tail,
     })
 }
+
+fn read_header(row: &PgRow) -> Result<(Option<Sequence>, usize, u64), Error> {
+    match row.try_get::<i32, _>("status").map_err(sql_error)? {
+        0 => {}
+        1 => return Err(rss_ledger::Error::UnsupportedKey.into()),
+        2 => return Err(rss_ledger::Error::UnsupportedEncoding.into()),
+        4 => return Err(rss_ledger::Error::SequenceGap.into()),
+        5 => return Err(Error::ReadBudgetExceeded),
+        _ => return Err(Error::StorageContract),
+    }
+    let tail = row
+        .try_get::<Option<i64>, _>("observed_tail")
+        .map_err(sql_error)?
+        .map(decode_sequence)
+        .transpose()?;
+    let expected = usize::try_from(
+        row.try_get::<i64, _>("expected_records")
+            .map_err(sql_error)?,
+    )
+    .map_err(|_| Error::StorageContract)?;
+    let bytes = u64::try_from(row.try_get::<i64, _>("required_bytes").map_err(sql_error)?)
+        .map_err(|_| Error::StorageContract)?;
+    Ok((tail, expected, bytes))
+}
+
 fn decode(row: PgRow) -> Result<Entry, Error> {
     let tenant: String = row
         .try_get("tenant_text")
@@ -275,7 +317,11 @@ mod tests {
         assert!(encode_sequence(Sequence::new(i64::MAX as u64 + 1)).is_err());
         assert!(decode_sequence(-1).is_err());
         assert_eq!(decode_sequence(0).ok(), Some(Sequence::new(0)));
-        assert!(ReadLimit::new(0).is_err());
-        assert!(ReadLimit::new(1025).is_err());
+        assert!(ReadLimit::new(0, 1).is_err());
+        assert!(ReadLimit::new(1025, 1).is_err());
+        assert!(ReadLimit::new(1, 0).is_err());
+        assert!(ReadLimit::new(1, i64::MAX as u64 + 1).is_err());
+        assert!(ReadLimit::new(1, 1).is_ok());
+        assert!(ReadLimit::new(1024, i64::MAX as u64).is_ok());
     }
 }

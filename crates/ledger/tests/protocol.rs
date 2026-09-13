@@ -216,3 +216,22 @@ fn length_prefixes_and_window_anchor_are_unambiguous() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn encoded_read_charge_matches_canonical_bytes() -> anyhow::Result<()> {
+    let a = Authenticator::new(KeyId::parse("密钥")?, vec![7; 32])?;
+    let ledger = LedgerId::new(scope()?.tenant(), ChainId::parse("链")?);
+    for size in [0, 1, MAX_PAYLOAD_BYTES] {
+        let entry = a.append(
+            &AppendRequest::new(ledger.clone(), RecordId::parse("记录")?, vec![9; size])?,
+            None,
+        )?;
+        assert_eq!(entry.encoded_len(), 127 + 3 + 6 + 6 + size);
+        assert_eq!(
+            entry.encoded_len(),
+            Authenticator::canonical_bytes(&entry)?.len() + 32
+        );
+        a.verify(&entry)?;
+    }
+    Ok(())
+}

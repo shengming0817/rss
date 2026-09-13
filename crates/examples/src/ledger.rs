@@ -85,12 +85,31 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
     );
     store.close(&control).await?;
     let reopened = PgLedger::new(input.pg.pool().await?, input.auth()?, &control).await?;
+    let denied = reopened
+        .read_window(
+            req.ledger(),
+            Sequence::new(0),
+            ReadLimit::new(10, 1)?,
+            &control,
+        )
+        .await;
+    anyhow::ensure!(
+        denied.fold(
+            |_| false,
+            |_| false,
+            |e| matches!(e, Error::ReadBudgetExceeded),
+            |_| false,
+            |_| false,
+            |_| false
+        ),
+        "encoded byte budget was not rejected with acknowledged rollback"
+    );
     let page = committed(
         reopened
             .read_window(
                 req.ledger(),
                 Sequence::new(0),
-                ReadLimit::new(10)?,
+                ReadLimit::new(10, 64 * 1024)?,
                 &control,
             )
             .await,

@@ -3,6 +3,9 @@ use rss_request_context::TenantId;
 
 /// Maximum exact payload size in encoding V1.
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
+/// V1 encoded record overhead: canonical authentication input framing plus the record tag.
+/// Identity UTF-8 bytes and payload bytes are charged separately.
+pub const V1_ENTRY_FIXED_BYTES: usize = b"rss.ledger.entry\0".len() + 2 + 16 + 12 + 8 + 32 + 8 + 32;
 macro_rules! identity {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -215,6 +218,15 @@ impl Entry {
     /// Exact key identity.
     pub const fn key_id(&self) -> &KeyId {
         &self.key_id
+    }
+    /// Logical encoded read charge, including the canonical input and this record's tag.
+    /// This does not allocate and is not an allocator or process-memory measurement.
+    pub fn encoded_len(&self) -> usize {
+        V1_ENTRY_FIXED_BYTES
+            + self.ledger().chain().as_str().len()
+            + self.record_id().as_str().len()
+            + self.key_id().as_str().len()
+            + self.payload().len()
     }
     /// Exact identity and content comparison for stable-id retries.
     pub fn matches(&self, request: &AppendRequest) -> bool {
