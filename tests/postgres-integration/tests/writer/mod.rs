@@ -81,6 +81,16 @@ async fn interoperability(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
                     };
                     assert_eq!(inserted, AppendOutcome::Inserted);
                     assert_eq!(repeated, AppendOutcome::AlreadyPresent);
+                    Ok(())
+                })
+            })
+            .await
+            .fold(Ok, Err, Err, Err, Err, Err)?;
+        // A conflict no longer preserves the legacy ability to swallow an Outbox error and commit.
+        let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("integration")?);
+        let rejected = runtime
+            .local_tx(tenant, deadline(), move |tx| {
+                Box::pin(async move {
                     let original = message(id);
                     let conflict = MessageEnvelope::new(
                         original.id().clone(),
@@ -98,8 +108,15 @@ async fn interoperability(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
                     Ok(())
                 })
             })
-            .await
-            .fold(Ok, Err, Err, Err, Err, Err)?;
+            .await;
+        assert!(rejected.fold(
+            |_| false,
+            |_| false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false
+        ));
     }
     Ok(())
 }

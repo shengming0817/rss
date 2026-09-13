@@ -1,14 +1,14 @@
 WITH required(name, privileges) AS (
  VALUES ('consumer_dead_letter', 'SELECT,INSERT')
  UNION ALL SELECT 'recovery_operations', 'SELECT,INSERT' WHERE $1
- UNION ALL SELECT 'outbox', 'SELECT,INSERT,UPDATE' WHERE $1
+ UNION ALL SELECT 'outbox', 'SELECT' WHERE $1
 ), checks AS (
  SELECT c.oid, c.relowner, c.relrowsecurity, c.relforcerowsecurity,
    NOT pg_has_role(current_user,c.relowner,'MEMBER')
    AND c.relrowsecurity AND c.relforcerowsecurity
    AND NOT EXISTS (SELECT 1 FROM unnest(string_to_array(r.privileges,',')) p WHERE NOT has_table_privilege(current_user,c.oid,p))
    AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']) p
-     WHERE NOT p=ANY(string_to_array(r.privileges,',')) AND NOT (r.name='consumer_dead_letter' AND p='UPDATE') AND
+     WHERE NOT p=ANY(string_to_array(r.privileges,',')) AND NOT (r.name IN ('consumer_dead_letter','outbox') AND p='UPDATE') AND
        (has_table_privilege(current_user,c.oid,p) OR (p IN ('SELECT','INSERT','UPDATE','REFERENCES') AND has_any_column_privilege(current_user,c.oid,CASE WHEN p IN ('SELECT','INSERT','UPDATE','REFERENCES') THEN p ELSE 'SELECT' END)))) AS valid
  FROM required r LEFT JOIN pg_class c ON c.oid=to_regclass('rss_transactional_messaging.'||r.name)
 ), required_columns(relation,name,type) AS (VALUES

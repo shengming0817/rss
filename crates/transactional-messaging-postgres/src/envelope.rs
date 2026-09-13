@@ -4,10 +4,10 @@ use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_diag_context::CorrelationId;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::message::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Envelope {
     id: String,
@@ -27,30 +27,6 @@ pub(crate) struct Envelope {
     payload: Vec<u8>,
 }
 impl Envelope {
-    pub(crate) fn encode<P: AsRef<[u8]>>(message: &MessageEnvelope<P>) -> Result<String, PgError> {
-        let m = message.metadata();
-        serde_json::to_string(&Self {
-            id: message.id().as_str().into(),
-            tenant: m.tenant_id().to_string(),
-            occurred_at: m.occurred_at().unix_seconds(),
-            domain: m.domain().as_str().into(),
-            route: m.route().as_str().into(),
-            contract: m.contract().id().as_str().into(),
-            version: m.contract().version().to_string(),
-            schema: m.contract().schema_digest().as_str().into(),
-            correlation: m.correlation().map(Into::into),
-            partition: m.partition().map(|p| p.key().as_str().into()),
-            causation: m.causation().map(|id| id.as_str().into()),
-            attributes: m.attributes().map(|(k, v)| (k.into(), v.into())).collect(),
-            trace: message.transport_context().trace().map(Into::into),
-            tenant_authority: message
-                .transport_context()
-                .tenant_authority()
-                .map(Into::into),
-            payload: message.payload().as_ref().to_vec(),
-        })
-        .map_err(|_| PgError::invariant())
-    }
     pub(crate) fn decode(raw: &str) -> Result<MessageEnvelope<Vec<u8>>, PgError> {
         let value: Self = serde_json::from_str(raw).map_err(|_| PgError::invariant())?;
         let invalid = |_| PgError::invariant();

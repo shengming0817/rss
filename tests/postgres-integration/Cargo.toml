@@ -13,6 +13,7 @@ default = []
 rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime", "rss-examples/managed"]
 
 [dev-dependencies]
+rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
 rss-examples = { path = "../../crates/examples", features = ["providers", "outbox-writer", "observation-handoff", "recovery-pg"] }
 rss-projection.workspace = true
 rss-projection-postgres = { workspace = true, features = ["integration"] }

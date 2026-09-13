@@ -370,6 +370,13 @@ impl InboxDriver for Harness {
 }
 
 pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
+    eprintln!("pg-suite conformance=reverse-commit");
+    Box::pin(outbox::Driver::reverse_commit_ordering(
+        runtime.clone(),
+        owner,
+    ))
+    .await?;
+    eprintln!("pg-suite conformance=provider-contracts");
     let timer = Timer::new();
     Box::pin(
         rss_transactional_messaging_testkit::localtx::run_localtx_conformance(

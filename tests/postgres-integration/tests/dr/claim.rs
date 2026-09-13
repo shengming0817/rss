@@ -16,6 +16,15 @@ pub async fn check(
         runtime
             .local_tx(tenant(), deadline(), move |tx| {
                 Box::pin(async move {
+                    tx.prepare_outbox_partitions(
+                        &message("partial-claim")
+                            .metadata()
+                            .partition()
+                            .cloned()
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                    )
+                    .await?;
                     append
                         .append(tx, PendingMessage::new(message("partial-claim")))
                         .await?;

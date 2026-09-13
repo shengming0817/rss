@@ -171,6 +171,10 @@ async fn messaging(
         let result = runtime
             .local_tx(tenant, deadline, move |tx| {
                 Box::pin(async move {
+                    tx.prepare_outbox_partitions(
+                        &pending.partition().cloned().into_iter().collect::<Vec<_>>(),
+                    )
+                    .await?;
                     rss_ledger_postgres::append_in(tx, authenticator, &writing).await?;
                     writer.append(tx, pending).await?;
                     if rollback {

@@ -16,7 +16,7 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 
 Use an external migrator to provision a `rss_tmsg_relay` role with
 `NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION` and no membership
-in any other role, then execute `migrations/0001_create_transactional_messaging.sql`. The migrator must be able to transfer
+in any other role, then execute the complete `MIGRATION_SQL` (0001–0010). The migrator must be able to transfer
 function ownership to that role. Do not run migrations through the application pool.
 
 Registry consumers obtain the same versioned SQL through
@@ -26,13 +26,14 @@ file. Pin the adapter version in the external migrator (`rss-transactional-messa
 
 The runtime login must not own the schema/tables, be superuser, have BYPASSRLS, or belong to the
 relay role. Grant it schema USAGE; policy SELECT; Inbox SELECT/INSERT/UPDATE/DELETE; Outbox
-SELECT/INSERT; Outbox sequence USAGE; and EXECUTE on the three package functions. Grant no schema
+SELECT; and EXECUTE on `check_execution`, the three relay functions, `prepare_outbox_partitions(jsonb)`
+and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or sequence privilege. Grant no schema
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
 A producer that only commits business state and appends/reads Outbox uses
-`PgRuntime::connect_producer(config, timer, binding)`. Grant the same schema/policy/Outbox/
-sequence privileges and `check_execution()` EXECUTE, but no Inbox privileges and no
+`PgRuntime::connect_producer(config, timer, binding)`. Grant schema USAGE, policy/Outbox SELECT,
+`check_execution()`, `prepare_outbox_partitions(jsonb)` and `append_outbox(bytea,jsonb)` EXECUTE, but no Inbox privileges and no
 `claim_outbox`, `outbox_lease` or `settle_outbox` EXECUTE. Admission rejects those extra
 capabilities, including inherited grants; PostgreSQL also denies relay calls at execution.
 Construct `PgOutboxWriter::new(runtime.clone(), domain)` from that shared runtime, and call
@@ -78,6 +79,62 @@ external migrator/operator corrects that category and reconnects. Authentication
 database errors are permanent configuration failures; permission denial during the catalog probe
 is a storage-contract failure, while runtime permission denial remains a non-retryable operation
 error. Transaction stages log only the phase, classification and redacted source.
+
+## Partition allocation and SQL callers (#2422)
+
+Every ordered writer first calls `tx.prepare_outbox_partitions(&partitions)` with its complete
+`PartitionIdentity` set, including identities used by other writers/domains in the same transaction.
+Prepare before companion business locks when those identities are known. An empty set acquires
+nothing; one nonempty set may be declared per tenant transaction. Duplicate entries are deduplicated;
+repeated or expanded declarations and undeclared ordered append fail closed. Unordered messages
+need no declaration. Runtime provenance validation remains mandatory for companion operations.
+
+The database owns both membership and order. `outbox_partitions` stores the last allocated ordinal
+and a PostgreSQL-issued `prepared_by` transaction ID. Preparation sorts exact domain/key identities
+with `C` collation before creating or locking any allocator rows. Updating the preparation marker
+holds each row through commit/rollback. Append requires that current-transaction marker, increments
+the counter and inserts the message atomically. Rollback also rolls back preparation and allocation.
+Allocator rows are retained; no cleanup worker or reset API is provided. `partition_seq` is unique
+and increasing within a partition, but is not promised gapless. Global `seq` is only a row identity
+and DR reference: its cache settings cannot change the partition predecessor relation.
+
+The same protocol is available to non-Rust clients inside their tenant/fence-bound transaction:
+
+```sql
+-- The trusted host has bound tenant, storage target/lineage, epoch and statement timeout.
+SELECT rss_transactional_messaging.prepare_outbox_partitions(
+  '[["orders","device-42"],["orders","device-17"]]'::jsonb);
+-- Bind core message-wire-v1 bytes and transport; no external digest or private envelope.
+SELECT rss_transactional_messaging.append_outbox($1::bytea,$2::jsonb);
+-- Result: inserted | already_present | conflict. Commit/rollback remains caller-owned.
+```
+
+The SQL function strictly decodes the public core [message byte contract](../transactional-messaging/message-wire-v1.md),
+derives row/envelope identity and calculates SHA-256 over those exact bytes. Transport is a separate
+object containing exactly `trace` and `tenant_authority` (string or null). It preserves
+same-ID fingerprint conflict semantics, and cannot be bypassed by runtime table INSERT or allocator
+mutation. Fingerprinting remains owned by the core format; SQL does not introduce a second digest
+algorithm. Direct SQL callers must keep the trusted transaction context fixed, resolve statement
+errors with rollback, and enforce their operation deadline. These credentials are not an arbitrary-SQL
+sandbox. Claims continue respecting live leases, retry windows, unresolved DLQ heads and DR progress.
+Replay decodes the protected original, prepares its partition, then uses this same append function.
+
+The Rust transaction view keeps only failure/reuse state, not a second partition collection.
+Failed/cancelled admission prevents commit even if a callback swallows its error. Rust restores
+admission only after Inserted/AlreadyPresent; fingerprint Conflict also prevents commit. SQL callers
+receive the closed conflict result and must roll back the associated business transaction.
+Consumer effect savepoint rollback releases allocator changes and disables further Outbox use of
+that view while allowing the legitimate rejection receipt/DLQ to commit. Successful release retains
+locks until outer transaction settlement.
+
+`OUTBOX_PARTITION_UPGRADE_SQL` installs 0009–0010 after 0008; `OUTBOX_MESSAGE_UPGRADE_SQL` installs
+0010 after 0009. All upgrade constants include the current contract and require an empty Outbox.
+Existing ordered rows are rejected: their original commit order cannot be recovered by sorting `seq`.
+No backfill, old-schema runtime, advisory-lock fallback or dual ordering is provided. Use an empty
+ordered Outbox and replace the old runtime grants before reconnecting. The external operator owns
+installation and traffic isolation; no application call executes DDL or production data deletion.
+Schema admission checks allocator structure, collation, RLS, constraints, function signatures and
+least privileges. Existing runtimes must be replaced when provisioning changes.
 
 ## Resource ownership and shutdown
 
@@ -183,7 +240,8 @@ async fn close(runtime: &PgRuntime) {
 async fn append(runtime: &PgRuntime, store: Arc<PgOutboxStore<()>>,
     message: MessageEnvelope<Vec<u8>>, deadline: OperationDeadline) -> LocalTxAttempt<AppendOutcome, PgError> {
     runtime.local_tx(message.metadata().tenant_id(), deadline, move |tx| Box::pin(async move {
-        // Consumer-owned repository writes can use this same tx before append.
+        tx.prepare_outbox_partitions(&message.metadata().partition().cloned().into_iter().collect::<Vec<_>>()).await?;
+        // Consumer-owned repository writes use this same prepared tx before append.
         store.append(tx, PendingMessage::new(message)).await.map_err(Into::into)
     })).await
 }
@@ -265,14 +323,16 @@ observation. It performs one mutation and never resets the total budget.
 
 ## Consumer archive schema and role cutover (#2302)
 
-Fresh installation uses `MIGRATION_SQL` (0001–0008). Upgrade exactly once from the installed boundary:
+Fresh installation uses `MIGRATION_SQL` (0001–0010). Upgrade exactly once from the installed boundary:
 
 | Installed through | Remaining SQL |
 |---|---|
-| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0008) |
-| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0008) |
-| 0004 or 0005 | Apply each remaining numbered migration in order, through 0008 |
-| 0006 | `DR_UPGRADE_SQL` (0007/0008) |
+| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0010) |
+| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0010) |
+| 0004 or 0005 | Apply each remaining numbered migration in order, through 0010 |
+| 0006 | `DR_UPGRADE_SQL` (0007–0010) |
+| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0010; empty Outbox) |
+| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010; empty Outbox) |
 
 Do not rerun aggregate constants containing already applied DDL. Migration 0005 replaces
 `archive_fault` with `archive_fault(uuid,uuid,bytea,text)`; grant that signature after upgrading.
@@ -284,9 +344,9 @@ shadowing. The startup probe rejects unsafe paths, including drift of the intern
 Current recovery probes require nullable HOT capsule content and reject the previous broad UPDATE
 permission. External migrators must revoke UPDATE on `consumer_dead_letter` from the recovery
 operator (including inherited grants), then grant only UPDATE(recovery_version) on that table.
-The complete additional maintenance grants are UPDATE on `outbox` and SELECT/INSERT on
-`recovery_operations`, together with the already declared base SELECT/INSERT and operation
-permissions. No old-schema runtime mode exists.
+The complete additional maintenance grants are UPDATE(status,recovery_version,lease_token,lease_until,retry_after)
+on `outbox` and SELECT/INSERT on `recovery_operations`, together with base read/execute permissions.
+Table-wide Outbox UPDATE, ordering-field UPDATE, INSERT and sequence privileges are rejected. No old-schema runtime mode exists.
 
 `PgArchiveRepository` uses a separate, private pool and an archive-only role. The external migrator
 owns tables/functions and executes upgrades. Give the workload role schema USAGE and SELECT on
@@ -326,7 +386,7 @@ single-tenant mode, automatic adoption of database values or legacy SQL overload
 fences only that tenant; a multi-tenant relay skips fenced tenants while serving its remaining scope.
 Reconstruct the affected runtime with a newly authorized binding after cutover.
 
-`DR_UPGRADE_SQL` applies migrations 0007/0008 after 0006, once, with traffic isolated. Fresh installs
+`DR_UPGRADE_SQL` applies migrations 0007–0010 after 0006, once, with traffic isolated and no existing Outbox rows. Fresh installs
 use `MIGRATION_SQL`. The external migrator must provision the singleton `storage_lineage` row with
 nonzero 16-byte target/lineage identifiers and each `tenant_epoch` row with a positive epoch before
 admitting traffic. Supply these values from independently verified restore/deployment evidence.
@@ -342,7 +402,9 @@ Replace Outbox grants with the current exact signatures:
 GRANT EXECUTE ON FUNCTION
  rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),
  rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),
- rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)
+ rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),
+ rss_transactional_messaging.prepare_outbox_partitions(jsonb),
+ rss_transactional_messaging.append_outbox(bytea,jsonb)
 TO application_runtime;
 ```
 
@@ -417,3 +479,10 @@ fingerprints, migrations, execution fencing and transaction outcomes are unchang
 The `rss-examples` `outbox-writer` binary is a real producer-ACL consumer. It verifies business and
 Outbox commit/rollback through the public API. The independent source/artifact runner executes it
 without AMQP or messaging-runtime dependencies and separately compiles a relay-only provider.
+
+Migration `0010_verify_outbox_message_contract.sql` removes the unverified-digest function signature
+and its grants. It requires an empty Outbox: historical inputs were not verified and cannot be
+backfilled with trustworthy canonical bytes. Provision EXECUTE on `append_outbox(bytea,jsonb)`;
+no runtime role may execute the private frame reader/decoder. Startup rejects the legacy signature,
+missing decoder functions, changed ownership/search paths or leaked decoder EXECUTE. No extension,
+new crate, second fingerprint algorithm or compatibility writer is installed.

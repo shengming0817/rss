@@ -159,6 +159,12 @@ async fn execute_transaction<
             return TransactionOutcome::commit_unknown();
         }
     };
+    let body = body.and_then(|disposition| {
+        tx.outbox_admission
+            .check_commit()
+            .map_err(PgConsumerEffectFailure::infrastructure)?;
+        Ok(disposition)
+    });
     if cutoff.remaining(timer.now()).unwrap_or_default().is_zero() {
         return TransactionOutcome::commit_unknown();
     }
@@ -251,6 +257,9 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
             .execute(&mut *tx.connection)
             .await
             .map_err(PgConsumerEffectFailure::infrastructure)?;
+        // Allocator preparation/locks were rolled back with the effect. Terminal receipt
+        // persistence remains legal, but this view must never admit another Outbox operation.
+        tx.outbox_admission = crate::outbox_admission::Admission::Unavailable;
     }
     sqlx::query("RELEASE SAVEPOINT rss_tmsg_effect")
         .execute(&mut *tx.connection)

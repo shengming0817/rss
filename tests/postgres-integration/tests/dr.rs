@@ -117,39 +117,12 @@ async fn run() -> anyhow::Result<()> {
         )
         .await?;
     sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE dr_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE dr_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS;").execute(&owner).await?;
-    let archive_schema = MIGRATION_SQL
-        .strip_suffix(DR_UPGRADE_SQL)
-        .ok_or_else(|| anyhow::anyhow!("DR upgrade boundary"))?;
-    sqlx::raw_sql(archive_schema).execute(&owner).await?;
-    let legacy = upgrade::seed(&owner).await?;
-    let mut upgrade = owner.begin().await?;
-    sqlx::raw_sql(DR_UPGRADE_SQL).execute(&mut *upgrade).await?;
-    upgrade.rollback().await?;
-    assert!(
-        sqlx::query_scalar::<_, Option<String>>(
-            "SELECT to_regclass('rss_transactional_messaging.dr_plans')::text"
-        )
-        .fetch_one(&owner)
-        .await?
-        .is_none()
-    );
-    assert_eq!(
-        upgrade::facts(&owner).await?,
-        legacy,
-        "DDL rollback preserves old business records"
-    );
-    sqlx::raw_sql(DR_UPGRADE_SQL).execute(&owner).await?;
-    assert_eq!(
-        upgrade::facts(&owner).await?,
-        legacy,
-        "upgrade preserves terminal evidence and all Published facts"
-    );
-    sqlx::raw_sql("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,decode(repeat('01',16),'hex'),decode(repeat('02',16),'hex')); INSERT INTO rss_transactional_messaging.tenant_epoch VALUES('11111111-1111-1111-1111-111111111111',1); GRANT USAGE ON SCHEMA rss_transactional_messaging TO dr_runtime,dr_operator; GRANT SELECT ON rss_transactional_messaging.policy TO dr_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO dr_runtime; GRANT SELECT,INSERT ON rss_transactional_messaging.outbox TO dr_runtime; GRANT USAGE ON ALL SEQUENCES IN SCHEMA rss_transactional_messaging TO dr_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO dr_runtime,dr_operator; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO dr_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.apply_dr(uuid,bytea,text,jsonb,jsonb,bigint),rss_transactional_messaging.read_dr(uuid,bytea) TO dr_operator;").execute(&owner).await?;
+    let owner = Box::pin(upgrade::install_current(owner)).await?;
     let config = |role: &str| -> anyhow::Result<PgConfig> {
         Ok(PgConfig::new(
             &p.host,
             p.port,
-            &p.database,
+            "partition_order_current",
             role,
             PgPassword::new("fixture-only"),
             PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
@@ -198,6 +171,7 @@ async fn run() -> anyhow::Result<()> {
     )?);
     let one = std::num::NonZeroUsize::new(1).ok_or_else(|| anyhow::anyhow!("limit"))?;
     // Old Inbox and Outbox capabilities must not acquire authority from a newer runtime.
+    Box::pin(upgrade::publish_current(runtime.clone(), outbox.clone())).await?;
     let inbox = PgInboxStore::new(
         runtime.clone(),
         rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
@@ -233,6 +207,15 @@ async fn run() -> anyhow::Result<()> {
         runtime
             .local_tx(tenant(), deadline(), move |tx| {
                 Box::pin(async move {
+                    tx.prepare_outbox_partitions(
+                        &message("old-lease")
+                            .metadata()
+                            .partition()
+                            .cloned()
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                    )
+                    .await?;
                     append
                         .append(tx, PendingMessage::new(message("old-lease")))
                         .await?;

@@ -99,6 +99,10 @@ async fn atomicity(runtime: Arc<PgRuntime>, tenant: TenantId, prefix: &str) -> a
         let attempt = runtime
             .local_tx(tenant, deadline()?, move |tx| {
                 Box::pin(async move {
+                    tx.prepare_outbox_partitions(
+                        &pending.partition().cloned().into_iter().collect::<Vec<_>>(),
+                    )
+                    .await?;
                     writer.validate_transaction(tx)?;
                     tx.with_connection(move |connection| Box::pin(async move {
                 sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,$2)")

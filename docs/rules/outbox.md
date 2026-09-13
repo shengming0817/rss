@@ -54,7 +54,14 @@ retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 r
 ## Partition order
 
 `INVARIANT: OUTBOX-PARTITION-ORDER-01`：同 `(tenant, domain, partition_key)` 只允许 head-of-partition admission；
-未 terminal settle/DLQ resolution 的 head 阻塞 successor。partition key 必须全局唯一或包含 tenant scope。
+未 terminal settle/DLQ resolution 的 head 阻塞 successor。partition identity 包含 tenant 与 domain，key 可在不同作用域复用。
+
+- PostgreSQL 由组件内 allocator 原子分配 `partition_seq`；`seq` 仅用于行身份和 DR 引用，不参与分区前序判定。
+- 官方 Rust 与 SQL 写入共用 prepare/append 函数：一次完整非空分区声明先按精确身份排序取行锁，再分配序号，锁持有到事务结算；不得增量扩展集合。
+- 数据库持有事务准备证明和唯一序号；runtime 不得直接 INSERT Outbox、改写排序字段或操作 allocator/底层序列。Recovery 只持有所需状态列更新权限。
+- Rust 在失败或取消后阻断提交；consumer effect savepoint 回滚后关闭 Outbox 准入，保留合法 terminal receipt/DLQ 提交。
+- 有序旧数据不按 `seq` 回填提交顺序；安装与权限切换归外部 migrator。序号不承诺连续，也不扩展为通用序列服务。
+- Medium canonical proof 为真实 PostgreSQL T2：覆盖反序提交、回滚、多分区锁序、SQL 入口与权限拒绝、replay、lease/DLQ 和 DR。
 
 ## Metadata funnel
 
@@ -74,3 +81,10 @@ retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 r
 消息 recovery 拥有显式恢复请求；PostgreSQL adapter 在原消息 schema 和事务 owner 内落实。
 未过期 dead_letter 可按原身份 redrive；过期头仅可通过带持久化回执的 resolved 处置解除分区阻塞。
 resolved 不表示 published，发布事实查询必须区分两者。所有操作按租户、目标版本和稳定操作身份校验。
+
+`INVARIANT: OUTBOX-SQL-MESSAGE-CONTRACT-01`: SQL writers consume the core-owned versioned
+`message-wire-v1` byte contract. The database strictly decodes all authored facts and hashes the
+exact bytes with SHA-256; callers cannot supply a fingerprint or a private durable projection.
+The core encoder is shared with `MessageFingerprint::of`. Transport fields are separate and cannot
+change authored identity. Medium proof owner is PostgreSQL `partition::wire_contract`: independent
+SQL encoding, malformed inputs, digest parity, authored conflicts and transport-only idempotency.

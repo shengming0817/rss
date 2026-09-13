@@ -6,6 +6,7 @@ pub mod error;
 pub mod fence;
 #[cfg(feature = "consumer")]
 pub mod inbox;
+#[doc = include_str!("../message-wire-v1.md")]
 pub mod message;
 pub mod observability;
 #[cfg(feature = "producer")]

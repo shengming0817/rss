@@ -55,7 +55,10 @@ impl OutboxWriter<Vec<u8>> for PgOutboxWriter {
         tx: &mut Self::Transaction<'_>,
         message: PendingMessage<Vec<u8>>,
     ) -> Result<AppendOutcome, MessagingError> {
-        self.validate_transaction(tx).map_err(PgError::port)?;
+        if let Err(error) = self.validate_transaction(tx) {
+            tx.outbox_admission = crate::outbox_admission::Admission::Failed;
+            return Err(error.port());
+        }
         append_message(tx, &self.domain, message).await
     }
 }
@@ -350,37 +353,40 @@ pub(crate) async fn append_message<P: AsRef<[u8]>>(
     domain: &MessagingDomain,
     message: PendingMessage<P>,
 ) -> Result<AppendOutcome, MessagingError> {
+    tx.outbox_admission.begin().map_err(PgError::port)?;
     let envelope = message.envelope();
     if tx.tenant_id() != envelope.metadata().tenant_id() || envelope.metadata().domain() != domain {
         return Err(PgError::invariant().port());
     }
-    let tenant = tx.tenant_id().to_string();
-    let id = envelope.id().as_str().to_owned();
-    let domain = domain.as_str().to_owned();
-    let partition = message.partition().map(|p| p.key().as_str().to_owned());
-    let encoded = Envelope::encode(envelope).map_err(PgError::port)?;
-    let digest = *message.fingerprint().as_bytes();
-    let count = tx.with_connection(move |connection| Box::pin(async move {
-            sqlx::query("INSERT INTO rss_transactional_messaging.outbox (tenant_id,message_id,domain,partition_key,envelope,fingerprint) VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6) ON CONFLICT (tenant_id,message_id) DO NOTHING")
-                .bind(tenant).bind(id).bind(domain).bind(partition).bind(encoded).bind(digest.as_slice()).execute(connection).await.map(|r| r.rows_affected())
-        })).await.map_err(PgError::port)?;
-    if count == 1 {
-        return Ok(AppendOutcome::Inserted);
-    }
-    // Separate statement is required after a concurrent ON CONFLICT wait (fresh MVCC snapshot).
-    let tenant = tx.tenant_id().to_string();
-    let id = envelope.id().as_str().to_owned();
-    let persisted = tx.with_connection(move |connection| Box::pin(async move {
-            sqlx::query_scalar::<_, Vec<u8>>("SELECT fingerprint FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2")
-                .bind(tenant).bind(id).fetch_one(connection).await
-        })).await.map_err(PgError::port)?;
-    if fingerprint(persisted).map_err(PgError::port)? == message.fingerprint() {
-        Ok(AppendOutcome::AlreadyPresent)
-    } else {
-        Err(PgError::classified(
-            MessagingErrorKind::Conflict,
-            std::io::Error::other("same-ID fingerprint conflict"),
-        )
-        .port())
-    }
+    let encoded = envelope.canonical_bytes();
+    let transport = serde_json::json!({
+        "trace": envelope.transport_context().trace(),
+        "tenant_authority": envelope.transport_context().tenant_authority(),
+    });
+    let outcome: String = tx
+        .with_connection(move |connection| {
+            Box::pin(async move {
+                sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+                    .bind(encoded)
+                    .bind(transport)
+                    .fetch_one(connection)
+                    .await
+            })
+        })
+        .await
+        .map_err(PgError::port)?;
+    let result = match outcome.as_str() {
+        "inserted" => AppendOutcome::Inserted,
+        "already_present" => AppendOutcome::AlreadyPresent,
+        "conflict" => {
+            return Err(PgError::classified(
+                MessagingErrorKind::Conflict,
+                std::io::Error::other("same-ID fingerprint conflict"),
+            )
+            .port());
+        }
+        _ => return Err(PgError::invariant().port()),
+    };
+    tx.outbox_admission.complete();
+    Ok(result)
 }
