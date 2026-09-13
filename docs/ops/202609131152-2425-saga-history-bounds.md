@@ -5,8 +5,8 @@
 ## 被测身份与环境
 
 ```text
-revision=bc59fe9a88662e03e7c0bfef8206ab7b81864569
-binary_sha256=c3cf4fb176d437929162a1d758b8b3835dfb6720818d4708cbce254616ea2e9b
+revision=2a5f103c942f4e8922c96cc3e21df66032f73415
+binary_sha256=dedfaa52ee582a12205d93f505329d6e0ab85800720ce4528fa7f6eb757068e4
 rustc=1.96.0 (ac68faa20 2026-05-25)
 profile=debug
 host=macOS 26.4 / arm64
@@ -15,18 +15,18 @@ postgres_image=sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ff
 ```
 
 每个档位使用独立测试进程和一次性 PostgreSQL fixture。时间不是隔离机器上的统计分布；
-首次查询的准备成本、缓存与主机负载会影响结果。本轮独立源码消费构建与 CI 同时运行，因此不据提交时间的差异推导历史增长复杂度。
+首次查询的准备成本、缓存与主机负载会影响结果。本轮独立源码消费构建同时运行，因此不据提交时间的差异推导历史增长复杂度。
 
 ## 测量结果
 
 | 档位 | 已存事件 | 计费字节 | journal DataRow 字节 | snapshot ms | run ms | 提交次数 / 总 ms | 峰值 RSS MiB |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| entries-100 | 100 | 25600 | 11750 | 29.413 | 17.644 | 2 / 7.149 | 26.67 |
-| entries-1000 | 1000 | 256000 | 117500 | 55.900 | 84.919 | 2 / 29.930 | 27.55 |
-| entries-10000 | 10000 | 2560000 | 1175000 | 250.617 | 279.360 | 2 / 10.992 | 26.81 |
-| bytes-50 | 3 | 5246865 | 4794373 | 202.984 | 367.330 | 1 / 32.109 | 47.39 |
-| bytes-95 | 3 | 5246865 | 4793855 | 216.383 | 314.078 | 1 / 4.022 | 47.33 |
-| bytes-100 | 3 | 5246865 | 4794755 | 187.916 | 264.226 | 1 / 2.451 | 47.33 |
+| entries-100 | 100 | 25600 | 11750 | 8.996 | 21.068 | 2 / 7.991 | 27.25 |
+| entries-1000 | 1000 | 256000 | 117500 | 27.587 | 42.313 | 2 / 9.585 | 27.19 |
+| entries-10000 | 10000 | 2560000 | 1175000 | 250.049 | 243.915 | 2 / 10.049 | 27.38 |
+| bytes-50 | 3 | 5246865 | 4793971 | 173.416 | 258.602 | 1 / 3.033 | 47.34 |
+| bytes-95 | 3 | 5246865 | 4795474 | 189.762 | 275.316 | 1 / 3.707 | 47.39 |
+| bytes-100 | 3 | 5246865 | 4795188 | 179.281 | 271.541 | 1 / 3.165 | 47.39 |
 
 - `snapshot` 包含锁定元数据、读取、类型化解码和完整事件回放；随后 `run` 再执行一次正常恢复，
   包含完整回放、认证、测试 action/probe 与提交，两个时间不能直接相减解释为密码学成本。
@@ -41,7 +41,7 @@ postgres_image=sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ff
   三个档位均成功完成 pending 结算，100% 占用没有阻断已准入效果。
 
 升级覆盖 416 条事件、pending、补偿暂停、成功和 400 条长历史四类实例。
-本次升级耗时 **21.776 ms**，WAL 增量 **255,856 字节**，组件关系及索引占用由
+本次升级耗时 **26.103 ms**，WAL 增量 **255,968 字节**，组件关系及索引占用由
 **311,296** 变为 **352,256 字节**。关系占用差值不是迁移期间的临时磁盘峰值；
 产品仍需为实际数据规模安排停写窗口、执行时限与临时磁盘空间。
 
@@ -67,9 +67,8 @@ Core 用例覆盖跨 run 的 crash/负向 probe 累积、补偿 Resume、精确�
 同一状态转换与计量的回放对照、约束漂移、巨大单行及计量篡改拒绝、同行 receipt 和单向升级。首审修复后额外覆盖 44 项独立权限/结构漂移，以及三个字节数组各 7 类非法值、字符串型 format/seq/attempt 共 24 个向量在 definer、同行 CHECK、升级三个入口的拒绝。
 独立 source consumer 分别执行 core-only、PostgreSQL、runtime 组合。
 
-代码 revision `bc59fe9a88662e03e7c0bfef8206ab7b81864569` 的最终独立源码消费三组合通过。
-完整 `make ci CI_BASE=origin/develop` 及修复后的统一复验均退出 0；最终选择 96 项测试
-（43 项 unit、53 项真实 provider），全部通过，文档测试通过。affected 选择未触发 workspace 全量覆盖率门。
+F6 将 Report 收敛为单一只读 HistoryHead；新增三项编译失败测试证明消费者不能改写报告 revision、
+改写 HistoryHead revision 或导入内部 Progress。完整本地 CI 的最终结果见 PR #1014 的交接记录。
 
 这些结果证明受测 library 场景及资源边界；不证明任意规模恢复、无限重试、生产 T3 或实际发布。
 
@@ -77,25 +76,25 @@ Core 用例覆盖跨 run 的 crash/负向 probe 累积、补偿 Resume、精确�
 <summary>绑定上述身份的测量输出</summary>
 
 ```text
-SAGA_HISTORY_MEASURE profile=entries-100 entries=100 charged_bytes=25600 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=11750 snapshot_ms=29.413 run_ms=17.644 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=7.149
-maximum_rss_bytes=27967488
+SAGA_HISTORY_MEASURE profile=entries-100 entries=100 charged_bytes=25600 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=11750 snapshot_ms=8.996 run_ms=21.068 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=7.991
+maximum_rss_bytes=28573696
 
-SAGA_HISTORY_MEASURE profile=entries-1000 entries=1000 charged_bytes=256000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=117500 snapshot_ms=55.900 run_ms=84.919 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=29.930
-maximum_rss_bytes=28884992
+SAGA_HISTORY_MEASURE profile=entries-1000 entries=1000 charged_bytes=256000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=117500 snapshot_ms=27.587 run_ms=42.313 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=9.585
+maximum_rss_bytes=28508160
 
-SAGA_HISTORY_MEASURE profile=entries-10000 entries=10000 charged_bytes=2560000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=1175000 snapshot_ms=250.617 run_ms=279.360 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=10.992
-maximum_rss_bytes=28114944
+SAGA_HISTORY_MEASURE profile=entries-10000 entries=10000 charged_bytes=2560000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=1175000 snapshot_ms=250.049 run_ms=243.915 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=10.049
+maximum_rss_bytes=28704768
 
-SAGA_HISTORY_MEASURE profile=bytes-50 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=31524706 journal_data_row_bytes=4794373 snapshot_ms=202.984 run_ms=367.330 receipt_opens=1 receipt_open_ms=0.355 commits=1 commit_ms=32.109
+SAGA_HISTORY_MEASURE profile=bytes-50 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=31524706 journal_data_row_bytes=4793971 snapshot_ms=173.416 run_ms=258.602 receipt_opens=1 receipt_open_ms=0.272 commits=1 commit_ms=3.033
+maximum_rss_bytes=49643520
+
+SAGA_HISTORY_MEASURE profile=bytes-95 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=16591951 journal_data_row_bytes=4795474 snapshot_ms=189.762 run_ms=275.316 receipt_opens=1 receipt_open_ms=0.346 commits=1 commit_ms=3.707
 maximum_rss_bytes=49692672
 
-SAGA_HISTORY_MEASURE profile=bytes-95 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=16591951 journal_data_row_bytes=4793855 snapshot_ms=216.383 run_ms=314.078 receipt_opens=1 receipt_open_ms=0.326 commits=1 commit_ms=4.022
-maximum_rss_bytes=49627136
+SAGA_HISTORY_MEASURE profile=bytes-100 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=15762353 journal_data_row_bytes=4795188 snapshot_ms=179.281 run_ms=271.541 receipt_opens=1 receipt_open_ms=0.304 commits=1 commit_ms=3.165
+maximum_rss_bytes=49692672
 
-SAGA_HISTORY_MEASURE profile=bytes-100 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=15762353 journal_data_row_bytes=4794755 snapshot_ms=187.916 run_ms=264.226 receipt_opens=1 receipt_open_ms=0.295 commits=1 commit_ms=2.451
-maximum_rss_bytes=49627136
-
-SAGA_HISTORY_UPGRADE entries=416 migration_ms=21.776 wal_bytes=255856 relation_bytes_before=311296 relation_bytes_after=352256
-maximum_rss_bytes=27901952
+SAGA_HISTORY_UPGRADE entries=416 migration_ms=26.103 wal_bytes=255968 relation_bytes_before=311296 relation_bytes_after=352256
+maximum_rss_bytes=28311552
 ```
 </details>
