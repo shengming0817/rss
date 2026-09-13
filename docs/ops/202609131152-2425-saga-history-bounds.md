@@ -5,8 +5,8 @@
 ## 被测身份与环境
 
 ```text
-revision=2a5f103c942f4e8922c96cc3e21df66032f73415
-binary_sha256=dedfaa52ee582a12205d93f505329d6e0ab85800720ce4528fa7f6eb757068e4
+revision=de5a4ce9910f0c7719cf91c232d2d5dc0d0663bc
+binary_sha256=435f61c896e5129997382d69c31e65da035d943e332251ddeea6e2992723b75c
 rustc=1.96.0 (ac68faa20 2026-05-25)
 profile=debug
 host=macOS 26.4 / arm64
@@ -21,12 +21,12 @@ postgres_image=sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ff
 
 | 档位 | 已存事件 | 计费字节 | journal DataRow 字节 | snapshot ms | run ms | 提交次数 / 总 ms | 峰值 RSS MiB |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| entries-100 | 100 | 25600 | 11750 | 8.996 | 21.068 | 2 / 7.991 | 27.25 |
-| entries-1000 | 1000 | 256000 | 117500 | 27.587 | 42.313 | 2 / 9.585 | 27.19 |
-| entries-10000 | 10000 | 2560000 | 1175000 | 250.049 | 243.915 | 2 / 10.049 | 27.38 |
-| bytes-50 | 3 | 5246865 | 4793971 | 173.416 | 258.602 | 1 / 3.033 | 47.34 |
-| bytes-95 | 3 | 5246865 | 4795474 | 189.762 | 275.316 | 1 / 3.707 | 47.39 |
-| bytes-100 | 3 | 5246865 | 4795188 | 179.281 | 271.541 | 1 / 3.165 | 47.39 |
+| entries-100 | 100 | 25600 | 11750 | 5.448 | 15.634 | 2 / 6.787 | 26.78 |
+| entries-1000 | 1000 | 256000 | 117500 | 26.173 | 37.506 | 2 / 7.426 | 26.88 |
+| entries-10000 | 10000 | 2560000 | 1175000 | 253.497 | 280.772 | 2 / 12.167 | 26.48 |
+| bytes-50 | 3 | 5246865 | 4795282 | 180.685 | 261.545 | 1 / 2.757 | 47.45 |
+| bytes-95 | 3 | 5246865 | 4793977 | 194.806 | 278.052 | 1 / 3.539 | 47.48 |
+| bytes-100 | 3 | 5246865 | 4793906 | 187.529 | 267.100 | 1 / 3.384 | 47.50 |
 
 - `snapshot` 包含锁定元数据、读取、类型化解码和完整事件回放；随后 `run` 再执行一次正常恢复，
   包含完整回放、认证、测试 action/probe 与提交，两个时间不能直接相减解释为密码学成本。
@@ -41,8 +41,8 @@ postgres_image=sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ff
   三个档位均成功完成 pending 结算，100% 占用没有阻断已准入效果。
 
 升级覆盖 416 条事件、pending、补偿暂停、成功和 400 条长历史四类实例。
-本次升级耗时 **26.103 ms**，WAL 增量 **255,968 字节**，组件关系及索引占用由
-**311,296** 变为 **352,256 字节**。关系占用差值不是迁移期间的临时磁盘峰值；
+本次升级耗时 **22.030 ms**，WAL 增量 **270,536 字节**，组件关系及索引占用由
+**286,720** 变为 **360,448 字节**。关系占用差值不是迁移期间的临时磁盘峰值；
 产品仍需为实际数据规模安排停写窗口、执行时限与临时磁盘空间。
 
 ## 复现
@@ -70,31 +70,36 @@ Core 用例覆盖跨 run 的 crash/负向 probe 累积、补偿 Resume、精确�
 F6 将 Report 收敛为单一只读 HistoryHead；新增三项编译失败测试证明消费者不能改写报告 revision、
 改写 HistoryHead revision 或导入内部 Progress。完整本地 CI 的最终结果见 PR #1014 的交接记录。
 
+外部再审后的修复增加了独立字节读取边界测试；临时移除字节比较时测试明确失败，恢复后通过。
+容量阻断发现与 runnable 页共用持久准入规则，测试覆盖分页、租户/游标隔离、扩容后分类切换，
+并对升级后的 pending、暂停、terminal、长历史实例核对 Core/SQL 分类。资源限制结果明确区分
+持久容量、配置读取预算和当前认证余额；所有场景保持效果准入与结算预留不变量。
+
 这些结果证明受测 library 场景及资源边界；不证明任意规模恢复、无限重试、生产 T3 或实际发布。
 
 <details>
 <summary>绑定上述身份的测量输出</summary>
 
 ```text
-SAGA_HISTORY_MEASURE profile=entries-100 entries=100 charged_bytes=25600 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=11750 snapshot_ms=8.996 run_ms=21.068 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=7.991
-maximum_rss_bytes=28573696
+SAGA_HISTORY_MEASURE profile=entries-100 entries=100 charged_bytes=25600 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=11750 snapshot_ms=5.448 run_ms=15.634 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=6.787
+maximum_rss_bytes=28082176
 
-SAGA_HISTORY_MEASURE profile=entries-1000 entries=1000 charged_bytes=256000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=117500 snapshot_ms=27.587 run_ms=42.313 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=9.585
-maximum_rss_bytes=28508160
+SAGA_HISTORY_MEASURE profile=entries-1000 entries=1000 charged_bytes=256000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=117500 snapshot_ms=26.173 run_ms=37.506 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=7.426
+maximum_rss_bytes=28180480
 
-SAGA_HISTORY_MEASURE profile=entries-10000 entries=10000 charged_bytes=2560000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=1175000 snapshot_ms=250.049 run_ms=243.915 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=10.049
-maximum_rss_bytes=28704768
+SAGA_HISTORY_MEASURE profile=entries-10000 entries=10000 charged_bytes=2560000 reserved_bytes=256 capacity_bytes=268435456 journal_data_row_bytes=1175000 snapshot_ms=253.497 run_ms=280.772 receipt_opens=0 receipt_open_ms=0.000 commits=2 commit_ms=12.167
+maximum_rss_bytes=27770880
 
-SAGA_HISTORY_MEASURE profile=bytes-50 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=31524706 journal_data_row_bytes=4793971 snapshot_ms=173.416 run_ms=258.602 receipt_opens=1 receipt_open_ms=0.272 commits=1 commit_ms=3.033
-maximum_rss_bytes=49643520
+SAGA_HISTORY_MEASURE profile=bytes-50 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=31524706 journal_data_row_bytes=4795282 snapshot_ms=180.685 run_ms=261.545 receipt_opens=1 receipt_open_ms=0.313 commits=1 commit_ms=2.757
+maximum_rss_bytes=49758208
 
-SAGA_HISTORY_MEASURE profile=bytes-95 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=16591951 journal_data_row_bytes=4795474 snapshot_ms=189.762 run_ms=275.316 receipt_opens=1 receipt_open_ms=0.346 commits=1 commit_ms=3.707
-maximum_rss_bytes=49692672
+SAGA_HISTORY_MEASURE profile=bytes-95 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=16591951 journal_data_row_bytes=4793977 snapshot_ms=194.806 run_ms=278.052 receipt_opens=1 receipt_open_ms=0.374 commits=1 commit_ms=3.539
+maximum_rss_bytes=49790976
 
-SAGA_HISTORY_MEASURE profile=bytes-100 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=15762353 journal_data_row_bytes=4795188 snapshot_ms=179.281 run_ms=271.541 receipt_opens=1 receipt_open_ms=0.304 commits=1 commit_ms=3.165
-maximum_rss_bytes=49692672
+SAGA_HISTORY_MEASURE profile=bytes-100 entries=3 charged_bytes=5246865 reserved_bytes=10515488 capacity_bytes=15762353 journal_data_row_bytes=4793906 snapshot_ms=187.529 run_ms=267.100 receipt_opens=1 receipt_open_ms=0.403 commits=1 commit_ms=3.384
+maximum_rss_bytes=49807360
 
-SAGA_HISTORY_UPGRADE entries=416 migration_ms=26.103 wal_bytes=255968 relation_bytes_before=311296 relation_bytes_after=352256
-maximum_rss_bytes=28311552
+SAGA_HISTORY_UPGRADE entries=416 migration_ms=22.030 wal_bytes=270536 relation_bytes_before=286720 relation_bytes_after=360448
+maximum_rss_bytes=28491776
 ```
 </details>
