@@ -67,6 +67,10 @@ Core 用例覆盖跨 run 的 crash/负向 probe 累积、补偿 Resume、精确�
 同一状态转换与计量的回放对照、约束漂移、巨大单行及计量篡改拒绝、同行 receipt 和单向升级。首审修复后额外覆盖 44 项独立权限/结构漂移，以及三个字节数组各 7 类非法值、字符串型 format/seq/attempt 共 24 个向量在 definer、同行 CHECK、升级三个入口的拒绝。
 独立 source consumer 分别执行 core-only、PostgreSQL、runtime 组合。
 
+代码 revision `bc59fe9a88662e03e7c0bfef8206ab7b81864569` 的最终独立源码消费三组合通过。
+完整 `make ci CI_BASE=origin/develop` 及修复后的统一复验均退出 0；最终选择 96 项测试
+（43 项 unit、53 项真实 provider），全部通过，文档测试通过。affected 选择未触发 workspace 全量覆盖率门。
+
 这些结果证明受测 library 场景及资源边界；不证明任意规模恢复、无限重试、生产 T3 或实际发布。
 
 <details>
