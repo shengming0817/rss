@@ -3,7 +3,10 @@
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 use futures::future::BoxFuture;
-use rss_saga::{Control, Definition, Error, Event, Lease, Mutation, Scope, Snapshot, Store, Timer};
+use rss_saga::{
+    Control, Definition, Error, Event, EventKind, HistoryCapacity, HistoryHead, Lease, Mutation,
+    ProtectedReceipt, ReadBudget, Scope, Snapshot, Store, Timer,
+};
 use rss_saga::{DiagnosticPhase, ErrorKind};
 use sqlx::{Connection as _, PgConnection, PgPool, Row as _, pool::PoolConnection};
 use std::time::Duration;
@@ -11,7 +14,13 @@ use std::time::Duration;
 mod probe;
 use probe::validate;
 /// Version-matched fresh schema SQL for an external migrator; reading this constant executes nothing.
-pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_create_saga.sql");
+pub const MIGRATION_SQL: &str = concat!(
+    include_str!("../migrations/0001_create_saga.sql"),
+    "\n",
+    include_str!("../migrations/0002_add_history_bounds.sql")
+);
+/// One-way upgrade executed only by the external migrator with writers stopped.
+pub const UPGRADE_SQL: &str = include_str!("../migrations/0002_add_history_bounds.sql");
 #[derive(Clone)]
 /// Adopted PostgreSQL pool implementing the atomic Saga storage contract.
 pub struct PgStore {
@@ -116,6 +125,7 @@ fn sql_error_at(phase: DiagnosticPhase, error: sqlx::Error) -> Error {
         Some("RS001") => ErrorKind::Fenced,
         Some("RS002") => ErrorKind::Conflict,
         Some("RS003") => ErrorKind::Integrity,
+        Some("RS004") => ErrorKind::HistoryLimited,
         _ => ErrorKind::Store,
     };
     Error::provider(kind, phase, code.as_deref(), error)
@@ -150,56 +160,105 @@ fn ttl_millis(ttl: Duration) -> Result<i64, Error> {
     }
     Ok(millis)
 }
-async fn locked(connection: &mut PgConnection, lease: &Lease) -> Result<serde_json::Value, Error> {
-    sqlx::query_scalar("SELECT rss_saga.lock_instance($1,$2,$3)")
-        .bind(lease.scope().id())
-        .bind(lease.token())
-        .bind(lease.epoch())
-        .fetch_one(connection)
-        .await
-        .map_err(sql_error)
+async fn locked(connection: &mut PgConnection, lease: &Lease) -> Result<HistoryHead, Error> {
+    let value: sqlx::types::Json<HistoryHead> =
+        sqlx::query_scalar("SELECT rss_saga.lock_instance($1,$2,$3)")
+            .bind(lease.scope().id())
+            .bind(lease.token())
+            .bind(lease.epoch())
+            .fetch_one(connection)
+            .await
+            .map_err(sql_error)?;
+    Ok(value.0)
 }
-async fn load(connection: &mut PgConnection, lease: &Lease) -> Result<Snapshot, Error> {
-    let row = locked(connection, lease).await?;
-    let definition: Definition = serde_json::from_value(row["definition"].clone())
-        .map_err(|_| Error::new(rss_saga::ErrorKind::Integrity))?;
-    let rows=sqlx::query("SELECT j.seq,j.step,j.attempt,j.kind,j.effect_key,r.protected FROM rss_saga.journal j LEFT JOIN rss_saga.step_receipts r ON (r.tenant_id,r.saga_id,r.completed_seq)=(j.tenant_id,j.saga_id,j.seq) WHERE j.tenant_id=$1::text::uuid AND j.saga_id=$2 ORDER BY j.seq").bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).fetch_all(connection).await.map_err(sql_error)?;
-    let mut events = Vec::with_capacity(rows.len());
-    for r in rows {
-        let value = serde_json::json!({"seq":r.try_get::<i64,_>("seq").map_err(sql_error)?,"step":r.try_get::<i32,_>("step").map_err(sql_error)?,"attempt":r.try_get::<i64,_>("attempt").map_err(sql_error)?,"kind":r.try_get::<String,_>("kind").map_err(sql_error)?,"receipt":r.try_get::<Option<serde_json::Value>,_>("protected").map_err(sql_error)?});
-        let event = serde_json::from_value::<Event>(value)
-            .map_err(|_| Error::new(rss_saga::ErrorKind::Integrity))?;
-        let key = definition.effect_key(lease.scope(), event.step, event_phase(event.kind))?;
-        if r.try_get::<Vec<u8>, _>("effect_key").map_err(sql_error)? != key.as_bytes() {
-            return Err(Error::new(rss_saga::ErrorKind::Integrity));
+async fn load(
+    connection: &mut PgConnection,
+    lease: &Lease,
+    read: ReadBudget,
+) -> Result<Snapshot, Error> {
+    use futures::TryStreamExt as _;
+    let head = locked(connection, lease).await?;
+    head.check_read(read)?;
+    // SQL withholds oversized payloads before SQLx receives a complete DataRow.
+    let definition: Option<sqlx::types::Json<Definition>> = sqlx::query_scalar("SELECT CASE WHEN octet_length(definition::text)<=$3 THEN definition END FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND saga_id=$2")
+        .bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).bind(rss_saga::DEFINITION_BYTES as i64)
+        .fetch_one(&mut *connection).await.map_err(sql_error)?;
+    let definition = definition.ok_or(ErrorKind::HistoryReadLimit)?.0;
+    let mut snapshot = Snapshot::empty(definition, head.capacity, read)?;
+    let mut rows = sqlx::query("SELECT seq,step,attempt,CASE WHEN octet_length(kind)<=32 THEN kind END AS kind,CASE WHEN octet_length(effect_key)=32 THEN effect_key END AS effect_key,encoded_bytes,CASE WHEN encoded_bytes<=$4 AND (protected IS NULL OR octet_length(protected::text)<=encoded_bytes-256) THEN protected END AS protected,octet_length(kind)<=32 AND octet_length(effect_key)=32 AND encoded_bytes<=$4 AND (protected IS NULL OR octet_length(protected::text)<=encoded_bytes-256) AS bounded FROM rss_saga.journal WHERE tenant_id=$1::text::uuid AND saga_id=$2 ORDER BY seq LIMIT $3")
+        .bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).bind(head.revision.saturating_add(1).min(i64::MAX as u64) as i64)
+        .bind((rss_saga::EVENT_BYTES + rss_saga::RECEIPT_BYTES).min(read.history().max_encoded_bytes()) as i64).fetch(&mut *connection);
+    while let Some(row) = rows.try_next().await.map_err(sql_error)? {
+        cooperate().await;
+        if !row.try_get::<bool, _>("bounded").map_err(sql_error)? {
+            return Err(ErrorKind::HistoryReadLimit.into());
         }
-        events.push(event);
+        if snapshot.revision() >= head.revision {
+            return Err(ErrorKind::Integrity.into());
+        }
+        let kind: String = row.try_get("kind").map_err(sql_error)?;
+        let kind: EventKind = serde_json::from_str(&format!("\"{kind}\""))
+            .map_err(|_| Error::new(ErrorKind::Integrity))?;
+        let receipt: Option<sqlx::types::Json<ProtectedReceipt>> =
+            row.try_get("protected").map_err(sql_error)?;
+        let event = Event {
+            seq: u64::try_from(row.try_get::<i64, _>("seq").map_err(sql_error)?)
+                .map_err(|_| Error::new(ErrorKind::Integrity))?,
+            step: usize::try_from(row.try_get::<i32, _>("step").map_err(sql_error)?)
+                .map_err(|_| Error::new(ErrorKind::Integrity))?,
+            attempt: u32::try_from(row.try_get::<i64, _>("attempt").map_err(sql_error)?)
+                .map_err(|_| Error::new(ErrorKind::Integrity))?,
+            kind,
+            receipt: receipt.map(|value| value.0),
+        };
+        let key =
+            snapshot
+                .definition()
+                .effect_key(lease.scope(), event.step, event.kind.phase())?;
+        if row.try_get::<Vec<u8>, _>("effect_key").map_err(sql_error)? != key.as_bytes()
+            || row.try_get::<i64, _>("encoded_bytes").map_err(sql_error)?
+                != event.encoded_bytes()? as i64
+        {
+            return Err(ErrorKind::Integrity.into());
+        }
+        snapshot.replay(event)?;
     }
-    let snapshot = Snapshot::from_events(definition, events)?;
-    if row["revision"].as_u64() != Some(snapshot.revision())
-        || row["status"]
-            != serde_json::to_value(snapshot.status())
-                .map_err(|_| Error::new(rss_saga::ErrorKind::Integrity))?
-    {
-        return Err(Error::new(rss_saga::ErrorKind::Integrity));
+    drop(rows);
+    if snapshot.head() != &head {
+        return Err(ErrorKind::Integrity.into());
     }
     Ok(snapshot)
+}
+// Yield even when SQLx already buffered the next row, so the outer injected Control and lease renewal can interrupt replay.
+async fn cooperate() {
+    let mut yielded = false;
+    futures::future::poll_fn(|cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
 }
 impl Store for PgStore {
     async fn register<T: Timer>(
         &self,
         scope: Scope,
         definition: &Definition,
+        capacity: HistoryCapacity,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
         definition.validate()?;
-        let definition = serde_json::to_value(definition)
-            .map_err(|_| Error::new(rss_saga::ErrorKind::Definition))?;
+        let definition = sqlx::types::Json(definition.clone());
         self.transact(scope.tenant(), control, |c| {
             Box::pin(async move {
-                sqlx::query("SELECT rss_saga.register($1,$2)")
+                sqlx::query("SELECT rss_saga.register($1,$2,$3)")
                     .bind(scope.id())
                     .bind(definition)
+                    .bind(sqlx::types::Json(capacity))
                     .execute(c)
                     .await
                     .map_err(sql_error)?;
@@ -246,49 +305,81 @@ impl Store for PgStore {
     ) -> Result<(), Error> {
         self.update_lease(lease, 0, control).await
     }
+    async fn history_head<T: Timer>(
+        &self,
+        lease: &Lease,
+        control: &Control<'_, T>,
+    ) -> Result<HistoryHead, Error> {
+        let lease = lease.clone();
+        self.transact(lease.scope().tenant(), control, |c| {
+            Box::pin(async move { locked(c, &lease).await })
+        })
+        .await
+    }
+    async fn extend_history<T: Timer>(
+        &self,
+        lease: &Lease,
+        expected_revision: u64,
+        expected_capacity: HistoryCapacity,
+        capacity: HistoryCapacity,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        if !capacity.extends(expected_capacity) {
+            return Err(ErrorKind::Conflict.into());
+        }
+        let revision =
+            i64::try_from(expected_revision).map_err(|_| Error::new(ErrorKind::Conflict))?;
+        let lease = lease.clone();
+        self.transact(lease.scope().tenant(), control, |c| {
+            Box::pin(async move {
+                sqlx::query("SELECT rss_saga.extend_history($1,$2,$3,$4,$5,$6)")
+                    .bind(lease.scope().id())
+                    .bind(lease.token())
+                    .bind(lease.epoch())
+                    .bind(revision)
+                    .bind(sqlx::types::Json(expected_capacity))
+                    .bind(sqlx::types::Json(capacity))
+                    .execute(c)
+                    .await
+                    .map_err(sql_error)?;
+                Ok(())
+            })
+        })
+        .await
+    }
     async fn snapshot<T: Timer>(
         &self,
         lease: &Lease,
+        read: ReadBudget,
         control: &Control<'_, T>,
     ) -> Result<Snapshot, Error> {
         let lease = lease.clone();
         self.transact(lease.scope().tenant(), control, |c| {
-            Box::pin(async move { load(c, &lease).await })
+            Box::pin(async move { load(c, &lease, read).await })
         })
         .await
     }
     async fn commit<T: Timer>(
         &self,
         lease: &Lease,
-        mutation: Mutation,
+        mutation: &Mutation,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
+        if mutation.scope() != lease.scope() {
+            return Err(ErrorKind::Fenced.into());
+        }
+        let mutation = mutation.clone();
         let lease = lease.clone();
         self.transact(lease.scope().tenant(), control, |c| {
             Box::pin(async move {
-                let snapshot = load(c, &lease).await?;
-                if snapshot.revision() != mutation.event().seq {
-                    return Err(Error::new(rss_saga::ErrorKind::Conflict));
-                }
-                snapshot.apply(mutation.event().clone())?;
-                let event = serde_json::to_value(mutation.event())
-                    .map_err(|_| Error::new(rss_saga::ErrorKind::Integrity))?;
-                sqlx::query("SELECT rss_saga.commit_event($1,$2,$3,$4,$5)")
+                sqlx::query("SELECT rss_saga.commit_event($1,$2,$3,$4,$5,$6,$7)")
                     .bind(lease.scope().id())
                     .bind(lease.token())
                     .bind(lease.epoch())
-                    .bind(event)
-                    .bind(
-                        snapshot
-                            .definition()
-                            .effect_key(
-                                lease.scope(),
-                                mutation.event().step,
-                                event_phase(mutation.event().kind),
-                            )?
-                            .as_bytes()
-                            .to_vec(),
-                    )
+                    .bind(sqlx::types::Json(mutation.event()))
+                    .bind(mutation.effect_key().as_bytes().as_slice())
+                    .bind(sqlx::types::Json(mutation.before()))
+                    .bind(sqlx::types::Json(mutation.after()))
                     .execute(c)
                     .await
                     .map_err(sql_error)?;
@@ -308,7 +399,7 @@ impl Store for PgStore {
             return Err(Error::new(rss_saga::ErrorKind::Budget));
         }
         self.transact(tenant,control,|c|Box::pin(async move {
-            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND status IN ('Ready','Running','Compensating') AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).fetch_all(c).await.map_err(sql_error)?;
+            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit) AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).fetch_all(c).await.map_err(sql_error)?;
             Ok(ids.into_iter().map(|id|Scope::new(tenant,id)).collect())
         })).await
     }
@@ -348,21 +439,6 @@ impl rss_runtime::ManagedResource for PgStore {
     }
 }
 
-fn event_phase(kind: rss_saga::EventKind) -> rss_saga::Phase {
-    use rss_saga::{EventKind, Phase};
-    match kind {
-        EventKind::ForwardIntent
-        | EventKind::ForwardApplied
-        | EventKind::ForwardNotApplied
-        | EventKind::ForwardProbeNotApplied
-        | EventKind::Abort => Phase::Forward,
-        EventKind::CompensationIntent
-        | EventKind::CompensationApplied
-        | EventKind::CompensationNotApplied
-        | EventKind::CompensationFailed
-        | EventKind::Resume => Phase::Compensation,
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;

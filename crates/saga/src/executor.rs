@@ -3,15 +3,17 @@
 //! ref: tokio-rs/tokio tokio/src/macros/select.rs@tokio-1.52.3
 use crate::action::Registered;
 use crate::{
-    Control, Definition, EffectContext, EffectOutcome, Error, Event, EventKind, Lease, Mutation,
-    Phase, ReceiptContext, ReceiptProtection, Registry, SagaReceiptProtector, Scope, Snapshot,
-    Status, Store, Timer,
+    Control, Definition, EffectContext, EffectOutcome, Error, Event, EventKind, HistoryCapacity,
+    HistoryHead, Lease, Mutation, Phase, ReadBudget, ReceiptContext, ReceiptProtection, Registry,
+    SagaReceiptProtector, Scope, Snapshot, Status, Store, Timer,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Why a bounded invocation stopped after acknowledged durable progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStop {
+    /// No new intent fits; explicit capacity/read-budget growth is required.
+    HistoryLimited,
     /// All effects succeeded or their compensation completed.
     Completed,
     /// A compensation requires an explicit revision-checked resume.
@@ -55,6 +57,8 @@ impl SuccessReference {
 #[derive(Debug)]
 #[must_use]
 pub struct Report {
+    /// Acknowledged finite capacity and observed use.
+    pub history: HistoryHead,
     /// Durable status after this invocation's last acknowledged transition.
     pub status: Status,
     /// Revision used for explicit compensation resume CAS.
@@ -77,28 +81,27 @@ fn report(scope: Scope, snapshot: &Snapshot, advances: u32) -> Report {
     } else {
         RunStop::Yielded
     };
-    let failed_kind = if status == Status::CompensationFailed {
-        Some(EventKind::CompensationFailed)
+    let failure = if status == Status::CompensationFailed {
+        snapshot.progress().compensation.map(|step| Failure {
+            step: snapshot.definition().steps()[step].name().into(),
+            kind: FailureKind::CompensationNotApplied,
+        })
     } else if matches!(status, Status::Compensating | Status::Compensated) {
-        Some(EventKind::Abort)
+        Some(Failure {
+            step: snapshot.definition().steps()[snapshot.progress().forward]
+                .name()
+                .into(),
+            kind: FailureKind::ForwardRetriesExhausted,
+        })
     } else {
         None
     };
-    let failure = failed_kind
-        .and_then(|kind| snapshot.events().iter().rev().find(|e| e.kind == kind))
-        .map(|event| Failure {
-            step: snapshot.definition().steps()[event.step].name().into(),
-            kind: if event.kind == EventKind::Abort {
-                FailureKind::ForwardRetriesExhausted
-            } else {
-                FailureKind::CompensationNotApplied
-            },
-        });
     let success = (status == Status::Succeeded).then(|| SuccessReference {
         scope,
         definition: snapshot.definition().clone(),
     });
     Report {
+        history: snapshot.head().clone(),
         status,
         revision: snapshot.revision(),
         advances,
@@ -113,15 +116,22 @@ pub struct Executor<S, P> {
     protection: ReceiptProtection<P>,
     registry: Registry,
     lease_policy: crate::LeasePolicy,
+    read: ReadBudget,
 }
 impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
     /// Construct an unstarted executor with mandatory store, protection and exact registry; default leases last 30 seconds.
-    pub fn new(store: S, protection: ReceiptProtection<P>, registry: Registry) -> Self {
+    pub fn new(
+        store: S,
+        protection: ReceiptProtection<P>,
+        registry: Registry,
+        read: ReadBudget,
+    ) -> Self {
         Self {
             store,
             protection,
             registry,
             lease_policy: crate::LeasePolicy::default(),
+            read,
         }
     }
     /// Select explicit operational lease timing before execution starts.
@@ -138,12 +148,61 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         &self,
         scope: Scope,
         definition: &Definition,
+        capacity: HistoryCapacity,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
         self.registry.resolve(definition)?;
         control
-            .run(self.store.register(scope, definition, control))
+            .run(self.store.register(scope, definition, capacity, control))
             .await
+    }
+    /// Read finite metadata without loading journal or receipt payloads.
+    pub async fn history_head<T: Timer>(
+        &self,
+        scope: Scope,
+        control: &Control<'_, T>,
+    ) -> Result<HistoryHead, Error> {
+        let lease = control
+            .run(self.store.claim(scope, self.lease_policy.ttl(), control))
+            .await?;
+        let result = control.run(self.store.history_head(&lease, control)).await;
+        let release = control.run(self.store.release(&lease, control)).await;
+        let head = result?;
+        release?;
+        Ok(head)
+    }
+    /// Explicit monotonic capacity growth; caller owns authorization. No history replay is required.
+    pub async fn extend_history<T: Timer>(
+        &self,
+        scope: Scope,
+        expected_revision: u64,
+        expected_capacity: HistoryCapacity,
+        capacity: HistoryCapacity,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        if !capacity.extends(expected_capacity) {
+            return Err(crate::ErrorKind::Conflict.into());
+        }
+        let lease = control
+            .run(self.store.claim(scope, self.lease_policy.ttl(), control))
+            .await?;
+        let result = control
+            .run(self.store.extend_history(
+                &lease,
+                expected_revision,
+                expected_capacity,
+                capacity,
+                control,
+            ))
+            .await
+            .map_err(Error::uncertain);
+        if matches!(&result, Err(error) if matches!(error.kind(), crate::ErrorKind::CommitUnknown | crate::ErrorKind::RollbackUnknown | crate::ErrorKind::Fenced))
+        {
+            return result;
+        }
+        let release = control.run(self.store.release(&lease, control)).await;
+        result?;
+        release
     }
     /// Recover and advance within one total deadline and driver budget. Yielding is reported separately from Saga completion.
     pub async fn run<T: Timer>(
@@ -227,8 +286,16 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         control: &Control<'_, T>,
         commit_inflight: &AtomicBool,
     ) -> Result<Report, Error> {
-        let mut snapshot = control.run(self.store.snapshot(lease, control)).await?;
+        let mut snapshot = control
+            .run(self.store.snapshot(lease, self.read, control))
+            .await?;
         let entry = self.registry.resolve(snapshot.definition())?;
+        if snapshot.progress().pending.is_some() {
+            snapshot
+                .head()
+                .check_admission(self.read)
+                .map_err(|_| Error::new(crate::ErrorKind::HistoryReadLimit))?;
+        }
         self.verify_receipts(lease.scope(), &snapshot, control)
             .await?;
         if let Some(revision) = resume {
@@ -237,29 +304,43 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             }
             let step = snapshot
                 .progress()
-                .completed
-                .last()
-                .ok_or(Error::new(crate::ErrorKind::Integrity))?
-                .0;
+                .compensation
+                .ok_or(Error::new(crate::ErrorKind::Integrity))?;
             let event = Event {
                 seq: revision,
                 step,
-                attempt: snapshot.progress().compensation_attempts[step],
+                attempt: snapshot.progress().compensation_attempt,
                 kind: EventKind::Resume,
                 receipt: None,
             };
-            snapshot = self
-                .commit(lease, snapshot, event, control, commit_inflight)
-                .await?;
+            if let Err(error) = self
+                .commit(lease, &mut snapshot, event, control, commit_inflight)
+                .await
+            {
+                if error.kind() != crate::ErrorKind::HistoryLimited {
+                    return Err(error);
+                }
+                let mut result = report(lease.scope(), &snapshot, 0);
+                result.stop = RunStop::HistoryLimited;
+                return Ok(result);
+            }
         }
         for advances in 0..budget {
             control.check()?;
             if snapshot.status().is_terminal() || snapshot.status() == Status::CompensationFailed {
                 return Ok(report(lease.scope(), &snapshot, advances));
             }
-            snapshot = self
-                .advance(lease, snapshot, &entry, control, commit_inflight)
-                .await?;
+            if let Err(error) = self
+                .advance(lease, &mut snapshot, &entry, control, commit_inflight)
+                .await
+            {
+                if error.kind() != crate::ErrorKind::HistoryLimited {
+                    return Err(error);
+                }
+                let mut result = report(lease.scope(), &snapshot, advances);
+                result.stop = RunStop::HistoryLimited;
+                return Ok(result);
+            }
         }
         Ok(report(lease.scope(), &snapshot, budget))
     }
@@ -284,7 +365,9 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                     .claim(reference.scope, self.lease_policy.ttl(), control),
             )
             .await?;
-        let snapshot = control.run(self.store.snapshot(&lease, control)).await;
+        let snapshot = control
+            .run(self.store.snapshot(&lease, self.read, control))
+            .await;
         let release = control.run(self.store.release(&lease, control)).await;
         // Preserve the read failure, but always attempt bounded cleanup after a successful claim.
         let snapshot = snapshot?;
@@ -293,11 +376,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         {
             return Err(Error::new(crate::ErrorKind::ReceiptUnavailable));
         }
-        let event = snapshot
-            .events()
-            .iter()
-            .find(|e| e.step == completion.step && e.kind == EventKind::ForwardApplied)
-            .ok_or_else(|| Error::new(crate::ErrorKind::ReceiptUnavailable))?;
+        let event = snapshot.receipt(completion.step)?;
         let receipt = event
             .receipt
             .as_ref()
@@ -336,53 +415,52 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
     async fn commit<T: Timer>(
         &self,
         lease: &Lease,
-        snapshot: Snapshot,
+        snapshot: &mut Snapshot,
         event: Event,
         control: &Control<'_, T>,
         commit_inflight: &AtomicBool,
-    ) -> Result<Snapshot, Error> {
-        let mutation = Mutation::new(&snapshot, event.clone())?;
+    ) -> Result<(), Error> {
+        let mutation = Mutation::new(lease.scope(), snapshot, event)?;
         // Cancellation by the sibling renewal future must retain the pending write fact.
         // Clear only after this await returns; a dropped work future leaves it set.
         commit_inflight.store(true, Ordering::SeqCst);
         let result = control
-            .run(self.store.commit(lease, mutation, control))
+            .run(self.store.commit(lease, &mutation, control))
             .await
             .map_err(Error::uncertain);
         commit_inflight.store(false, Ordering::SeqCst);
         result?;
-        snapshot.apply(event)
+        mutation.accept(snapshot);
+        Ok(())
     }
     async fn advance<T: Timer>(
         &self,
         lease: &Lease,
-        mut snapshot: Snapshot,
+        snapshot: &mut Snapshot,
         entry: &Registered,
         control: &Control<'_, T>,
         commit_inflight: &AtomicBool,
-    ) -> Result<Snapshot, Error> {
+    ) -> Result<(), Error> {
         let recovery = snapshot.progress().pending.is_some();
-        let intent = if let Some(event) = snapshot.progress().pending.clone() {
-            event
+        let intent = if let Some(event) = snapshot.progress().pending {
+            event.event(snapshot.revision())
         } else {
             let p = snapshot.progress();
             let (step, attempt, kind) = if p.status == Status::Compensating {
                 let step = p
-                    .completed
-                    .last()
-                    .ok_or(Error::new(crate::ErrorKind::Integrity))?
-                    .0;
+                    .compensation
+                    .ok_or(Error::new(crate::ErrorKind::Integrity))?;
                 (
                     step,
-                    p.compensation_attempts[step]
+                    p.compensation_attempt
                         .checked_add(1)
                         .ok_or(Error::new(crate::ErrorKind::Integrity))?,
                     EventKind::CompensationIntent,
                 )
             } else {
                 let step = p.forward;
-                let attempts = p.forward_attempts[step];
-                if p.forward_failures[step] >= entry.definition.steps()[step].max_failures() {
+                let attempts = p.forward_attempt;
+                if p.forward_failures >= entry.definition.steps()[step].max_failures() {
                     let event = Event {
                         seq: snapshot.revision(),
                         step,
@@ -409,16 +487,15 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 kind,
                 receipt: None,
             };
-            snapshot = self
-                .commit(lease, snapshot, event.clone(), control, commit_inflight)
+            self.commit(lease, snapshot, event.clone(), control, commit_inflight)
                 .await?;
             event
         };
         let event = if intent.kind == EventKind::ForwardIntent {
-            self.forward(lease.scope(), &snapshot, entry, &intent, recovery, control)
+            self.forward(lease.scope(), snapshot, entry, &intent, recovery, control)
                 .await?
         } else {
-            self.compensate(lease.scope(), &snapshot, entry, &intent, recovery, control)
+            self.compensate(lease.scope(), snapshot, entry, &intent, recovery, control)
                 .await?
         };
         self.commit(lease, snapshot, event, control, commit_inflight)
@@ -476,26 +553,30 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         probe: bool,
         control: &Control<'_, T>,
     ) -> Result<Event, Error> {
-        let (step, receipt) = snapshot
+        let step = snapshot
             .progress()
-            .completed
-            .last()
+            .compensation
             .ok_or(Error::new(crate::ErrorKind::Integrity))?;
-        if *step != intent.step {
-            return Err(Error::new(crate::ErrorKind::Integrity));
+        if step != intent.step {
+            return Err(crate::ErrorKind::Integrity.into());
         }
+        let receipt = snapshot
+            .receipt(step)?
+            .receipt
+            .as_ref()
+            .ok_or(Error::new(crate::ErrorKind::Integrity))?;
         let context = ReceiptContext::new(
             scope,
             &entry.definition,
-            *step,
+            step,
             receipt.attempt(),
             receipt.completed_seq(),
         )?;
         let plaintext = control.run(self.protection.open(receipt, &context)).await?;
         let effect_context =
-            EffectContext::new(scope, &entry.definition, *step, Phase::Compensation)?;
+            EffectContext::new(scope, &entry.definition, step, Phase::Compensation)?;
         let outcome = control
-            .run(entry.actions[*step].compensate(effect_context, plaintext, probe))
+            .run(entry.actions[step].compensate(effect_context, plaintext, probe))
             .await?;
         // A negative probe authorizes a fresh attempt; it does not declare a failed compensation.
         let kind = match outcome {
@@ -506,7 +587,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         };
         Ok(Event {
             seq: snapshot.revision(),
-            step: *step,
+            step,
             attempt: intent.attempt,
             kind,
             receipt: None,

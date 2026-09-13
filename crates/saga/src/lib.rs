@@ -23,6 +23,7 @@ mod action;
 mod control;
 mod definition;
 mod error;
+mod history;
 mod integrity;
 mod model;
 mod receipt;
@@ -33,11 +34,15 @@ pub use action::{
 pub use control::{Control, LeasePolicy, Timer};
 pub use definition::{ActionGeneration, Definition, EffectKey, Identity, StepSpec};
 pub use error::{Diagnostic, DiagnosticPhase, Error, ErrorKind};
+pub use history::{
+    DEFINITION_BYTES, EVENT_BYTES, HistoryCapacity, HistoryHead, PLAINTEXT_BYTES, RECEIPT_BYTES,
+    ReadBudget,
+};
 pub use integrity::{
     SagaReceiptFingerprint, SagaReceiptIntegrityError, SagaReceiptIntegrityKeyId,
     SagaReceiptIntegrityKeyring, VersionedSagaReceiptIntegrityKey,
 };
-pub use model::{Event, EventKind, Phase, Scope, Snapshot, Status};
+pub use model::{Event, EventKind, Phase, Progress, Scope, Snapshot, Status};
 pub use receipt::{
     Ciphertext, EffectContext, ProtectedReceipt, ReceiptContext, ReceiptProtection,
     SagaReceiptProtector,

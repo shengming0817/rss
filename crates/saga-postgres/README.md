@@ -1,33 +1,33 @@
 # rss-saga-postgres
 
-PostgreSQL 16+ implementation of the `rss-saga::Store` port. Instance state, journal, protected
-receipts and lease fencing share one transaction. The core executor owns actions and cryptography;
-the adapter only persists protected receipt records.
+PostgreSQL 16+ implementation of `rss-saga::Store`. Instance progress, finite history capacity,
+journal events and protected receipts settle in one transaction. The core owns actions and
+cryptography; the adapter persists protected records and independently validates transitions.
 
-## Installation and ownership
+## Installation and upgrade
 
-An external migrator executes the version-matched `MIGRATION_SQL` as a dedicated
-NOSUPERUSER NOBYPASSRLS schema owner. The fresh `rss_saga` schema contains only instances, journal
-and step_receipts. Provision a separate runtime login with schema USAGE, table SELECT and EXECUTE
-on the component functions; grant no direct write, REFERENCES or TRIGGER privileges (including column grants) and no owner membership.
-All three component tables must remain permanent (LOGGED). Admission checks the current role and
-all SET ROLE reachable roles, including their inherited table/column privileges, schema CREATE,
-ownership and dangerous role attributes. A NOINHERIT membership does not hide reachable write
-authority. All catalog checks use one acquired connection under the constructor deadline.
-Admission rejects PUBLIC schema/table/column privileges and table rewrite rules. Each table must
-have exactly its canonical `tenant` policy, including command, roles, permissiveness and predicates.
-Function identity, arguments, return type, body and execution attributes must match the bundled
-migration; extra overloads cannot replace missing routines. Tables ENABLE and FORCE RLS, functions
-have fixed search paths, and PUBLIC function privileges are revoked.
+An external migrator executes `MIGRATION_SQL` as a dedicated NOSUPERUSER NOBYPASSRLS schema owner.
+For an existing component V1 installation, stop all writers and execute `UPGRADE_SQL` instead.
+The upgrade takes exclusive component table locks, validates and replays the original history,
+moves each receipt into its `ForwardApplied` journal row, and removes the old receipt table and
+pairing triggers. It preserves definitions, sequences, attempts, effect keys and receipt V1 bytes.
+An invalid history or arithmetic overflow aborts the transaction. The product owns the migration
+execution deadline, maintenance window, database backup and available temporary disk/WAL space.
 
-The application owns role provisioning, TLS configuration, migration execution and business tables.
-The tenant setting isolates queries inside trusted application code; it does not authenticate a
-holder of database credentials. Runtime SQL must not change identity or disable security policy.
+Schema V2 has two tables: `instances` and `journal`. The new runtime accepts only V2; it does not
+run migrations or maintain an old-schema reader. Original committed migrations remain immutable.
+Fresh installation executes the same migration chain as an upgrade.
 
-This version supports fresh installation only. It does not adopt historical `public.saga_*` tables,
-run an old migration chain, import active instances or retain an alternate schema. Future component
-migrations must be append-only and preserve persisted identity. There is no retention sweeper;
-instances, definitions and receipts remain retained, including failed compensation.
+Provision a separate runtime login with schema USAGE, table SELECT and EXECUTE on the component
+functions. Reapply function EXECUTE grants after the upgrade creates the new signatures. Grant
+no direct write, REFERENCES or TRIGGER privileges, including column grants, and no owner membership.
+Tables remain LOGGED with ENABLE/FORCE RLS. Admission checks every SET ROLE reachable role,
+PUBLIC privileges, rewrite rules, exact tenant policies, function signatures/bodies/attributes,
+new history CHECK bindings and receipt uniqueness indexes. Unexpected user triggers are rejected.
+
+The application owns role provisioning, TLS, business tables and authorization. The tenant setting
+isolates queries made by trusted application code; possession of database credentials is not tenant
+authentication. Products must not let callers select arbitrary tenant settings.
 
 ## Composition
 
@@ -41,54 +41,66 @@ async fn connect<T: Timer>(pool: sqlx::PgPool, control: &Control<'_, T>)
 }
 ```
 
-`PgStore::new` checks the component storage/role contract and adopts the supplied pool. Configure
-verified TLS and the runtime login before passing it in. All clones refer to the adopted pool.
-`close(control)` stops pool admission and waits within the caller's deadline; its outcome
-separates a drained pool from interrupted waiting. Cancel/join workers before closing the store.
-The optional `rss-runtime` feature implements the existing `ManagedResource` lifecycle contract.
+`PgStore::new` verifies and adopts the supplied pool. All clones share it. `close(control)` stops
+pool admission and distinguishes draining from interrupted waiting; cancel and join workers first.
+The optional `rss-runtime` feature implements the existing managed-resource lifecycle.
 
-Claiming locks the instance before checking database time and increments its epoch. Every
-transition checks tenant, token, epoch, expiry and expected journal revision. SQL enforces legal
-forward/compensation transitions and consecutive attempts. Deferred constraints pair each
-forward completion with exactly one protected receipt. Duplicate registration accepts only the
-same complete definition; contract/version metadata cannot be replaced for later instances.
+The core [README](../saga/README.md) shows typed actions, explicit `HistoryCapacity` and `ReadBudget`,
+a timer and authenticated receipt protection. Runtime roles never receive a business transaction
+writer, second receipt writer or history bypass.
 
-Commit errors produce `CommitUnknown`; failed rollback produces `RollbackUnknown`. Interrupted
-transactions quarantine the pool connection. The executor stops, then recovers with a new claim
-and locked consistent snapshot. Lock acquisition serializes with the earlier transaction: a
-plain read that sees no row is not proof of rollback. An acknowledged receipt resumes at the next
-step; an unfinished intent probes its external effect. Partial/inconsistent state fails closed.
-No special blind retry loop, second receipt writer or raw business transaction API exists.
+## Bounded history and atomic commits
 
-The implementation preserves canonical effect keys and receipt v1 encoding. Cryptographic receipt
-verification happens in the core against the expected instance/definition, not against AAD hydrated
-from the row. Randomized ciphertext equality is not a deduplication contract.
+`revision` is the event count. V1 accounting charges 256 bytes for each event plus the protected
+receipt envelope's conservative JSON size. This includes the expansion of byte arrays to JSON
+numbers, key escaping, AAD and authentication metadata; it is not PostgreSQL tuple or TOAST size.
+Definitions have a separate 2 MiB encoded bound. Plaintext remains limited to 1 MiB and ciphertext
+to 2 MiB; the maximum encoded receipt is larger than the ciphertext limit.
 
-A complete typed Step, injected timer, cancellation token and authenticated protector composition
-is shown in the [core README](../saga/README.md#complete-typed-composition). Declare the direct
-`rss-contract`, `rss-data-protection`, `tokio`, `tokio-util` and chosen AEAD dependencies in the
-application manifest; pass this adopted `PgStore` as that example's `S`.
+The core derives mandatory settlement and first-compensation reservations from current progress.
+SQL checks the same reservation against durable event/byte capacity when committing the event.
+Receipts are stored in their completion row, with CHECK and partial UNIQUE constraints enforcing
+pairing and uniqueness. Progress and accounting change atomically under tenant, live lease and
+revision/capacity CAS. The commit path uses fixed-size progress and a pending-key point lookup;
+it does not reload or aggregate the journal.
 
-## Verification
+Recovery still validates the complete bounded history. It locks fixed-size metadata, checks the
+caller's read/authentication budgets, withholds oversized definition/receipt payloads in SQL, and
+then streams typed events in order. SQLx receives complete rows, so a Rust check after receiving a
+row alone cannot provide the payload boundary. Replay checks actual accounting, effect keys and
+transitions, and compares the final projection with the locked metadata. Cooperative yields keep
+the injected deadline/cancellation and lease renewal observable between rows. Cryptographic
+receipt verification remains in the core.
 
-`saga-postgres-integration` uses real TLS PostgreSQL and Redis fixtures. It covers RLS/direct-write
-rejection, lease takeover, compensation pause/resume, commit ACK loss, pending commit interruption,
-receipt corruption, and killing an executor process both before and after its remote effect becomes durable. Restart uses the short lease expiry, not an administrator edit.
-Settlement loss is injected by a private test protocol proxy, never a production API or feature; defaults remain empty. Actual `.crate`
-artifacts are independently consumed by `hack/saga-package-proof.py`. The candidate workflow passes its existing archive directory and exact revision to that script; checksum/revision checks precede consumption. Core-only, PostgreSQL and standalone `rss-runtime` selections resolve independently; both PostgreSQL selections execute the recovery scenario.
+Capacity exhaustion stops a new intent at a safe boundary. Existing pending effects use reserved
+space for authoritative probing and settlement. `history_head` reads small metadata even if a
+worker cannot load the history; `extend_history` performs monotonic finite growth using the live
+lease, expected revision and expected capacity. It does not append a journal event or reset time.
+Candidates use the same admission predicate to exclude capacity-blocked new intents while keeping
+pending settlements recoverable.
 
-ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
-ref: baseline/pre-community-core-20260902 adapters/postgres/src/saga.rs@5b63e10a1
-ref: baseline/pre-community-core-20260902 adapters/postgres/migrations/0083_create_saga_step_receipts.sql@5b63e10a1
+Upgrade initializes each existing capacity to its observed use plus mandatory remaining obligations
+(at least one for empty numeric limits). An instance beyond a worker's read budget requires an
+explicitly larger finite read budget; further new attempts may also require capacity growth.
+All instances then follow the same runtime path. There is no unlimited grandfather mode,
+compaction, checkpoint, history reset or automatic compensation on capacity exhaustion.
 
+## Failure and verification
 
-执行示例和输入/结果说明见 [rss-examples](../examples/README.md)。独立源码使用
-`python3 hack/saga-package-proof.py --source`；固定 artifact 使用
-`python3 hack/saga-package-proof.py --artifacts DIR --revision SHA`。
-两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
-完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。
+`CommitUnknown`, `RollbackUnknown`, cancellation and deadlines do not prove absence of a write or
+remote effect. Interrupted transactions quarantine their connection; recover under a fresh live
+claim and locked snapshot. Pending effects use their original idempotency key. Acknowledged
+state, original definition and authenticated receipts remain authoritative.
 
-Admission is read-only and rejects drift; it does not repair storage or defend against trusted
-administrators performing DDL after construction. No compatibility bypass is provided.
+The real TLS PostgreSQL/Redis tests cover lease takeover, process crashes, acknowledgement loss,
+compensation pause/resume, tenant isolation, capacity boundaries, schema drift and one-way upgrade
+of pending, paused, terminal and long-history instances. Explicit ignored measurement profiles
+record 100/1,000/10,000 events and 50/95/100 percent byte occupancy; ordinary CI has no invented
+performance SLO. Measurement commands and results are recorded with the #2425 delivery artifact.
 
-ref: postgres src/backend/utils/adt/acl.c@REL_16_STABLE
+Independent consumption runs through `python3 hack/saga-package-proof.py --source`; fixed candidate
+archives use `--artifacts DIR --revision SHA`. Core-only, PostgreSQL and runtime selections resolve
+independently. These prove library consumption, not product production acceptance or publication.
+
+ref: restatedev/restate crates/worker-api/src/invoker/invocation_reader.rs@7fcc614c75fac74d051b68b118e87421e90467cc
+ref: launchbadge/sqlx sqlx-postgres/src/connection/stream.rs@v0.9.0

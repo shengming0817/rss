@@ -1,6 +1,12 @@
 /// Closed recovery decisions; diagnostics never change their meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ErrorKind {
+    /// No new effect may start until explicit finite capacity is available.
+    #[error("saga history capacity exhausted")]
+    HistoryLimited,
+    /// History cannot be loaded or authenticated within this caller's finite read budget.
+    #[error("saga history read budget exhausted")]
+    HistoryReadLimit,
     /// Definition metadata is structurally invalid.
     #[error("invalid saga definition")]
     Definition,

@@ -5,6 +5,10 @@ mod boundaries;
 #[path = "../../../crates/saga/tests/support/mod.rs"]
 mod common;
 mod examples;
+#[path = "support/history.rs"]
+mod history;
+#[path = "support/measurement.rs"]
+mod measurement;
 mod process;
 #[path = "support/redis_effect.rs"]
 mod redis_effect;
@@ -57,6 +61,8 @@ async fn suite() -> anyhow::Result<()> {
     let store = PgStore::new(pool.clone(), &control).await?;
     let d = definition(&["one", "two", "three"])?;
     run_scenarios(&store, &owner, &pool, &fixture, &d, &control).await?;
+    eprintln!("saga T2: history bounds");
+    history::bounds(&store, &owner, &control).await?;
     assert_eq!(store.close(&control).await, CloseOutcome::Drained);
     owner.close().await;
     drop(fixture);
@@ -77,8 +83,14 @@ async fn lease_and_isolation(
     expire(owner, a).await?;
     let fresh = store.claim(a, Duration::from_secs(10), control).await?;
     assert!(fresh.epoch() > stale.epoch());
-    assert_stale_rejected(store, &stale, control).await;
-    assert_eq!(store.snapshot(&fresh, control).await?.revision(), 0);
+    assert_stale_rejected(store, &stale, control).await?;
+    assert_eq!(
+        store
+            .snapshot(&fresh, read_budget()?, control)
+            .await?
+            .revision(),
+        0
+    );
     isolation_sql(pool).await?;
     store.release(&fresh, control).await?;
     Ok(())
@@ -97,8 +109,9 @@ async fn unresolved_restart(
         store.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
     );
-    e.register(s, d, control).await?;
+    e.register(s, d, history_capacity()?, control).await?;
     assert!(matches!(
         e.run(s, 30, control).await,
         Err(ref failure) if failure.kind()==rss_saga::ErrorKind::EffectUnknown
@@ -109,6 +122,7 @@ async fn unresolved_restart(
         store.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
     );
     assert_eq!(e.run(s, 30, control).await?.status, Status::Succeeded);
     assert_eq!(
@@ -118,7 +132,7 @@ async fn unresolved_restart(
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?,
         vec!["execute:one", "probe:one", "execute:two", "execute:three"]
     );
-    sqlx::query("UPDATE rss_saga.step_receipts SET protected=jsonb_set(protected,'{aad}','[]') WHERE saga_id=$1 AND step=0").bind(s.id()).execute(owner).await?;
+    sqlx::query("UPDATE rss_saga.journal SET protected=jsonb_set(protected,'{aad,0}','0') WHERE saga_id=$1 AND step=0").bind(s.id()).execute(owner).await?;
     assert!(matches!(
         e.run(s, 30, control).await,
         Err(ref failure) if failure.kind()==rss_saga::ErrorKind::Protection
@@ -200,8 +214,11 @@ async fn compensation_roundtrip(
         store.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), true)?,
+        read_budget()?,
     );
-    executor.register(s, d, control).await?;
+    executor
+        .register(s, d, history_capacity()?, control)
+        .await?;
     let report = executor.run(s, 30, control).await?;
     assert_eq!(report.status, Status::CompensationFailed);
     assert_eq!(
@@ -218,7 +235,7 @@ async fn compensation_roundtrip(
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?,
         vec!["two", "one"]
     );
-    let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM rss_saga.journal WHERE saga_id=$1 AND kind='ForwardApplied'),(SELECT count(*) FROM rss_saga.step_receipts WHERE saga_id=$1)").bind(s.id()).fetch_one(owner).await?;
+    let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM rss_saga.journal WHERE saga_id=$1 AND kind='ForwardApplied'),(SELECT count(*) FROM rss_saga.journal WHERE protected IS NOT NULL AND saga_id=$1)").bind(s.id()).fetch_one(owner).await?;
     assert_eq!(counts, (2, 2));
     Ok(())
 }
@@ -317,20 +334,25 @@ async fn register_tenants(
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let b = Scope::new(TenantId::parse(OTHER)?, a.id());
-    store.register(a, d, control).await?;
-    store.register(b, d, control).await?;
+    store.register(a, d, history_capacity()?, control).await?;
+    store.register(b, d, history_capacity()?, control).await?;
     Ok(())
 }
 
-async fn assert_stale_rejected(store: &PgStore, stale: &Lease, control: &Control<'_, Clock>) {
+async fn assert_stale_rejected(
+    store: &PgStore,
+    stale: &Lease,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     assert!(matches!(
-        store.snapshot(stale, control).await,
+        store.snapshot(stale, read_budget()?, control).await,
         Err(ref failure) if failure.kind()==rss_saga::ErrorKind::Fenced
     ));
     assert!(matches!(
         store.renew(stale, Duration::from_secs(1), control).await,
         Err(ref failure) if failure.kind()==rss_saga::ErrorKind::Fenced
     ));
+    Ok(())
 }
 
 async fn assert_active_claim_rejected(
@@ -378,9 +400,10 @@ async fn typed_success_receipt(
         store.clone(),
         protection()?,
         Registry::builder().register(builder)?.finish(),
+        read_budget()?,
     );
     let s = scope(TENANT)?;
-    e.register(s, d, control).await?;
+    e.register(s, d, history_capacity()?, control).await?;
     let report = e.run(s, 30, control).await?;
     let reference = report
         .success
@@ -389,5 +412,57 @@ async fn typed_success_receipt(
         e.success_receipt(&reference, &completion, control).await?,
         "three"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_upgrade() -> anyhow::Result<()> {
+    let network = testkit::bridge_network("saga-history-upgrade").await?;
+    let fixture = testkit::postgres_tls(
+        testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: "saga-history-upgrade",
+        },
+        testkit::PgTlsServerIdentity::MatchingHost,
+    )
+    .await?;
+    let (owner, pool) = provision(&fixture).await?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(120), &cancel);
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        history::upgrade(&owner, &pool, &control),
+    )
+    .await??;
+    pool.close().await;
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit resource measurement profiles; ordinary CI has no performance SLO"]
+async fn history_measurements() -> anyhow::Result<()> {
+    let network = testkit::bridge_network("saga-history-measure").await?;
+    let fixture = testkit::postgres_tls(
+        testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: "saga-history-measure",
+        },
+        testkit::PgTlsServerIdentity::MatchingHost,
+    )
+    .await?;
+    let (owner, pool) = provision(&fixture).await?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(180), &cancel);
+    let store = PgStore::new(pool.clone(), &control).await?;
+    tokio::time::timeout(
+        Duration::from_secs(180),
+        measurement::run(&store, &owner, &clock, &control),
+    )
+    .await??;
+    pool.close().await;
+    owner.close().await;
     Ok(())
 }

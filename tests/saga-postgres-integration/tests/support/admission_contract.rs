@@ -13,10 +13,8 @@ pub(super) async fn drift(
         ("SCHEMA rss_saga", "USAGE"),
         ("rss_saga.instances", "SELECT"),
         ("rss_saga.journal", "SELECT"),
-        ("rss_saga.step_receipts", "SELECT"),
         ("rss_saga.instances", "SELECT(revision)"),
         ("rss_saga.journal", "SELECT(tenant_id)"),
-        ("rss_saga.step_receipts", "SELECT(tenant_id)"),
     ] {
         cases.push((
             format!("F1 PUBLIC {object} {privilege}"),
@@ -24,8 +22,9 @@ pub(super) async fn drift(
             format!("REVOKE {privilege} ON {object} FROM PUBLIC"),
         ));
     }
+    history_cases(&mut cases);
     policy_cases(&mut cases);
-    for table in ["instances", "journal", "step_receipts"] {
+    for table in ["instances", "journal"] {
         for event in ["INSERT", "UPDATE"] {
             cases.push((
                 format!("F3 {table} {event} rule"),
@@ -59,8 +58,31 @@ pub(super) async fn drift(
 }
 
 type Case = (String, String, String);
+fn history_cases(cases: &mut Vec<Case>) {
+    for (table, name, expr) in [
+        (
+            "instances",
+            "saga_history_instance",
+            "rss_saga.valid_instance(definition,progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)",
+        ),
+        (
+            "journal",
+            "saga_history_journal",
+            "rss_saga.valid_journal(kind,seq,attempt,effect_key,protected,encoded_bytes)",
+        ),
+    ] {
+        cases.push((format!("history {name} weakened"), format!("ALTER TABLE rss_saga.{table} DROP CONSTRAINT {name}; ALTER TABLE rss_saga.{table} ADD CONSTRAINT {name} CHECK(true)"), format!("ALTER TABLE rss_saga.{table} DROP CONSTRAINT {name}; ALTER TABLE rss_saga.{table} ADD CONSTRAINT {name} CHECK({expr})")));
+    }
+    for (name, columns) in [
+        ("saga_forward_step", "tenant_id,saga_id,step"),
+        ("saga_forward_effect", "tenant_id,effect_key"),
+    ] {
+        cases.push((format!("history {name} nonunique"), format!("DROP INDEX rss_saga.{name}; CREATE INDEX {name} ON rss_saga.journal({columns}) WHERE kind='ForwardApplied'"), format!("DROP INDEX rss_saga.{name}; CREATE UNIQUE INDEX {name} ON rss_saga.journal({columns}) WHERE kind='ForwardApplied'")));
+    }
+}
+
 fn policy_cases(cases: &mut Vec<Case>) {
-    for table in ["instances", "journal", "step_receipts"] {
+    for table in ["instances", "journal"] {
         let create = format!(
             "CREATE POLICY tenant ON rss_saga.{table} USING ({TENANT_EXPR}) WITH CHECK ({TENANT_EXPR})"
         );

@@ -56,9 +56,10 @@ pub(super) async fn fence_during_effect(
         store.clone(),
         protection()?,
         Registry::builder().register(builder)?.finish(),
+        read_budget()?,
     );
     let e = e.with_lease_policy(LeasePolicy::new(Duration::from_millis(300))?);
-    e.register(scope, d, control).await?;
+    e.register(scope, d, history_capacity()?, control).await?;
     let takeover = async {
         entered.notified().await;
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -71,14 +72,15 @@ pub(super) async fn fence_during_effect(
     let (old, fresh) = tokio::join!(e.run(scope, 30, control), takeover);
     assert!(matches!(old, Err(ref failure) if failure.kind()==rss_saga::ErrorKind::Fenced));
     let fresh = fresh?;
-    let snapshot = store.snapshot(&fresh, control).await?;
+    let snapshot = store.snapshot(&fresh, read_budget()?, control).await?;
     assert_eq!(snapshot.revision(), 1);
     assert_eq!(snapshot.events()[0].kind, EventKind::ForwardIntent);
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM rss_saga.step_receipts WHERE saga_id=$1")
-            .bind(scope.id())
-            .fetch_one(owner)
-            .await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_saga.journal WHERE protected IS NOT NULL AND saga_id=$1",
+    )
+    .bind(scope.id())
+    .fetch_one(owner)
+    .await?;
     assert_eq!(count, 0);
     store.release(&fresh, control).await?;
     Ok(())
@@ -100,12 +102,8 @@ pub(super) async fn admission_drift(
             "REVOKE UPDATE (revision) ON rss_saga.instances FROM saga_runtime",
         ),
         (
-            "CREATE TRIGGER extra_trigger AFTER INSERT ON rss_saga.journal FOR EACH ROW EXECUTE FUNCTION rss_saga.assert_receipt_pair()",
-            "DROP TRIGGER extra_trigger ON rss_saga.journal",
-        ),
-        (
-            "DROP TRIGGER receipt_pair ON rss_saga.journal; CREATE CONSTRAINT TRIGGER receipt_pair AFTER UPDATE ON rss_saga.journal DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION rss_saga.assert_receipt_pair()",
-            "DROP TRIGGER receipt_pair ON rss_saga.journal; CREATE CONSTRAINT TRIGGER receipt_pair AFTER INSERT ON rss_saga.journal DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION rss_saga.assert_receipt_pair()",
+            "CREATE FUNCTION rss_saga.test_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER extra_trigger AFTER INSERT ON rss_saga.journal FOR EACH ROW EXECUTE FUNCTION rss_saga.test_trigger()",
+            "DROP TRIGGER extra_trigger ON rss_saga.journal; DROP FUNCTION rss_saga.test_trigger()",
         ),
         (
             "GRANT UPDATE ON rss_saga.instances TO saga_runtime",
@@ -114,10 +112,6 @@ pub(super) async fn admission_drift(
         (
             "ALTER TABLE rss_saga.instances DISABLE ROW LEVEL SECURITY",
             "ALTER TABLE rss_saga.instances ENABLE ROW LEVEL SECURITY",
-        ),
-        (
-            "ALTER TABLE rss_saga.journal DISABLE TRIGGER receipt_pair",
-            "ALTER TABLE rss_saga.journal ENABLE TRIGGER receipt_pair",
         ),
         (
             "ALTER POLICY tenant ON rss_saga.journal USING (true) WITH CHECK (true)",
@@ -151,56 +145,29 @@ async fn logged_tables(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    // Detach incoming fixture FKs so exactly one relation can be UNLOGGED at a time.
-    // PostgreSQL supplies quoted DDL and the original definitions; no second migration copy.
-    for table in ["step_receipts", "journal", "instances"] {
-        let incoming: Vec<(String, String)> = sqlx::query_as("SELECT format('ALTER TABLE %s DROP CONSTRAINT %I',conrelid::regclass,conname), format('ALTER TABLE %s ADD CONSTRAINT %I %s',conrelid::regclass,conname,pg_get_constraintdef(oid)) FROM pg_constraint WHERE contype='f' AND confrelid=to_regclass($1)")
-            .bind(format!("rss_saga.{table}")).fetch_all(owner).await?;
-        for (detach, _) in &incoming {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(detach.as_str()))
-                .execute(owner)
-                .await?;
-        }
-        let result = single_unlogged(pool, owner, control, table).await;
-        for (_, restore) in &incoming {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(restore.as_str()))
-                .execute(owner)
-                .await?;
-        }
-        result?;
+    // PostgreSQL forbids a LOGGED journal referencing UNLOGGED instances. Keep every FK present
+    // and test the valid non-durable combinations, so rejection is caused by persistence drift.
+    for (change, restore, expected) in [
+        (
+            "ALTER TABLE rss_saga.journal SET UNLOGGED",
+            "ALTER TABLE rss_saga.journal SET LOGGED",
+            vec!["journal"],
+        ),
+        (
+            "ALTER TABLE rss_saga.journal SET UNLOGGED; ALTER TABLE rss_saga.instances SET UNLOGGED",
+            "ALTER TABLE rss_saga.instances SET LOGGED; ALTER TABLE rss_saga.journal SET LOGGED",
+            vec!["instances", "journal"],
+        ),
+    ] {
+        PgStore::new(pool.clone(), control).await?;
+        sqlx::raw_sql(change).execute(owner).await?;
+        let rejected = PgStore::new(pool.clone(), control).await;
+        let drifted=sqlx::query_scalar::<_,String>("SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='rss_saga' AND c.relkind='r' AND c.relpersistence<>'p' ORDER BY c.relname").fetch_all(owner).await;
+        sqlx::raw_sql(restore).execute(owner).await?;
+        assert_eq!(drifted?, expected);
+        assert!(matches!(rejected,Err(e) if e.kind()==ErrorKind::StorageContract));
         PgStore::new(pool.clone(), control).await?;
     }
-    Ok(())
-}
-async fn single_unlogged(
-    pool: &PgPool,
-    owner: &PgPool,
-    control: &Control<'_, Clock>,
-    table: &str,
-) -> anyhow::Result<()> {
-    PgStore::new(pool.clone(), control).await?;
-    // Identifier is selected exclusively from the closed fixture table list above.
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "ALTER TABLE rss_saga.{table} SET UNLOGGED"
-    )))
-    .execute(owner)
-    .await?;
-    let rejected = PgStore::new(pool.clone(), control).await;
-    let drifted = sqlx::query_scalar::<_, String>("SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='rss_saga' AND c.relkind='r' AND c.relpersistence<>'p'").fetch_all(owner).await;
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "ALTER TABLE rss_saga.{table} SET LOGGED"
-    )))
-    .execute(owner)
-    .await?;
-    anyhow::ensure!(
-        drifted? == [table],
-        "persistence case must isolate its target"
-    );
-    anyhow::ensure!(
-        matches!(rejected, Err(e) if e.kind()==ErrorKind::StorageContract),
-        "accepted unlogged {table}"
-    );
-    PgStore::new(pool.clone(), control).await?;
     Ok(())
 }
 async fn reachable_grants(

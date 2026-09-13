@@ -217,3 +217,12 @@ pub fn registry(
     }
     Ok(Registry::builder().register(builder)?.finish())
 }
+
+/// Explicit fixture capacity; production callers choose their own finite values.
+pub fn history_capacity() -> Result<HistoryCapacity, Error> {
+    HistoryCapacity::new(10_000, 256 * 1024 * 1024)
+}
+/// Explicit fixture replay/authentication allowance.
+pub fn read_budget() -> Result<ReadBudget, Error> {
+    ReadBudget::new(history_capacity()?, 1024 * 1024 * 1024)
+}

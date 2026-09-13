@@ -27,6 +27,7 @@ impl Store for Memory {
         &self,
         scope: Scope,
         d: &Definition,
+        capacity: HistoryCapacity,
         _: &Control<'_, T>,
     ) -> Result<(), Error> {
         let mut data = self
@@ -41,7 +42,7 @@ impl Store for Memory {
             data.insert(
                 scope,
                 (
-                    Snapshot::empty(d.clone()),
+                    Snapshot::empty(d.clone(), capacity, read_budget()?)?,
                     Lease::from_provider(scope, uuid::Uuid::new_v4(), 1)?,
                 ),
             );
@@ -90,7 +91,42 @@ impl Store for Memory {
         self.3.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn snapshot<T: Timer>(&self, l: &Lease, _: &Control<'_, T>) -> Result<Snapshot, Error> {
+    async fn history_head<T: Timer>(
+        &self,
+        lease: &Lease,
+        _: &Control<'_, T>,
+    ) -> Result<HistoryHead, Error> {
+        let data = self.0.lock().map_err(|_| Error::new(ErrorKind::Store))?;
+        let (snapshot, held) = data.get(&lease.scope()).ok_or(ErrorKind::Store)?;
+        if held.token() != lease.token() {
+            return Err(ErrorKind::Fenced.into());
+        }
+        Ok(snapshot.head().clone())
+    }
+    async fn extend_history<T: Timer>(
+        &self,
+        lease: &Lease,
+        expected_revision: u64,
+        expected: HistoryCapacity,
+        capacity: HistoryCapacity,
+        _: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        let mut data = self.0.lock().map_err(|_| Error::new(ErrorKind::Store))?;
+        let (snapshot, held) = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
+        if held.token() != lease.token() {
+            return Err(ErrorKind::Fenced.into());
+        }
+        if snapshot.revision() != expected_revision {
+            return Err(ErrorKind::Conflict.into());
+        }
+        snapshot.extend_capacity(expected, capacity)
+    }
+    async fn snapshot<T: Timer>(
+        &self,
+        l: &Lease,
+        read: ReadBudget,
+        _: &Control<'_, T>,
+    ) -> Result<Snapshot, Error> {
         if self.4.point.load(Ordering::SeqCst) == 3 {
             self.4.entered.notify_one();
             std::future::pending::<()>().await;
@@ -103,12 +139,13 @@ impl Store for Memory {
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?
             .get(&l.scope())
             .map(|(s, _)| s.clone())
-            .ok_or(Error::new(rss_saga::ErrorKind::Store))
+            .ok_or(Error::new(rss_saga::ErrorKind::Store))?
+            .with_read_budget(read)
     }
     async fn commit<T: Timer>(
         &self,
         l: &Lease,
-        m: Mutation,
+        m: &Mutation,
         _: &Control<'_, T>,
     ) -> Result<(), Error> {
         if self.2.load(Ordering::SeqCst) == 1 {
@@ -130,7 +167,7 @@ impl Store for Memory {
             if lease.token() != l.token() {
                 return Err(Error::new(rss_saga::ErrorKind::Fenced));
             }
-            *s = s.apply(m.event().clone())?;
+            s.apply(m.event().clone())?;
             if m.event().kind == EventKind::ForwardIntent && self.1.swap(false, Ordering::SeqCst) {
                 return Err(Error::new(ErrorKind::CommitUnknown));
             }
@@ -181,14 +218,20 @@ async fn effect_unknown_recovers_by_probe_without_reexecuting() -> anyhow::Resul
         memory.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
     );
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     assert!(matches!(
         e.run(s, 10, &control).await,
         Err(ref failure) if failure.kind()==rss_saga::ErrorKind::EffectUnknown
     ));
     drop(e);
-    let recovered = Executor::new(memory, protection()?, registry(d, effects.clone(), false)?);
+    let recovered = Executor::new(
+        memory,
+        protection()?,
+        registry(d, effects.clone(), false)?,
+        read_budget()?,
+    );
     assert_eq!(
         recovered.run(s, 10, &control).await?.status,
         Status::Succeeded
@@ -216,8 +259,9 @@ async fn failed_compensation_resumes_once_in_reverse_order() -> anyhow::Result<(
         memory.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), true)?,
+        read_budget()?,
     );
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     let paused = e.run(s, 20, &control).await?;
     assert_eq!(paused.status, Status::CompensationFailed);
     assert!(matches!(
@@ -229,6 +273,7 @@ async fn failed_compensation_resumes_once_in_reverse_order() -> anyhow::Result<(
         memory.clone(),
         protection()?,
         registry(d, effects.clone(), true)?,
+        read_budget()?,
     );
     assert_eq!(
         recovered
@@ -276,12 +321,14 @@ async fn changed_definition_and_cancel_never_admit_effects() -> anyhow::Result<(
         memory.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
     );
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     let wrong = Executor::new(
         memory,
         protection()?,
         registry(definition(&["one", "two"])?, effects.clone(), false)?,
+        read_budget()?,
     );
     assert!(matches!(
         wrong.run(s, 10, &control).await,
@@ -315,8 +362,9 @@ async fn unknown_compensation_is_probed_after_restart() -> anyhow::Result<()> {
         memory.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), true)?,
+        read_budget()?,
     );
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     assert!(matches!(
         e.run(s, 20, &control).await,
         Err(ref failure) if failure.kind()==rss_saga::ErrorKind::EffectUnknown
@@ -326,6 +374,7 @@ async fn unknown_compensation_is_probed_after_restart() -> anyhow::Result<()> {
         memory.clone(),
         protection()?,
         registry(d, effects.clone(), true)?,
+        read_budget()?,
     );
     assert_eq!(e.run(s, 20, &control).await?.status, Status::Compensated);
     let data = memory
@@ -360,9 +409,10 @@ async fn negative_probe_after_intent_crash_does_not_exhaust_one_attempt() -> any
         memory.clone(),
         protection()?,
         registry(d, effects.clone(), false)?,
+        read_budget()?,
     );
     let d = definition(&["one"])?;
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     assert!(
         matches!(e.run(s,10,&control).await,Err(error) if error.kind()==ErrorKind::CommitUnknown)
     );
@@ -410,12 +460,13 @@ async fn successful_receipt_is_typed_and_bound_to_the_final_action() -> anyhow::
         Memory::default(),
         protection()?,
         Registry::builder().register(builder)?.finish(),
+        read_budget()?,
     );
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(10), &cancel);
     let s = scope()?;
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     let report = e.run(s, 10, &control).await?;
     let reference = report
         .success
@@ -459,15 +510,15 @@ async fn sweep_cursor_and_total_budget_prevent_unknown_instance_starvation() -> 
     let registry = Registry::builder()
         .register(DefinitionBuilder::new(d.clone())?.step(SelectiveStep)?)?
         .finish();
-    let e = Executor::new(Memory::default(), protection()?, registry);
+    let e = Executor::new(Memory::default(), protection()?, registry, read_budget()?);
     let tenant = scope()?.tenant();
     let a = Scope::new(tenant, uuid::Uuid::from_u128(1));
     let b = Scope::new(tenant, uuid::Uuid::from_u128(2));
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(10), &cancel);
-    e.register(a, &d, &control).await?;
-    e.register(b, &d, &control).await?;
+    e.register(a, &d, history_capacity()?, &control).await?;
+    e.register(b, &d, history_capacity()?, &control).await?;
     let first = e
         .run_once(tenant, None, SweepBudget::new(2, 1)?, &control)
         .await?;
@@ -520,12 +571,12 @@ async fn managed_cancellation_is_a_clean_lifecycle_exit() -> anyhow::Result<()> 
     let registry = Registry::builder()
         .register(DefinitionBuilder::new(d.clone())?.step(PendingStep(entered.clone()))?)?
         .finish();
-    let e = Executor::new(Memory::default(), protection()?, registry);
+    let e = Executor::new(Memory::default(), protection()?, registry, read_budget()?);
     let s = scope()?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(10), &cancel);
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     let (start, status) = rss_runtime::ManagedTask::prepare("saga-test", Duration::from_secs(1));
     let (registration, result) =
         Arc::new(e).into_registration(start, Clock::new(), s, 10, Duration::from_secs(60));
@@ -554,12 +605,13 @@ async fn interrupted_commit_is_unknown() -> anyhow::Result<()> {
         memory.clone(),
         protection()?,
         registry(d.clone(), Arc::new(Effects::default()), false)?,
+        read_budget()?,
     );
     let s = scope()?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_millis(50), &cancel);
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     memory.2.store(1, Ordering::SeqCst);
     assert!(
         matches!(e.run(s,10,&control).await,Err(error) if error.kind()==ErrorKind::CommitUnknown)
@@ -581,12 +633,13 @@ async fn receipt_snapshot_failure_releases_claim() -> anyhow::Result<()> {
         memory.clone(),
         protection()?,
         Registry::builder().register(builder)?.finish(),
+        read_budget()?,
     );
     let s = scope()?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(10), &cancel);
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     let report = e.run(s, 10, &control).await?;
     let reference = report
         .success
@@ -610,12 +663,13 @@ async fn managed_yield_and_pause_preserve_continuation_owner() -> anyhow::Result
         Memory::default(),
         protection()?,
         registry(d.clone(), effects, true)?,
+        read_budget()?,
     ));
     let s = scope()?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(10), &cancel);
-    e.register(s, &d, &control).await?;
+    e.register(s, &d, history_capacity()?, &control).await?;
     for (budget, expected) in [(1, RunStop::Yielded), (30, RunStop::Paused)] {
         let (start, _) =
             rss_runtime::ManagedTask::prepare("saga-continuation", Duration::from_secs(1));
@@ -668,13 +722,14 @@ async fn renewal_interrupts_commit_without_losing_settlement() -> anyhow::Result
                 memory.clone(),
                 protection()?,
                 registry(d.clone(), effects.clone(), false)?,
+                read_budget()?,
             )
             .with_lease_policy(LeasePolicy::new(Duration::from_millis(30))?);
             let s = scope()?;
             let clock = Clock::new();
             let cancel = CancellationToken::new();
             let control = Control::new(&clock, Duration::from_secs(5), &cancel);
-            e.register(s, &d, &control).await?;
+            e.register(s, &d, history_capacity()?, &control).await?;
             let error = e
                 .run(s, 10, &control)
                 .await
@@ -727,12 +782,15 @@ async fn caller_cancellation_preserves_pending_applied_commit() -> anyhow::Resul
             memory.clone(),
             protection()?,
             registry(d.clone(), effects.clone(), false)?,
+            read_budget()?,
         );
         let s = scope()?;
         let clock = Clock::new();
         let cancel = CancellationToken::new();
         let control = Control::new(&clock, Duration::from_secs(5), &cancel);
-        executor.register(s, &d, &control).await?;
+        executor
+            .register(s, &d, history_capacity()?, &control)
+            .await?;
         let interrupt = async {
             memory.4.entered.notified().await;
             cancel.cancel();
@@ -758,5 +816,94 @@ async fn caller_cancellation_preserves_pending_applied_commit() -> anyhow::Resul
             1
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_crash_negative_probes_stop_before_new_effect_and_extend_by_cas()
+-> anyhow::Result<()> {
+    let d = definition(&["one"])?;
+    let effects = Arc::new(Effects::default());
+    let memory = Memory::default();
+    let scope = scope()?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+    let capacity = HistoryCapacity::new(9, 32 * 1024 * 1024)?;
+    let read = ReadBudget::new(HistoryCapacity::new(30, 64 * 1024 * 1024)?, 1024 * 1024)?;
+    let executor = Executor::new(
+        memory.clone(),
+        protection()?,
+        registry(d.clone(), effects.clone(), false)?,
+        read,
+    );
+    executor.register(scope, &d, capacity, &c).await?;
+    for _ in 0..3 {
+        memory.1.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(executor.run(scope,1,&c).await,Err(e) if e.kind()==ErrorKind::CommitUnknown)
+        );
+        assert_eq!(executor.run(scope, 1, &c).await?.stop, RunStop::Yielded);
+    }
+    let blocked = executor.run(scope, 1, &c).await?;
+    assert_eq!(blocked.stop, RunStop::HistoryLimited);
+    assert_eq!(blocked.revision, 6);
+    assert!(
+        effects
+            .applied
+            .lock()
+            .map_err(|_| Error::new(ErrorKind::Store))?
+            .is_empty()
+    );
+    let next = HistoryCapacity::new(20, 64 * 1024 * 1024)?;
+    executor
+        .extend_history(scope, blocked.revision, capacity, next, &c)
+        .await?;
+    assert!(
+        matches!(executor.extend_history(scope,blocked.revision,capacity,next,&c).await,Err(e) if e.kind()==ErrorKind::Conflict)
+    );
+    assert_eq!(executor.run(scope, 1, &c).await?.status, Status::Succeeded);
+    Ok(())
+}
+
+#[tokio::test]
+async fn compensation_retry_requires_new_space_and_never_spends_earlier_steps_reserve()
+-> anyhow::Result<()> {
+    let d = definition(&["one", "two", "three"])?;
+    let effects = Arc::new(Effects::default());
+    let memory = Memory::default();
+    let scope = scope()?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+    let capacity = HistoryCapacity::new(100, 64 * 1024 * 1024)?;
+    let executor = Executor::new(
+        memory,
+        protection()?,
+        registry(d.clone(), effects.clone(), true)?,
+        ReadBudget::new(capacity, 3 * 1024 * 1024)?,
+    );
+    executor
+        .register(scope, &d, HistoryCapacity::new(13, 64 * 1024 * 1024)?, &c)
+        .await?;
+    effects.fail_undo.store(true, Ordering::SeqCst);
+    let paused = executor.run(scope, 20, &c).await?;
+    assert_eq!(paused.status, Status::CompensationFailed);
+    effects.fail_undo.store(true, Ordering::SeqCst);
+    let again = executor.resume(scope, paused.revision, 20, &c).await?;
+    assert_eq!(again.stop, RunStop::HistoryLimited);
+    assert_eq!(again.revision, paused.revision);
+    executor
+        .extend_history(scope, again.revision, again.history.capacity, capacity, &c)
+        .await?;
+    let retried = executor.resume(scope, again.revision, 20, &c).await?;
+    assert_eq!(retried.status, Status::CompensationFailed);
+    assert_eq!(
+        executor
+            .resume(scope, retried.revision, 20, &c)
+            .await?
+            .status,
+        Status::Compensated
+    );
     Ok(())
 }

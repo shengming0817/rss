@@ -66,7 +66,18 @@ fn empty_definition_and_duplicate_step_fail() -> anyhow::Result<()> {
         )
         .is_err()
     );
-    assert_eq!(Snapshot::empty(d).status(), Status::Ready);
+    assert_eq!(
+        Snapshot::empty(
+            d,
+            rss_saga::HistoryCapacity::new(10_000, 256 * 1024 * 1024)?,
+            rss_saga::ReadBudget::new(
+                rss_saga::HistoryCapacity::new(10_000, 256 * 1024 * 1024)?,
+                1024 * 1024 * 1024
+            )?
+        )?
+        .status(),
+        Status::Ready
+    );
     Ok(())
 }
 #[test]

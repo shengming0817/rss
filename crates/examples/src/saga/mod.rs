@@ -34,8 +34,19 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
         PgStore::new(input.pool().await?, &c).await?,
         protection(key, integrity)?,
         registry(definition.clone(), effects.clone(), true)?,
+        rss_saga::ReadBudget::new(
+            rss_saga::HistoryCapacity::new(10_000, 256 * 1024 * 1024)?,
+            1024 * 1024 * 1024,
+        )?,
     );
-    executor.register(scope, &definition, &c).await?;
+    executor
+        .register(
+            scope,
+            &definition,
+            rss_saga::HistoryCapacity::new(10_000, 256 * 1024 * 1024)?,
+            &c,
+        )
+        .await?;
     let report = executor.run(scope, 30, &c).await?;
     anyhow::ensure!(
         report.status == Status::CompensationFailed,
@@ -51,6 +62,10 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
         store.clone(),
         protection(key, integrity)?,
         registry(definition.clone(), effects.clone(), true)?,
+        rss_saga::ReadBudget::new(
+            rss_saga::HistoryCapacity::new(10_000, 256 * 1024 * 1024)?,
+            1024 * 1024 * 1024,
+        )?,
     );
     let recovered = executor.resume(scope, report.revision, 30, &c).await?;
     anyhow::ensure!(
@@ -58,7 +73,16 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
         "reconstructed executor did not compensate"
     );
     let lease = store.claim(scope, Duration::from_secs(5), &c).await?;
-    let snapshot = store.snapshot(&lease, &c).await?;
+    let snapshot = store
+        .snapshot(
+            &lease,
+            rss_saga::ReadBudget::new(
+                rss_saga::HistoryCapacity::new(10_000, 256 * 1024 * 1024)?,
+                1024 * 1024 * 1024,
+            )?,
+            &c,
+        )
+        .await?;
     anyhow::ensure!(
         snapshot.definition() == &definition,
         "definition identity changed on recovery"
