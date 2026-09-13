@@ -38,7 +38,8 @@ pub const MIGRATION_SQL: &str = concat!(
     include_str!("../migrations/0006_secure_archive_search_path.sql"),
     include_str!("../migrations/0007_add_message_dr.sql"),
     include_str!("../migrations/0008_apply_message_dr.sql"),
-    include_str!("../migrations/0009_allocate_outbox_partitions.sql")
+    include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
+    include_str!("../migrations/0010_verify_outbox_message_contract.sql")
 );
 /// One-way upgrade from the original component schema; executed only by the external migrator.
 pub const RECOVERY_UPGRADE_SQL: &str = concat!(
@@ -53,7 +54,8 @@ pub const RECOVERY_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0006_secure_archive_search_path.sql"),
     include_str!("../migrations/0007_add_message_dr.sql"),
     include_str!("../migrations/0008_apply_message_dr.sql"),
-    include_str!("../migrations/0009_allocate_outbox_partitions.sql")
+    include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
+    include_str!("../migrations/0010_verify_outbox_message_contract.sql")
 );
 #[cfg(feature = "recovery")]
 mod recovery;
@@ -69,7 +71,8 @@ pub const ARCHIVE_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0006_secure_archive_search_path.sql"),
     include_str!("../migrations/0007_add_message_dr.sql"),
     include_str!("../migrations/0008_apply_message_dr.sql"),
-    include_str!("../migrations/0009_allocate_outbox_partitions.sql")
+    include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
+    include_str!("../migrations/0010_verify_outbox_message_contract.sql")
 );
 #[cfg(feature = "recovery")]
 mod archive;
@@ -80,7 +83,8 @@ pub use archive::PgArchiveRepository;
 pub const DR_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0007_add_message_dr.sql"),
     include_str!("../migrations/0008_apply_message_dr.sql"),
-    include_str!("../migrations/0009_allocate_outbox_partitions.sql")
+    include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
+    include_str!("../migrations/0010_verify_outbox_message_contract.sql")
 );
 #[cfg(feature = "recovery")]
 mod dr;
@@ -89,5 +93,11 @@ pub use dr::PgDrStore;
 
 /// Install partition ordering on an empty ordered Outbox. Existing ordered data is rejected.
 /// The external migrator also replaces runtime INSERT/sequence grants with function EXECUTE.
-pub const OUTBOX_PARTITION_UPGRADE_SQL: &str =
-    include_str!("../migrations/0009_allocate_outbox_partitions.sql");
+pub const OUTBOX_PARTITION_UPGRADE_SQL: &str = concat!(
+    include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
+    include_str!("../migrations/0010_verify_outbox_message_contract.sql")
+);
+
+/// Replace the unverified SQL writer with the core message byte contract; requires an empty Outbox.
+pub const OUTBOX_MESSAGE_UPGRADE_SQL: &str =
+    include_str!("../migrations/0010_verify_outbox_message_contract.sql");

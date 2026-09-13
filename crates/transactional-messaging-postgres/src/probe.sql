@@ -25,7 +25,7 @@ functions(signature) AS (VALUES
  ('rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)')),
 write_functions(signature,result) AS (VALUES
  ('rss_transactional_messaging.prepare_outbox_partitions(jsonb)','void'::regtype),
- ('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)','text'::regtype)),
+ ('rss_transactional_messaging.append_outbox(bytea,jsonb)','text'::regtype)),
 tenant_predicate(value) AS (VALUES ($predicate$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$predicate$)),
 expected_policies(relation, name, roles, predicate) AS (
  SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
@@ -57,6 +57,16 @@ expected_policies(relation, name, roles, predicate) AS (
  ('outbox_partitions','last_sequence','0'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
  ('outbox','retry_count','0'), ('outbox','retry_after','clock_timestamp()')
 ), checks(reason, valid) AS (VALUES
+ ('functions', to_regprocedure('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)') IS NULL),
+ ('functions', NOT EXISTS (SELECT 1 FROM (VALUES
+  ('rss_transactional_messaging.read_outbox_frame(bytea,integer,integer)','record'::regtype,true),
+  ('rss_transactional_messaging.decode_outbox_message(bytea)','jsonb'::regtype,false)) f(signature,result,retset)
+  LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
+  WHERE p.oid IS NULL OR p.prorettype<>f.result OR p.proretset<>f.retset OR p.provolatile<>'i' OR p.prosecdef
+   OR p.proowner<>(SELECT oid FROM relay_role)
+   OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp'=ANY(p.proconfig))
+   OR has_function_privilege(current_user,p.oid,'EXECUTE')
+   OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))),
  ('policy', (EXISTS (SELECT 1 FROM rss_transactional_messaging.policy
     WHERE revision = 1 AND automatic_window_seconds = 86400
       AND safety_seconds = 86400 AND receipt_retention_seconds > 172800))),

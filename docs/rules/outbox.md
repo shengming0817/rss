@@ -81,3 +81,10 @@ retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 r
 消息 recovery 拥有显式恢复请求；PostgreSQL adapter 在原消息 schema 和事务 owner 内落实。
 未过期 dead_letter 可按原身份 redrive；过期头仅可通过带持久化回执的 resolved 处置解除分区阻塞。
 resolved 不表示 published，发布事实查询必须区分两者。所有操作按租户、目标版本和稳定操作身份校验。
+
+`INVARIANT: OUTBOX-SQL-MESSAGE-CONTRACT-01`: SQL writers consume the core-owned versioned
+`message-wire-v1` byte contract. The database strictly decodes all authored facts and hashes the
+exact bytes with SHA-256; callers cannot supply a fingerprint or a private durable projection.
+The core encoder is shared with `MessageFingerprint::of`. Transport fields are separate and cannot
+change authored identity. Medium proof owner is PostgreSQL `partition::wire_contract`: independent
+SQL encoding, malformed inputs, digest parity, authored conflicts and transport-only idempotency.

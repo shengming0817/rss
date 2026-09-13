@@ -550,88 +550,7 @@ impl MessageFingerprint {
     /// Hash the ID, all authored metadata, and payload bytes; exclude [`TransportContext`].
     pub fn of<P: AsRef<[u8]>>(message: &MessageEnvelope<P>) -> Self {
         let mut digest = Sha256::new();
-        frame(&mut digest, 0, FINGERPRINT_DOMAIN.as_bytes());
-        frame(&mut digest, 1, message.id().as_str().as_bytes());
-        frame(&mut digest, 2, &message.metadata().tenant_id().octets());
-        frame(
-            &mut digest,
-            3,
-            &message
-                .metadata()
-                .occurred_at()
-                .unix_seconds()
-                .to_be_bytes(),
-        );
-        frame_optional(
-            &mut digest,
-            4,
-            message.metadata().correlation().map(str::as_bytes),
-        );
-        frame(
-            &mut digest,
-            5,
-            message.metadata().domain().as_str().as_bytes(),
-        );
-        frame(
-            &mut digest,
-            6,
-            message.metadata().route().as_str().as_bytes(),
-        );
-        frame(
-            &mut digest,
-            7,
-            message.metadata().contract().id().as_str().as_bytes(),
-        );
-        frame(
-            &mut digest,
-            8,
-            &message
-                .metadata()
-                .contract()
-                .version()
-                .major()
-                .to_be_bytes(),
-        );
-        frame(
-            &mut digest,
-            9,
-            message
-                .metadata()
-                .contract()
-                .schema_digest()
-                .as_str()
-                .as_bytes(),
-        );
-        match message.metadata().partition() {
-            Some(partition) => {
-                frame(&mut digest, 10, &[1]);
-                frame(&mut digest, 11, &partition.tenant_id().octets());
-                frame(&mut digest, 12, partition.domain().as_str().as_bytes());
-                frame(&mut digest, 13, partition.key().as_str().as_bytes());
-            }
-            None => frame(&mut digest, 10, &[0]),
-        }
-        frame_optional(
-            &mut digest,
-            14,
-            message
-                .metadata()
-                .causation()
-                .map(MessageId::as_str)
-                .map(str::as_bytes),
-        );
-        frame(
-            &mut digest,
-            15,
-            &u64::try_from(message.metadata().attributes.len())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
-        for (key, value) in message.metadata().attributes() {
-            frame(&mut digest, 16, key.as_bytes());
-            frame(&mut digest, 17, value.as_bytes());
-        }
-        frame(&mut digest, 18, message.payload().as_ref());
+        encode_canonical(message, &mut |bytes| digest.update(bytes));
         Self(digest.finalize().into())
     }
 
@@ -718,17 +637,104 @@ fn validate_transport_identity(raw: &str, max_len: usize) -> Result<(), MessageI
     Ok(())
 }
 
-fn frame(digest: &mut Sha256, tag: u8, value: &[u8]) {
-    digest.update([tag]);
-    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
-    digest.update(value);
+fn frame(sink: &mut impl FnMut(&[u8]), tag: u8, value: &[u8]) {
+    sink(&[tag]);
+    sink(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    sink(value);
 }
-fn frame_optional(digest: &mut Sha256, tag: u8, value: Option<&[u8]>) {
+fn frame_optional(sink: &mut impl FnMut(&[u8]), tag: u8, value: Option<&[u8]>) {
     match value {
         Some(value) => {
-            frame(digest, tag, &[1]);
-            frame(digest, tag, value);
+            frame(sink, tag, &[1]);
+            frame(sink, tag, value);
         }
-        None => frame(digest, tag, &[0]),
+        None => frame(sink, tag, &[0]),
     }
+}
+
+impl<P: AsRef<[u8]>> MessageEnvelope<P> {
+    /// Encode the public v1 authored-message contract. SHA-256 of exactly these bytes is
+    /// [`MessageFingerprint::of`]; transport context is excluded. This exposes payload and metadata.
+    ///
+    /// The normative field order, framing, types and rejection rules are documented in
+    /// the crate's `message-wire-v1.md` contract. No JSON serialization is involved.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        encode_canonical(self, &mut |part| bytes.extend_from_slice(part));
+        bytes
+    }
+}
+
+fn encode_canonical<P: AsRef<[u8]>>(message: &MessageEnvelope<P>, sink: &mut impl FnMut(&[u8])) {
+    frame(sink, 0, FINGERPRINT_DOMAIN.as_bytes());
+    frame(sink, 1, message.id().as_str().as_bytes());
+    frame(sink, 2, &message.metadata().tenant_id().octets());
+    frame(
+        sink,
+        3,
+        &message
+            .metadata()
+            .occurred_at()
+            .unix_seconds()
+            .to_be_bytes(),
+    );
+    frame_optional(sink, 4, message.metadata().correlation().map(str::as_bytes));
+    frame(sink, 5, message.metadata().domain().as_str().as_bytes());
+    frame(sink, 6, message.metadata().route().as_str().as_bytes());
+    frame(
+        sink,
+        7,
+        message.metadata().contract().id().as_str().as_bytes(),
+    );
+    frame(
+        sink,
+        8,
+        &message
+            .metadata()
+            .contract()
+            .version()
+            .major()
+            .to_be_bytes(),
+    );
+    frame(
+        sink,
+        9,
+        message
+            .metadata()
+            .contract()
+            .schema_digest()
+            .as_str()
+            .as_bytes(),
+    );
+    match message.metadata().partition() {
+        Some(partition) => {
+            frame(sink, 10, &[1]);
+            frame(sink, 11, &partition.tenant_id().octets());
+            frame(sink, 12, partition.domain().as_str().as_bytes());
+            frame(sink, 13, partition.key().as_str().as_bytes());
+        }
+        None => frame(sink, 10, &[0]),
+    }
+    frame_optional(
+        sink,
+        14,
+        message
+            .metadata()
+            .causation()
+            .map(MessageId::as_str)
+            .map(str::as_bytes),
+    );
+    frame(
+        sink,
+        15,
+        &u64::try_from(message.metadata().attributes.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (key, value) in message.metadata().attributes() {
+        frame(sink, 16, key.as_bytes());
+        frame(sink, 17, value.as_bytes());
+    }
+    frame(sink, 18, message.payload().as_ref());
 }

@@ -3031,6 +3031,7 @@ dependencies = [
  "ring",
  "rss-contract",
  "rss-data-protection",
+ "rss-diag-context",
  "rss-examples",
  "rss-observation",
  "rss-observation-postgres",

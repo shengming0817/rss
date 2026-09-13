@@ -1,4 +1,5 @@
 //! INVARIANT: OUTBOX-PARTITION-ORDER-01 — public Rust and independent SQL callers.
+mod wire_contract;
 use super::{Timer, binding, deadline, fence_fixture, message, outbox_budget};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::{inbox::*, message::*, outbox::*, policy::*, transaction::*};
@@ -34,12 +35,73 @@ fn ordered_in(tenant: TenantId, id: &str, domain: &str, key: &str) -> MessageEnv
     )
 }
 
-fn wire(message: &MessageEnvelope<Vec<u8>>) -> serde_json::Value {
+// Independent SQL-client implementation of the public core byte contract (no adapter codec).
+fn frames(message: &MessageEnvelope<Vec<u8>>) -> Vec<(u8, Vec<u8>)> {
     let m = message.metadata();
-    serde_json::json!({"id":message.id().as_str(),"tenant":m.tenant_id().to_string(),"occurred_at":m.occurred_at().unix_seconds(),
-        "domain":m.domain().as_str(),"route":m.route().as_str(),"contract":m.contract().id().as_str(),"version":m.contract().version().to_string(),
-        "schema":m.contract().schema_digest().as_str(),"partition":m.partition().map(|p|p.key().as_str()),
-        "correlation":null,"causation":null,"trace":null,"tenant_authority":null,"attributes":{},"payload":message.payload()})
+    let mut fields = vec![
+        (0, b"rss-transactional-message-v1".to_vec()),
+        (1, message.id().as_str().as_bytes().to_vec()),
+        (2, m.tenant_id().octets().to_vec()),
+        (3, m.occurred_at().unix_seconds().to_be_bytes().to_vec()),
+    ];
+    optional_frame(&mut fields, 4, m.correlation());
+    fields.extend([
+        (5, m.domain().as_str().as_bytes().to_vec()),
+        (6, m.route().as_str().as_bytes().to_vec()),
+        (7, m.contract().id().as_str().as_bytes().to_vec()),
+        (8, m.contract().version().major().to_be_bytes().to_vec()),
+        (9, m.contract().schema_digest().as_str().as_bytes().to_vec()),
+        (10, vec![u8::from(m.partition().is_some())]),
+    ]);
+    if let Some(partition) = m.partition() {
+        fields.extend([
+            (11, partition.tenant_id().octets().to_vec()),
+            (12, partition.domain().as_str().as_bytes().to_vec()),
+            (13, partition.key().as_str().as_bytes().to_vec()),
+        ]);
+    }
+    optional_frame(&mut fields, 14, m.causation().map(MessageId::as_str));
+    let attributes = m.attributes().collect::<Vec<_>>();
+    fields.push((
+        15,
+        u64::try_from(attributes.len())
+            .expect("count")
+            .to_be_bytes()
+            .to_vec(),
+    ));
+    for (key, value) in attributes {
+        fields.extend([
+            (16, key.as_bytes().to_vec()),
+            (17, value.as_bytes().to_vec()),
+        ]);
+    }
+    fields.push((18, message.payload().clone()));
+    fields
+}
+
+fn optional_frame(fields: &mut Vec<(u8, Vec<u8>)>, tag: u8, value: Option<&str>) {
+    fields.push((tag, vec![u8::from(value.is_some())]));
+    if let Some(value) = value {
+        fields.push((tag, value.as_bytes().to_vec()));
+    }
+}
+
+fn wire(fields: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for (tag, bytes) in fields {
+        output.push(*tag);
+        output.extend(
+            u64::try_from(bytes.len())
+                .expect("frame size")
+                .to_be_bytes(),
+        );
+        output.extend(bytes);
+    }
+    output
+}
+
+fn transport(message: &MessageEnvelope<Vec<u8>>) -> serde_json::Value {
+    serde_json::json!({"trace":message.transport_context().trace(),"tenant_authority":message.transport_context().tenant_authority()})
 }
 
 async fn sql_tx(pool: &PgPool, tenant: TenantId) -> anyhow::Result<Transaction<'static, Postgres>> {
@@ -64,12 +126,15 @@ async fn sql_append(
     connection: &mut PgConnection,
     message: &MessageEnvelope<Vec<u8>>,
 ) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2,$3,$4,$5)")
-        .bind(message.id().as_str())
-        .bind(message.metadata().domain().as_str())
-        .bind(message.metadata().partition().map(|p| p.key().as_str()))
-        .bind(wire(message))
-        .bind(MessageFingerprint::of(message).as_bytes().as_slice())
+    let encoded = wire(&frames(message));
+    assert_eq!(
+        encoded,
+        message.canonical_bytes(),
+        "independent SQL encoder agrees with core"
+    );
+    sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+        .bind(encoded)
+        .bind(transport(message))
         .fetch_one(connection)
         .await
 }
@@ -100,6 +165,7 @@ pub(super) async fn run(
     config: PgConfig,
 ) -> anyhow::Result<()> {
     Box::pin(sql_digest_integrity(raw)).await?;
+    Box::pin(wire_contract::run(runtime.clone(), raw)).await?;
     Box::pin(sql_protocol(raw)).await?;
     Box::pin(rollback_and_independence(owner, raw)).await?;
     Box::pin(opposite_declarations(owner, raw)).await?;
@@ -234,31 +300,12 @@ async fn sql_protocol(raw: &PgPool) -> anyhow::Result<()> {
         assert_eq!(code(&error).as_deref(), Some("42501"));
         tx.rollback().await?;
     }
-    for (field, value) in [
-        ("partition", serde_json::json!("undeclared")),
-        (
-            "tenant",
-            serde_json::json!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-        ),
-        ("id", serde_json::json!("forged-id")),
-        ("domain", serde_json::json!("forged-domain")),
-    ] {
-        let mut tx = sql_tx(raw, tenant).await?;
-        let item = message("mismatched-envelope");
-        let mut envelope = wire(&item);
-        envelope[field] = value;
-        let error =
-            sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2,NULL,$3,$4)")
-                .bind(item.id().as_str())
-                .bind(item.metadata().domain().as_str())
-                .bind(envelope)
-                .bind(MessageFingerprint::of(&item).as_bytes().as_slice())
-                .execute(&mut *tx)
-                .await
-                .expect_err("identity mismatch");
-        assert_eq!(code(&error).as_deref(), Some("22023"));
-        tx.rollback().await?;
-    }
+    // Projection identities cannot be forged: the obsolete multi-identity signature is gone.
+    let mut tx = sql_tx(raw, tenant).await?;
+    let error = sqlx::query("SELECT rss_transactional_messaging.append_outbox('id'::text,'domain'::text,NULL::text,'{}'::jsonb,decode(repeat('00',32),'hex'))")
+        .execute(&mut *tx).await.expect_err("unverified digest API removed");
+    assert_eq!(code(&error).as_deref(), Some("42883"));
+    tx.rollback().await?;
     Ok(())
 }
 
@@ -583,7 +630,16 @@ async fn cached_order(runtime: Arc<PgRuntime>, owner: &PgPool, raw: &PgPool) -> 
     Ok(())
 }
 
+#[allow(clippy::cognitive_complexity)] // reason: reversible catalog drift cases preserve restore-before-assert for every incompatible shape.
 async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()> {
+    let mut tx = owner.begin().await?;
+    let error = sqlx::raw_sql(OUTBOX_MESSAGE_UPGRADE_SQL)
+        .execute(&mut *tx)
+        .await
+        .expect_err("unverified historical rows cannot be backfilled");
+    assert_eq!(code(&error).as_deref(), Some("23514"));
+    tx.rollback().await?;
+
     for (grant, revoke) in [
         (
             "GRANT INSERT ON rss_transactional_messaging.outbox TO tmsg_runtime",
@@ -615,6 +671,21 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
     }
     for (change, restore, expected) in [
         (
+            "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.decode_outbox_message(bytea) TO tmsg_runtime",
+            "REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.decode_outbox_message(bytea) FROM tmsg_runtime",
+            PgStorageContractFailure::Functions,
+        ),
+        (
+            "ALTER FUNCTION rss_transactional_messaging.read_outbox_frame(bytea,integer,integer) SECURITY DEFINER",
+            "ALTER FUNCTION rss_transactional_messaging.read_outbox_frame(bytea,integer,integer) SECURITY INVOKER",
+            PgStorageContractFailure::Functions,
+        ),
+        (
+            "CREATE FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea) RETURNS text LANGUAGE sql AS 'SELECT NULL::text'",
+            "DROP FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)",
+            PgStorageContractFailure::Functions,
+        ),
+        (
             "ALTER TABLE rss_transactional_messaging.outbox_partitions ALTER COLUMN prepared_by DROP NOT NULL",
             "ALTER TABLE rss_transactional_messaging.outbox_partitions ALTER COLUMN prepared_by SET NOT NULL",
             PgStorageContractFailure::Columns,
@@ -625,8 +696,8 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
             PgStorageContractFailure::RuntimeAcl,
         ),
         (
-            "ALTER FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea) SECURITY INVOKER",
-            "ALTER FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea) SECURITY DEFINER",
+            "ALTER FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) SECURITY INVOKER",
+            "ALTER FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) SECURITY DEFINER",
             PgStorageContractFailure::Functions,
         ),
     ] {
@@ -780,12 +851,18 @@ async fn sql_digest_integrity(raw: &PgPool) -> anyhow::Result<()> {
     let mut tx = sql_tx(raw, item.metadata().tenant_id()).await?;
     sql_prepare(&mut tx, serde_json::json!([["sql-integrity", "one"]])).await?;
     assert_eq!(sql_append(&mut tx, &item).await?, "inserted");
-    let mut altered = wire(&item);
-    altered["payload"] = serde_json::json!([99]);
-    let outcome: String = sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2,$3,$4,$5)")
-        .bind(item.id().as_str()).bind("sql-integrity").bind("one").bind(altered)
-        .bind(MessageFingerprint::of(&item).as_bytes().as_slice()).fetch_one(&mut *tx).await?;
-    assert_ne!(outcome, "already_present", "different authored facts cannot reuse an unverified digest");
+    let mut altered = frames(&item);
+    altered.last_mut().expect("payload").1 = vec![99];
+    let outcome: String =
+        sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+            .bind(wire(&altered))
+            .bind(transport(&item))
+            .fetch_one(&mut *tx)
+            .await?;
+    assert_eq!(
+        outcome, "conflict",
+        "different authored facts cannot reuse an unverified digest"
+    );
     tx.rollback().await?;
     Ok(())
 }

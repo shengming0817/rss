@@ -358,24 +358,19 @@ pub(crate) async fn append_message<P: AsRef<[u8]>>(
     if tx.tenant_id() != envelope.metadata().tenant_id() || envelope.metadata().domain() != domain {
         return Err(PgError::invariant().port());
     }
-    let id = envelope.id().as_str().to_owned();
-    let domain = domain.as_str().to_owned();
-    let partition = message.partition().map(|p| p.key().as_str().to_owned());
-    let encoded = Envelope::encode(envelope).map_err(PgError::port)?;
-    let digest = *message.fingerprint().as_bytes();
+    let encoded = envelope.canonical_bytes();
+    let transport = serde_json::json!({
+        "trace": envelope.transport_context().trace(),
+        "tenant_authority": envelope.transport_context().tenant_authority(),
+    });
     let outcome: String = tx
         .with_connection(move |connection| {
             Box::pin(async move {
-                sqlx::query_scalar(
-                    "SELECT rss_transactional_messaging.append_outbox($1,$2,$3,$4::jsonb,$5)",
-                )
-                .bind(id)
-                .bind(domain)
-                .bind(partition)
-                .bind(encoded)
-                .bind(digest.as_slice())
-                .fetch_one(connection)
-                .await
+                sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+                    .bind(encoded)
+                    .bind(transport)
+                    .fetch_one(connection)
+                    .await
             })
         })
         .await
