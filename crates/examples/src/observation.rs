@@ -73,9 +73,13 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
         JournalReadGrant::verify(&DemoAuthority, tenant)?,
         rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
     )?);
-    let projection = rss_projection_postgres::PgStore::new(input.pool().await?).await?;
     let cancel = tokio_util::sync::CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let control = Control::new(
+        &clock,
+        rss_projection::Timer::now(&clock) + Duration::from_secs(30),
+        &cancel,
+    );
+    let projection = rss_projection_postgres::PgStore::new(input.pool().await?, &control).await?;
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "example-v1")?;
     projection
         .initialize(

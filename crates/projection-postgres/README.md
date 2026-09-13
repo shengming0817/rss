@@ -11,6 +11,39 @@ before closing it. The callback is trusted application SQL, not a sandbox: it mu
 transaction control, change session identity, or write another generation. Only the adapter owns
 normal commit/rollback. Unknown settlement closes the connection instead of returning it to reuse.
 
+## Startup budget (#2423)
+
+`PgStore::new(pool, &control)` requires the existing Projection `Control` for every adoption.
+The same absolute deadline and cancellation token cover pool acquisition and the complete
+schema/role/RLS probe. Acquisition time is deducted from the query budget; an already cancelled
+or expired control admits no acquisition. Pool creation and TLS configuration before calling
+`new` remain caller-owned. When reusing a timer origin, compute `timer.now() + budget` once
+at the start of the invocation, then pass that same control through its stages.
+
+```rust
+use rss_projection::{Control, Error, Timer};
+use rss_projection_postgres::PgStore;
+use sqlx::PgPool;
+
+async fn adopt<T: Timer>(pool: PgPool, control: &Control<'_, T>) -> Result<PgStore, Error> {
+    PgStore::new(pool, control).await
+}
+```
+
+Startup preserves `Cancelled` and `Deadline`, with acquisition SQLx errors diagnosed as
+`Phase::Acquire` and probe SQLx errors as `Phase::Admission`. It performs no business writes
+and does not report transaction settlement uncertainty. Failed or dropped probes retire their
+connection through SQLx `close_on_drop`; successful probes return the connection to the pool.
+Admission failure does not explicitly close other owners' pool clones. Returning from admission
+is not proof that asynchronous connection cleanup or the remote query has already terminated.
+
+This replaces the old one-argument Rust constructor; no overload, default budget, or compatibility
+feature remains. Schema revision 3 and its migrations are unchanged. RSS workspace consumers move
+together; independently pinned product consumers, including rss-mdm, must update their callsites
+when upgrading their RSS revision.
+
+ref: launchbadge/sqlx sqlx-core/src/pool/connection.rs@75bc0487eb661da811bb7a3c5d158f1bd463fef4
+
 ## Storage installation
 
 `MIGRATION_SQL` is the version-bound fresh schema. An external migrator executes it **as a dedicated

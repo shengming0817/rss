@@ -1,9 +1,9 @@
 //! Runtime admission checks the roles a session can reach, not only immediately inherited ACLs.
 use crate::transaction::sql_error;
 use rss_projection::{Error, ErrorKind};
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
-pub(crate) async fn validate(pool: &PgPool) -> Result<(), Error> {
+pub(crate) async fn validate(connection: &mut PgConnection) -> Result<(), Error> {
     let safe: Option<bool> = sqlx::query_scalar(r#"
 WITH reachable AS (
     SELECT * FROM pg_roles WHERE rolname = current_user OR pg_has_role(current_user, oid, 'SET')
@@ -94,7 +94,7 @@ SELECT
     )
     AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:3'
          FROM pg_namespace WHERE nspname='rss_projection')
-"#).fetch_one(pool).await.map_err(|e| sql_error(e, rss_projection::Phase::Admission))?;
+"#).fetch_one(connection).await.map_err(|e| sql_error(e, rss_projection::Phase::Admission))?;
     if safe == Some(true) {
         Ok(())
     } else {

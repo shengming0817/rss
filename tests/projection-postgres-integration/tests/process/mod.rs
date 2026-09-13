@@ -91,16 +91,17 @@ async fn projection_worker_child() -> anyhow::Result<()> {
         .password("fixture-only")
         .ssl_mode(PgSslMode::VerifyFull)
         .ssl_root_cert_from_pem(ca);
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(60), &cancel);
     let store = PgStore::new(
         PgPoolOptions::new()
             .max_connections(2)
             .connect_with(options)
             .await?,
+        &control,
     )
     .await?;
-    let clock = Clock::new();
-    let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(60), &cancel);
     let s = scope("process-crash", TENANT)?;
     let projection = store.projection(
         store.takeover(&s, &DEFINITION, &control).await?,

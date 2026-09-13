@@ -188,12 +188,16 @@ impl Fixture {
             rss_projection::SourceScope::new(TenantId::parse(tenant)?, "rss.observation.v1")?,
         )?))
     }
-    pub async fn projection(&self) -> anyhow::Result<rss_projection_postgres::PgStore> {
+    pub async fn projection(
+        &self,
+        control: &rss_projection::Control<'_, ProjectionClock>,
+    ) -> anyhow::Result<rss_projection_postgres::PgStore> {
         Ok(rss_projection_postgres::PgStore::new(
             PgPoolOptions::new()
                 .max_connections(5)
                 .connect_with(self.options.clone())
                 .await?,
+            control,
         )
         .await?)
     }

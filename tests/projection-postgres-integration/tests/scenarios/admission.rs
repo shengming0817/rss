@@ -1,6 +1,10 @@
 use super::*;
 
-pub(crate) async fn rejects_dangerous_acl(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()> {
+pub(crate) async fn rejects_dangerous_acl(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     for (grant, revoke) in [
         (
             "GRANT UPDATE(position,epoch,worker_token) ON rss_projection.checkpoints TO projection_runtime",
@@ -20,15 +24,15 @@ pub(crate) async fn rejects_dangerous_acl(pool: &PgPool, owner: &PgPool) -> anyh
         ),
     ] {
         sqlx::raw_sql(grant).execute(owner).await?;
-        let adoption = PgStore::new(pool.clone()).await;
+        let adoption = PgStore::new(pool.clone(), control).await;
         sqlx::raw_sql(revoke).execute(owner).await?;
         assert!(
             matches!(adoption, Err(error) if error.kind() == rss_projection::ErrorKind::StorageContract)
         );
-        PgStore::new(pool.clone()).await?;
+        PgStore::new(pool.clone(), control).await?;
     }
-    isolation_contract(pool, owner).await?;
-    required_function_permissions(pool, owner).await
+    isolation_contract(pool, owner, control).await?;
+    required_function_permissions(pool, owner, control).await
 }
 
 pub(crate) async fn borrowed_timeout_rolls_back(
@@ -89,7 +93,7 @@ pub(crate) async fn store_identity(
             control,
         )
         .await?;
-    let second = PgStore::new(pool.clone()).await?;
+    let second = PgStore::new(pool.clone(), control).await?;
     assert!(
         matches!(second.projection(store.takeover(&s, &DEFINITION, control).await?, Counter), Err(e) if e.kind() == ErrorKind::ScopeMismatch)
     );
@@ -170,7 +174,11 @@ pub(crate) async fn application_error_cannot_claim_settlement(
     Ok(())
 }
 
-async fn required_function_permissions(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()> {
+async fn required_function_permissions(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     for (revoke, grant) in [
         (
             "REVOKE EXECUTE ON FUNCTION rss_projection.initialize(uuid,text,text,text,bigint,boolean,bigint,text[],bytea[],bytea) FROM projection_runtime",
@@ -190,19 +198,23 @@ async fn required_function_permissions(pool: &PgPool, owner: &PgPool) -> anyhow:
         ),
     ] {
         sqlx::raw_sql(revoke).execute(owner).await?;
-        let adoption = PgStore::new(pool.clone()).await;
+        let adoption = PgStore::new(pool.clone(), control).await;
         sqlx::raw_sql(grant).execute(owner).await?;
         assert!(
             matches!(adoption, Err(error) if error.kind() == ErrorKind::StorageContract),
             "missing EXECUTE must reject store admission"
         );
-        PgStore::new(pool.clone()).await?;
+        PgStore::new(pool.clone(), control).await?;
     }
     Ok(())
 }
 
 // F4.1: each drift must fail its own admission check, then restore the supported schema.
-async fn isolation_contract(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()> {
+async fn isolation_contract(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     for (change, restore) in [
         (
             "GRANT USAGE ON SCHEMA rss_projection TO PUBLIC",
@@ -221,7 +233,7 @@ async fn isolation_contract(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()>
             "REVOKE SELECT(position) ON rss_projection.events FROM PUBLIC",
         ),
     ] {
-        assert_drift(pool, owner, change, restore).await?;
+        assert_drift(pool, owner, control, change, restore).await?;
     }
     for table in ["sources", "events", "checkpoints", "receipts"] {
         let create = format!(
@@ -244,6 +256,7 @@ async fn isolation_contract(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()>
             assert_drift(
                 pool,
                 owner,
+                control,
                 &format!("{drop_policy}; {replacement}"),
                 &restore,
             )
@@ -252,17 +265,18 @@ async fn isolation_contract(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()>
         assert_drift(
             pool,
             owner,
+            control,
             &format!("CREATE POLICY extra ON rss_projection.{table} USING(true)"),
             &format!("DROP POLICY extra ON rss_projection.{table}"),
         )
         .await?;
-        assert_drift(pool, owner,
+        assert_drift(pool, owner, control,
             &format!("ALTER POLICY tenant_scope ON rss_projection.{table} WITH CHECK(true)"),
             &format!("ALTER POLICY tenant_scope ON rss_projection.{table} WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid)")).await?;
     }
     // Independent maintenance roles and a restricted inherited group remain supported.
     sqlx::raw_sql("CREATE ROLE projection_reader NOLOGIN; CREATE ROLE projection_maintenance NOLOGIN; GRANT USAGE ON SCHEMA rss_projection TO projection_reader; GRANT SELECT ON ALL TABLES IN SCHEMA rss_projection TO projection_reader; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_projection TO projection_reader; GRANT projection_reader TO projection_runtime; GRANT UPDATE ON rss_projection.events TO projection_maintenance; REVOKE SELECT ON ALL TABLES IN SCHEMA rss_projection FROM projection_runtime").execute(owner).await?;
-    let admitted = PgStore::new(pool.clone()).await;
+    let admitted = PgStore::new(pool.clone(), control).await;
     sqlx::raw_sql("GRANT SELECT ON ALL TABLES IN SCHEMA rss_projection TO projection_runtime; REVOKE projection_reader FROM projection_runtime; DROP OWNED BY projection_reader, projection_maintenance; DROP ROLE projection_reader, projection_maintenance").execute(owner).await?;
     admitted?;
     Ok(())
@@ -270,6 +284,7 @@ async fn isolation_contract(pool: &PgPool, owner: &PgPool) -> anyhow::Result<()>
 async fn assert_drift(
     pool: &PgPool,
     owner: &PgPool,
+    control: &Control<'_, Clock>,
     change: &str,
     restore: &str,
 ) -> anyhow::Result<()> {
@@ -277,7 +292,7 @@ async fn assert_drift(
     sqlx::raw_sql(sqlx::AssertSqlSafe(change))
         .execute(owner)
         .await?;
-    let admitted = PgStore::new(pool.clone()).await;
+    let admitted = PgStore::new(pool.clone(), control).await;
     sqlx::raw_sql(sqlx::AssertSqlSafe(restore))
         .execute(owner)
         .await?;
@@ -285,7 +300,7 @@ async fn assert_drift(
         matches!(admitted, Err(e) if e.kind()==ErrorKind::StorageContract),
         "accepted drift: {change}"
     );
-    PgStore::new(pool.clone()).await?;
+    PgStore::new(pool.clone(), control).await?;
     Ok(())
 }
 

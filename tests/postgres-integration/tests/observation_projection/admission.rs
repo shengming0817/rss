@@ -94,10 +94,10 @@ async fn permanent_resolver_failures_reject_the_effect() -> anyhow::Result<()> {
     use rss_projection::{Control, GenerationStart, ProjectionScope, ReplayBound};
     let f = Fixture::new(false).await?;
     let (source, event) = resolver_record(&f).await?;
-    let projection = f.projection().await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, std::time::Duration::from_secs(30), &cancel);
+    let projection = f.projection(&control).await?;
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "reject")?;
     projection
         .initialize(
