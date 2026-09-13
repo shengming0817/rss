@@ -156,6 +156,22 @@ enum Stop {
     Deadline,
     Drop,
 }
+impl Stop {
+    fn signal(self, timer: &ManualTimer, cancel: &CancellationToken) -> Option<ErrorKind> {
+        match self {
+            Self::Cancel => {
+                cancel.cancel();
+                Some(ErrorKind::Cancelled)
+            }
+            Self::Deadline => {
+                timer.advance(DEADLINE);
+                Some(ErrorKind::Deadline)
+            }
+            // Dropping the future must retire its connection without either control signal.
+            Self::Drop => None,
+        }
+    }
+}
 
 async fn probe_wait(pool: &PgPool, owner: &PgPool, stop: Stop) -> anyhow::Result<()> {
     let mut held = pool.acquire().await?;
@@ -181,22 +197,21 @@ async fn probe_wait(pool: &PgPool, owner: &PgPool, stop: Stop) -> anyhow::Result
         }
     })
     .await??;
-    match stop {
-        Stop::Drop => drop(startup),
-        Stop::Cancel | Stop::Deadline => {
-            let expected = if matches!(stop, Stop::Cancel) {
-                cancel.cancel();
-                ErrorKind::Cancelled
-            } else {
-                timer.advance(DEADLINE);
-                ErrorKind::Deadline
-            };
-            assert_eq!(
-                error_kind(tokio::time::timeout(GUARD, startup).await?),
-                Some(expected)
-            );
-        }
+    if let Some(expected) = stop.signal(&timer, &cancel) {
+        assert_eq!(
+            error_kind(tokio::time::timeout(GUARD, startup).await?),
+            Some(expected)
+        );
+    } else {
+        drop(startup);
     }
+    assert_replacement(pool, original).await?;
+    blocker.rollback().await?;
+    wait_for_retirement(owner, original).await?;
+    fresh_admission(pool).await
+}
+
+async fn assert_replacement(pool: &PgPool, original: i32) -> anyhow::Result<()> {
     // Keep the lock: default return-to-pool ping would wait for the original query and
     // retain the only permit. Quarantine instead allows a replacement backend now.
     let mut replacement = tokio::time::timeout(GUARD, pool.acquire())
@@ -206,8 +221,10 @@ async fn probe_wait(pool: &PgPool, owner: &PgPool, stop: Stop) -> anyhow::Result
         .fetch_one(&mut *replacement)
         .await?;
     assert_ne!(pid, original, "interrupted probe connection was reused");
-    drop(replacement);
-    blocker.rollback().await?;
+    Ok(())
+}
+
+async fn wait_for_retirement(owner: &PgPool, original: i32) -> anyhow::Result<()> {
     tokio::time::timeout(GUARD, async {
         while sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE pid=$1)",
@@ -220,8 +237,7 @@ async fn probe_wait(pool: &PgPool, owner: &PgPool, stop: Stop) -> anyhow::Result
         }
         Ok::<(), anyhow::Error>(())
     })
-    .await??;
-    fresh_admission(pool).await
+    .await?
 }
 
 async fn wait_for_probe(owner: &PgPool, pid: i32) -> anyhow::Result<()> {
