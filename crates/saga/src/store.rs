@@ -1,4 +1,7 @@
-use crate::{Control, Definition, Error, Event, Scope, Snapshot, Timer};
+use crate::{
+    Control, Definition, EffectKey, Error, Event, HistoryCapacity, HistoryHead, ReadBudget, Scope,
+    Snapshot, Timer,
+};
 use std::future::Future;
 
 /// Adapter-issued claim. Implementing a Store is a trusted provider boundary.
@@ -34,26 +37,68 @@ impl Lease {
     }
 }
 /// Only the executor creates mutations; adapters can inspect, validate and persist them.
+#[derive(Clone)]
 pub struct Mutation {
+    scope: Scope,
     event: Event,
+    before: HistoryHead,
+    after: HistoryHead,
+    key: EffectKey,
 }
 impl Mutation {
-    pub(crate) fn new(snapshot: &Snapshot, event: Event) -> Result<Self, Error> {
-        snapshot.apply(event.clone())?;
-        Ok(Self { event })
+    pub(crate) fn new(scope: Scope, snapshot: &Snapshot, event: Event) -> Result<Self, Error> {
+        let after = snapshot.prepare(&event, true)?;
+        let key = snapshot
+            .definition()
+            .effect_key(scope, event.step, event.kind.phase())?;
+        Ok(Self {
+            scope,
+            event,
+            before: snapshot.head().clone(),
+            after,
+            key,
+        })
     }
-    /// Closed executor-created transition; persist only after validating lease and expected revision.
+    /// Tenant and instance for which the executor prepared this mutation.
+    pub const fn scope(&self) -> Scope {
+        self.scope
+    }
+    /// Closed executor-created transition.
     pub fn event(&self) -> &Event {
         &self.event
     }
+    /// Expected fixed-size state, including capacity CAS.
+    pub fn before(&self) -> &HistoryHead {
+        &self.before
+    }
+    /// Core-derived result, independently checked by the provider.
+    pub fn after(&self) -> &HistoryHead {
+        &self.after
+    }
+    /// Scope-bound immutable effect key.
+    pub fn effect_key(&self) -> &EffectKey {
+        &self.key
+    }
+    pub(crate) fn accept(self, snapshot: &mut Snapshot) {
+        snapshot.accept(self.event, self.after);
+    }
+}
+/// Independent, fairly pageable discovery sets derived from the same durable admission rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateFilter {
+    /// Work that can advance within its durable capacity, including pending settlements.
+    Runnable,
+    /// Work awaiting explicit capacity growth. Does not include terminal or paused instances.
+    CapacityBlocked,
 }
 /// Trusted provider boundary for tenant-scoped, lease-fenced atomic Saga persistence.
 pub trait Store: Send + Sync {
-    /// Atomically register immutable scope/definition metadata. Same identity with changed metadata is a conflict; caller owns authorization.
+    /// Atomically register scope, exact definition and capacity. An existing scope must match both definition and current capacity; changes require explicit growth. Caller owns authorization.
     fn register<T: Timer>(
         &self,
         scope: Scope,
         definition: &Definition,
+        capacity: HistoryCapacity,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
     /// Serialize with prior writes, reject an unexpired holder, then issue a fresh token and monotonic epoch. Use provider time for expiry.
@@ -76,22 +121,39 @@ pub trait Store: Send + Sync {
         lease: &Lease,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Read fixed-size metadata under the live lease, without loading definition or journal payloads.
+    fn history_head<T: Timer>(
+        &self,
+        lease: &Lease,
+        control: &Control<'_, T>,
+    ) -> impl Future<Output = Result<HistoryHead, Error>> + Send;
+    /// Increase only finite capacity under tenant, live lease, journal revision and previous-capacity CAS.
+    fn extend_history<T: Timer>(
+        &self,
+        lease: &Lease,
+        expected_revision: u64,
+        expected_capacity: HistoryCapacity,
+        capacity: HistoryCapacity,
+        control: &Control<'_, T>,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
     /// Must serialize with prior writes before claiming their absence, and return one snapshot.
     fn snapshot<T: Timer>(
         &self,
         lease: &Lease,
+        read: ReadBudget,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<Snapshot, Error>> + Send;
     /// Under one transaction, validate scope, live lease and expected revision, then persist journal, protected receipt and status together. Unknown settlement must return CommitUnknown; never acknowledge staged writes.
     fn commit<T: Timer>(
         &self,
         lease: &Lease,
-        mutation: Mutation,
+        mutation: &Mutation,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
-    /// Return at most limit runnable unleased/expired scopes for this tenant, strictly ascending after the optional UUID. Exclude terminal and explicitly paused instances.
+    /// Return at most limit unleased/expired scopes in the selected discovery set, strictly ascending after the optional UUID. Exclude terminal, explicitly paused and ordinal-exhausted instances.
     fn candidates<T: Timer>(
         &self,
+        filter: CandidateFilter,
         tenant: rss_request_context::TenantId,
         after: Option<uuid::Uuid>,
         limit: u32,

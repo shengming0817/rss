@@ -220,7 +220,7 @@ async fn pending(
         3,
         "server has not settled yet"
     );
-    let recovery = direct.register(s, d, control);
+    let recovery = direct.register(s, d, history_capacity()?, control);
     tokio::pin!(recovery);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut recovery)
@@ -258,10 +258,13 @@ async fn completion(
         faulty,
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
     )
     .with_lease_policy(LeasePolicy::new(Duration::from_secs(6))?);
     // This proves lost COMMIT acknowledgement, not sub-second lease scheduling under load.
-    executor.register(s, d, control).await?;
+    executor
+        .register(s, d, history_capacity()?, control)
+        .await?;
     assert_kind(executor.run(s, 30, control).await, ErrorKind::CommitUnknown);
     assert_eq!(proxy.lost.load(Ordering::SeqCst), 3);
     assert_kind(
@@ -273,16 +276,18 @@ async fn completion(
         direct.clone(),
         protection()?,
         registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
     );
     assert_eq!(
-        recovered.run(s, 30, control).await?.status,
+        recovered.run(s, 30, control).await?.head().status(),
         Status::Succeeded
     );
-    let receipts: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM rss_saga.step_receipts WHERE saga_id=$1")
-            .bind(s.id())
-            .fetch_one(owner)
-            .await?;
+    let receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_saga.journal WHERE protected IS NOT NULL AND saga_id=$1",
+    )
+    .bind(s.id())
+    .fetch_one(owner)
+    .await?;
     assert_eq!(receipts, 3);
     assert_eq!(
         *effects
@@ -310,7 +315,7 @@ async fn registration_ack(
     let before = backend(pool).await?;
     proxy.arm.store(1, Ordering::SeqCst);
     assert_kind(
-        store.register(s, d, control).await,
+        store.register(s, d, history_capacity()?, control).await,
         ErrorKind::CommitUnknown,
     );
     assert_eq!(proxy.lost.load(Ordering::SeqCst), 1);
@@ -320,10 +325,10 @@ async fn registration_ack(
         "uncertain connection must not reenter pool"
     );
     // New transaction and instance lock prove the complete committed registration is present.
-    direct.register(s, d, control).await?;
+    direct.register(s, d, history_capacity()?, control).await?;
     verify_snapshot(direct, s, d, control).await?;
     rollback_ack(proxy, store, pool, s, d, control).await?;
-    direct.register(s, d, control).await?;
+    direct.register(s, d, history_capacity()?, control).await?;
     Ok(())
 }
 async fn rollback_ack(
@@ -338,7 +343,9 @@ async fn rollback_ack(
     let before = backend(pool).await?;
     proxy.arm.store(2, Ordering::SeqCst);
     assert_kind(
-        store.register(s, &different, control).await,
+        store
+            .register(s, &different, history_capacity()?, control)
+            .await,
         ErrorKind::RollbackUnknown,
     );
     assert_eq!(proxy.lost.load(Ordering::SeqCst), 2);
@@ -354,7 +361,7 @@ async fn cancel_during_commit(
     control: &Control<'_, Clock>,
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
-    let (result, ()) = tokio::join!(store.register(s, d, control), async {
+    let (result, ()) = tokio::join!(store.register(s, d, history_capacity()?, control), async {
         while proxy.arm.load(Ordering::SeqCst) != 0 {
             tokio::task::yield_now().await;
         }
@@ -371,7 +378,13 @@ async fn verify_snapshot(
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let lease = direct.claim(s, Duration::from_secs(5), control).await?;
-    assert_eq!(direct.snapshot(&lease, control).await?.definition(), d);
+    assert_eq!(
+        direct
+            .snapshot(&lease, read_budget()?, control)
+            .await?
+            .definition(),
+        d
+    );
     direct.release(&lease, control).await?;
     Ok(())
 }
@@ -388,7 +401,7 @@ async fn aborted_commit(
     let s = scope(TENANT)?;
     proxy.arm.store(1, Ordering::SeqCst);
     assert_kind(
-        store.register(s, d, control).await,
+        store.register(s, d, history_capacity()?, control).await,
         ErrorKind::CommitUnknown,
     );
     sqlx::raw_sql("DROP TRIGGER test_abort_commit ON rss_saga.instances; DROP FUNCTION rss_saga.test_abort_commit();").execute(owner).await?;
@@ -398,7 +411,7 @@ async fn aborted_commit(
         .await?;
     assert_eq!(count, 0);
     // The fresh registration transaction serializes on unique identity and establishes absence.
-    direct.register(s, d, control).await?;
+    direct.register(s, d, history_capacity()?, control).await?;
     verify_snapshot(direct, s, d, control).await?;
     Ok(())
 }

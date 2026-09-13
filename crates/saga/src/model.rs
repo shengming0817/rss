@@ -1,5 +1,8 @@
 //! One replay algorithm for live execution and restart.
-use crate::{Definition, Error, ProtectedReceipt};
+use crate::{
+    CandidateFilter, Definition, Error, ErrorKind, HistoryCapacity, HistoryHead, HistoryLimit,
+    ProtectedReceipt, ReadBudget,
+};
 use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 
@@ -100,135 +103,176 @@ pub struct Event {
     /// Present only for a paired forward completion; contains no plaintext.
     pub receipt: Option<ProtectedReceipt>,
 }
-#[derive(Debug, Clone)]
-/// Validated aggregate replay of a single instance definition and journal.
-pub struct Snapshot {
-    definition: Definition,
-    events: Vec<Event>,
-    progress: Progress,
+impl EventKind {
+    /// Stable effect phase associated with the closed transition.
+    pub const fn phase(self) -> Phase {
+        match self {
+            Self::ForwardIntent
+            | Self::ForwardApplied
+            | Self::ForwardNotApplied
+            | Self::ForwardProbeNotApplied
+            | Self::Abort => Phase::Forward,
+            _ => Phase::Compensation,
+        }
+    }
 }
-#[derive(Debug, Clone)]
+impl Event {
+    /// Conservative complete V1 event charge, independent of database tuple/TOAST storage.
+    pub fn encoded_bytes(&self) -> Result<u64, Error> {
+        Ok(crate::EVENT_BYTES
+            + self
+                .receipt
+                .as_ref()
+                .map_or(Ok(0), ProtectedReceipt::encoded_bytes)?)
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Intent {
+    pub step: usize,
+    pub attempt: u32,
+    pub kind: EventKind,
+}
+impl Intent {
+    pub(crate) fn event(self, seq: u64) -> Event {
+        Event {
+            seq,
+            step: self.step,
+            attempt: self.attempt,
+            kind: self.kind,
+            receipt: None,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// Fixed-size current projection. Storage data is checked against complete bounded replay.
 pub(crate) struct Progress {
-    pub status: Status,
-    pub forward: usize,
-    pub completed: Vec<(usize, ProtectedReceipt)>,
-    pub pending: Option<Event>,
-    pub forward_attempts: Vec<u32>,
-    pub forward_failures: Vec<u32>,
-    pub compensation_attempts: Vec<u32>,
+    pub(crate) status: Status,
+    pub(crate) forward: usize,
+    pub(crate) forward_attempt: u32,
+    pub(crate) forward_failures: u32,
+    pub(crate) compensation: Option<usize>,
+    pub(crate) compensation_attempt: u32,
+    pub(crate) pending: Option<Intent>,
+    pub(crate) last_kind: Option<EventKind>,
 }
-impl Snapshot {
-    /// Construct the empty state for an already validated registered definition.
-    pub fn empty(definition: Definition) -> Self {
-        let len = definition.steps().len();
+impl Progress {
+    /// Acknowledged business state; capacity exhaustion does not replace it.
+    pub(crate) const fn status(&self) -> Status {
+        self.status
+    }
+    pub(crate) fn empty() -> Self {
         Self {
-            definition,
-            events: Vec::new(),
-            progress: Progress {
-                status: Status::Ready,
-                forward: 0,
-                completed: Vec::new(),
-                pending: None,
-                forward_attempts: vec![0; len],
-                forward_failures: vec![0; len],
-                compensation_attempts: vec![0; len],
-            },
+            status: Status::Ready,
+            forward: 0,
+            forward_attempt: 0,
+            forward_failures: 0,
+            compensation: None,
+            compensation_attempt: 0,
+            pending: None,
+            last_kind: None,
         }
     }
-    /// Validate stored definition fingerprint and replay every event in exact sequence order.
-    pub fn from_events(definition: Definition, events: Vec<Event>) -> Result<Self, Error> {
-        definition.validate()?;
-        let mut snapshot = Self::empty(definition);
-        for event in events {
-            snapshot.append(event)?;
-        }
-        Ok(snapshot)
-    }
-    /// Pinned definition used to validate this snapshot.
-    pub fn definition(&self) -> &Definition {
-        &self.definition
-    }
-    /// Validated committed journal prefix; protected receipts remain opaque.
-    pub fn events(&self) -> &[Event] {
-        &self.events
-    }
-    /// Next journal sequence number and expected mutation CAS revision.
-    pub fn revision(&self) -> u64 {
-        self.events.len() as u64
-    }
-    /// Status derived from the complete validated journal prefix.
-    pub fn status(&self) -> Status {
-        self.progress.status
-    }
-    pub(crate) fn progress(&self) -> &Progress {
-        &self.progress
-    }
-    /// Shared transition validation for adapters and the executor. Storage input is never trusted.
-    pub fn apply(&self, event: Event) -> Result<Self, Error> {
-        let mut next = self.clone();
-        next.append(event)?;
-        Ok(next)
-    }
-    fn append(&mut self, event: Event) -> Result<(), Error> {
-        let revision = self.revision();
-        let status = self.status();
-        let p = &mut self.progress;
-        if event.seq != revision
-            || event.step >= self.definition.steps().len()
-            || status.is_terminal()
-        {
-            return Err(Error::new(crate::ErrorKind::Integrity));
-        }
-        if (event.kind == EventKind::ForwardApplied) != event.receipt.is_some() {
-            return Err(Error::new(crate::ErrorKind::Integrity));
-        }
-        let pending_matches = |phase| {
-            p.pending.as_ref().is_some_and(|e| {
-                e.step == event.step && e.attempt == event.attempt && e.kind == phase
+    pub(crate) fn reserve(&self) -> Result<(u64, u64), Error> {
+        if self.forward > 1024
+            || self.compensation.is_some_and(|c| c >= 1024)
+            || self.pending.is_some_and(|p| {
+                p.step >= 1024
+                    || !matches!(
+                        p.kind,
+                        EventKind::ForwardIntent | EventKind::CompensationIntent
+                    )
             })
+        {
+            return Err(ErrorKind::Integrity.into());
+        }
+        if self.status.is_terminal() {
+            return Ok((0, 0));
+        }
+        let (entries, receipt) = if matches!(self.status, Status::Ready | Status::Running) {
+            let pending = self.pending.is_some();
+            (
+                2 * self.forward as u64 + 1 + if pending { 3 } else { 0 },
+                pending,
+            )
+        } else {
+            let earlier = self.compensation.unwrap_or(0) as u64;
+            let current = if self.pending.is_some() {
+                1
+            } else if self.compensation_attempt == 0 || self.last_kind == Some(EventKind::Resume) {
+                2
+            } else {
+                0
+            };
+            (2 * earlier + current, false)
+        };
+        Ok((
+            entries,
+            entries * crate::EVENT_BYTES + if receipt { crate::RECEIPT_BYTES } else { 0 },
+        ))
+    }
+    fn transition(&self, definition: &Definition, event: &Event) -> Result<Self, Error> {
+        let mut p = *self;
+        let invalid = || Error::new(ErrorKind::Integrity);
+        if p.status.is_terminal()
+            || event.step >= definition.steps().len()
+            || event.attempt == 0
+            || (event.kind == EventKind::ForwardApplied) != event.receipt.is_some()
+        {
+            return Err(invalid());
+        }
+        let matches = |kind| {
+            self.pending
+                == Some(Intent {
+                    kind,
+                    step: event.step,
+                    attempt: event.attempt,
+                })
         };
         match event.kind {
             EventKind::ForwardIntent => {
                 if !matches!(p.status, Status::Ready | Status::Running)
                     || p.pending.is_some()
                     || event.step != p.forward
-                    || Some(event.attempt) != p.forward_attempts[event.step].checked_add(1)
+                    || Some(event.attempt) != p.forward_attempt.checked_add(1)
+                    || p.forward_failures >= definition.steps()[event.step].max_failures()
                 {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                    return Err(invalid());
                 }
-                p.forward_attempts[event.step] = event.attempt;
-                p.pending = Some(event.clone());
+                p.forward_attempt = event.attempt;
+                p.pending = Some(Intent {
+                    step: event.step,
+                    attempt: event.attempt,
+                    kind: event.kind,
+                });
                 p.status = Status::Running;
             }
             EventKind::ForwardApplied => {
-                if !pending_matches(EventKind::ForwardIntent) {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                if !matches(EventKind::ForwardIntent) {
+                    return Err(invalid());
                 }
-                let receipt = event
-                    .receipt
-                    .clone()
-                    .ok_or(Error::new(crate::ErrorKind::Integrity))?;
+                let receipt = event.receipt.as_ref().ok_or_else(invalid)?;
                 if receipt.attempt() != event.attempt || receipt.completed_seq() != event.seq {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                    return Err(invalid());
                 }
-                p.completed.push((event.step, receipt));
                 p.forward += 1;
+                p.forward_attempt = 0;
+                p.forward_failures = 0;
                 p.pending = None;
-                p.status = if p.forward == self.definition.steps().len() {
+                p.status = if p.forward == definition.steps().len() {
                     Status::Succeeded
                 } else {
                     Status::Running
                 };
             }
             EventKind::ForwardNotApplied | EventKind::ForwardProbeNotApplied => {
-                if !pending_matches(EventKind::ForwardIntent) {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                if !matches(EventKind::ForwardIntent) {
+                    return Err(invalid());
                 }
                 p.pending = None;
                 if event.kind == EventKind::ForwardNotApplied {
-                    p.forward_failures[event.step] = p.forward_failures[event.step]
-                        .checked_add(1)
-                        .ok_or(Error::new(crate::ErrorKind::Integrity))?;
+                    p.forward_failures = p.forward_failures.checked_add(1).ok_or_else(invalid)?;
                 }
                 p.status = Status::Ready;
             }
@@ -236,12 +280,15 @@ impl Snapshot {
                 if p.status != Status::Ready
                     || p.pending.is_some()
                     || event.step != p.forward
-                    || event.attempt != p.forward_attempts[event.step]
-                    || event.attempt == 0
+                    || event.attempt != p.forward_attempt
+                    || p.forward_failures < definition.steps()[event.step].max_failures()
+                    || p.last_kind != Some(EventKind::ForwardNotApplied)
                 {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                    return Err(invalid());
                 }
-                p.status = if p.completed.is_empty() {
+                p.compensation = p.forward.checked_sub(1);
+                p.compensation_attempt = 0;
+                p.status = if p.compensation.is_none() {
                     Status::Compensated
                 } else {
                     Status::Compensating
@@ -250,46 +297,232 @@ impl Snapshot {
             EventKind::CompensationIntent => {
                 if p.status != Status::Compensating
                     || p.pending.is_some()
-                    || p.completed.last().map(|(i, _)| *i) != Some(event.step)
-                    || Some(event.attempt) != p.compensation_attempts[event.step].checked_add(1)
+                    || p.compensation != Some(event.step)
+                    || Some(event.attempt) != p.compensation_attempt.checked_add(1)
                 {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                    return Err(invalid());
                 }
-                p.compensation_attempts[event.step] = event.attempt;
-                p.pending = Some(event.clone());
+                p.compensation_attempt = event.attempt;
+                p.pending = Some(Intent {
+                    step: event.step,
+                    attempt: event.attempt,
+                    kind: event.kind,
+                });
             }
             EventKind::CompensationApplied
             | EventKind::CompensationNotApplied
             | EventKind::CompensationFailed => {
-                if !pending_matches(EventKind::CompensationIntent) {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                if p.status != Status::Compensating || !matches(EventKind::CompensationIntent) {
+                    return Err(invalid());
                 }
                 p.pending = None;
                 if event.kind == EventKind::CompensationApplied {
-                    p.completed.pop();
-                    p.status = if p.completed.is_empty() {
+                    p.compensation = event.step.checked_sub(1);
+                    p.compensation_attempt = 0;
+                    p.status = if p.compensation.is_none() {
                         Status::Compensated
                     } else {
                         Status::Compensating
                     };
-                } else if event.kind == EventKind::CompensationNotApplied {
-                    p.status = Status::Compensating;
-                } else {
+                } else if event.kind == EventKind::CompensationFailed {
                     p.status = Status::CompensationFailed;
                 }
             }
             EventKind::Resume => {
                 if p.status != Status::CompensationFailed
                     || p.pending.is_some()
-                    || p.completed.last().map(|(i, _)| *i) != Some(event.step)
-                    || event.attempt != p.compensation_attempts[event.step]
+                    || p.compensation != Some(event.step)
+                    || event.attempt != p.compensation_attempt
                 {
-                    return Err(Error::new(crate::ErrorKind::Integrity));
+                    return Err(invalid());
                 }
                 p.status = Status::Compensating;
             }
         }
-        self.events.push(event);
+        p.last_kind = Some(event.kind);
+        Ok(p)
+    }
+}
+#[derive(Debug, Clone)]
+/// Complete bounded validated history; transitions copy only a fixed-size progress value.
+pub struct Snapshot {
+    definition: Definition,
+    events: Vec<Event>,
+    receipt_sequences: Vec<usize>,
+    head: HistoryHead,
+    read: ReadBudget,
+}
+impl Snapshot {
+    /// Start bounded replay or a fresh registered instance; no unbounded construction exists.
+    pub fn empty(
+        definition: Definition,
+        capacity: HistoryCapacity,
+        read: ReadBudget,
+    ) -> Result<Self, Error> {
+        definition.validate()?;
+        Ok(Self {
+            definition,
+            events: Vec::new(),
+            receipt_sequences: Vec::new(),
+            head: HistoryHead {
+                revision: 0,
+                encoded_bytes: 0,
+                capacity,
+                progress: Progress::empty(),
+            },
+            read,
+        })
+    }
+    /// Replay one already persisted event. Historical admission is not reinterpreted under today's capacity.
+    pub fn replay(&mut self, event: Event) -> Result<(), Error> {
+        let after = self.prepare(&event, false)?;
+        self.accept(event, after);
         Ok(())
+    }
+    /// Validate one new transition including its settlement reservation, without copying history.
+    pub fn apply(&mut self, event: Event) -> Result<(), Error> {
+        let after = self.prepare(&event, true)?;
+        self.accept(event, after);
+        Ok(())
+    }
+    /// Pinned immutable definition.
+    pub fn definition(&self) -> &Definition {
+        &self.definition
+    }
+    /// One owned journal prefix, including one copy of each protected receipt.
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+    /// Expected journal CAS revision.
+    pub const fn revision(&self) -> u64 {
+        self.head.revision
+    }
+    /// Acknowledged business status.
+    pub const fn status(&self) -> Status {
+        self.head.progress.status
+    }
+    /// Validated small metadata, independently comparable with the provider projection.
+    pub const fn head(&self) -> &HistoryHead {
+        &self.head
+    }
+    /// Resolve a completed forward receipt using its replay-built sequence reference.
+    pub fn receipt(&self, step: usize) -> Result<&Event, Error> {
+        self.receipt_sequences
+            .get(step)
+            .and_then(|seq| self.events.get(*seq))
+            .ok_or(ErrorKind::ReceiptUnavailable.into())
+    }
+    /// Apply an acknowledged metadata-only capacity increase to a trusted provider's test/store state.
+    pub fn extend_capacity(
+        &mut self,
+        expected: HistoryCapacity,
+        next: HistoryCapacity,
+    ) -> Result<(), Error> {
+        if self.head.capacity != expected || !next.extends(expected) {
+            return Err(ErrorKind::Conflict.into());
+        }
+        self.head.capacity = next;
+        Ok(())
+    }
+    /// Rebind a caller's read budget after provider replay; validates actual retained history.
+    pub fn with_read_budget(mut self, read: ReadBudget) -> Result<Self, Error> {
+        self.head.check_read(read)?;
+        self.read = read;
+        Ok(self)
+    }
+    pub(crate) fn progress(&self) -> &Progress {
+        &self.head.progress
+    }
+    pub(crate) fn prepare(&self, event: &Event, admission: bool) -> Result<HistoryHead, Error> {
+        if event.seq != self.revision() {
+            return Err(if admission {
+                ErrorKind::Conflict
+            } else {
+                ErrorKind::Integrity
+            }
+            .into());
+        }
+        let after = self.transition(event)?;
+        if admission {
+            after.check_admission(self.read)?;
+        } else {
+            after.check_read(self.read)?;
+        }
+        Ok(after)
+    }
+    fn transition(&self, event: &Event) -> Result<HistoryHead, Error> {
+        let progress = self.head.progress.transition(&self.definition, event)?;
+        let after = HistoryHead {
+            revision: self
+                .revision()
+                .checked_add(1)
+                .ok_or(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity))?,
+            encoded_bytes: self
+                .head
+                .encoded_bytes
+                .checked_add(event.encoded_bytes()?)
+                .ok_or(ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity))?,
+            capacity: self.head.capacity,
+            progress,
+        };
+        Ok(after)
+    }
+    /// Classify a validated snapshot independently of the worker's read budget. Terminal, paused and ordinal-exhausted instances belong to neither discovery set.
+    pub fn candidate_filter(&self) -> Result<Option<CandidateFilter>, Error> {
+        if self.status().is_terminal() || self.status() == Status::CompensationFailed {
+            return Ok(None);
+        }
+        if self.progress().pending.is_some() {
+            return Ok(Some(CandidateFilter::Runnable));
+        }
+        let Some(event) = self.next_event()? else {
+            return Ok(None);
+        };
+        match self.transition(&event)?.check_capacity() {
+            Ok(_) => Ok(Some(CandidateFilter::Runnable)),
+            Err(e) if e.kind() == ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity) => {
+                Ok(Some(CandidateFilter::CapacityBlocked))
+            }
+            Err(e) => Err(e),
+        }
+    }
+    pub(crate) fn next_event(&self) -> Result<Option<Event>, Error> {
+        let p = self.progress();
+        let (step, attempt, kind) = if p.status == Status::Compensating {
+            (
+                p.compensation.ok_or(ErrorKind::Integrity)?,
+                p.compensation_attempt.checked_add(1),
+                EventKind::CompensationIntent,
+            )
+        } else {
+            let spec = self
+                .definition
+                .steps()
+                .get(p.forward)
+                .ok_or(ErrorKind::Integrity)?;
+            if p.forward_failures >= spec.max_failures() {
+                (p.forward, Some(p.forward_attempt), EventKind::Abort)
+            } else {
+                (
+                    p.forward,
+                    p.forward_attempt.checked_add(1),
+                    EventKind::ForwardIntent,
+                )
+            }
+        };
+        Ok(attempt.map(|attempt| Event {
+            seq: self.revision(),
+            step,
+            attempt,
+            kind,
+            receipt: None,
+        }))
+    }
+    pub(crate) fn accept(&mut self, event: Event, head: HistoryHead) {
+        if event.kind == EventKind::ForwardApplied {
+            self.receipt_sequences.push(self.events.len());
+        }
+        self.events.push(event);
+        self.head = head;
     }
 }

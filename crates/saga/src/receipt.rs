@@ -156,6 +156,24 @@ pub struct ProtectedReceipt {
     seq: u64,
 }
 impl ProtectedReceipt {
+    /// Conservative V1 JSON envelope charge; validate all variable-size components first.
+    pub fn encoded_bytes(&self) -> Result<u64, Error> {
+        if self.ciphertext.key_ref.is_empty()
+            || self.ciphertext.key_ref.len() > 1024
+            || self.ciphertext.bytes.is_empty()
+            || self.ciphertext.bytes.len() > 2 * 1024 * 1024
+            || self.aad.len() > crate::history::AAD_BYTES
+            || self.key_id.is_empty()
+            || self.key_id.len() > 64
+            || self.digest.len() != 32
+            || self.format != 1
+        {
+            return Err(crate::ErrorKind::Integrity.into());
+        }
+        Ok(1024
+            + 6 * (self.ciphertext.key_ref.len() + self.key_id.len()) as u64
+            + 5 * (self.ciphertext.bytes.len() + self.aad.len() + self.digest.len()) as u64)
+    }
     /// Forward intent attempt authenticated by this receipt.
     pub fn attempt(&self) -> u32 {
         self.attempt
@@ -224,6 +242,9 @@ impl<P: SagaReceiptProtector> ReceiptProtection<P> {
             .open(&receipt.ciphertext, context)
             .await
             .map_err(|_| Error::new(crate::ErrorKind::Protection))?;
+        if plaintext.expose().len() > crate::PLAINTEXT_BYTES as usize {
+            return Err(crate::ErrorKind::Protection.into());
+        }
         if !self
             .integrity
             .verify(&[&context.content(plaintext.expose())], &fingerprint)

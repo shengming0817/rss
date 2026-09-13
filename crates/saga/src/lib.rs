@@ -16,6 +16,18 @@
 //!     rss_saga::Mutation { event }
 //! }
 //! ```
+//! Acknowledged report state cannot be rewritten through duplicate public fields:
+//! ```compile_fail
+//! fn rewrite(report: &mut rss_saga::Report) { report.revision = 0; }
+//! ```
+//! History observations expose no independently mutable state coordinates:
+//! ```compile_fail
+//! fn rewrite(head: &mut rss_saga::HistoryHead) { head.revision = 0; }
+//! ```
+//! The durable progress representation is not a consumer-facing API:
+//! ```compile_fail
+//! fn expose(_: rss_saga::Progress) {}
+//! ```
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
@@ -23,6 +35,7 @@ mod action;
 mod control;
 mod definition;
 mod error;
+mod history;
 mod integrity;
 mod model;
 mod receipt;
@@ -33,6 +46,10 @@ pub use action::{
 pub use control::{Control, LeasePolicy, Timer};
 pub use definition::{ActionGeneration, Definition, EffectKey, Identity, StepSpec};
 pub use error::{Diagnostic, DiagnosticPhase, Error, ErrorKind};
+pub use history::{
+    DEFINITION_BYTES, EVENT_BYTES, HistoryCapacity, HistoryHead, HistoryLimit, PLAINTEXT_BYTES,
+    RECEIPT_BYTES, ReadBudget,
+};
 pub use integrity::{
     SagaReceiptFingerprint, SagaReceiptIntegrityError, SagaReceiptIntegrityKeyId,
     SagaReceiptIntegrityKeyring, VersionedSagaReceiptIntegrityKey,
@@ -42,7 +59,7 @@ pub use receipt::{
     Ciphertext, EffectContext, ProtectedReceipt, ReceiptContext, ReceiptProtection,
     SagaReceiptProtector,
 };
-pub use store::{Lease, Mutation, Store};
+pub use store::{CandidateFilter, Lease, Mutation, Store};
 mod executor;
 pub use executor::{
     Executor, Failure, FailureKind, InstanceResult, Report, RunStop, SuccessReference, SweepBudget,

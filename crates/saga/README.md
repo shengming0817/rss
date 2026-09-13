@@ -34,7 +34,7 @@ library has no remove, latest, cleanup or automatic definition retirement operat
 
 ## Execute and recover
 
-`Executor::new(store, protection, registry)` does not spawn work. Register an instance with a
+`Executor::new(store, protection, registry, read_budget)` does not spawn work. Register an instance with a
 caller-selected `Scope` (tenant + UUID), then call `run(scope, budget, control)`.
 `Control` carries an injected monotonic `Timer`, one absolute deadline and cancellation token.
 `budget` bounds driver advances, including probes and retry decisions; phases do not reset time. Budget exhaustion returns `RunStop::Yielded`, not a failure or successful Saga result.
@@ -65,7 +65,7 @@ key, and implement authoritative probing. This is not a distributed atomic trans
 
 `CommitUnknown`, `RollbackUnknown`, cancellation and deadlines do not prove rollback. Reload through
 the same recovery path after ownership is available; never substitute a new instance/effect key.
-Reports describe acknowledged state only and include the failed step and closed cause when compensating or paused. `DefinitionBuilder::last_step` returns a typed `Completion<R>` witness; use it with `Report.success` and `Executor::success_receipt` to retrieve the final authenticated receipt. The resolver checks scope, exact definition and the actual registered Rust receipt type before decoding. Application message ACKs must wait for the required
+Reports expose their single acknowledged `HistoryHead` through `head()`. Read status, revision, capacity and usage through that observation; for example, pass `head.revision()` and `head.capacity()` from the same head to `extend_history`. Report state has no duplicate public fields, and the stored progress representation is private. Reports include the failed step and closed cause when compensating or paused. `DefinitionBuilder::last_step` returns a typed `Completion<R>` witness; use it with `Report.success` and `Executor::success_receipt` to retrieve the final authenticated receipt. The resolver checks scope, exact definition and the actual registered Rust receipt type before decoding. Application message ACKs must wait for the required
 acknowledged durable transition. Saga does not own broker settlement, a DLQ, or a management API.
 
 ## Receipt protection
@@ -187,8 +187,8 @@ async fn checkout<S: Store>(store: S, scope: Scope, encryption_key: aead::Unboun
     let provider = LocalAead { key: aead::LessSafeKey::new(encryption_key), key_id: "demo-key-v1".into() };
     let keyring = SagaReceiptIntegrityKeyring::new(integrity_key, vec![])
         .map_err(|_| Error::new(ErrorKind::Protection))?;
-    let executor = Executor::new(store, ReceiptProtection::new(provider, keyring), registry);
-    executor.register(scope, &definition, control).await?;
+    let executor = Executor::new(store, ReceiptProtection::new(provider, keyring), registry, ReadBudget::new(HistoryCapacity::new(10_000, 256 * 1024 * 1024)?, 1024 * 1024 * 1024)?);
+    executor.register(scope, &definition, HistoryCapacity::new(10_000, 256 * 1024 * 1024)?, control).await?;
     let report = executor.run(scope, 20, control).await?;
     let receipt = match &report.success {
         Some(reference) => Some(executor.success_receipt(reference, &completion, control).await?),
@@ -200,3 +200,51 @@ async fn checkout<S: Store>(store: S, scope: Scope, encryption_key: aead::Unboun
 
 
 最小可运行使用流程及独立源码/候选 artifact 命令见 [rss-examples](../examples/README.md)。
+
+## Finite history capacity
+
+Construct `Executor::new(store, protection, registry, read_budget)` with an explicit
+`ReadBudget::new(history_capacity, authentication_bytes)?`. Register each scope with
+`register(scope, definition, capacity, control)`. Retries must match both the exact definition and current capacity; a different capacity returns `Conflict`, including an outdated value after growth. There is no unbounded default or legacy overload.
+The example's 10,000 events and 256 MiB are explicit caller choices, not a production SLO.
+
+`HistoryCapacity` bounds the committed journal plus required reservations in entries and charged
+encoded bytes. Receipt-free events cost 256 bytes. A protected receipt additionally costs
+`1024 + 6*(key_ref_bytes + integrity_key_id_bytes) + 5*(ciphertext_bytes + aad_bytes + digest_bytes)`.
+The conservative V1 charge covers JSON number-array and escaped-string expansion; it does not
+change receipt encoding or measure database physical storage. Definitions have a separate encoded
+bound in the provider. Authentication work reserves the existing 1 MiB maximum plaintext per
+historical receipt before any protector `open` call.
+
+The caller's read budget limits full history replay and authentication. Each receipt open consumes the maximum plaintext size from one invocation-wide allowance, including replay verification and subsequent compensation opens. Running out at a safe boundary returns `HistoryLimited` before another intent or Resume is written; another invocation may continue with a fresh finite allowance. Before admitting an intent,
+the executor also verifies that its maximum settlement remains readable under that budget.
+`RunStop::HistoryLimited(reason)` preserves a closed resource owner: `DurableCapacity` requires explicit growth, `ReadBudget` requires a larger configured read budget, and `AuthenticationAllowance` means a fresh invocation can continue. Static admission is checked before charging the current allowance, so a permanently insufficient read budget is never reported as a retryable invocation yield. It preserves business status and
+reports the acknowledged `HistoryHead`; it is distinct from advance-budget `Yielded`, failed
+compensation and an unknown effect. Capacity exhaustion does not automatically abort a Saga.
+
+A forward intent reserves its maximum receipt settlement, required Abort and first compensation
+of applied effects. Compensation intents reserve settlement; Resume reserves itself and the next
+intent/settlement pair. Pending effects settle from these reservations. A negative probe or failed
+compensation is a safe boundary at which another attempt can be refused. Finite capacity cannot
+promise unlimited retries or crashes. Serialization/protection contract failures remain separate
+from history capacity and never prove that an effect was absent.
+
+`Executor::capacity_blocked(tenant, cursor, limit, control)` fairly pages capacity-blocked scopes
+without loading history, independently of `run_once`'s runnable page. Products can call
+`history_head` for each discovered scope and authorize a finite `extend_history` using the same
+head's revision and capacity. `Store::candidates(CandidateFilter, ...)` uses the same durable
+admission predicate for both sets; terminal, explicitly paused and ordinal-exhausted instances
+belong to neither. This adds no persisted pause state and does not continuously replay blocked history.
+
+`Executor::history_head(scope, control)` remains available without loading journal payloads.
+`extend_history(scope, expected_revision, expected_capacity, larger_capacity, control)` performs
+explicit monotonic growth under a live lease and both CAS coordinates. Products own authorization
+and resource sizing. To recover beyond a worker's read budget, supply an explicitly larger finite
+budget to the same executor type, then use ordinary run/resume. No special bypass worker is needed.
+
+`Snapshot::empty(definition, capacity, read_budget)?` starts bounded replay; `replay(event)` checks
+stored sequence, receipt coordinates, actual use and transitions without retroactively applying
+new-intent admission to historical events. Providers compare the resulting `head()` with locked
+metadata. Live transitions prepare a fixed-size result before persistence and accept it only after
+ACK; they do not copy the complete history. Each protected receipt is retained once, with sequence
+references for compensation and successful result lookup.

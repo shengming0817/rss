@@ -17,9 +17,10 @@ impl Store for CompletionFault {
         &self,
         s: Scope,
         d: &Definition,
+        capacity: HistoryCapacity,
         c: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.store.register(s, d, c).await
+        self.store.register(s, d, capacity, c).await
     }
     async fn claim<T: Timer>(
         &self,
@@ -44,22 +45,47 @@ impl Store for CompletionFault {
     async fn release<T: Timer>(&self, l: &Lease, c: &Control<'_, T>) -> Result<(), Error> {
         self.store.release(l, c).await
     }
-    async fn snapshot<T: Timer>(&self, l: &Lease, c: &Control<'_, T>) -> Result<Snapshot, Error> {
-        self.store.snapshot(l, c).await
+    async fn history_head<T: Timer>(
+        &self,
+        l: &Lease,
+        c: &Control<'_, T>,
+    ) -> Result<HistoryHead, Error> {
+        self.store.history_head(l, c).await
+    }
+    async fn extend_history<T: Timer>(
+        &self,
+        l: &Lease,
+        revision: u64,
+        expected: HistoryCapacity,
+        capacity: HistoryCapacity,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.store
+            .extend_history(l, revision, expected, capacity, c)
+            .await
+    }
+    async fn snapshot<T: Timer>(
+        &self,
+        l: &Lease,
+        read: ReadBudget,
+        c: &Control<'_, T>,
+    ) -> Result<Snapshot, Error> {
+        self.store.snapshot(l, read, c).await
     }
     async fn candidates<T: Timer>(
         &self,
+        filter: CandidateFilter,
         t: rss_request_context::TenantId,
         after: Option<uuid::Uuid>,
         n: u32,
         c: &Control<'_, T>,
     ) -> Result<Vec<Scope>, Error> {
-        self.store.candidates(t, after, n, c).await
+        self.store.candidates(filter, t, after, n, c).await
     }
     async fn commit<T: Timer>(
         &self,
         l: &Lease,
-        m: Mutation,
+        m: &Mutation,
         c: &Control<'_, T>,
     ) -> Result<(), Error> {
         if m.event().kind == self.when && self.armed.swap(false, Ordering::SeqCst) {

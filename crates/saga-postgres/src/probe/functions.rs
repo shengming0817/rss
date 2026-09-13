@@ -1,9 +1,9 @@
 //! Read only the bundled declaration grammar; PostgreSQL resolves exact routine identities.
-use crate::{Error, MIGRATION_SQL, sql_error};
+use crate::{Error, UPGRADE_SQL, sql_error};
 use sqlx::{PgConnection, Row as _};
 
 pub(super) async fn validate(conn: &mut PgConnection) -> Result<(), Error> {
-    let definitions = definitions(MIGRATION_SQL).map_err(|()| invalid())?;
+    let definitions = definitions(UPGRADE_SQL).map_err(|()| invalid())?;
     let signatures: Vec<_> = definitions.iter().map(|d| d.signature.as_str()).collect();
     let returns: Vec<_> = definitions.iter().map(|d| d.returns).collect();
     let rows = sqlx::query(
@@ -16,6 +16,7 @@ actual AS (
 SELECT e.signature, p.prosrc, p.prosecdef, pg_get_function_identity_arguments(p.oid) AS arguments,
     p.prorettype=to_regtype(e.result) AND NOT p.proretset
     AND p.proowner=p.nspowner AND p.prokind='f'
+    AND has_function_privilege(current_user,p.oid,'EXECUTE')
     AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
     AND NOT p.proisstrict AND NOT p.proleakproof AND p.provolatile='v' AND p.proparallel='u'
     AND p.pronargdefaults=0 AND p.provariadic=0 AND p.proargmodes IS NULL
@@ -79,7 +80,10 @@ struct Definition<'a> {
 // This is deliberately not a general SQL parser: unknown migration syntax fails closed.
 fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
     let mut result = Vec::new();
-    for declaration in sql.split("CREATE FUNCTION ").skip(1) {
+    for declaration in sql.split("CREATE ").skip(1).filter_map(|part| {
+        part.strip_prefix("FUNCTION ")
+            .or_else(|| part.strip_prefix("OR REPLACE FUNCTION "))
+    }) {
         let declaration = declaration.strip_prefix("rss_saga.").ok_or(())?;
         let (name, rest) = declaration.split_once('(').ok_or(())?;
         if name.is_empty()
@@ -96,7 +100,9 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
             .strip_prefix("SET search_path=pg_catalog,rss_saga AS $$")
             .ok_or(())?;
         let (body, _) = rest.split_once("$$;").ok_or(())?;
-        if body.trim().is_empty() || !matches!(returns, "trigger" | "void" | "bigint" | "jsonb") {
+        if body.trim().is_empty()
+            || !matches!(returns, "trigger" | "void" | "bigint" | "jsonb" | "boolean")
+        {
             return Err(());
         }
         result.push(Definition {
@@ -108,7 +114,7 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
             body,
         });
     }
-    if result.len() != 6 {
+    if result.len() != 12 {
         return Err(());
     }
     Ok(result)
@@ -123,7 +129,9 @@ fn argument_types(arguments: &str) -> Result<Vec<&str>, ()> {
             let mut tokens = arg.split_whitespace();
             let _name = tokens.next().ok_or(())?;
             let ty = tokens.next().ok_or(())?;
-            if tokens.next().is_some() || !matches!(ty, "uuid" | "jsonb" | "bigint" | "bytea") {
+            if tokens.next().is_some()
+                || !matches!(ty, "uuid" | "jsonb" | "bigint" | "bytea" | "text")
+            {
                 return Err(());
             }
             Ok(ty)
@@ -136,19 +144,25 @@ mod tests {
     use super::*;
     #[test]
     fn shipped_declarations_have_exact_signatures() -> Result<(), ()> {
-        let definitions = definitions(MIGRATION_SQL)?;
+        let definitions = definitions(UPGRADE_SQL)?;
         assert_eq!(
             definitions
                 .iter()
                 .map(|d| d.signature.as_str())
                 .collect::<Vec<_>>(),
             [
-                "rss_saga.assert_receipt_pair()",
-                "rss_saga.register(uuid,jsonb)",
-                "rss_saga.claim(uuid,uuid,bigint)",
+                "rss_saga.history_charge(jsonb)",
+                "rss_saga.history_reserve(jsonb)",
+                "rss_saga.next_progress(jsonb,jsonb,jsonb)",
+                "rss_saga.valid_instance(jsonb,jsonb,bigint,bigint,bigint,bigint)",
+                "rss_saga.valid_journal(text,bigint,bigint,bytea,jsonb,bigint)",
+                "rss_saga.register(uuid,jsonb,jsonb)",
                 "rss_saga.lock_instance(uuid,uuid,bigint)",
+                "rss_saga.extend_history(uuid,uuid,bigint,bigint,jsonb,jsonb)",
+                "rss_saga.commit_event(uuid,uuid,bigint,jsonb,bytea,jsonb,jsonb)",
+                "rss_saga.runnable(jsonb,jsonb,bigint,bigint,bigint,bigint)",
+                "rss_saga.claim(uuid,uuid,bigint)",
                 "rss_saga.lease(uuid,uuid,bigint,bigint)",
-                "rss_saga.commit_event(uuid,uuid,bigint,jsonb,bytea)",
             ]
         );
         Ok(())
@@ -157,11 +171,11 @@ mod tests {
     fn incomplete_or_unknown_migration_grammar_fails_closed() {
         for sql in [
             String::new(),
-            MIGRATION_SQL.replace("rss_saga.lease(", "rss_saga.claim("),
-            MIGRATION_SQL.replace("AS $$", "AS $other$"),
-            MIGRATION_SQL.replace("LANGUAGE plpgsql", "LANGUAGE sql"),
-            MIGRATION_SQL.replace("p_ttl bigint)", "p_ttl bigint DEFAULT 1)"),
-            MIGRATION_SQL.replace("RETURNS void", "RETURNS SETOF void"),
+            UPGRADE_SQL.replace("rss_saga.lease(", "rss_saga.claim("),
+            UPGRADE_SQL.replace("AS $$", "AS $other$"),
+            UPGRADE_SQL.replace("LANGUAGE plpgsql", "LANGUAGE sql"),
+            UPGRADE_SQL.replace("p_ttl bigint)", "p_ttl bigint DEFAULT 1)"),
+            UPGRADE_SQL.replace("RETURNS void", "RETURNS SETOF void"),
         ] {
             assert!(definitions(&sql).is_err());
         }

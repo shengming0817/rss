@@ -31,9 +31,10 @@ async fn example_consumer() -> anyhow::Result<()> {
             }
             Err(error) => return Err(error.into()),
         }
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_saga.step_receipts")
-            .fetch_one(&owner)
-            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM rss_saga.journal WHERE protected IS NOT NULL")
+                .fetch_one(&owner)
+                .await?;
         anyhow::ensure!(count == 2, "durable example result missing");
         owner.close().await;
         Ok::<(), anyhow::Error>(())

@@ -125,7 +125,7 @@ async fn crash_at(
     let pool = deadpool_redis::Config::from_url(redis.url())
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
     let s = scope(TENANT)?;
-    store.register(s, d, control).await?;
+    store.register(s, d, history_capacity()?, control).await?;
     let root = std::env::temp_dir().join(format!("rss-saga-crash-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root)?;
     let ca = root.join("ca.pem");
@@ -196,6 +196,7 @@ async fn saga_worker_child() -> anyhow::Result<()> {
             Some(std::env::var("SAGA_TEST_MARKER")?.into()),
             std::env::var("SAGA_TEST_PHASE")? == "intent",
         )?,
+        read_budget()?,
     );
     let e = e.with_lease_policy(LeasePolicy::new(Duration::from_millis(300))?);
     let s = Scope::new(
@@ -235,7 +236,7 @@ async fn recover_after_crash(
     control: &Control<'_, Clock>,
     before_effect: bool,
 ) -> anyhow::Result<()> {
-    let rows:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM rss_saga.journal WHERE saga_id=$1),(SELECT count(*) FROM rss_saga.step_receipts WHERE saga_id=$1)").bind(s.id()).fetch_one(owner).await?;
+    let rows:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM rss_saga.journal WHERE saga_id=$1),(SELECT count(*) FROM rss_saga.journal WHERE protected IS NOT NULL AND saga_id=$1)").bind(s.id()).fetch_one(owner).await?;
     assert_eq!(rows, (1, 0));
     let remote_before = redis_effect::RedisSagaEffectFixture::new(pool.clone());
     let observed = remote_before
@@ -254,8 +255,12 @@ async fn recover_after_crash(
         store.clone(),
         protection()?,
         redis_registry(d.clone(), pool.clone(), None, false)?,
+        read_budget()?,
     );
-    assert_eq!(e.run(s, 30, control).await?.status, Status::Succeeded);
+    assert_eq!(
+        e.run(s, 30, control).await?.head().status(),
+        Status::Succeeded
+    );
     let first_key = d.effect_key(s, 0, Phase::Forward)?;
     let remote = redis_effect::RedisSagaEffectFixture::new(pool.clone());
     assert_eq!(
@@ -271,11 +276,12 @@ async fn assert_restart_receipts(
     s: Scope,
     before_effect: bool,
 ) -> anyhow::Result<()> {
-    let receipts: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM rss_saga.step_receipts WHERE saga_id=$1")
-            .bind(s.id())
-            .fetch_one(owner)
-            .await?;
+    let receipts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_saga.journal WHERE protected IS NOT NULL AND saga_id=$1",
+    )
+    .bind(s.id())
+    .fetch_one(owner)
+    .await?;
     assert_eq!(receipts, 3);
     let attempts:Vec<i64>=sqlx::query_scalar("SELECT attempt FROM rss_saga.journal WHERE saga_id=$1 AND step=0 AND kind='ForwardIntent' ORDER BY seq").bind(s.id()).fetch_all(owner).await?;
     assert_eq!(attempts, if before_effect { vec![1, 2] } else { vec![1] });

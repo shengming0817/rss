@@ -1,6 +1,12 @@
 /// Closed recovery decisions; diagnostics never change their meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ErrorKind {
+    /// A new effect is blocked by the specified finite resource owner.
+    #[error("saga history limited: {0:?}")]
+    HistoryLimited(crate::HistoryLimit),
+    /// History cannot be loaded or authenticated within this caller's finite read budget.
+    #[error("saga history read budget exhausted")]
+    HistoryReadLimit,
     /// Definition metadata is structurally invalid.
     #[error("invalid saga definition")]
     Definition,
@@ -37,9 +43,9 @@ pub enum ErrorKind {
     #[error("saga effect outcome unknown")]
     /// An admitted external effect has an uncertain outcome and must be probed.
     EffectUnknown,
-    #[error("saga execution budget exhausted")]
-    /// A supplied execution bound is invalid; normal budget yield uses Report instead.
-    Budget,
+    #[error("invalid saga resource budget")]
+    /// A supplied execution, history capacity, or authentication bound is invalid.
+    InvalidBudget,
     /// The configured database schema or runtime role violates the storage contract.
     #[error("saga storage contract not accepted")]
     StorageContract,
