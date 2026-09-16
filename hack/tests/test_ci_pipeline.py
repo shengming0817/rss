@@ -24,9 +24,65 @@ class PipelineTests(unittest.TestCase):
         self.bundle = self.root / 'build'
         self.bundle.mkdir()
         (self.bundle / 'tests.tar.zst').write_bytes(b'archive')
-        self.manifest = {'plan': self.plan, 'toolchain': 'rustc', 'archive': pipeline.sha(self.bundle / 'tests.tar.zst'),
+        self.manifest = {'plan': self.plan, 'toolchain': 'rustc', 'cargo_home': str(self.root / 'build-cargo'),
+                         'archive': pipeline.sha(self.bundle / 'tests.tar.zst'),
                          'launcher': None, 'supplemental': {}, 'groups': {g: {'filter': 'all()', 'tests': ['test']} for g in pipeline.GROUPS}}
         pipeline.write(self.bundle / 'manifest.json', self.manifest)
+
+    def test_build_records_the_cargo_home_used_by_compilation(self):
+        home = self.root / 'user'
+        cases = [(None, home / '.cargo'), ('', home / '.cargo'),
+                 ('relative cargo', self.root / 'relative cargo'),
+                 (str(self.root / 'absolute cargo'), self.root / 'absolute cargo')]
+        for covered in (False, True):
+            for configured, expected in cases:
+                with self.subTest(coverage=covered, cargo_home=configured):
+                    calls = []
+                    def run(command, **kwargs):
+                        calls.append((command, kwargs.get('env')))
+                        if command[:3] == ['cargo', 'nextest', 'archive']:
+                            (self.bundle / 'tests.tar.zst').write_bytes(b'archive')
+                        return '' if kwargs.get('capture') else 0
+                    env = {'CARGO_TARGET_DIR': str(self.root / 'target')}
+                    if configured is not None: env['CARGO_HOME'] = configured
+                    with patch.dict(os.environ, env, clear=True), \
+                         patch.object(pipeline, 'ROOT', self.root), \
+                         patch.object(Path, 'home', return_value=home), \
+                         patch.object(pipeline, 'run', run), \
+                         patch.object(pipeline, 'inventory', return_value=[]):
+                        self.assertEqual(pipeline.build(self.plan | {
+                            'full': False, 'packages': ['sample'], 'coverage': covered}), 0)
+                    manifest = json.loads((self.bundle / 'manifest.json').read_text())
+                    self.assertEqual(manifest['cargo_home'], str(expected))
+                    cargo_calls = [env for command, env in calls if command[0] == 'cargo']
+                    self.assertTrue(cargo_calls)
+                    self.assertTrue(all(env['CARGO_HOME'] == str(expected) for env in cargo_calls))
+
+    def test_report_uses_build_cargo_home_even_when_consumer_home_differs(self):
+        self.results()
+        report_home = str(self.root / 'report-cargo')
+        with patch.dict(os.environ, {'CARGO_HOME': report_home}), \
+             patch.object(pipeline, 'run', side_effect=lambda command, **kw: 'rustc' if kw.get('capture') else 0) as run:
+            self.assertEqual(pipeline.coverage(self.plan), 0)
+            self.assertEqual(os.environ['CARGO_HOME'], report_home)
+        report = [call for call in run.call_args_list if call.args[0][:3] == ['cargo', 'llvm-cov', 'report']]
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0].kwargs['env']['CARGO_HOME'], self.manifest['cargo_home'])
+        self.assertFalse(Path(self.manifest['cargo_home']).exists())
+        # The recorded path also participates in the existing result/manifest binding.
+        pipeline.write(self.bundle / 'manifest.json', self.manifest | {'cargo_home': report_home})
+        self.assertNotEqual(self.report(), 0)
+
+    def test_build_requires_valid_cargo_home_without_legacy_fallback(self):
+        missing = dict(self.manifest)
+        del missing['cargo_home']
+        invalid = [missing] + [self.manifest | {'cargo_home': value}
+                              for value in (None, '', 42, [], {}, 'relative', '/bad\0path')]
+        for manifest in invalid:
+            with self.subTest(cargo_home=manifest.get('cargo_home')), patch.object(pipeline, 'run', return_value='rustc'):
+                pipeline.write(self.bundle / 'manifest.json', manifest)
+                with self.assertRaisesRegex(ValueError, 'cargo home'):
+                    pipeline.load_build(self.plan)
 
     def test_new_group_reaches_remote_matrix_from_selection(self):
         output = self.root / 'github-output'

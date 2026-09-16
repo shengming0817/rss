@@ -141,8 +141,7 @@ def active(plan):
     return plan['full'] or bool(plan['packages'])
 
 
-def coverage_env(target):
-    env = os.environ | {'CARGO_TARGET_DIR': str(target)}
+def coverage_env(env):
     raw = run(['cargo', 'llvm-cov', 'show-env', '--sh'], env=env, capture=True)
     for line in raw.splitlines():
         words = shlex.split(line)
@@ -171,7 +170,13 @@ def build(plan):
         shutil.rmtree(bundle)
     bundle.mkdir(parents=True)
     target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target')) / ('ci-coverage' if plan['coverage'] else 'ci-tests')
-    env = coverage_env(target) if plan['coverage'] else os.environ | {'CARGO_TARGET_DIR': str(target)}
+    # Cargo resolves relative CARGO_HOME against the invocation directory; empty means default.
+    cargo_home = Path(os.environ.get('CARGO_HOME') or Path.home() / '.cargo')
+    if not cargo_home.is_absolute():
+        cargo_home = ROOT / cargo_home
+    env = os.environ | {'CARGO_TARGET_DIR': str(target), 'CARGO_HOME': str(cargo_home)}
+    if plan['coverage']:
+        env = coverage_env(env)
     target.mkdir(parents=True, exist_ok=True)
     for old in target.glob('*.profraw'):
         old.unlink()
@@ -216,7 +221,7 @@ def build(plan):
         raise ValueError('test groups omit or duplicate selected tests')
     if has_providers:
         shutil.copy2(extracted / 'target/debug/rss-test-launcher', bundle / 'rss-test-launcher')
-    manifest = {'plan': plan, 'toolchain': run(['rustc', '-Vv'], capture=True),
+    manifest = {'plan': plan, 'toolchain': run(['rustc', '-Vv'], capture=True), 'cargo_home': env['CARGO_HOME'],
                 'archive': sha(archive), 'groups': groups, 'supplemental': supplemental,
                 'launcher': sha(bundle / 'rss-test-launcher') if has_providers else None}
     write(bundle / 'manifest.json', manifest)
@@ -227,6 +232,9 @@ def build(plan):
 def load_build(plan):
     bundle = ARTIFACTS / 'build'
     manifest = json.loads((bundle / 'manifest.json').read_text())
+    cargo_home = manifest.get('cargo_home')
+    if not isinstance(cargo_home, str) or '\0' in cargo_home or not Path(cargo_home).is_absolute():
+        raise ValueError('invalid build cargo home; regenerate the archive')
     if manifest['plan'] != plan or manifest['toolchain'] != run(['rustc', '-Vv'], capture=True):
         raise ValueError('build identity mismatch')
     if manifest['archive'] != sha(bundle / 'tests.tar.zst'):
@@ -402,7 +410,10 @@ def coverage(plan):
             print(f'ci: coverage group={group}: {error}', file=sys.stderr)
             status = 1
     # report uses original archived objects and never builds or executes tests.
-    env = os.environ | {'CARGO_TARGET_DIR': str(target), 'CARGO_LLVM_COV_TARGET_DIR': str(target), 'CARGO_LLVM_COV_BUILD_DIR': str(target)}
+    # ref: cargo-llvm-cov v0.8.7 src/report.rs::ignore_filename_regex uses CARGO_HOME
+    # to exclude registry/git sources. Match the original objects, not this runner's cache.
+    env = os.environ | {'CARGO_HOME': manifest['cargo_home'], 'CARGO_TARGET_DIR': str(target),
+                        'CARGO_LLVM_COV_TARGET_DIR': str(target), 'CARGO_LLVM_COV_BUILD_DIR': str(target)}
     code = run(['cargo', 'llvm-cov', 'report', '--locked', '--nextest-archive-file', str(bundle / 'tests.tar.zst'), '--failure-mode', 'any', '--fail-under-lines', '80', '--lcov', '--output-path', str(target / 'lcov.info')], env=env)
     return code or status
 

@@ -153,7 +153,7 @@ pub async fn minio_tls_archive(attachment: NetworkAttachment<'_>) -> Result<Mini
     let policy = minio_archive_policy();
     let archive_alias = format!("rss/{MINIO_ARCHIVE_BUCKET}");
     let neighbor_alias = format!("rss/{MINIO_NEIGHBOR_BUCKET}");
-    let image = GenericImage::new("minio/minio", "RELEASE.2025-02-28T09-55-16Z")
+    let image = GenericImage::new("quay.io/minio/minio", "RELEASE.2025-02-28T09-55-16Z")
         .with_exposed_port(MINIO_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("API:"));
     let container = start_on_network(

@@ -46,6 +46,7 @@ doctest 使用独立 `cargo test --doc` 命令，仅由 `CI_PART=all` 或 `CI_PA
 普通 AMQP、Kafka、MQTT 使用共享实例。AMQP 用独立 vhost；Kafka 每个 fixture 用进程唯一 topic，
 group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，不同进程的公共配置添加 PID。
 重启 broker、服务端 TLS 身份变化、PG 集群角色/ACL 与 archive 复合场景保持显式独占。
+Archive 的 MinIO fixture 使用 Quay 上的固定 release tag；原 Docker Hub 来源已不可公开拉取。
 共享与独占复用同一构造和管理命令实现。MQTT 共享句柄不能重启 broker。
 
 资源携带唯一 `rss.test-run` 标签。启动失败或取消时，启动器终止 nextest 进程组并清理本次标签的容器和网络；
@@ -57,6 +58,11 @@ group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，�
 
 完整范围使用 `cargo llvm-cov show-env` 插桩后构建 archive。每组运行前清除自己的 profile 目录，
 不同组写独立路径。构建期 proc-macro 对象和本轮 profile 也传递，避免漏掉原覆盖率口径。
+构建 manifest 必须记录实际用于编译的绝对 `cargo_home`：非空 `CARGO_HOME` 优先，
+相对值以构建工作目录解析，未设置或为空时使用用户目录下的 `.cargo`。
+报告子进程采用此记录，让 cargo-llvm-cov 默认排除原构建的 registry/git 源码；
+消费机器的 Cargo 缓存目录可以不同，原目录无需存在。路径随 manifest 摘要绑定结果；
+缺失或非法字段直接拒绝，旧 archive 必须重新生成，不猜测 runner 路径。
 覆盖率 job 校验 SHA、工具链、archive 和 launcher 摘要、分组身份以及逐个 profile 摘要，
 解包原插桩对象后执行 `cargo llvm-cov report --nextest-archive-file ... --fail-under-lines 80`。
 它不编译、不执行测试。缺组、损坏、身份不符、测试失败均失败；有效部分仍尽可能生成诊断报告。
