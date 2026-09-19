@@ -44,6 +44,14 @@ class SemverTests(unittest.TestCase):
     def select(self, **kwargs):
         return semver.select(self.root, self.base, 'HEAD', {'full': True, 'packages': []}, **kwargs)
 
+    def test_tool_version_interface_returns_execution_requirement(self):
+        result = subprocess.run(
+            ['python3', str(ROOT / 'hack/ci-semver.py'), '--tool-version'],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '0.49.0\n')
+
     def test_explicit_empty_protection_skips(self):
         result = self.select()
         self.assertFalse(result['selected'])

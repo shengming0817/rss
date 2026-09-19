@@ -89,7 +89,7 @@ PG 取消/期限证明在真实数据库到达 effect 或注入 commit 阶段后
 保留 150ms 操作期限、连接回收与 durable rollback 断言；协调方同时观察操作提前完成，
 并以真实 5 秒等待约束连接、阶段进入、期限响应及关闭，避免前置超时后永等通知。
 
-## SemVer 独立检查与工具缓存
+## SemVer 独立检查与原生工具安装
 
 正常 PR/develop 由 plan 内的 semver 选择受影响受保护包，workflow 不重复维护清单。当前无承诺包明确跳过，
 checks 不安装 SemVer；有受检项时独立 job 的失败、取消、缺正式结果均阻断最终 cargo。
@@ -110,13 +110,12 @@ make ci CI_PART=semver CI_SEMVER_MODE=compare CI_SEMVER_PACKAGES=rss-contract CI
 Rust 检查不替代 wire、持久化格式或行为证明。
 
 GitHub 的 RSS SemVer workflow 支持独立 dispatch（baseline/head/packages），不重跑测试。
-工具压缩包按版本/平台/架构/SHA256 缓存，恢复后复验；缺失、坏包或缓存服务失败回源，最多四次有界下载，
-仅校验成功的包可安装和保存。工具安装、rustdoc/执行错误、兼容性失败分别保留实际阶段和退出码。
-本地已选中检查需要同版 cargo-semver-checks；没有工具时严格失败，不影响未选中的普通检查。
+CI 使用固定 revision 的 taiki-e/install-action 安装 cargo-semver-checks 0.49.0，由安装器按 runner 原生平台
+选择预编译包并校验完整性；不维护项目内平台表、下载 URL 或工具归档缓存。安装失败、rustdoc/执行错误、
+兼容性失败分别保留实际阶段和退出码。
 
-工具冷热证据复用 cold_cache/warm_run：冷跑隔离 cache key 后缀为 run ID-attempt，热跑只接受对应精确命中、
-再次验哈希且零回源，并核验相同 SemVer plan 与冷跑成功 result/cache facts。普通缓存失败可恢复，热跑不能以回源替代命中。
-指标 complete 仅表示现存记录通过校验；性能验收还必须核对具体场景预期记录，缺写入证据不能宣称完整测量。
-冷热事实及阶段耗时记入本次 PR 验收，不新增测量数据库或定时平台。
+本地已选中检查需要同版工具；没有工具或版本不匹配时严格失败，不影响未选中的普通检查。安装使用 Cargo
+支持的原生方式：`cargo install --locked --version 0.49.0 cargo-semver-checks`。
 
 ref: cargo-semver-checks v0.49.0 src/main.rs
+ref: taiki-e/install-action manifests/cargo-semver-checks.json@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c
