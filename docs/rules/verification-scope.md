@@ -37,9 +37,9 @@
 - 源码阶段可显式引用待验证源码；artifact 阶段仅允许精确候选包及其闭包，可使用指向解包 artifact 的
   path patch，禁止回到原 workspace 源码、internal package 或其它消费者补齐的依赖。正式验收绑定固定
   revision、version、archive digest 与实际命令结果；`cargo check` 不代表行为运行通过。
-- RSS 拥有库级 example、T1/T2 和 package correctness；rss-incubator 保留实际产品孵化、独立 pin/lock、
-  产品 CI 与接入验收，不作为所有 RSS 包的通用必经门禁。其 registry-only 消费约束不因主仓 artifact
-  proof 使用解包 path patch 而放宽；产品生产验收仍由产品 owner 按明确范围承担。
+- RSS 拥有库级 example、T1/T2、package correctness，以及独立源码与固定候选 artifact 消费证明。
+  各消费产品拥有自身 pin/lock、产品 CI、接入验收与生产 T3，职责遵循[项目范围](project-scope.md#产品拥有)。
+  主仓 artifact proof 允许的解包 path patch 不决定或放宽产品自身的依赖来源与验收要求。
 
 ## 默认选择
 
