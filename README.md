@@ -15,7 +15,7 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。按�
 | 执行与协议适配 | [Runtime](crates/runtime/README.md)、[Platform](crates/platform/README.md)、[Axum](crates/axum/README.md) |
 | 事务消息 | [消息核心](crates/transactional-messaging/README.md)、[执行循环](crates/transactional-messaging-runtime/README.md)、[PostgreSQL](crates/transactional-messaging-postgres/README.md) |
 | 消息传输与恢复 | [AMQP](crates/transactional-messaging-amqp/README.md)、[Kafka](crates/transactional-messaging-kafka/README.md)、[MQTT](crates/mqtt/README.md)、[Recovery](crates/transactional-messaging-recovery/README.md)、[S3 Archive](crates/transactional-messaging-recovery-s3/README.md) |
-| 持久化执行 | [Saga](crates/saga/README.md)、[Projection](crates/projection/README.md)、[Reconcile](crates/reconcile/README.md)、[Device Command](crates/device-command/README.md)；各组件文档链接其 PostgreSQL adapter |
+| 持久化执行 | [Saga](crates/saga/README.md) / [PG](crates/saga-postgres/README.md)、[Projection](crates/projection/README.md) / [PG](crates/projection-postgres/README.md)、[Reconcile](crates/reconcile/README.md) / [PG](crates/reconcile-postgres/README.md)、[Device Command](crates/device-command/README.md) / [PG](crates/device-command-postgres/README.md) |
 | 可靠观察与追加账本 | [Observation](crates/observation/README.md)、[Ledger](crates/ledger/README.md)及其 [Observation PG](crates/observation-postgres/README.md)、[Ledger PG](crates/ledger-postgres/README.md) |
 
 ## 最小源码消费
