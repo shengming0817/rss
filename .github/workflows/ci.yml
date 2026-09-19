@@ -95,8 +95,6 @@ jobs:
       baseline: ${{ needs.selection.outputs.baseline }}
       head: ${{ github.sha }}
       mode: affected
-      cold_cache: ${{ inputs.cold_cache || false }}
-      warm_run: ${{ inputs.warm_run || '' }}
   checks:
     needs: selection
     uses: ./.github/workflows/ci-compile.yml

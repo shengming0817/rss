@@ -14,6 +14,26 @@ PROCESS_TIMEOUT = 60
 
 
 class FinalizerTests(unittest.TestCase):
+    def test_semver_installs_execution_owned_native_tool_after_selection(self):
+        workflow = (ROOT / '.github/workflows/ci-semver.yml').read_text()
+        select_at = workflow.index('      - name: Select through Make\n')
+        resolve_at = workflow.index('      - name: Resolve pinned SemVer tool\n')
+        install_at = workflow.index('      - name: Install pinned SemVer tool\n')
+        execute_at = workflow.index('      - name: Execute only selected SemVer checks\n')
+        self.assertLess(select_at, resolve_at)
+        self.assertLess(resolve_at, install_at)
+        self.assertLess(install_at, execute_at)
+
+        resolve = workflow[resolve_at:install_at]
+        install = workflow[install_at:execute_at]
+        selected = "if: steps.select.outputs.semver == 'true'"
+        self.assertIn(selected, resolve)
+        self.assertIn('python3 hack/ci-semver.py --tool-version', resolve)
+        self.assertIn(selected, install)
+        self.assertIn('uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c', install)
+        self.assertIn('tool: cargo-semver-checks@${{ steps.semver_tool.outputs.version }}', install)
+        self.assertIn('fallback: none', install)
+
     def test_remote_matrix_and_final_gate_consume_selection(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertIn('integration_groups: ${{ steps.select.outputs.integration_groups }}', workflow)

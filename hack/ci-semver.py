@@ -14,8 +14,7 @@ import tomllib
 
 
 # One fixed CI tool package; this is not a general tool catalog.
-TOOL = {'version': '0.49.0', 'platform': 'x86_64-unknown-linux-gnu',
-        'sha256': '72f6834d75d28a66e02c9fd6a230ce901bb30eee6067b85867a97445df040e4a'}
+TOOL_VERSION = '0.49.0'
 
 
 def git(root, *args):
@@ -175,7 +174,7 @@ def execute(root, plan, output):
     cancelled = False
     try:
         version = subprocess.run(['cargo', 'semver-checks', '--version'], cwd=root, capture_output=True, text=True)
-        if version.returncode or version.stdout.strip() != 'cargo-semver-checks ' + TOOL['version']:
+        if version.returncode or version.stdout.strip() != 'cargo-semver-checks ' + TOOL_VERSION:
             tool_error = 'tool-version'
     except KeyboardInterrupt:
         cancelled = True
@@ -183,7 +182,7 @@ def execute(root, plan, output):
         tool_error = 'tool-unavailable'
     if tool_error:
         status = 1
-        print(f'SemVer: {tool_error}; expected cargo-semver-checks ' + TOOL['version'], file=sys.stderr)
+        print(f'SemVer: {tool_error}; expected cargo-semver-checks ' + TOOL_VERSION, file=sys.stderr)
     for item in plan['checks']:
         for configuration in item['configurations']:
             command = ['cargo', 'semver-checks', 'check-release', '--package', item['package'],
@@ -208,7 +207,7 @@ def execute(root, plan, output):
             if code != 0: status = 1
     if cancelled:
         status = 130
-    value = {'plan': plan, 'required_tool_version': TOOL['version'], 'results': results, 'exit': status, 'seconds': time.monotonic()-started}
+    value = {'plan': plan, 'required_tool_version': TOOL_VERSION, 'results': results, 'exit': status, 'seconds': time.monotonic()-started}
     temporary = output / 'result.json.tmp'
     temporary.write_text(json.dumps(value, indent=2) + '\n')
     temporary.replace(output / 'result.json')
@@ -217,5 +216,5 @@ def execute(root, plan, output):
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] != ['--tool-spec']: raise SystemExit('expected --tool-spec')
-    print(TOOL['version'], TOOL['platform'], TOOL['sha256'], sep='\t')
+    if sys.argv[1:] != ['--tool-version']: raise SystemExit('expected --tool-version')
+    print(TOOL_VERSION)
