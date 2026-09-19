@@ -1,14 +1,15 @@
 # Outbox 规则
 
-本文拥有 L2 producer/fact、outbox identity、relay、same-ID 窗口与恢复边界。
+本文拥有 Outbox 事务写入、identity、relay、same-ID 窗口与恢复边界。
 
-## Producer/fact closure
+## Transactional admission
 
-- OutboxFact HTTP producer 的每个 `emits` 必须指向同 domain 的存在 event；全 lifecycle 生效。
-- active producer 只指向 active 且有 subscriber 的 fact，并经 concern-specific tenant transaction 一次性写业务行
-  与 canonical outbox entry。
-- generic entry、provider `.write()` 后补 append、publisher 补发和兼容双写均不得进入 active producer。
-- carrier：typed contract/schema、generated fact provenance、contract validate 与 L2 assurance。
+- 相关业务效果与 Outbox entry 必须在调用方的同一租户事务内原子提交或回滚；
+  `OutboxWriter::append` 不提交调用方事务，事务结算遵循[本地事务规则](local-consistency.md)。
+- PostgreSQL 官方 Rust writer 与 SQL 入口共用组件 prepare/append 函数，遵循相同的身份、分区与权限约束。
+  事务提交后补 append、publisher 补发或兼容双写不能替代原子写入。
+- carrier：core 的 typed transaction/writer 契约、PostgreSQL 组件函数与真实 T2 原子性测试。
+  产品拥有业务组合与租户授权；接口类型本身不证明第三方 provider 的事务实现。
 
 ## 模式与 identity
 
@@ -65,8 +66,9 @@ retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 r
 
 ## Metadata funnel
 
-`INVARIANT: OUTBOX-METADATA-FUNNEL-01`：reserved envelope 字段只能由 generated/adapter canonical writer
-产生；业务 metadata 不得覆盖 tenant、schema、time、trace authority 或 wire identity。
+`INVARIANT: OUTBOX-METADATA-FUNNEL-01`：core 的私有字段与 typed constructors 隔离消息身份和业务
+扩展属性，adapter 按 canonical wire contract 编解码；业务属性不得覆盖 tenant、schema、time、
+trace authority 或 wire identity。metadata 构造不认证租户，可信身份与授权仍由消费方提供。
 
 ## Recovery
 

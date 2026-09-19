@@ -73,8 +73,8 @@ RSS 依赖只允许指向该次解包的候选闭包，不能回到主仓源码�
 `provider-integration.log`；精确 archive inventory/digest 随原 candidate artifact 保存。
 PR/issue 的验收记录需指向实际 revision、环境和这些运行结果。此处使用说明本身不是通过证据。
 
-rss-incubator 保留产品孵化、自有 pin/lock、产品 CI 和接入验收，不成为全部基础包的通用门禁；
-它的 registry-only 消费约束不因本仓允许解包 path patch 而改变。
+组件证明与产品验收的分工遵循[验证范围](../../docs/rules/verification-scope.md#示例与隔离消费目录)；
+消费产品按[项目范围](../../docs/rules/project-scope.md#产品拥有)承担自身接入与生产责任。
 
 ## 对标来源
 
