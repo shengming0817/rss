@@ -162,7 +162,9 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 ## 5. PR 流程（ship → review → fix → check）
 
-**外部 app handoff contract**：外部 app 是 `needs-review-again` / `needs-check-fix` 的实时消费者；`/pr-monitor` 是 ship/fix 收尾约 15min 后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、未重复领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
+**交接等待（ship/fix 共用）**：本地验证及必要修复收尾完成后开始计时，等待满 15 分钟。期间主 agent 禁止查询该 PR 及其 CI、review、监控状态，包括 label、评论、API、日志、进程和结果文件；不得委派子 agent 代查或提前启动 `/pr-monitor`。到期后再启动一次 `/pr-monitor <PR#> --mode=auto` 完成交接兜底。
+
+**外部 app handoff contract**：外部 app 是 `needs-review-again` / `needs-check-fix` 的实时消费者，不受主 agent 交接等待限制；`/pr-monitor` 是上述等待期满后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、未重复领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
 
 | live label | latest block | allowed dispatch |
 |------|------|------|
@@ -177,7 +179,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
   实施 → PR 创建 → 贴 pr-status/in-progress
   → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）→ 内置修复 Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
   → 切 pr-status/needs-review-again（首审唯一使用点）→ `make ci CI_BASE=<remote>/develop`；外部 app 可先行 review
-  → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
+  → 等待满 15min（期间禁止查询状态）→ 启动一次 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
 
 [review 轮] codex review 或 /pr-review <PR#>
   → 贴 findings 评论（codex / pm:pr-review）
@@ -189,7 +191,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
   → triage + IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → push/冲突预检 → deferred 留痕 + pm:fix
   → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → `make ci CI_BASE=<remote>/develop`
   → 外部 app 可在 label 后先行执行 /pr-review --check
-  → 延迟 ~15min 必须启动 pr-monitor --mode=auto 监听 check 交接
+  → 等待满 15min（期间禁止查询状态）→ 启动一次 pr-monitor --mode=auto 监听 check 交接
 
 /pr-review <PR#> --check（验证上一轮 findings 是否修复 + 抓回归）
   → 逐条核对当前代码：✅已修复 / ❌未修复 / ⚠️回归 / 🔧部分 → 贴 pm:pr-review（--check）

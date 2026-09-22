@@ -91,6 +91,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 2. IN_SCOPE Cx1/Cx2 直接派 `developer` 修复，不逐条询问。只要存在任一 IN_SCOPE Cx3/Cx4，就必须严格按 `.github/project-template/PROJECT.md` §5 发起一次批量处置，由用户对整批建议作出决策；只有不存在此类 finding 时才不沟通。这是顶部自主推进规则的显式决策门，不以“方案无歧义”为由跳过。
 3. 推送修复并完成冲突预检；按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、评论 artifact、机器块、label 流转与延迟监控，内容格式分别引用 `backlog.md` 和 `pr-comment.md`。
 4. **本地验证（label 后执行）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make -C <worktree> ci CI_BASE=<remote>/develop`（绝对路径）；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI，修复后推送并完成收尾流转。
+5. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 等待满 15 分钟；期间禁止查询交接状态，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
 
 artifact 必须先于总结与触发 label 落地；具体顺序见 `.github/project-template/PROJECT.md` §5。
 
