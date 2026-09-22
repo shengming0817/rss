@@ -1,4 +1,5 @@
 use super::*;
+mod interruption;
 
 pub(super) async fn run<T: Timer>(
     store: &PgLedger,
@@ -11,6 +12,7 @@ pub(super) async fn run<T: Timer>(
     commit(store, pool, control).await?;
     replay(pool, control).await?;
     cancellation(pool).await?;
+    interruption::run(store, pool, owner, control).await?;
     permissions(pool, owner, control).await
 }
 
