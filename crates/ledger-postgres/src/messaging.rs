@@ -1,4 +1,4 @@
-use crate::{Error, StagedAppend, repository};
+use crate::{Error, StagedAppend, borrowed};
 use rss_ledger::{AppendRequest, Authenticator};
 use rss_redact::RedactedSource;
 use rss_transactional_messaging::error::MessagingErrorKind;
@@ -18,12 +18,8 @@ pub async fn append_in(
     let request = request.clone();
     tx.with_connection(move |connection| {
         Box::pin(async move {
-            // Validate the actual borrowed database/role; the standalone pool may be different.
-            Ok(async {
-                crate::probe::validate_connection(connection).await?;
-                repository::append(connection, &auth, &request).await
-            }
-            .await)
+            // The message owner already bounds this borrow; do not start another clock.
+            Ok(borrowed::append(connection, &auth, &request).await)
         })
     })
     .await

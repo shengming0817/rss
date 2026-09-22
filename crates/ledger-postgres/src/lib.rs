@@ -1,7 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+mod borrowed;
 mod control;
+pub use borrowed::{append_in_transaction, read_window_in_transaction};
 mod error;
 #[cfg(feature = "messaging")]
 mod messaging;

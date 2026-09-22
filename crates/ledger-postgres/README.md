@@ -47,6 +47,15 @@ async fn business<T: Timer>(store: &PgLedger, request: AppendRequest, c: &Contro
 身份/配置检查和记录认证先于幂等返回。同链行锁、checked 分配、写入和链头更新保持在同一个事务。
 PG 序号范围为 `0..=i64::MAX`，耗尽显式拒绝。
 
+## SQLx 事务组合
+
+`append_in_transaction` 与 `read_window_in_transaction` 借用宿主持有的
+`sqlx::Transaction<Postgres>`，接收认证器和宿主的同一绝对 `Control`。
+两个入口都校验实际连接的 schema、权限与 tenant GUC；tenant 缺失、非法或不匹配时明确拒绝，
+读取不会把 RLS 过滤结果误报为空链。它们不获取其它连接、不改变 GUC/隔离级别、不结算事务。
+宿主必须传播错误、处理真实结算结果，并在未确认结算时隔离连接。
+窗口可包含该事务内尚未提交的记录，其认证结果不是提交证明。
+
 ## 消息事务组合
 
 启用 `messaging` 后调用 `append_in(tx, Arc<Authenticator>, request)`，无需构造独立 pool 或 PgLedger；不另开事务、不改变 tenant GUC 或预算、

@@ -83,6 +83,12 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         first.inserted() && !replay.inserted() && first.entry() == replay.entry(),
         "ledger idempotency mismatch"
     );
+    tokio::select! { biased;
+        () = cancel.cancelled() => anyhow::bail!("native transaction cancelled"),
+        result = tokio::time::timeout(control.remaining(), sqlx_borrow(&input, &req, &control)) => {
+            result.map_err(|_| anyhow::anyhow!("native transaction settlement unconfirmed"))??;
+        }
+    }
     store.close(&control).await?;
     let reopened = PgLedger::new(input.pg.pool().await?, input.auth()?, &control).await?;
     let denied = reopened
@@ -125,6 +131,44 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
     #[cfg(feature = "ledger-messaging")]
     messaging(&input, &reopened, &control).await?;
     reopened.close(&control).await?;
+    Ok(())
+}
+async fn sqlx_borrow(
+    input: &Input,
+    request: &AppendRequest,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let pool = input.pg.pool().await?;
+    let auth = input.auth()?;
+    use sqlx::Acquire;
+    let mut connection = pool.acquire().await?;
+    // This one-shot host always retires its lease, including if cancellation drops a
+    // pending BEGIN, operation or COMMIT. An error is never evidence of rollback.
+    connection.close_on_drop();
+    let mut tx = connection.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(request.ledger().tenant().to_string())
+        .execute(&mut *tx)
+        .await?;
+    let replay =
+        rss_ledger_postgres::append_in_transaction(&mut tx, &auth, request, control).await?;
+    anyhow::ensure!(!replay.inserted(), "native borrowed replay inserted again");
+    let window = rss_ledger_postgres::read_window_in_transaction(
+        &mut tx,
+        &auth,
+        request.ledger(),
+        Sequence::new(0),
+        ReadLimit::new(1, 4096)?,
+        control,
+    )
+    .await?;
+    anyhow::ensure!(
+        window.entries().len() == 1 && window.entries()[0].matches(request),
+        "native borrowed window differs"
+    );
+    tx.commit().await?;
+    drop(connection);
+    pool.close().await;
     Ok(())
 }
 #[cfg(feature = "ledger-messaging")]
