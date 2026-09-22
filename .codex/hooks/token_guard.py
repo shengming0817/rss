@@ -22,17 +22,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 
-MAX_FORK_TURNS = 3
+MAX_FORK_TURNS = 2
 TARGET_FORK_TURNS = "none"
 MIN_EMPTY_WRITE_STDIN_YIELD_MS = 60_000
 # Codex multi_agents_common: HARD_MAX = 3600_000; default model poll ≈ 30_000.
-MIN_WAIT_AGENT_TIMEOUT_MS = 300_000
-TARGET_WAIT_AGENT_TIMEOUT_MS = 600_000
+MIN_WAIT_AGENT_TIMEOUT_MS = 120_000
+TARGET_WAIT_AGENT_TIMEOUT_MS = 300_000
 HARD_MAX_WAIT_AGENT_TIMEOUT_MS = 3_600_000
 SPAWN_TOOL_NAMES = {"spawn_agent", "Agent"}
 WAIT_AGENT_TOOL_NAMES = {"wait_agent"}
@@ -49,6 +50,54 @@ EMPTY_CHARS_RE = re.compile(
     r"""(['"]?)chars\1\s*:\s*(['"])\s*\2""",
     re.IGNORECASE,
 )
+
+COORDINATION_NOTE = (
+    "子 agent 调用间隔：wait_agent timeout_ms 至少 120000，通常 300000；"
+    "对同一子 agent 的 list_agents/send_message/followup_task 非紧急调用至少间隔 5 分钟，"
+    "禁止连续短周期 list_agents 或逐步骤催问。仅在需求改变、安全风险、文件冲突、"
+    "明确请求信息或新证据将导致大面积返工时立即协调；"
+    "interrupt_agent 仅用于方向错误、失控、冲突、需求变更或继续执行可能造成损失。"
+)
+CI_NOTE = (
+    "make ci 返回 session 后仅空输入 write_stdin 续等，yield_time_ms 取工具及上级约束允许的最大值"
+    "（exec_command 上限 30000 ms）；禁止频繁查询日志、进程或 artifact；"
+    "完整结束后集中修复，仅复验失败项及受影响测试，同阶段不重跑完整 CI。"
+)
+
+
+def is_make_ci(command: str) -> bool:
+    """Recognize literal shell invocations; never interpret scripts or heredoc data."""
+    if "<<" in command:
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return False
+    segment = []
+    for word in words + [";"]:
+        if word and all(c in ";&|()\n" for c in word):
+            while segment and (re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", segment[0])
+                               or segment[0] in {"env", "command", "time"}):
+                segment.pop(0)
+            if segment and Path(segment[0]).name in {"make", "gmake"}:
+                # Skip values of options that consume a following argument.
+                args = iter(segment[1:])
+                for arg in args:
+                    if arg in {"-C", "-f", "--directory", "--file", "--makefile", "-I"}:
+                        next(args, None)
+                    elif arg == "ci":
+                        return True
+            segment = []
+        else:
+            segment.append(word)
+    return False
+
+
+def emit_context(event_name: str, note: str) -> None:
+    emit({"hookSpecificOutput": {"hookEventName": event_name, "additionalContext": note}})
 
 
 def emit(payload: dict) -> None:
@@ -203,8 +252,12 @@ def rewrite_wait_agent(tool_input: Any) -> Optional[tuple[dict, str]]:
 
 
 def handle_pre_tool_use(event: dict) -> None:
-    tool_name = str(event.get("tool_name") or "")
+    tool_name = str(event.get("tool_name") or "").split(".")[-1]
     tool_input = event.get("tool_input")
+
+    if tool_name in {"list_agents", "send_message", "followup_task", "interrupt_agent"}:
+        emit_context("PreToolUse", COORDINATION_NOTE)
+        return
 
     if tool_name in SPAWN_TOOL_NAMES:
         result = rewrite_spawn(tool_input)
@@ -234,6 +287,10 @@ def handle_pre_tool_use(event: dict) -> None:
         return
 
     if tool_name in BASH_TOOL_NAMES:
+        command = tool_input.get("command", tool_input.get("cmd", "")) if isinstance(tool_input, dict) else ""
+        if isinstance(command, str) and is_make_ci(command):
+            emit_context("PreToolUse", CI_NOTE)
+            return
         result = rewrite_bash(tool_input)
         if result is None:
             return
@@ -253,10 +310,16 @@ def main() -> int:
         return 0
     if not isinstance(event, dict):
         return 0
-    if str(event.get("hook_event_name") or "") != "PreToolUse":
-        return 0
     try:
-        handle_pre_tool_use(event)
+        event_name = event.get("hook_event_name")
+        if event_name == "PreToolUse":
+            handle_pre_tool_use(event)
+        elif event_name == "PostToolUse":
+            tool_input = event.get("tool_input")
+            if isinstance(tool_input, dict) and str(event.get("tool_name", "")).split(".")[-1] in BASH_TOOL_NAMES:
+                command = tool_input.get("command", tool_input.get("cmd", ""))
+                if isinstance(command, str) and is_make_ci(command):
+                    emit_context("PostToolUse", CI_NOTE)
     except Exception:
         # Fail-open: never block Codex on guard bugs.
         return 0

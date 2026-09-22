@@ -30,7 +30,18 @@
             "type": "command",
             "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/token_guard.py\"",
             "timeout": 5,
-            "statusMessage": "token_guard: rewrite empty write_stdin polls"
+            "statusMessage": "make ci 等待纪律与轮询提醒"
+          }
+        ]
+      },
+      {
+        "matcher": "list_agents|send_message|followup_task|interrupt_agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/token_guard.py\"",
+            "timeout": 5,
+            "statusMessage": "提醒子 agent 调用间隔与例外"
           }
         ]
       }
@@ -67,6 +78,19 @@
             "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/prmonitor_hook.py\"",
             "timeout": 30,
             "statusMessage": "通过 prmonitor 发送任务状态消息"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(/usr/bin/git rev-parse --show-toplevel 2>/dev/null) || exit 0; PY=\"$ROOT/.venv/bin/python\"; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || exit 0; exec \"$PY\" \"$ROOT/.codex/hooks/token_guard.py\"",
+            "timeout": 5,
+            "statusMessage": "make ci 完成后汇总修复提醒"
           }
         ]
       }

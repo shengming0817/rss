@@ -110,7 +110,7 @@ class TokenGuardTest(unittest.TestCase):
         self.assertEqual(updated["fork_turns"], "none")
 
     def test_spawn_none_and_small_int_passthrough(self):
-        for fork in ("none", "1", "3"):
+        for fork in ("none", "1", "2"):
             stdout = self.run_hook(
                 {
                     "hook_event_name": "PreToolUse",
@@ -129,7 +129,7 @@ class TokenGuardTest(unittest.TestCase):
             }
         )
         updated, note = self.parse_rewrite(stdout)
-        self.assertEqual(updated["timeout_ms"], 600000)
+        self.assertEqual(updated["timeout_ms"], 300000)
         self.assertEqual(updated["targets"], ["agent-1"])
         self.assertIn("timeout_ms", note or "")
 
@@ -142,7 +142,7 @@ class TokenGuardTest(unittest.TestCase):
             }
         )
         updated, _ = self.parse_rewrite(stdout)
-        self.assertEqual(updated["timeout_ms"], 600000)
+        self.assertEqual(updated["timeout_ms"], 300000)
 
     def test_wait_agent_long_timeout_passthrough(self):
         stdout = self.run_hook(
@@ -153,6 +153,48 @@ class TokenGuardTest(unittest.TestCase):
             }
         )
         self.assertEqual(stdout, "")
+
+    def test_wait_agent_policy_boundary(self):
+        self.assertEqual(self.hook.normalize_wait_agent_timeout_ms(119999), 300000)
+        self.assertIsNone(self.hook.normalize_wait_agent_timeout_ms(120000))
+        self.assertIsNone(self.hook.normalize_wait_agent_timeout_ms(300000))
+        self.assertEqual(self.hook.normalize_fork_turns("3"), "none")
+
+    def test_ci_reminder_before_and_after_without_rewriting_command(self):
+        for event_name in ("PreToolUse", "PostToolUse"):
+            stdout = self.run_hook({
+                "hook_event_name": event_name, "tool_name": "Bash",
+                "tool_input": {"command": "cd /repo && make ci CI_BASE=origin/develop > /tmp/ci.log 2>&1"},
+            })
+            specific = json.loads(stdout)["hookSpecificOutput"]
+            self.assertEqual(specific["hookEventName"], event_name)
+            self.assertIn("禁止频繁查询", specific["additionalContext"])
+            self.assertNotIn("updatedInput", specific)
+            self.assertNotIn("permissionDecision", specific)
+
+    def test_literal_ci_command_detection(self):
+        for command in ("make ci", "CI=1 /usr/bin/make -C /repo ci", "env CI=1 make -j 4 ci",
+                        "cd /repo\nmake ci", "make ci && echo done"):
+            self.assertTrue(self.hook.is_make_ci(command), command)
+        for command in ("echo 'make ci'", "rg 'make ci' README.md", "make ci-fast",
+                        "make -C ci test", "make -f ci test", "cat <<'EOF'\nmake ci\nEOF",
+                        "python3 -c 'print(\"make ci\")'", "echo 'unterminated"):
+            self.assertFalse(self.hook.is_make_ci(command), command)
+
+    def test_coordination_reminder_does_not_block_exceptions(self):
+        for name in ("list_agents", "send_message", "followup_task", "interrupt_agent"):
+            specific = json.loads(self.run_hook({
+                "hook_event_name": "PreToolUse", "tool_name": "collaboration." + name,
+                "tool_input": {"target": "worker", "message": "发现文件冲突"},
+            }))["hookSpecificOutput"]
+            self.assertIn("5 分钟", specific["additionalContext"])
+            self.assertNotIn("permissionDecision", specific)
+
+    def test_post_ci_hook_registered(self):
+        config = json.loads(CONFIG_PATH.read_text())
+        group = config["hooks"]["PostToolUse"][0]
+        self.assertEqual(group["matcher"], "Bash")
+        self.assertIn("token_guard.py", group["hooks"][0]["command"])
 
     def test_wait_agent_over_hard_max_clamped(self):
         stdout = self.run_hook(

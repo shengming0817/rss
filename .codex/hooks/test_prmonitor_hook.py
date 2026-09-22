@@ -106,7 +106,7 @@ class PrmonitorHookTest(unittest.TestCase):
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         self.assertEqual(
             set(config["hooks"]),
-            {"PreToolUse", "UserPromptSubmit", "PermissionRequest", "Stop"},
+            {"PreToolUse", "PostToolUse", "UserPromptSubmit", "PermissionRequest", "Stop"},
         )
         for groups in config["hooks"].values():
             command = groups[0]["hooks"][0]["command"]

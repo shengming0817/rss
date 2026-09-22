@@ -246,9 +246,7 @@ scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-t
 3. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
 4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 5. **切 label**：按 `PROJECT.md` §5 执行 `forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
-6. **本地验证（label 后执行）**：运行 `make ci CI_BASE=<remote>/develop`，验证政策遵循
-   [验证规则](../../../docs/rules/verification-scope.md)。失败则回阶段 1-4，集中修复后重新执行冲突预检、
-   pm 评论与 label 流转，再重跑本步骤。
+6. **本地验证（label 后执行）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make ci CI_BASE=<remote>/develop`；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI，修复后完成冲突预检、pm 评论与 label 流转。
 7. **延迟启监控（必做）**：本地验证结束后延迟约 15min 启 `/pr-monitor <PR#> --mode=auto`（check-side）；外部 app 可在 `needs-check-fix` 后先行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）请求用户决策。

@@ -3,9 +3,15 @@
 本目录为 RSS 项目启用三类能力：
 
 - `hooks.json` → `token_guard.py`：`PreToolUse` **改写**（不 deny）高耗默认参数，避免模型整轮重试。
-  - `spawn_agent` / `Agent`：缺省 / `all` / `>3` 的 `fork_turns` → `none`（Codex 源码省略时默认 `all`）。
-  - `wait_agent`：缺省 / `<300s` 的 `timeout_ms` → `600s`（硬顶 `3600s`）。保留多 agent 后台并行，但减少父会话满上下文密轮询；子 agent 有 mailbox 活动时仍可能提前返回（V2）。
+  - `spawn_agent` / `Agent`：缺省 / `all` / `>2` 的 `fork_turns` → `none`（Codex 源码省略时默认 `all`）。
+  - `wait_agent`：缺省 / `<120s` 的 `timeout_ms` → `300s`（硬顶 `3600s`）。保留多 agent 后台并行，但减少父会话满上下文密轮询；子 agent 有 mailbox 活动时仍可能提前返回（V2）。
   - `Bash`：命令字符串里对空 `write_stdin` 密 poll 抬高 `yield_time_ms`（原生 `write_stdin` 工具故意不走 PreToolUse，只能拦嵌在 Bash/exec 里的写法）。code-mode `wait` 上游禁用 PreToolUse，无法改写。
+- `hooks.json` → `token_guard.py`：在 `make ci` 的 `PreToolUse` 注入禁止频繁 `tail/rg/ps`、读取结果和短周期轮询的提醒；`PostToolUse` 再提醒完整 CI 后汇总修复。前置提醒必需：后台命令的后置 hook 可能直到进程结束才触发。
+  - 只识别直接 shell 命令（含 `cd && make ci`、环境变量、常见 make 参数）；不解释 heredoc、动态脚本、shell 包装器或变量展开，避免将文档里的命令当作实际执行。
+  - `list_agents/send_message/followup_task/interrupt_agent` 前注入 5 分钟间隔与紧急协调例外提醒；不据消息文本自动判断紧急程度、不强制阻断。
+  - `exec_command.yield_time_ms` 是启动等待（当前工具上限 30000 ms）；`write_stdin.yield_time_ms` 是已启动 session 的后续等待（空输入上限 300000 ms）。不能对两者统一强制 `>60000`，等待还须服从更高优先级约束。反复启动 `exec_command` 读取 CI 日志同样属于查询。
+  - hooks 是尽力提醒，不是全工具限流器：原生 `write_stdin` 没有独立前置 hook；code-mode 嵌套 shell 调用按 `Bash` 匹配，但外层 `wait` 不保证覆盖。
+  - 仅当前 RSS 主仓配置；产品仓及已有 worktree 不会自动同步。修改后需在新任务的 `/hooks` 检查并信任配置，不能用单元测试宣称当前运行任务已加载。
 - `hooks.json` → `prmonitor_hook.py`：等待原生人工输入、权限批准、计划批准和任务停止时，
   通过 prmonitor 消息基础通道发送无按钮信息卡片；等待类使用橙色，普通 Stop 使用灰色。
 - `config.toml` 启用全局定义的 `prmonitor_human` MCP。Codex 需要用户回答问题、
