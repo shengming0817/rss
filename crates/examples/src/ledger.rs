@@ -83,7 +83,12 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         first.inserted() && !replay.inserted() && first.entry() == replay.entry(),
         "ledger idempotency mismatch"
     );
-    sqlx_borrow(&input, &req, &control).await?;
+    tokio::select! { biased;
+        () = cancel.cancelled() => anyhow::bail!("native transaction cancelled"),
+        result = tokio::time::timeout(control.remaining(), sqlx_borrow(&input, &req, &control)) => {
+            result.map_err(|_| anyhow::anyhow!("native transaction settlement unconfirmed"))??;
+        }
+    }
     store.close(&control).await?;
     let reopened = PgLedger::new(input.pg.pool().await?, input.auth()?, &control).await?;
     let denied = reopened
@@ -135,7 +140,12 @@ async fn sqlx_borrow(
 ) -> anyhow::Result<()> {
     let pool = input.pg.pool().await?;
     let auth = input.auth()?;
-    let mut tx = pool.begin().await?;
+    use sqlx::Acquire;
+    let mut connection = pool.acquire().await?;
+    // This one-shot host always retires its lease, including if cancellation drops a
+    // pending BEGIN, operation or COMMIT. An error is never evidence of rollback.
+    connection.close_on_drop();
+    let mut tx = connection.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
         .bind(request.ledger().tenant().to_string())
         .execute(&mut *tx)
@@ -157,6 +167,7 @@ async fn sqlx_borrow(
         "native borrowed window differs"
     );
     tx.commit().await?;
+    drop(connection);
     pool.close().await;
     Ok(())
 }
