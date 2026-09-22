@@ -7,6 +7,7 @@ use sqlx::{
 };
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+mod borrowed;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
 mod messaging;
@@ -123,6 +124,7 @@ async fn run() -> anyhow::Result<()> {
     window::run(&store, &pool, &owner, &control).await?;
     scenarios::adversarial(&store, &pool, &owner, &control).await?;
     messaging::run(&store, &owner, &fixture).await?;
+    borrowed::run(&store, &pool, &owner, &control).await?;
     admission(&store, &control).await?;
     owner.close().await;
     drop(fixture);
