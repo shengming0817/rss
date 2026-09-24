@@ -496,3 +496,6 @@ install only this profile's permissions; it does not create roles or revoke unre
 Startup requires producer function EXECUTE to be absent from the worker and all SET-accessible
 roles. Existing full `connect` remains for hosts that also produce, while `connect_producer`
 requires neither Inbox nor relay rights. All profiles preserve storage/tenant execution fencing.
+
+`PgOutboxStore::has_dead_letters` provides a bounded, domain/tenant-scoped read of unresolved
+isolation evidence. It does not resolve records or choose host admission policy.

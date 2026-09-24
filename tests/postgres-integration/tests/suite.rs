@@ -556,6 +556,19 @@ async fn consumer_only_permissions(owner: &sqlx::PgPool, config: PgConfig) -> an
             .await
             .is_err()
     );
+    consumer_writer_denied(consumer.clone()).await?;
+    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime").execute(owner).await?;
+    assert!(
+        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .is_err()
+    );
+    consumer_set_role_denied(owner, config.clone()).await?;
+    consumer.close().await;
+    Ok(())
+}
+
+async fn consumer_writer_denied(consumer: Arc<PgRuntime>) -> anyhow::Result<()> {
     let writer = rss_transactional_messaging_postgres::PgOutboxWriter::new(
         consumer.clone(),
         message("consumer-forgery").metadata().domain().clone(),
@@ -583,12 +596,10 @@ async fn consumer_only_permissions(owner: &sqlx::PgPool, config: PgConfig) -> an
         |_| false,
         |_| false
     ));
-    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime").execute(owner).await?;
-    assert!(
-        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding())
-            .await
-            .is_err()
-    );
+    Ok(())
+}
+
+async fn consumer_set_role_denied(owner: &sqlx::PgPool, config: PgConfig) -> anyhow::Result<()> {
     sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) FROM tmsg_runtime; CREATE ROLE tmsg_writer_only NOLOGIN; GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_writer_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_writer_only; GRANT tmsg_writer_only TO tmsg_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
     assert!(
         PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding())
@@ -596,6 +607,5 @@ async fn consumer_only_permissions(owner: &sqlx::PgPool, config: PgConfig) -> an
             .is_err()
     );
     sqlx::raw_sql("REVOKE tmsg_writer_only FROM tmsg_runtime; REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) FROM tmsg_writer_only; REVOKE USAGE ON SCHEMA rss_transactional_messaging FROM tmsg_writer_only; DROP ROLE tmsg_writer_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime").execute(owner).await?;
-    consumer.close().await;
     Ok(())
 }
