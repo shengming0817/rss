@@ -247,7 +247,7 @@ scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-t
 4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 5. **切 label**：按 `PROJECT.md` §5 执行 `forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
 6. **本地验证（label 后执行）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make ci CI_BASE=<remote>/develop`；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI，修复后完成冲突预检、pm 评论与 label 流转。
-7. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 等待满 15 分钟；期间禁止查询交接状态，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check-fix` 后先行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
+7. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check-fix` 后先行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）请求用户决策。
 

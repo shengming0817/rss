@@ -164,6 +164,8 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 **交接等待（ship/fix 共用）**：本地验证及必要修复收尾完成后开始计时，等待满 15 分钟。期间主 agent 禁止查询该 PR 及其 CI、review、监控状态，包括 label、评论、API、日志、进程和结果文件；不得委派子 agent 代查或提前启动 `/pr-monitor`。到期后再启动一次 `/pr-monitor <PR#> --mode=auto` 完成交接兜底。
 
+**等待期间的执行与沟通**：进入等待时只说明一次原因、UTC 到期时间和到期后的动作；没有新信息时保持静默，禁止每分钟报时、倒计数或重复“仍在等待 / 未查询状态”。纯等待不属于实施进展，不应为了凑进度更新而制造消息。优先使用环境支持且已获授权的定时唤醒；否则按工具与上级指令允许的最长等待时长续等，分段返回本身不触发用户消息，也不触发外部状态查询。只有用户主动询问、出现异常或到期检查取得结果时才更新。未实际建立唤醒机制时，不得结束任务并声称会自动回来；到期检查仍须完成。
+
 **外部 app handoff contract**：外部 app 是 `needs-review-again` / `needs-check-fix` 的实时消费者，不受主 agent 交接等待限制；`/pr-monitor` 是上述等待期满后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、未重复领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
 
 | live label | latest block | allowed dispatch |
