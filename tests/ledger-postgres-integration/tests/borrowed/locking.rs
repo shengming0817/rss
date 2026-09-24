@@ -1,5 +1,7 @@
 use super::*;
 
+#[allow(clippy::cognitive_complexity)]
+// reason: one bounded two-transaction scenario keeps reservation and settlement assertions together.
 pub(super) async fn run<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Result<()> {
     let r = request("lock-first", "conditional", b"final fact")?;
     let a = auth()?;

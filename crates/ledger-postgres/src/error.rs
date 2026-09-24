@@ -53,6 +53,10 @@ pub enum Error {
     /// Caller cancellation was observed.
     #[error("ledger operation cancelled")]
     Cancelled(rss_transactional_messaging::transaction::LocalTxDeadlineStage),
+    /// Original message owner's classification, without losing settlement semantics.
+    #[cfg(feature = "messaging")]
+    #[error(transparent)]
+    Messaging(#[from] rss_transactional_messaging_postgres::PgError),
     /// Redacted database failure; classification alone does not authorize retry.
     #[error("ledger storage unavailable")]
     Storage(#[source] RedactedSource),

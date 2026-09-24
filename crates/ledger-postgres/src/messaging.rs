@@ -19,7 +19,7 @@ pub async fn lock_head_in(
         Box::pin(async move { Ok(borrowed::lock_head(connection, &auth, &ledger).await) })
     })
     .await
-    .map_err(|e| Error::Storage(RedactedSource::new(e)))?
+    .map_err(Error::Messaging)?
 }
 
 /// Stage in a message owner's transaction, inheriting its tenant and remaining budget.
@@ -41,11 +41,16 @@ pub async fn append_in(
         })
     })
     .await
-    .map_err(|e| Error::Storage(RedactedSource::new(e)))?
+    .map_err(Error::Messaging)?
 }
 impl From<Error> for PgError {
     fn from(error: Error) -> Self {
+        let error = match error {
+            Error::Messaging(original) => return original,
+            other => other,
+        };
         let kind = match &error {
+            Error::Messaging(original) => original.kind(),
             Error::Conflict => MessagingErrorKind::Conflict,
             Error::Deadline(_) => MessagingErrorKind::DeadlineElapsed,
             Error::Storage(_) => MessagingErrorKind::Transient,
@@ -74,6 +79,25 @@ impl From<Error> for PgError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owner_error_classifications_round_trip() {
+        for kind in [
+            MessagingErrorKind::Transient,
+            MessagingErrorKind::Permanent,
+            MessagingErrorKind::Conflict,
+            MessagingErrorKind::OwnershipLost,
+            MessagingErrorKind::Invariant,
+            MessagingErrorKind::DeadlineElapsed,
+        ] {
+            let error = PgError::Operation {
+                kind,
+                source: RedactedSource::new(std::io::Error::other("private-owner-marker")),
+            };
+            let wrapped = Error::Messaging(error);
+            assert!(!format!("{wrapped:?}").contains("private-owner-marker"));
+            assert_eq!(PgError::from(wrapped).kind(), kind);
+        }
+    }
     #[test]
     fn integrity_failures_never_become_invalid_requests() {
         use rss_ledger::Error as Protocol;
