@@ -486,3 +486,13 @@ backfilled with trustworthy canonical bytes. Provision EXECUTE on `append_outbox
 no runtime role may execute the private frame reader/decoder. Startup rejects the legacy signature,
 missing decoder functions, changed ownership/search paths or leaked decoder EXECUTE. No extension,
 new crate, second fingerprint algorithm or compatibility writer is installed.
+
+
+### Relay/consumer-only role
+
+Use `PgRuntime::connect_consumer` for a worker that relays existing Outbox rows and settles Inbox
+but must not author messages. The migration owner calls `grant_consumer(connection, role)` to
+install only this profile's permissions; it does not create roles or revoke unrelated grants.
+Startup requires producer function EXECUTE to be absent from the worker and all SET-accessible
+roles. Existing full `connect` remains for hosts that also produce, while `connect_producer`
+requires neither Inbox nor relay rights. All profiles preserve storage/tenant execution fencing.
