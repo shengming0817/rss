@@ -177,3 +177,11 @@ role and chain key, use the original connection/budget and retain the lock until
 An empty head can be created, but no entry or sequence is allocated. Append through the normal
 API after computing the facts; repeated locking in one transaction is safe. A lock is neither
 a staged event nor commit evidence. Propagate failures to the transaction owner.
+
+The SQLx transaction owner must set transaction-local PostgreSQL statement/lock timeouts
+from its remaining budget **before** lending a connection. Borrowed APIs intentionally do not
+change GUCs or acquire settlement authority. `Control` bounds client waiting, not server
+termination: after in-flight cancellation, quarantine the connection unless rollback is
+acknowledged within the owner's bounded cleanup. SQLSTATE 57014 is reported as
+`Cancelled(Operation)` because PostgreSQL uses it for both statement timeout and explicit
+query cancellation; the adapter does not claim to distinguish those causes.

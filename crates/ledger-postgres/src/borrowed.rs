@@ -9,6 +9,9 @@ use sqlx::{PgConnection, Postgres, Transaction};
 /// Lock the chain before taking business locks, without appending an event.
 /// An empty chain may acquire an empty head; its sequence is not advanced.
 /// Uses the owner's actual connection and budget. Only the owner can settle it.
+/// The owner must configure server statement/lock timeouts before lending the transaction.
+/// `Control` bounds client waiting; dropping a future does not cancel PostgreSQL execution.
+/// Retire the connection if rollback cannot be acknowledged within the owner's cleanup budget.
 pub async fn lock_head_in_transaction<T: Timer>(
     tx: &mut Transaction<'_, Postgres>,
     auth: &Authenticator,

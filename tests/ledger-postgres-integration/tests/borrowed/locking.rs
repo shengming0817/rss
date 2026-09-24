@@ -24,20 +24,25 @@ pub(super) async fn run<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> an
         .await?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
-    let short = Control::new(&clock, Duration::from_millis(100), &cancel);
+    let short = Control::new(&clock, Duration::from_millis(250), &cancel);
+    // Only the transaction owner configures server execution limits.
+    sqlx::query("SET LOCAL statement_timeout='100ms'")
+        .execute(&mut *second)
+        .await?;
     assert!(matches!(
         lock_head_in_transaction(&mut second, &a, r.ledger(), &short).await,
-        Err(Error::Deadline(LocalTxDeadlineStage::Operation))
+        Err(Error::Cancelled(LocalTxDeadlineStage::Operation)
+            | Error::Deadline(LocalTxDeadlineStage::Operation))
     ));
+    // The blocker remains held: owner-projected server timeout must permit rollback.
+    tokio::time::timeout(Duration::from_millis(500), second.rollback()).await??;
     assert!(
         append_in_transaction(&mut tx, &a, &r, control)
             .await?
             .inserted()
     );
     tx.commit().await?;
-    // SQLx cancellation drops the future, not the server query. Release the blocker
-    // before waiting for the second connection to acknowledge rollback.
-    second.rollback().await?;
+
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
         .bind(TENANT)
