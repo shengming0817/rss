@@ -49,5 +49,6 @@ cargo run --locked -p rss-examples --features core
 - 源码构建成功、固定候选 artifact 可消费和实际发布分别提供证据，不能互相替代。
 - 产品 T3、部署配置与生产验收归消费产品；库级示例和 T1/T2 不代替产品验收。
 
-贡献前阅读[协作说明](CLAUDE.md)；本地验证入口为 `make ci CI_BASE=origin/develop`，
-实际范围由[验证规则](docs/rules/verification-scope.md)和既有选择器决定。
+贡献前阅读[协作说明](CLAUDE.md)；运行、结果解释与故障恢复见
+[CI 使用与故障排查](docs/ops/202609070500-2309-ci-archive-fixtures.md)，验证范围遵循
+[验证规则](docs/rules/verification-scope.md)。

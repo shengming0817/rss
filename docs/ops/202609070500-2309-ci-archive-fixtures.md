@@ -1,121 +1,108 @@
-# CI 分组、归档与共享 fixture
+# CI 使用与故障排查
 
-Make 是本地与 CI 的标准入口。`hack/ci-impact.py` 只选择 package 范围；`hack/ci-pipeline.py` 持有
-一次选择、唯一测试分组 filter、构建身份与覆盖率判定。归档保留 Cargo fingerprint 元数据，让 trybuild 使用真实编译 feature。workflow 只编排 runner、缓存和产物。selection 从同一分组定义输出集成矩阵；unit/consumer 保留各自执行契约，最终门禁同时要求矩阵聚合成功。
+从仓库根目录通过 Make 运行验证。范围与深度遵循[验证规则](../rules/verification-scope.md#默认选择)，
+Rust API 与 wire 兼容边界遵循[版本规则](../rules/api-versioning.md)。具体选择、阶段和工具版本分别由
+[选择器](../../hack/ci-impact.py)、[执行器](../../hack/ci-pipeline.py)、[工具链](../../rust-toolchain.toml)
+及 [workflow](../../.github/workflows/ci.yml) 持有。
 
-普通 PR 为 affected；全局或未知影响回退全工作区测试及 80% 行覆盖率。deny 深度只由 develop/显式 `make ci-full` 开启；SemVer 按兼容承诺及影响独立选择，full 检查全部适用受保护包。取消人为 CI 总时限，不修改单项测试期限；GitHub 平台时限仍适用。
+## 运行
 
-## 执行
+准备仓库工具链及所选阶段需要的 Cargo 工具；安装版本参照
+[编译 workflow](../../.github/workflows/ci-compile.yml)。真实 provider 测试需要可用的 Docker；
+Kafka 独立消费检查还需要宿主 OpenSSL SDK（Linux 的 pkg-config/libssl-dev，macOS 的 Homebrew openssl）。
+先获取有效的比较基准；以下 `origin` 按实际 remote 替换。
 
 ```sh
 make ci CI_BASE=origin/develop
-make ci-full CI_BASE=<baseline>
-# 同一启动器筛选单个真实测试；定向诊断不判定全工作区覆盖率
+make ci-full CI_BASE=origin/develop
+# 定向诊断；不替代完整验证
 make ci CI_PART=tests CI_FILTER='package(=amqp-integration) and test(=shared_amqp_subscriber_lifecycle_suite)'
 ```
 
-显式 `CI_FILTER` 独立于 affected 范围，零匹配即失败；筛选表达式同样写入 plan。
-`CI_PART=select` 写出绑定 SHA 的 plan。GitHub 后续阶段通过 `CI_PLAN` 读取该产物，不能自行重新选择。
-`CI_PART=build` 生成 nextest archive，验证所有非 ignored 测试恰好分到 unit、consumer、amqp、kafka、
-providers 之一。consumer 先通过 `cargo fetch --locked` 准备冷 runner 的依赖下载，再运行 offline 证明；
-保留独立 workspace/依赖解析/target，组内串行并使用独立编译缓存，不重新构建工作区。Kafka 独立 API/依赖图证明使用宿主 OpenSSL SDK（Linux 的 pkg-config/libssl-dev、
-macOS 的 Homebrew openssl），避免为 cargo check 重编译 vendored OpenSSL；原工作区归档及真实 TLS 场景仍验证 vendored 构建。
-三个 provider 组最多同时使用三个 runner，组内串行。
-`CI_PART=tests` 只完成归档构建、测试组执行和适用的覆盖率汇总；测试失败仍收集其它组结果。
-doctest 使用独立 `cargo test --doc` 命令，仅由 `CI_PART=all` 或 `CI_PART=docs` 执行；
-`all` 在构建或测试失败后仍执行 doctest，并保留失败状态。
+普通运行选择受影响 package。已识别文档不贡献 package；混合提交仍选择代码的反向依赖闭包。
+文档是否被识别以选择器为准，不能仅凭 Markdown 后缀判断。未知路径、rename/copy 或分析异常会
+保守扩大范围。显式 `CI_FILTER` 独立于 affected 选择，零匹配失败。
 
-本地产物位于 `.local-ci-runs/current`，被 Git 忽略。普通和插桩构建使用不同 target 子目录与缓存身份。
-执行 job 只运行原 archive；fixture 启动器作为 nextest non-test binary 一并构建、传递，不在执行 runner 重建。
+按需使用 `CI_PART=checks` 运行静态检查、`tests` 构建归档并执行测试与适用覆盖率、`docs` 运行 doctest；
+默认 `all` 包含这些阶段与适用的 SemVer 检查。纯文档空选择仍运行 CI 脚本检查，不表示所有验证都跳过。
+分阶段消费归档时，先用 `CI_PART=select` 生成 plan，后续通过 `CI_PLAN` 指向同一产物；不要混用不同 SHA 的结果。
 
-所有 workflow 用 `python3 hack/ci-pipeline.py --install-toolchain` 从 `rust-toolchain.toml` 读取 channel/profile/components，统一安装并为独立消费目录设置默认工具链；不重复维护版本。
+本地产物默认位于 `.local-ci-runs/current`，可通过 `CI_ARTIFACTS` 指定其它目录。
+归档、正式结果和诊断报告属于该次运行；重新运行前将需要保留的证据保存到 PR 附件或已有持久制品。
 
-## fixture 所有权
+## 结果与故障定位
 
-`tests/fixtures/` 持有跨 package 的共享源码 fixture，是选择器显式声明的全局输入。
-包括 PG recovery / DR 与 Archive 共用的 `message_recovery.rs`；不再从 PG 测试目录跨 package 引用。
-该目录的增、改、删触发全工作区选择及 80% 行覆盖率门禁，原因是 `global-input`；
-普通 package 按 Cargo 反向依赖图选择，未知路径仍保守 full，不维护 fixture 消费者清单。
+以命令退出状态和正式结果判断成功。可执行阶段尽量继续收集失败，但编译失败或取消可能阻止后续
+测试运行；不能把“已生成覆盖率报告”或“部分测试通过”当作完整成功。缺失、损坏或身份不匹配的
+正式结果仍阻断验证；诊断统计不完整不会改写原测试结论。
 
-`testkit` 的 `rss-test-launcher` 启动所选 provider，持有容器，向 nextest 子进程传递临时 0600 描述文件。
-测试名中的 `shared_amqp_` / `shared_kafka_` / `shared_mqtt_` 声明所需共享 provider；
-启动器只根据实际选中测试启动它们，纯脚本协议测试和独占测试不会额外启动共享 broker。
-文件只包含客户端 TLS/连接信息和必要管理 endpoint，不传服务端私钥，不进入日志或 artifact。
-共享 fixture 缺失即报错，不自行启动，也不切换独占路径。
+失败后先查看产物中对应阶段的结果与日志，再使用定向命令复现。缺失或不兼容的 archive/plan 应重新
+生成，不手工补字段或拼接旧结果。覆盖率适用范围与门槛按验证规则执行；这里不维护第二份测试清单。
 
-普通 AMQP、Kafka、MQTT 使用共享实例。AMQP 用独立 vhost；Kafka 每个 fixture 用进程唯一 topic，
-group/client ID 同时隔离；MQTT 的重连保留同一测试的 client ID，不同进程的公共配置添加 PID。
-重启 broker、服务端 TLS 身份变化、PG 集群角色/ACL 与 archive 复合场景保持显式独占。
-Archive 的 MinIO fixture 使用 Quay 上的固定 release tag；原 Docker Hub 来源已不可公开拉取。
-共享与独占复用同一构造和管理命令实现。MQTT 共享句柄不能重启 broker。
+provider 启动失败先检查 Docker、镜像拉取和资源权限。共享 fixture 缺失即失败，不以临时自起实例
+掩盖接入错误；fixture 凭据不得进入日志或 artifact。排障与清理只处理本次运行的资源，不能删除其它
+运行的容器、网络或活跃 target。保留原始失败与脱敏诊断，避免通过无限重试或放宽测试期限掩盖问题。
+PostgreSQL 缺失端口映射的追踪见 [#2316](https://dev.azure.com/shengming0923/rss/_workitems/edit/2316)；
+单次复验通过不证明根因已解决。
 
-资源携带唯一 `rss.test-run` 标签。启动失败或取消时，启动器终止 nextest 进程组并清理本次标签的容器和网络；
-容器 guard Drop 负责常规释放；网络 guard 在 5 秒期限内及时释放地址池容量，超时会终止并回收 Docker 子进程。
-启动器保留最终兜底；标签扫描在单一 30 秒截止时间内
-尝试所有可枚举资源，聚合失败而不因首项错误跳过后续删除。Docker 命令、启动与测试仍有界。清理失败或超时会与原 child exit code／启动或执行错误分类共同报告，不覆盖测试结果，不透传原始凭据。
+## 本地 target 与编译缓存
 
-## 覆盖率与失败
+[本地启动器](../../hack/ci-run.py) 管理 target 租用和可选 sccache；直接 Cargo 命令不受它协调。
+池只协调同用户、本地文件系统上的 CI，不提供跨权限用户隔离。
 
-完整范围使用 `cargo llvm-cov show-env` 插桩后构建 archive。每组运行前清除自己的 profile 目录，
-不同组写独立路径。构建期 proc-macro 对象和本轮 profile 也传递，避免漏掉原覆盖率口径。
-构建 manifest 必须记录实际用于编译的绝对 `cargo_home`：非空 `CARGO_HOME` 优先，
-相对值以构建工作目录解析，未设置或为空时使用用户目录下的 `.cargo`。
-报告子进程采用此记录，让 cargo-llvm-cov 默认排除原构建的 registry/git 源码；
-消费机器的 Cargo 缓存目录可以不同，原目录无需存在。路径随 manifest 摘要绑定结果；
-缺失或非法字段直接拒绝，旧 archive 必须重新生成，不猜测 runner 路径。
-覆盖率 job 校验 SHA、工具链、archive 和 launcher 摘要、分组身份以及逐个 profile 摘要，
-解包原插桩对象后执行 `cargo llvm-cov report --nextest-archive-file ... --fail-under-lines 80`。
-它不编译、不执行测试。缺组、损坏、身份不符、测试失败均失败；有效部分仍尽可能生成诊断报告。
-最终 `cargo` 同时要求选择、静态检查、构建、所有执行组和应运行的 coverage 成功。
+| 配置 | 使用方式 |
+|---|---|
+| `RSS_TARGET_POOL_N` | 正整数调整并发槽数；`off` 或 `0` 关闭池并使用 worktree target，仍可显式指定 `CARGO_TARGET_DIR` |
+| `RSS_TARGET_POOL_ROOT` | 指定专用池目录；默认位置见启动器 |
+| `CARGO_TARGET_DIR` | 显式指定 target 可绕过默认池；不能与显式正数槽配置同时设置，也不能指向活跃槽 |
+| `RSS_COMPILER_CACHE` | `auto`（默认）在工具不可用时降级；`on` 要求可用；`off` 不自动接入 |
 
-每阶段输出耗时；每个 fixture 输出镜像准备、容器启动至就绪和清理耗时、启动尝试次数及成功就绪数到不含凭据的
-`fixture-metrics/<pid>.jsonl`，包括失败和取消 outcome。唯一入口为 `RSS_TEST_METRICS_DIR`；每进程独立写，进程内串行，无跨进程文件锁或轮询。写入失败留下同级 `fixture-metrics.incomplete` 标记并打印脱敏 warning。testcontainers 将启动和 readiness 纳入同一次有界调用，这一数值不冒充纯进程启动耗时。
-正式 `result.json` 在诊断聚合前原子落盘。启动/等待失败用空退出码和独立错误字段表示；profile 元数据失败仍保留测试结论但阻断门禁。缺正式结果不容错。
-聚合严格验证字段、范围和完整 JSONL；任一诊断故障或无记录标为 incomplete，保留原文件，不能将部分统计当完整数据。Summary/统计副本写入失败只告警。
-旧环境变量和旧结果格式不再读取；旧运行不能复用作新执行输入。
-GitHub step 时间保留 artifact 传输开销，缓存 summary 保留恢复 key、命中统计、保存结果和磁盘用量。
+同 worktree 已有运行或全部槽忙时，等待原运行退出再重试。构建子进程可能在 wrapper 退出后仍持有锁，
+不能仅凭 PID 元数据或 wrapper 退出就清理。不要删除活跃池的锁文件。检测到旧池或未标记非空目录时，
+先停止并确认所有相关构建退出，再重置确认属于 RSS 的专用旧池，或改用新的空池目录；不要清空普通目录。
 
-## 冷热验收
-
-冻结 SHA 后 dispatch `cold_cache=true`。仅在完整运行成功且 checks/build/consumer 缓存实际保存后，
-用同 SHA、同 baseline dispatch `warm_run=<cold run ID>-<attempt>`。精确缓存未命中则热跑失败，
-不以相近缓存替代。失败修复后重新冻结 SHA 并从冷跑开始。实际结果和耗时写入既有 PR 验收记录，
-首次完整数据前不承诺加速比例，不把历史问题当作已解决。
-
-ref: [cargo-llvm-cov v0.8.7 report.rs](https://github.com/taiki-e/cargo-llvm-cov/blob/v0.8.7/src/report.rs)
-ref: [nextest archiving](https://nexte.st/docs/ci-features/archiving/)
-
-PG 取消/期限证明在真实数据库到达 effect 或注入 commit 阶段后推进已有测试时钟，
-保留 150ms 操作期限、连接回收与 durable rollback 断言；协调方同时观察操作提前完成，
-并以真实 5 秒等待约束连接、阶段进入、期限响应及关闭，避免前置超时后永等通知。
-
-## SemVer 独立检查与原生工具安装
-
-正常 PR/develop 由 plan 内的 semver 选择受影响受保护包，workflow 不重复维护清单。当前无承诺包明确跳过，
-checks 不安装 SemVer；有受检项时独立 job 的失败、取消、缺正式结果均阻断最终 cargo。
+sccache 须预先安装启动器中 `SCCACHE_VERSION` 指定的版本，入口不自动下载安装。
+已有自定义 rustc wrapper 时，auto 保留它，on 拒绝冲突。server 版本或缓存目录不匹配时，
+等待所有使用该 RSS server 的 CI 退出后再停止 server；下次 CI 会重新启动。
 
 ```sh
-make ci CI_PART=semver CI_BASE=<impact-base> CI_HEAD=HEAD
-make ci CI_PART=semver CI_SEMVER_MODE=all CI_BASE=<impact-base>
-# 显式比较可选择实验包；先 checkout 到声明 head，不隐式创建源码快照。
+SCCACHE_SERVER_UDS="$HOME/.cache/rss-sccache/server.sock" sccache --show-stats
+# 确认没有使用该 server 的活跃 CI 后，才停止以应用新配置：
+SCCACHE_SERVER_UDS="$HOME/.cache/rss-sccache/server.sock" sccache --stop-server
+```
+
+统计是共享 server 的累计值，不能视为当前任务独占命中数；缓存失败不代表编译成功。
+容量配置等上游选项见 [sccache 配置](https://github.com/mozilla/sccache/blob/v0.15.0/docs/Configuration.md)。
+
+## SemVer 检查
+
+普通运行由选择结果决定受检包；无需检查时跳过。手工比较要求干净的 tracked checkout，且已 checkout 到
+声明的 head。安装所需工具时从现有入口读取版本：
+
+```sh
+cargo install --locked --version "$(python3 hack/ci-semver.py --tool-version)" cargo-semver-checks
+make ci CI_PART=semver CI_BASE=origin/develop CI_HEAD=HEAD
+make ci CI_PART=semver CI_SEMVER_MODE=all CI_BASE=origin/develop
+# 显式选择 package 比较；将基准替换为实际 commit
 make ci CI_PART=semver CI_SEMVER_MODE=compare CI_SEMVER_PACKAGES=rss-contract CI_BASE=<baseline> CI_HEAD=HEAD
 ```
 
-`CI_SEMVER_PACKAGES` 仅允许用于 `compare`，且不能与 `CI_SEMVER_FULL=1` 组合；冲突输入直接失败，不能缩小全量检查。
-用户取消会先保存正式结果，再停止后续配置及流水线阶段。
+`CI_SEMVER_PACKAGES` 仅用于 `compare`，不能与 `CI_SEMVER_FULL=1` 组合。工具缺失、版本不符、
+不支持的检查目标或输入非法均需处理，不能当作通过。也可使用
+[SemVer workflow](../../.github/workflows/ci-semver.yml) 的独立 dispatch，不重跑测试。
 
-受检源码必须是干净的 tracked checkout，base==head 保留相同比较，不偷偷改成父提交。
-固定 cargo-semver-checks 0.49.0 与仓库 Rust 工具链联动验证。执行显式 default/all；仅两侧均证明 feature 集等价时去重。
-过程宏不是该工具的受检通过项，rss-redact-derive 仍由现有消费者编译/trybuild 证明；显式要求工具检查不支持 target 时失败。
-Rust 检查不替代 wire、持久化格式或行为证明。
+## GitHub 冷热缓存验证
 
-GitHub 的 RSS SemVer workflow 支持独立 dispatch（baseline/head/packages），不重跑测试。
-CI 使用固定 revision 的 taiki-e/install-action 安装 cargo-semver-checks 0.49.0，由安装器按 runner 原生平台
-选择预编译包并校验完整性；不维护项目内平台表、下载 URL 或工具归档缓存。安装失败、rustdoc/执行错误、
-兼容性失败分别保留实际阶段和退出码。
+仅在需要验证缓存行为时执行：冻结 SHA，在 CI workflow 中以明确的 `baseline` 和 `cold_cache=true`
+dispatch。冷跑完整成功且缓存实际保存后，用同 SHA、同 baseline、`cold_cache=false` 和
+`warm_run=<cold run ID>-<attempt>` 再次 dispatch。热跑必须精确命中指定缓存；修复后重新冻结 SHA，
+从冷跑开始。PR 只恢复缓存，可信 develop/dispatch 才在成功后保存。
 
-本地已选中检查需要同版工具；没有工具或版本不匹配时严格失败，不影响未选中的普通检查。安装使用 Cargo
-支持的原生方式：`cargo install --locked --version 0.49.0 cargo-semver-checks`。
+对比原始运行的 restore/save key、命中统计、阶段耗时和磁盘用量；完整 target 复用与编译对象命中是
+不同证据，不预先承诺加速比例。运行记录留在 PR 或已有持久制品，不回填本文。
 
-ref: cargo-semver-checks v0.49.0 src/main.rs
-ref: taiki-e/install-action manifests/cargo-semver-checks.json@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c
+归档与覆盖率机制的来源：
+[nextest archiving](https://nexte.st/docs/ci-features/archiving/)、
+[cargo-llvm-cov report](https://github.com/taiki-e/cargo-llvm-cov/blob/v0.8.7/src/report.rs)。
+本地池历史来源为 RSS `hack/target-pool.py`、`hack/cargo.sh`，固定提交
+`5b63e10a1b396b0ff70b7d1e6e55db296cd7a891`；当前操作以现有启动器为准。
