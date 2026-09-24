@@ -75,11 +75,15 @@ pub async fn run(
         .await?,
     );
     for mode in ["commit", "rollback", "expired", "unknown", "wake"] {
-        scenario(mode, store, owner, &runtime, c).await?;
+        scenario(mode, store, owner, &runtime, c, false).await?;
+        if mode != "wake" {
+            scenario(mode, store, owner, &runtime, c, true).await?;
+        }
     }
     for unknown in [false, true] {
         wake_failure(&runtime, owner, c, unknown).await?;
     }
+    borrowed_scope_rejected(store, &runtime, c).await?;
     runtime.close().await;
     Ok(())
 }
@@ -89,8 +93,9 @@ async fn scenario(
     owner: &PgPool,
     runtime: &Arc<PgRuntime>,
     c: &Control<'_, Clock>,
+    borrowed: bool,
 ) -> anyhow::Result<()> {
-    let id = format!("message-{mode}");
+    let id = format!("message-{mode}-{borrowed}");
     let t = target(&id, TENANT)?;
     store.wake(&t, c).await?;
     let claim = claim(
@@ -136,7 +141,35 @@ async fn scenario(
     if mode == "unknown" {
         runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     }
-    let result = if mode == "wake" {
+    let result = if borrowed {
+        runtime
+            .local_tx_with_context(
+                TenantId::parse(TENANT)?,
+                rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                    c.remaining(),
+                ),
+                (&claim, Some(callback)),
+                |(claim, callback), tx| {
+                    Box::pin(async move {
+                        // The host acquires its own aggregate lock before lending this same transaction.
+                        tx.with_connection(|c| {
+                            Box::pin(async move {
+                                sqlx::query("SELECT pg_advisory_xact_lock(2498)")
+                                    .execute(c)
+                                    .await?;
+                                Ok(())
+                            })
+                        })
+                        .await?;
+                        let callback = callback
+                            .take()
+                            .ok_or_else(|| PgError::from(sqlx::Error::RowNotFound))?;
+                        rss_reconcile_postgres::messaging::protect_in(tx, claim, (), callback).await
+                    })
+                },
+            )
+            .await
+    } else if mode == "wake" {
         rss_reconcile_postgres::messaging::wake_with(runtime, &t, c, (), callback).await
     } else {
         rss_reconcile_postgres::messaging::protect(runtime, &claim, c, (), callback).await
@@ -257,5 +290,53 @@ async fn wake_failure(
     let counts:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM rss_reconcile.targets WHERE reconciler=$1),(SELECT count(*) FROM public.effects WHERE id=$1),(SELECT count(*) FROM rss_transactional_messaging.outbox WHERE message_id=$1)").bind(&audit.id).fetch_one(owner).await?;
     let expected = i64::from(unknown);
     assert_eq!(counts, (expected, expected, expected));
+    Ok(())
+}
+
+async fn borrowed_scope_rejected(
+    store: &PgStore,
+    runtime: &PgRuntime,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let target = target("borrowed-cross-tenant", TENANT)?;
+    store.wake(&target, control).await?;
+    let claim = claim(store, &target, Duration::from_secs(3), control).await?;
+    let entered = AtomicBool::new(false);
+    let result = runtime
+        .local_tx_with_context(
+            TenantId::parse("00000000-0000-0000-0000-000000000001")?,
+            rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                control.remaining(),
+            ),
+            (&claim, &entered),
+            |(claim, entered), tx| {
+                Box::pin(async move {
+                    rss_reconcile_postgres::messaging::protect_in(
+                        tx,
+                        claim,
+                        entered,
+                        |entered, _| {
+                            Box::pin(async move {
+                                entered.store(true, Ordering::SeqCst);
+                                Ok(())
+                            })
+                        },
+                    )
+                    .await
+                })
+            },
+        )
+        .await;
+    let rejected = result.fold(
+        |()| false,
+        |_| false,
+        |_| true,
+        |_| false,
+        |_| false,
+        |_| true,
+    );
+    assert!(rejected);
+    assert!(!entered.load(Ordering::SeqCst));
     Ok(())
 }
