@@ -129,17 +129,7 @@ where
         (target.clone(), context, Some(operation)),
         |state, tx| {
             Box::pin(async move {
-                tx.with_connection(|conn| {
-                    Box::pin(async move { Ok(crate::probe::validate_connection(conn).await) })
-                })
-                .await?
-                .map_err(convert)?;
-                let target = state.0.clone();
-                tx.with_connection(move |conn| {
-                    Box::pin(async move { Ok(wake(conn, &target).await) })
-                })
-                .await?
-                .map_err(convert)?;
+                wake_target_in(tx, &state.0).await?;
                 let operation = state
                     .2
                     .take()
@@ -153,6 +143,39 @@ where
         Err(error) => LocalTxAttempt::commit_unknown(convert(error)),
     }
 }
+/// Register a wake and run trusted SQL/messages in a caller-owned transaction.
+///
+/// The host can acquire preceding locks before entering this composition. It inherits
+/// the transaction's tenant, connection and budget; success is staged, never commit proof.
+/// Propagate errors to the original owner. No session changes or second connection occur.
+pub async fn wake_in<R: Send, C: Send, F>(
+    tx: &mut PgTransaction<'_>,
+    target: &Target,
+    mut context: C,
+    operation: F,
+) -> Result<R, PgError>
+where
+    F: for<'c> FnOnce(&'c mut C, &'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, PgError>>
+        + Send,
+{
+    wake_target_in(tx, target).await?;
+    operation(&mut context, tx).await
+}
+async fn wake_target_in(tx: &mut PgTransaction<'_>, target: &Target) -> Result<(), PgError> {
+    if tx.tenant_id() != target.scope().tenant() {
+        return Err(convert(Error::new(ErrorKind::Fenced)));
+    }
+    tx.with_connection(|conn| {
+        Box::pin(async move { Ok(crate::probe::validate_connection(conn).await) })
+    })
+    .await?
+    .map_err(convert)?;
+    let target = target.clone();
+    tx.with_connection(move |conn| Box::pin(async move { Ok(wake(conn, &target).await) }))
+        .await?
+        .map_err(convert)
+}
+
 async fn component_lock(tx: &mut PgTransaction<'_>, key: &Key) -> Result<(), PgError> {
     let key = key.copy_arguments();
     tx.with_connection(move |conn| Box::pin(async move { Ok(lock(conn, &key).await) }))

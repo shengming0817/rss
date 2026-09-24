@@ -1,3 +1,4 @@
+mod ledger;
 use rss_request_context::{Clock as MessageClock, Deadline, ExecutionTimer};
 #[path = "../../../fixtures/message_fence.rs"]
 mod fence_fixture;
@@ -50,13 +51,7 @@ pub async fn run(
     fixture: &testkit::PgTlsFixture,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS;")
-        .execute(owner)
-        .await?;
-    sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
-        .execute(owner)
-        .await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO reconcile_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO reconcile_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO reconcile_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO reconcile_runtime;").execute(owner).await?;
+    install(owner).await?;
     let p = fixture.params();
     fence_fixture::provision(owner).await?;
     let runtime = Arc::new(
@@ -75,16 +70,27 @@ pub async fn run(
         .await?,
     );
     for mode in ["commit", "rollback", "expired", "unknown", "wake"] {
-        scenario(mode, store, owner, &runtime, c, false).await?;
-        if mode != "wake" {
-            scenario(mode, store, owner, &runtime, c, true).await?;
-        }
+        Box::pin(scenario(mode, store, owner, &runtime, c, false)).await?;
+        Box::pin(scenario(mode, store, owner, &runtime, c, true)).await?;
     }
+    Box::pin(scenario("outer-rollback", store, owner, &runtime, c, true)).await?;
+    ledger::competition(store, owner, &runtime, c).await?;
     for unknown in [false, true] {
         wake_failure(&runtime, owner, c, unknown).await?;
     }
     borrowed_scope_rejected(store, &runtime, c).await?;
     runtime.close().await;
+    Ok(())
+}
+async fn install(owner: &PgPool) -> anyhow::Result<()> {
+    sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS;")
+        .execute(owner)
+        .await?;
+    sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL)
+        .execute(owner)
+        .await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO reconcile_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO reconcile_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO reconcile_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO reconcile_runtime;").execute(owner).await?;
+    ledger::install(owner).await?;
     Ok(())
 }
 async fn scenario(
@@ -114,6 +120,10 @@ async fn scenario(
     let rollback = mode == "rollback";
     let expired = mode == "expired";
     let effect_id = id.clone();
+    let ledger_request = ledger::request(&id, &id)?;
+    let append_ledger = borrowed && mode != "outer-rollback";
+    let request_for_callback = ledger_request.clone();
+    let authenticator = ledger::auth()?;
     let callback = scoped(move |_, tx| {
         Box::pin(async move {
             let tenant = tx.tenant_id().to_string();
@@ -129,6 +139,11 @@ async fn scenario(
             })
             .await?;
             outbox.append(tx, PendingMessage::new(envelope)).await?;
+            if append_ledger {
+                rss_ledger_postgres::append_in(tx, authenticator, &request_for_callback)
+                    .await
+                    .map_err(PgError::from)?;
+            }
             if expired {
                 tokio::time::sleep(Duration::from_millis(45)).await;
             }
@@ -141,6 +156,8 @@ async fn scenario(
     if mode == "unknown" {
         runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     }
+    let outer_rollback = mode == "outer-rollback";
+    let borrowed_wake = mode == "wake";
     let result = if borrowed {
         runtime
             .local_tx_with_context(
@@ -148,23 +165,26 @@ async fn scenario(
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                     c.remaining(),
                 ),
-                (&claim, Some(callback)),
-                |(claim, callback), tx| {
+                (&claim, &t, Some(callback), ledger_request, ledger::auth()?),
+                |(claim, target, callback, request, auth), tx| {
                     Box::pin(async move {
-                        // The host acquires its own aggregate lock before lending this same transaction.
-                        tx.with_connection(|c| {
-                            Box::pin(async move {
-                                sqlx::query("SELECT pg_advisory_xact_lock(2498)")
-                                    .execute(c)
-                                    .await?;
-                                Ok(())
-                            })
-                        })
-                        .await?;
+                        rss_ledger_postgres::lock_head_in(tx, auth.clone(), request.ledger())
+                            .await
+                            .map_err(PgError::from)?;
                         let callback = callback
                             .take()
                             .ok_or_else(|| PgError::from(sqlx::Error::RowNotFound))?;
-                        rss_reconcile_postgres::messaging::protect_in(tx, claim, (), callback).await
+                        if borrowed_wake {
+                            rss_reconcile_postgres::messaging::wake_in(tx, target, (), callback)
+                                .await?;
+                        } else {
+                            rss_reconcile_postgres::messaging::protect_in(tx, claim, (), callback)
+                                .await?;
+                        }
+                        if outer_rollback {
+                            return Err(PgError::from(sqlx::Error::RowNotFound));
+                        }
+                        Ok(())
                     })
                 },
             )
@@ -182,19 +202,28 @@ async fn scenario(
         |_| "unknown",
         |_| "fenced",
     );
-    verify_result(mode, &id, status, owner).await
+    verify_result(mode, &id, status, owner).await?;
+    if borrowed {
+        ledger::verify(
+            owner,
+            &id,
+            !matches!(mode, "rollback" | "outer-rollback" | "expired"),
+        )
+        .await?;
+    }
+    Ok(())
 }
 async fn verify_result(mode: &str, id: &str, status: &str, owner: &PgPool) -> anyhow::Result<()> {
     match mode {
         "unknown" => assert_eq!(status, "unknown"),
-        "rollback" => assert_eq!(status, "rolled-back"),
+        "rollback" | "outer-rollback" => assert_eq!(status, "rolled-back"),
         "expired" => assert!(matches!(status, "fenced" | "rolled-back")),
         _ => assert_eq!(status, "committed"),
     }
     verify_counts(mode, id, owner).await
 }
 async fn verify_counts(mode: &str, id: &str, owner: &PgPool) -> anyhow::Result<()> {
-    let expected = i64::from(!matches!(mode, "rollback" | "expired"));
+    let expected = i64::from(!matches!(mode, "rollback" | "outer-rollback" | "expired"));
     assert_eq!(count(owner, id).await?, expected);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -303,40 +332,56 @@ async fn borrowed_scope_rejected(
     store.wake(&target, control).await?;
     let claim = claim(store, &target, Duration::from_secs(3), control).await?;
     let entered = AtomicBool::new(false);
-    let result = runtime
-        .local_tx_with_context(
-            TenantId::parse("00000000-0000-0000-0000-000000000001")?,
-            rss_transactional_messaging::policy::OperationDeadline::from_remaining(
-                control.remaining(),
-            ),
-            (&claim, &entered),
-            |(claim, entered), tx| {
-                Box::pin(async move {
-                    rss_reconcile_postgres::messaging::protect_in(
-                        tx,
-                        claim,
-                        entered,
-                        |entered, _| {
-                            Box::pin(async move {
-                                entered.store(true, Ordering::SeqCst);
-                                Ok(())
-                            })
-                        },
-                    )
-                    .await
-                })
-            },
-        )
-        .await;
-    let rejected = result.fold(
-        |()| false,
-        |_| false,
-        |_| true,
-        |_| false,
-        |_| false,
-        |_| true,
-    );
-    assert!(rejected);
-    assert!(!entered.load(Ordering::SeqCst));
+    for wake in [false, true] {
+        let result = runtime
+            .local_tx_with_context(
+                TenantId::parse("00000000-0000-0000-0000-000000000001")?,
+                rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+                    control.remaining(),
+                ),
+                (&claim, &entered),
+                |(claim, entered), tx| {
+                    Box::pin(async move {
+                        if wake {
+                            return rss_reconcile_postgres::messaging::wake_in(
+                                tx,
+                                claim.target(),
+                                entered,
+                                |entered, _| {
+                                    Box::pin(async move {
+                                        entered.store(true, Ordering::SeqCst);
+                                        Ok(())
+                                    })
+                                },
+                            )
+                            .await;
+                        }
+                        rss_reconcile_postgres::messaging::protect_in(
+                            tx,
+                            claim,
+                            entered,
+                            |entered, _| {
+                                Box::pin(async move {
+                                    entered.store(true, Ordering::SeqCst);
+                                    Ok(())
+                                })
+                            },
+                        )
+                        .await
+                    })
+                },
+            )
+            .await;
+        let rejected = result.fold(
+            |()| false,
+            |_| false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| true,
+        );
+        assert!(rejected);
+        assert!(!entered.load(Ordering::SeqCst));
+    }
     Ok(())
 }

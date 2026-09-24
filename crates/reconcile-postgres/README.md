@@ -46,7 +46,7 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 开启 `transactional-messaging` 才引入消息 core/PG 依赖。`messaging::protect` 和 `messaging::wake_with` 接受现有 `PgRuntime` 与显式 context，回调取得同一个消息 `PgTransaction`。仅追加消息时，使用共享 runtime 与 domain 构造 `PgOutboxWriter`，在回调中通过 `OutboxWriter::append` 写入，无需 receipt 类型或投递预算。确实同时承担投递的消费者才组合使用 `PgOutboxStore<R>`。Reconcile 校验、业务 SQL、canonical Outbox 和调度状态同事务；消息 runtime 唯一拥有结算。它们返回 `LocalTxAttempt`，必须穷尽区分 committed、not-started、rolled-back、fenced、rollback-failed、commit-unknown。
 
-`messaging::protect_in` 借用调用方已经打开的 `PgTransaction`，供宿主先取得 Audit/Ledger 等上层锁，再锁 claim、执行业务并标记 Applied。它继承原连接和剩余预算，不改会话、不取得第二连接、不接管提交；成功只是 staged，错误必须交回原 owner 回滚。独立 `protect` 与该接口共用同一 claim 校验及写入实现。
+`messaging::protect_in` 借用调用方已经打开的 `PgTransaction`，供宿主先取得 Audit/Ledger 等上层锁，再锁 claim、执行业务并标记 Applied。它继承原连接和剩余预算，不改会话、不取得第二连接、不接管提交；成功只是 staged，错误必须交回原 owner 回滚。独立 `protect` 与该接口共用同一 claim 校验及写入实现。`messaging::wake_in` 对称地在已有事务内登记 wake 并执行回调，与独立 `wake_with` 共用准入和 wake SQL，适用于上层锁必须先于调度目标锁的原子业务提交。
 
 消息模式需安装原消息 schema，并向同一 runtime 角色授予本组件最小权限。与默认路径共用本组件 SQL 和 fencing；不复制 Outbox/Inbox，不修改消息引擎依赖方向。回调的 context 可以直接借用业务字段，和 transaction 一起重借；不要求为借用额外包装 Arc。
 

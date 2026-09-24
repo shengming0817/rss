@@ -88,7 +88,7 @@ async fn reconcile_postgres_suite() -> anyhow::Result<()> {
         scenarios::run(&store,&pool,&owner,&control).await?;
         process::run(&store,&owner,&fixture,&control).await?;
         transport::run(&owner,options.clone(),&control).await?;
-        messaging::run(&store,&owner,&fixture,&control).await?;
+        Box::pin(messaging::run(&store,&owner,&fixture,&control)).await?;
         assert_eq!(store.close(&control).await,CloseOutcome::Drained);owner.close().await;drop(fixture);drop(network);Ok::<(),anyhow::Error>(())
     }).await??;
     Ok(())

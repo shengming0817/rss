@@ -11,6 +11,8 @@ workspace = true
 [dev-dependencies]
 rss-examples = { path = "../../crates/examples", features = ["reconcile-pg"] }
 
+rss-ledger.workspace = true
+rss-ledger-postgres = { workspace = true, features = ["messaging"] }
 rss-reconcile.workspace = true
 rss-reconcile-postgres = { workspace = true, features = ["integration", "transactional-messaging"] }
 rss-request-context.workspace = true

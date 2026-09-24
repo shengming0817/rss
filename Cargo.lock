@@ -3282,6 +3282,8 @@ dependencies = [
  "futures",
  "rss-contract",
  "rss-examples",
+ "rss-ledger",
+ "rss-ledger-postgres",
  "rss-reconcile",
  "rss-reconcile-postgres",
  "rss-request-context",
