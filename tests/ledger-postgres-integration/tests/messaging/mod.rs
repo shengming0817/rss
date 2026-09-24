@@ -42,6 +42,13 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         let r = request("inbox", m.id().as_str(), m.payload()).map_err(|_| {
             PgConsumerEffectFailure::infrastructure(std::io::Error::other("fixture request"))
         })?;
+        rss_ledger_postgres::lock_head_in(tx, self.auth.clone(), r.ledger())
+            .await
+            .map_err(|e| {
+                PgConsumerEffectFailure::infrastructure(
+                    rss_transactional_messaging_postgres::PgError::from(e),
+                )
+            })?;
         if let Err(error) = rss_ledger_postgres::append_in(tx, self.auth.clone(), &r).await {
             return match error {
                 rss_ledger_postgres::Error::Conflict => Ok(TerminalDisposition::Rejected(

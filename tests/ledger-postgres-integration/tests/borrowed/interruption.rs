@@ -15,10 +15,12 @@ pub(super) async fn run<T: Timer>(
         .connect_with((*pool.connect_options()).clone())
         .await?;
     for case in [
-        ("append-cancel", true, true),
-        ("append-deadline", true, false),
-        ("read-cancel", false, true),
-        ("read-deadline", false, false),
+        ("append-cancel", 1, true),
+        ("append-deadline", 1, false),
+        ("read-cancel", 0, true),
+        ("read-deadline", 0, false),
+        ("lock-cancel", 2, true),
+        ("lock-deadline", 2, false),
     ] {
         interrupted(store, &single, owner, control, case).await?;
     }
@@ -26,17 +28,19 @@ pub(super) async fn run<T: Timer>(
     Ok(())
 }
 
+#[allow(clippy::cognitive_complexity)]
+// reason: one owned interruption fixture keeps server bounds, quarantine and replacement assertions together.
 async fn interrupted<T: Timer>(
     store: &PgLedger,
     single: &PgPool,
     owner: &PgPool,
     control: &Control<'_, T>,
-    case: (&str, bool, bool),
+    case: (&str, u8, bool),
 ) -> anyhow::Result<()> {
-    let (id, _, _) = case;
+    let (id, operation, _) = case;
     let request = request(&format!("borrowed-{id}"), "event", b"exact")?;
     let mut blocker = owner.begin().await?;
-    sqlx::query("LOCK TABLE rss_ledger.entries IN ACCESS EXCLUSIVE MODE")
+    sqlx::query(blocking_table(operation))
         .execute(&mut *blocker)
         .await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -46,25 +50,31 @@ async fn interrupted<T: Timer>(
     // The host, not the borrowing API, owns uncertain-settlement isolation.
     lease.close_on_drop();
     let mut tx = lease.begin().await?;
+    // The owner bounds PostgreSQL separately from client-future cancellation.
+    sqlx::query("SET LOCAL statement_timeout='200ms'")
+        .execute(&mut *tx)
+        .await?;
     let (pid, _): (i32, String) =
         sqlx::query_as("SELECT pg_backend_pid(),set_config('rss.tenant_id',$1,true)")
             .bind(TENANT)
             .fetch_one(&mut *tx)
             .await?;
     interrupt(&mut tx, &request, owner, (pid, blocker_pid), case).await?;
-    // The backend is still blocked: dropping the API future is not rollback ACK.
-    // A separate bounded host cleanup attempt cannot confirm settlement either.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), tx.rollback())
-            .await
-            .is_err()
-    );
+    // A cancelled future is not an ACK. The owner either gets a real rollback ACK
+    // after the server timeout or quarantines the lease when its cleanup budget expires.
+    let cleanup = tokio::time::timeout(Duration::from_millis(50), tx.rollback()).await;
+    if !case.2 {
+        cleanup??;
+    }
     drop(lease);
+    // The owner retires the uncertain lease: replacement must not depend on releasing the blocker.
+    let replacement: i32 = tokio::time::timeout(
+        Duration::from_secs(1),
+        sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(single),
+    )
+    .await??;
     blocker.rollback().await?;
     wait_retired(owner, pid).await?;
-    let replacement: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(single)
-        .await?;
     assert_ne!(replacement, pid);
     recover(store, single, &request, control).await
 }
@@ -109,7 +119,7 @@ async fn interrupt(
     request: &AppendRequest,
     owner: &PgPool,
     pids: (i32, i32),
-    case: (&str, bool, bool),
+    case: (&str, u8, bool),
 ) -> anyhow::Result<()> {
     let (id, append, cancelled) = case;
     let clock = Clock::new();
@@ -128,7 +138,10 @@ async fn interrupt(
     observed?;
     match result {
         Err(Error::Cancelled(LocalTxDeadlineStage::Operation)) if cancelled => Ok(()),
-        Err(Error::Deadline(LocalTxDeadlineStage::Operation)) if !cancelled => Ok(()),
+        Err(
+            Error::Cancelled(LocalTxDeadlineStage::Operation)
+            | Error::Deadline(LocalTxDeadlineStage::Operation),
+        ) if !cancelled => Ok(()),
         _ => anyhow::bail!("{id}: missing in-flight interruption"),
     }
 }
@@ -138,9 +151,11 @@ async fn operate<T: Timer>(
     authenticator: &Authenticator,
     request: &AppendRequest,
     control: &Control<'_, T>,
-    append: bool,
+    append: u8,
 ) -> Result<(), Error> {
-    if append {
+    if append == 2 {
+        lock_head_in_transaction(tx, authenticator, request.ledger(), control).await
+    } else if append == 1 {
         append_in_transaction(tx, authenticator, request, control)
             .await
             .map(|_| ())
@@ -195,4 +210,11 @@ async fn wait_retired(owner: &PgPool, pid: i32) -> anyhow::Result<()> {
     })
     .await??;
     Ok(())
+}
+
+fn blocking_table(operation: u8) -> &'static str {
+    match operation {
+        2 => "LOCK TABLE rss_ledger.heads IN ACCESS EXCLUSIVE MODE",
+        _ => "LOCK TABLE rss_ledger.entries IN ACCESS EXCLUSIVE MODE",
+    }
 }

@@ -1,5 +1,6 @@
 use super::*;
 mod interruption;
+mod locking;
 
 pub(super) async fn run<T: Timer>(
     store: &PgLedger,
@@ -7,6 +8,7 @@ pub(super) async fn run<T: Timer>(
     owner: &PgPool,
     control: &Control<'_, T>,
 ) -> anyhow::Result<()> {
+    locking::run(pool, control).await?;
     scope(pool, control).await?;
     visibility(store, pool, control).await?;
     commit(store, pool, control).await?;
@@ -25,6 +27,10 @@ async fn scope<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Res
             .bind(tenant)
             .execute(&mut *tx)
             .await?;
+        assert!(matches!(
+            lock_head_in_transaction(&mut tx, &authenticator, request.ledger(), control).await,
+            Err(Error::Protocol(rss_ledger::Error::ScopeMismatch))
+        ));
         assert!(matches!(
             append_in_transaction(&mut tx, &authenticator, &request, control).await,
             Err(Error::Protocol(rss_ledger::Error::ScopeMismatch))
@@ -58,6 +64,7 @@ async fn visibility<T: Timer>(
         .bind(TENANT)
         .execute(&mut *tx)
         .await?;
+    lock_head_in_transaction(&mut tx, &authenticator, request.ledger(), control).await?;
     let staged = append_in_transaction(&mut tx, &authenticator, &request, control).await?;
     assert!(staged.inserted());
     let window = read_window_in_transaction(
@@ -164,6 +171,10 @@ async fn cancellation(pool: &PgPool) -> anyhow::Result<()> {
     let stopped = Control::new(&clock, Duration::from_secs(5), &cancel);
     let mut tx = pool.begin().await?;
     assert!(matches!(
+        lock_head_in_transaction(&mut tx, &authenticator, request.ledger(), &stopped).await,
+        Err(Error::Cancelled(LocalTxDeadlineStage::Operation))
+    ));
+    assert!(matches!(
         append_in_transaction(&mut tx, &authenticator, &request, &stopped).await,
         Err(Error::Cancelled(LocalTxDeadlineStage::Operation))
     ));
@@ -199,6 +210,10 @@ async fn permissions<T: Timer>(
         .bind(TENANT)
         .execute(&mut *tx)
         .await?;
+    assert!(matches!(
+        lock_head_in_transaction(&mut tx, &authenticator, request.ledger(), control).await,
+        Err(Error::Admission(_))
+    ));
     assert!(matches!(
         append_in_transaction(&mut tx, &authenticator, &request, control).await,
         Err(Error::Admission(_))

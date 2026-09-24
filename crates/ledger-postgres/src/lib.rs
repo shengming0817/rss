@@ -3,12 +3,12 @@
 #![warn(missing_docs)]
 mod borrowed;
 mod control;
-pub use borrowed::{append_in_transaction, read_window_in_transaction};
+pub use borrowed::{append_in_transaction, lock_head_in_transaction, read_window_in_transaction};
 mod error;
 #[cfg(feature = "messaging")]
 mod messaging;
 #[cfg(feature = "messaging")]
-pub use messaging::append_in;
+pub use messaging::{append_in, lock_head_in};
 mod probe;
 mod repository;
 mod transaction;

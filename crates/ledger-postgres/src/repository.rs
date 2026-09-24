@@ -73,12 +73,11 @@ impl Window {
         self.observed_tail
     }
 }
-pub(crate) async fn append(
+pub(crate) async fn lock_head(
     connection: &mut PgConnection,
     auth: &Authenticator,
-    request: &AppendRequest,
-) -> Result<StagedAppend, Error> {
-    let ledger = request.ledger();
+    ledger: &LedgerId,
+) -> Result<(), Error> {
     sqlx::query("SELECT rss_ledger.prepare_append($1::uuid,$2,$3,1::smallint)")
         .bind(ledger.tenant().to_string())
         .bind(ledger.chain().as_str())
@@ -86,6 +85,16 @@ pub(crate) async fn append(
         .execute(&mut *connection)
         .await
         .map_err(sql_error)?;
+    Ok(())
+}
+
+pub(crate) async fn append(
+    connection: &mut PgConnection,
+    auth: &Authenticator,
+    request: &AppendRequest,
+) -> Result<StagedAppend, Error> {
+    let ledger = request.ledger();
+    lock_head(connection, auth, ledger).await?;
     let head = sqlx::query(
         "SELECT seq,tag FROM rss_ledger.heads WHERE tenant_id=$1::uuid AND chain_id=$2",
     )

@@ -50,15 +50,22 @@ pub enum Error {
     /// Remaining operation budget elapsed.
     #[error("ledger deadline elapsed")]
     Deadline(rss_transactional_messaging::transaction::LocalTxDeadlineStage),
-    /// Caller cancellation was observed.
+    /// Caller or PostgreSQL statement cancellation was observed.
     #[error("ledger operation cancelled")]
     Cancelled(rss_transactional_messaging::transaction::LocalTxDeadlineStage),
+    /// Original message owner's classification, without losing settlement semantics.
+    #[cfg(feature = "messaging")]
+    #[error(transparent)]
+    Messaging(#[from] rss_transactional_messaging_postgres::PgError),
     /// Redacted database failure; classification alone does not authorize retry.
     #[error("ledger storage unavailable")]
     Storage(#[source] RedactedSource),
 }
 pub(crate) fn sql_error(e: sqlx::Error) -> Error {
     match e.as_database_error().and_then(|e| e.code()).as_deref() {
+        Some("57014") => Error::Cancelled(
+            rss_transactional_messaging::transaction::LocalTxDeadlineStage::Operation,
+        ),
         Some("PL001") => rss_ledger::Error::ScopeMismatch.into(),
         Some("PL002") => rss_ledger::Error::UnsupportedKey.into(),
         Some("PL003") => rss_ledger::Error::UnsupportedEncoding.into(),
@@ -72,6 +79,12 @@ pub(crate) fn sql_error(e: sqlx::Error) -> Error {
 
 impl From<sqlx::Error> for Error {
     fn from(error: sqlx::Error) -> Self {
-        Self::Storage(RedactedSource::new(error))
+        if error.as_database_error().and_then(|e| e.code()).as_deref() == Some("57014") {
+            Self::Cancelled(
+                rss_transactional_messaging::transaction::LocalTxDeadlineStage::Operation,
+            )
+        } else {
+            Self::Storage(RedactedSource::new(error))
+        }
     }
 }
