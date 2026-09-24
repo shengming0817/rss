@@ -5,6 +5,7 @@
 #![warn(missing_docs)]
 mod config;
 mod consumer;
+mod consumer_profile;
 mod envelope;
 mod fence;
 mod inbox;
@@ -16,6 +17,7 @@ pub use config::{PgConfig, PgPassword, PgPrivateCa, PgPrivateCaError};
 pub use consumer::{
     ConsumerRecoveryMode, PgConsumerEffect, PgConsumerEffectFailure, PgConsumerTx, ReceiptOnly,
 };
+pub use consumer_profile::grant_consumer;
 pub use inbox::{PgInboxClaim, PgInboxStore};
 pub use outbox::{PgOutboxClaim, PgOutboxStore, PgOutboxWriter};
 #[cfg(feature = "integration")]

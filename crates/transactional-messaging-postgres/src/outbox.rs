@@ -96,6 +96,23 @@ impl<R> PgOutboxStore<R> {
             next_tenant: std::sync::atomic::AtomicUsize::new(0),
         })
     }
+    /// Read whether this domain has unresolved dead letters in any bound tenant.
+    /// One absolute budget covers every tenant. This is a read, not permission to resolve records;
+    /// the consuming host decides how an unresolved record affects its admission policy.
+    pub async fn has_dead_letters(&self, deadline: OperationDeadline) -> Result<bool, PgError> {
+        let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
+            .map_err(|_| PgError::invariant())?;
+        for &(tenant, _) in self.writer.runtime.binding.tenants() {
+            let domain = self.writer.domain.as_str().to_owned();
+            let found=self.writer.runtime.relay(tenant,cutoff,move|c|Box::pin(async move {
+                Ok(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND status='dead_letter')").bind(tenant.to_string()).bind(domain).fetch_one(c).await?)
+            })).await?;
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// Reject a transaction from a different runtime before any companion operation.
     pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
         self.writer.validate_transaction(tx)

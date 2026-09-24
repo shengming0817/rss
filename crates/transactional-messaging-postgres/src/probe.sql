@@ -124,7 +124,8 @@ expected_policies(relation, name, roles, predicate) AS (
  ('functions', NOT EXISTS(SELECT 1 FROM write_functions f LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
   WHERE p.oid IS NULL OR p.prorettype<>f.result OR p.proretset OR p.provolatile<>'v' OR NOT p.prosecdef OR p.proowner<>(SELECT oid FROM relay_role)
    OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp'=ANY(p.proconfig))
-   OR NOT has_function_privilege(current_user,p.oid,'EXECUTE')
+   OR has_function_privilege(current_user,p.oid,'EXECUTE') IS DISTINCT FROM (NOT $3)
+   OR ($3 AND EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_function_privilege(r.oid,p.oid,'EXECUTE')))
    OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))),
  ('constraints', EXISTS(SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('rss_transactional_messaging.outbox_partition')
   AND i.indrelid='rss_transactional_messaging.outbox'::regclass AND i.indisunique AND i.indisvalid AND i.indisready

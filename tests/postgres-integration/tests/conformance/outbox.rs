@@ -507,7 +507,28 @@ impl OutboxDriver for Driver {
     }
     async fn blocked_partition_claims(&self) -> Result<usize, MessagingError> {
         let claim = self.head.lock().await.take().expect("head");
+        assert!(
+            !self
+                .store()
+                .has_dead_letters(deadline())
+                .await
+                .map_err(port)?
+        );
         self.settle(claim, OutboxSettlement::DeadLetter).await?;
+        assert!(
+            self.store()
+                .has_dead_letters(deadline())
+                .await
+                .map_err(port)?
+        );
+        let other = PgOutboxStore::<()>::new(
+            self.h.runtime.clone(),
+            MessagingDomain::parse("readback-other").expect("domain"),
+            crate::outbox_budget(Duration::from_secs(60)),
+        )
+        .map_err(port)?;
+        assert!(!other.has_dead_letters(deadline()).await.map_err(port)?);
+
         Ok(self
             .store()
             .claim_partition_heads(NonZeroUsize::new(8).expect("limit"), deadline())

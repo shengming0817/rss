@@ -301,6 +301,7 @@ pub enum PgTransactionFault {
 pub(crate) enum Profile {
     Runtime,
     Producer,
+    Consumer,
     Recovery,
     #[cfg(feature = "recovery")]
     Dr,
@@ -326,6 +327,15 @@ impl PgRuntime {
         binding: ExecutionBinding,
     ) -> Result<Self, PgError> {
         Self::connect_profile(config, timer, binding, Profile::Producer).await
+    }
+    /// Connect a relay/Inbox consumer without permission to author Outbox messages.
+    /// Producer function EXECUTE must also be absent from every SET-accessible role.
+    pub async fn connect_consumer<C: ExecutionTimer + 'static>(
+        config: PgConfig,
+        timer: C,
+        binding: ExecutionBinding,
+    ) -> Result<Self, PgError> {
+        Self::connect_profile(config, timer, binding, Profile::Consumer).await
     }
     pub(crate) async fn connect_profile<C: ExecutionTimer + 'static>(
         config: PgConfig,
@@ -375,6 +385,7 @@ impl PgRuntime {
                 sqlx::query_scalar::<_, String>(include_str!("probe.sql"))
                     .bind(recovery_operator)
                     .bind(profile == Profile::Producer)
+                    .bind(profile == Profile::Consumer)
                     .fetch_optional(&runtime.pool)
                     .await
             })

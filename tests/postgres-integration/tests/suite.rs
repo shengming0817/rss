@@ -67,6 +67,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         let timer = Timer::new();
         let config = PgConfig::new(&params.host, params.port, &params.database, "tmsg_runtime", PgPassword::new("fixture-only"), rss_transactional_messaging_postgres::PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?);
         transaction_only_permissions(&fixture, &owner, config.clone()).await?;
+        consumer_only_permissions(&owner, config.clone()).await?;
         let raw_runtime = PgPoolOptions::new().max_connections(2).acquire_timeout(Duration::from_secs(5))
             .connect_with(PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database)
                 .username("tmsg_runtime").password("fixture-only").ssl_mode(PgSslMode::VerifyFull)
@@ -539,5 +540,72 @@ async fn producer_relay_denied(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
             rss_transactional_messaging_postgres::PgError::PermissionDenied(_)
         ));
     }
+    Ok(())
+}
+
+async fn consumer_only_permissions(owner: &sqlx::PgPool, config: PgConfig) -> anyhow::Result<()> {
+    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) FROM tmsg_runtime").execute(owner).await?;
+    let mut connection = owner.acquire().await?;
+    rss_transactional_messaging_postgres::grant_consumer(&mut connection, "tmsg_runtime").await?;
+    drop(connection);
+    let consumer = Arc::new(
+        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding()).await?,
+    );
+    assert!(
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .is_err()
+    );
+    consumer_writer_denied(consumer.clone()).await?;
+    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime").execute(owner).await?;
+    assert!(
+        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .is_err()
+    );
+    consumer_set_role_denied(owner, config.clone()).await?;
+    consumer.close().await;
+    Ok(())
+}
+
+async fn consumer_writer_denied(consumer: Arc<PgRuntime>) -> anyhow::Result<()> {
+    let writer = rss_transactional_messaging_postgres::PgOutboxWriter::new(
+        consumer.clone(),
+        message("consumer-forgery").metadata().domain().clone(),
+    );
+    let attempt = consumer
+        .local_tx(
+            message("consumer-forgery").metadata().tenant_id(),
+            deadline(),
+            move |tx| {
+                Box::pin(async move {
+                    use rss_transactional_messaging::outbox::{OutboxWriter, PendingMessage};
+                    writer
+                        .append(tx, PendingMessage::new(message("consumer-forgery")))
+                        .await?;
+                    Ok(())
+                })
+            },
+        )
+        .await;
+    assert!(attempt.fold(
+        |_| false,
+        |_| false,
+        |_| true,
+        |_| false,
+        |_| false,
+        |_| false
+    ));
+    Ok(())
+}
+
+async fn consumer_set_role_denied(owner: &sqlx::PgPool, config: PgConfig) -> anyhow::Result<()> {
+    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) FROM tmsg_runtime; CREATE ROLE tmsg_writer_only NOLOGIN; GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_writer_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_writer_only; GRANT tmsg_writer_only TO tmsg_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
+    assert!(
+        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql("REVOKE tmsg_writer_only FROM tmsg_runtime; REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) FROM tmsg_writer_only; REVOKE USAGE ON SCHEMA rss_transactional_messaging FROM tmsg_writer_only; DROP ROLE tmsg_writer_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime").execute(owner).await?;
     Ok(())
 }
