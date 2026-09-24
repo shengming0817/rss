@@ -1,9 +1,27 @@
 use crate::{Error, StagedAppend, borrowed};
-use rss_ledger::{AppendRequest, Authenticator};
+use rss_ledger::{AppendRequest, Authenticator, LedgerId};
 use rss_redact::RedactedSource;
 use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging_postgres::{PgError, PgTransaction};
 use std::sync::Arc;
+/// Lock a chain before business/outbox locks without producing an event.
+/// Inherits the message owner's tenant, connection and remaining budget; never settles.
+pub async fn lock_head_in(
+    tx: &mut PgTransaction<'_>,
+    auth: Arc<Authenticator>,
+    ledger: &LedgerId,
+) -> Result<(), Error> {
+    if tx.tenant_id() != ledger.tenant() {
+        return Err(rss_ledger::Error::ScopeMismatch.into());
+    }
+    let ledger = ledger.clone();
+    tx.with_connection(move |connection| {
+        Box::pin(async move { Ok(borrowed::lock_head(connection, &auth, &ledger).await) })
+    })
+    .await
+    .map_err(|e| Error::Storage(RedactedSource::new(e)))?
+}
+
 /// Stage in a message owner's transaction, inheriting its tenant and remaining budget.
 /// Never settles, alters GUCs or opens another transaction. The returned value is staged.
 /// Propagate errors through the enclosing local_tx or consumer effect to roll back.

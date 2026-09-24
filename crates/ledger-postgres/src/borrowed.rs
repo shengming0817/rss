@@ -6,6 +6,29 @@ use rss_request_context::TenantId;
 use rss_transactional_messaging::transaction::LocalTxDeadlineStage;
 use sqlx::{PgConnection, Postgres, Transaction};
 
+/// Lock the chain before taking business locks, without appending an event.
+/// An empty chain may acquire an empty head; its sequence is not advanced.
+/// Uses the owner's actual connection and budget. Only the owner can settle it.
+pub async fn lock_head_in_transaction<T: Timer>(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &Authenticator,
+    ledger: &LedgerId,
+    control: &Control<'_, T>,
+) -> Result<(), Error> {
+    control
+        .run_stage(LocalTxDeadlineStage::Operation, lock_head(tx, auth, ledger))
+        .await
+}
+
+pub(crate) async fn lock_head(
+    connection: &mut PgConnection,
+    auth: &Authenticator,
+    ledger: &LedgerId,
+) -> Result<(), Error> {
+    validate(connection, ledger.tenant()).await?;
+    repository::lock_head(connection, auth, ledger).await
+}
+
 /// Stage an append in an existing SQLx transaction under its owner's absolute budget.
 ///
 /// Validates the actual connection, role and tenant setting. Does not change settings,

@@ -168,3 +168,12 @@ existing provider fixtures; `all` reports `GRAPH PASS` for dependency/API compil
 Candidate validation checks embedded Cargo identity and dependency origins before execution;
 VCS metadata is not cryptographic provenance. Compilation, fixed-artifact execution and registry
 publication are distinct results.
+
+### Lock before deriving business facts
+
+Use `lock_head_in_transaction` (SQLx) or `lock_head_in` (messaging) before business/outbox
+locks when the event depends on the transaction's final facts. Both validate the actual tenant,
+role and chain key, use the original connection/budget and retain the lock until settlement.
+An empty head can be created, but no entry or sequence is allocated. Append through the normal
+API after computing the facts; repeated locking in one transaction is safe. A lock is neither
+a staged event nor commit evidence. Propagate failures to the transaction owner.
