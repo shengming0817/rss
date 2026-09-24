@@ -64,6 +64,7 @@ PostgreSQL 缺失端口映射的追踪见 [#2316](https://dev.azure.com/shengmin
 sccache 须预先安装启动器中 `SCCACHE_VERSION` 指定的版本，入口不自动下载安装。
 已有自定义 rustc wrapper 时，auto 保留它，on 拒绝冲突。server 版本或缓存目录不匹配时，
 等待所有使用该 RSS server 的 CI 退出后再停止 server；下次 CI 会重新启动。
+下面命令使用默认 socket；若覆盖了 `SCCACHE_SERVER_UDS`，请使用实际配置的同一 socket。
 
 ```sh
 SCCACHE_SERVER_UDS="$HOME/.cache/rss-sccache/server.sock" sccache --show-stats
@@ -83,8 +84,8 @@ SCCACHE_SERVER_UDS="$HOME/.cache/rss-sccache/server.sock" sccache --stop-server
 cargo install --locked --version "$(python3 hack/ci-semver.py --tool-version)" cargo-semver-checks
 make ci CI_PART=semver CI_BASE=origin/develop CI_HEAD=HEAD
 make ci CI_PART=semver CI_SEMVER_MODE=all CI_BASE=origin/develop
-# 显式选择 package 比较；将基准替换为实际 commit
-make ci CI_PART=semver CI_SEMVER_MODE=compare CI_SEMVER_PACKAGES=rss-contract CI_BASE=<baseline> CI_HEAD=HEAD
+# 显式选择 package 比较；也可将 origin/develop 替换为实际基准 commit
+make ci CI_PART=semver CI_SEMVER_MODE=compare CI_SEMVER_PACKAGES=rss-contract CI_BASE=origin/develop CI_HEAD=HEAD
 ```
 
 `CI_SEMVER_PACKAGES` 仅用于 `compare`，不能与 `CI_SEMVER_FULL=1` 组合。工具缺失、版本不符、
