@@ -7,7 +7,7 @@ allowed-tools: [Bash, Read, Skill, Agent]
 
 # pr-monitor — PR 状态自动接力检查器（fix 侧）
 
-> **适用场景**：ship/fix 推完 PR 后，延迟约 15 分钟必须启动一次 `/pr-monitor <PR#> --mode=auto`。外部 app 负责实时监听 `pr-status/needs-review-again` / `pr-status/needs-check-fix` 并执行 review/check；本技能只检查这些流程产出的 label + 机器块，并在满足自动门时接力 `/fix`。
+> **适用场景**：ship/fix 推完 PR 后，延迟约 15 分钟必须启动一次 `/pr-monitor <PR#> --mode=auto`。外部 app 负责实时监听 `pr-status/needs-review` / `pr-status/needs-check` 并执行 review/check；本技能只检查这些流程产出的 label + 机器块，并在满足自动门时接力 `/fix`。
 >
 > **单 tick 模型**：每次调用只做一次检查就返回；不携带 tick payload、不写文件，状态全部从 PR 实时读取（label + 最新机器块）。
 
@@ -60,11 +60,11 @@ esac; shift; done
 
 | 条件 | 判定 | 窗口输出 |
 |------|------|---------|
-| `pr-status/ready` ∈ labels | label 含 | "PR #N 已 ready，监控结束" |
+| `pr-status/ready` 是唯一流程标签 | `extract` EC=0，latest block `kind == "pr-review"`、`verdict` 为 `approved` 或 `ready`、`next.agent == null`，且 block headSha 等于 live head | "PR #N 已 ready，监控结束" |
 | PR state != open | `state != "open"` | "PR #N 已关闭（state=$STATE），监控结束" |
 | 熔断 | block `cycle.exhausted` 或 `round ≥ 3` 或 `next.agent == "human"` | "PR #N 熔断：review↔fix 已达 3 轮上限，转人工" |
 
-> ready/closed/熔断 是终止出口。ship/fix 经延迟单次调用本技能、跑完即止。
+> `ready` 标签若缺少当前 head 的有效审查块，只报告证据失效并要求对新 head 重新 review，不宣称可合并。ready/closed/熔断 是终止出口。ship/fix 经延迟单次调用本技能、跑完即止。
 
 ### §3.2 调 fix（handoff 机器门全过才接力）
 
@@ -72,21 +72,23 @@ esac; shift; done
 
 | handoff 门（全过才 dispatch） | 判定 |
 |------|------|
-| `pr-status/needs-fix` ∈ labels | label check |
+| `pr-status/needs-fix` 是唯一流程标签 | 无其它 `pr-status/*` 或旧 `pr-review/*` |
 | fresh canonical review 块 | `extract` EC=0 且 latest block `kind == "pr-review"`（stale / 无块 → 不过）|
 | review 结论一致 | block `verdict == "changes-requested"` |
 | 下一跳一致 | block `next.agent == "claude"` 且 `next.command == "/fix"` |
 | 触发 label 一致 | block `next.triggerLabel == "pr-status/needs-fix"` 且该 label 仍在 PR |
 | same head | block `next.requiresSameHeadSha == true`（`extract` 已比对 live headSha，stale 失败）|
 
-全过 → host LLM in-session 调用 `Skill("fix", args="<N>")`。**Cx / scope / 能否修由 fix 自判**（读 finding 文件 + `byCx`）——pr-monitor 只守 handoff 真实性 + freshness 这层机器门，不做 Cx 判定（去掉原 Cx1/Cx2 window）。
+全过且消费者已对该机器块 idempotencyKey 完成持久化互斥领取 → host LLM in-session 调用 `Skill("fix", args="<N>")`。**Cx / scope / 能否修由 fix 自判**（读 finding 文件 + `byCx`）——pr-monitor 只守 handoff 真实性 + freshness 这层机器门，不做 Cx 判定（去掉原 Cx1/Cx2 window）。
 
-stale 块 / 旧 head review / 手工错贴 label → 门不过 → 不 dispatch，落 §3.3 报告。fix 接力后贴 pm:fix + 切 `pr-status/needs-check-fix`；pr-monitor 本次到此结束。后续 `/pr-review --check` 由外部 app 监听触发，再由 fix 收尾延迟约 15min 启动下一次接力。
+fix 执行期间仍为 `needs-fix`；同一 key 已领取时不重复启动。没有可核验领取机制时仅报告待处理，不自动派发。
+
+stale 块 / 旧 head review / 手工错贴 label → 门不过 → 不 dispatch，落 §3.3 报告。fix 接力后贴 pm:fix + 切 `pr-status/needs-check`；pr-monitor 本次到此结束。后续 `/pr-review --check` 由外部 app 监听触发，再由 fix 收尾延迟约 15min 启动下一次接力。
 
 ### §3.3 不自动修的情况（只报告，不 AskUserQuestion）
 
-- **`pr-status/needs-review-again`**：窗口打印 "PR #N 待外部 app 执行首轮 review；如需手动兜底，运行 `/pr-monitor <N> --mode=auto --role=review`"。
-- **`pr-status/needs-check-fix`**：窗口打印 "PR #N 待外部 app 执行 `/pr-review --check`；如需手动兜底，运行 `/pr-monitor <N> --mode=auto --role=review`"。
+- **`pr-status/needs-review`**：窗口打印 "PR #N 待外部 app 执行首轮 review；如需手动兜底，运行 `/pr-monitor <N> --mode=auto --role=review`"。
+- **`pr-status/needs-check`**：窗口打印 "PR #N 待外部 app 执行 `/pr-review --check`；如需手动兜底，运行 `/pr-monitor <N> --mode=auto --role=review`"。
 - **无 `pr-status/needs-fix`**：窗口打印 "PR #N 暂无待修 label，本次接力结束"。
 - **needs-fix 在但 handoff 门不过**（stale 块 / 旧 head / verdict·next 不一致）：窗口打印 "PR #N 有 needs-fix 但最新机器块 stale 或与 live head/label 不一致，不自动接力——等外部 app 对当前 head 重新 review"。
 
@@ -116,15 +118,14 @@ fi
 
 ## §4 alternate review 能力（`--role=review`）
 
-review 角色 in-session 按当前 `pr-status` 跑 review/check（Claude review 引擎）：
+review 角色同样先执行 §0 的 fresh canonical + same-head 校验，并通过消费者的 idempotencyKey 互斥领取；无领取机制时只报告，不自动派发。仅以下精确组合允许执行：
 
-```bash
-if [[ " ${LABELS[*]} " == *" pr-status/needs-check-fix "* ]]; then
-  claude -p "/pr-review $PR --check"
-else
-  claude -p "/pr-review $PR"
-fi
-```
+| 唯一流程标签 | 最新块 | 执行 |
+|---|---|---|
+| `pr-status/needs-review` | `kind=ship`、`verdict=needs-review`、`next.triggerLabel=pr-status/needs-review`、`next.command=codex review` | 完整 `/pr-review <PR#>` |
+| `pr-status/needs-check` | `kind=fix`、`verdict=needs-check`、`next.triggerLabel=pr-status/needs-check`、`next.command=/pr-review --check` | `/pr-review <PR#> --check` |
+
+其它状态、冲突标签或旧 head 不默认回退到完整审查，只报告未满足交接条件。
 
 review 结果由 /pr-review 贴评论 + 切 label；fix 侧接力仍由后续 `/pr-monitor <PR#> --mode=auto` 完成。
 

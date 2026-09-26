@@ -135,7 +135,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 **必须给出明确的时机建议**，回答三个问题：
 
-**Q0: 是否属于当前分支？** 取 2.4 归属结果：**OUT_OF_SCOPE** → 自动建 backlog issue（4.6 step 3；pri-p0/标签判不定除外），跳过 Q1-Q3；**IN_SCOPE / RELATED** → 进 Q1（RELATED 改动量大可 defer）。
+**Q0: 是否属于当前分支？** 取 2.4 归属结果：**OUT_OF_SCOPE** → 自动建 backlog issue（4.6 step 4；pri-p0/标签判不定除外），跳过 Q1-Q3；**IN_SCOPE / RELATED** → 进 Q1（RELATED 改动量大可 defer）。
 
 **Q1: 推荐现在做还是后面做？**（仅 IN_SCOPE / RELATED 继续）
 
@@ -152,7 +152,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 ### 3.3 详细修复计划
 
-文件级改动清单。收尾验证统一按§4.6 第 6 步执行；验证政策遵循[验证规则](../../../docs/rules/verification-scope.md)。
+文件级改动清单。收尾验证统一按§4.6 第 1 步执行；验证政策遵循[验证规则](../../../docs/rules/verification-scope.md)。
 
 ### 3.4 执行决策
 
@@ -162,7 +162,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 | Cx2 + IN_SCOPE + 触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
 | **Cx3/Cx4 IN_SCOPE** | 任何 | 如存在，执行下方单次批量处置门；无这类 finding 时不沟通 |
-| 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 3；pri-p0/判不定除外） |
+| 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 4；pri-p0/判不定除外） |
 
 **Cx3/Cx4 单次批量处置门**：先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由。属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。然后只发起一次批量处置请求：用户可全盘采纳建议，或按 finding ID 覆盖个别项。判当前 PR 修的记 `✅ 已修`并纳入本轮；判 defer 的自动建 issue、记 `⏸ defer`，不再二次确认。
 
@@ -177,7 +177,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 **用 TaskCreate 注册每项任务**，执行时 TaskUpdate 更新状态（✔/◼/◻）。
 
 规则：
-- 所有 finding 都创建 task，OUT_OF_SCOPE 标注 `[→ 自动建 issue（4.6 step 3）；pri-p0/判不定除外]`
+- 所有 finding 都创建 task，OUT_OF_SCOPE 标注 `[→ 自动建 issue（4.6 step 4）；pri-p0/判不定除外]`
 - 单条 Cx1 IN_SCOPE → 跳过清单直接修；批量或 Cx2+ → 必须创建
 - 最后两项固定：`commit + push` + `闭合/创建 GitHub issues`
 - 创建后立即执行，不等确认
@@ -220,7 +220,7 @@ scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-t
 
 ### 4.3 编辑循环收敛
 
-确认每条 finding 的复现测试与适用的 Edit-Test Loop 已通过；最终本地验证统一按§4.6 第 6 步在**切 label 后**执行。
+确认每条 finding 的复现测试与适用的 Edit-Test Loop 已通过；最终本地验证统一按§4.6 第 1 步在**交接前**执行。
 
 ### 4.4 测试失败处理（分层回退）
 
@@ -241,13 +241,13 @@ scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-t
 
 > **pm:* 评论统一**：填 `.github/project-template/pr-comment.md`（无损 `file:line` + 详表入 `<details>`），用 `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的 URL。
 
-1. **提交 + push**：仅 `git add` 修复文件，按 4.1 commit/push；无 PR 才用填好的 `pull_request_template.md` 调 `forge.sh pr-create`。
-2. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。
-3. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
-4. **pm:fix**（`--kind=fix`，OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
-5. **切 label**：按 `PROJECT.md` §5 执行 `forge.sh pr-set-labels <PR#> --add pr-status/needs-check-fix --remove pr-status/needs-fix`。**前置不变式（artifact-before-trigger）**：全部 deferred 的 issue 已建、pm 评论已贴，方可切 label（与 ship 阶段 8 同序）。
-6. **本地验证（label 后执行）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make ci CI_BASE=<remote>/develop`；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI，修复后完成冲突预检、pm 评论与 label 流转。
-7. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check-fix` 后先行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
+1. **本地验证（交接前）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make ci CI_BASE=<remote>/develop`；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI，修复后按以下步骤交接。fix 执行及验证期间保持 `pr-status/needs-fix`，不切回 `in-progress`。
+2. **提交 + push**：仅 `git add` 修复文件，按 4.1 commit/push；无 PR 才用填好的 `pull_request_template.md` 调 `forge.sh pr-create`。
+3. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。 合并改变 head 后精确验证受影响范围，再生成评论。
+4. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
+5. **pm:fix**（`--kind=fix`，绑定最终已验证 head；OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
+6. **切 label**：按 `PROJECT.md` §2.5/§5 使用 `forge.sh pr-set-status <PR#> needs-check <已验证且写入机器块的 head-sha>`。全部 deferred issue、pm 评论先落地，方可切状态；失败不得宣称交接完成。
+7. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check` 后执行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）请求用户决策。
 
@@ -271,5 +271,5 @@ Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri
 - 无法定位问题代码
 - 测试失败且 4 轮回退后仍无法修正
 - 存在 IN_SCOPE Cx3/Cx4 时，按 3.4 将全部 finding 合并为一次批量处置请求；无这类 finding 时不沟通
-- **OUT_OF_SCOPE / 批量处置判定 defer 的 Cx3+/RELATED / /fix 派生新问题 → 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 4.6 step 3：无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。**判定 defer 后建 issue 不再二次确认**。仅 `pri-p0`（incident）请求用户决策，或 area/type 判不定（`validate` 失败）时标 `deferred=labels-underivable` 回退草稿。
+- **OUT_OF_SCOPE / 批量处置判定 defer 的 Cx3+/RELATED / /fix 派生新问题 → 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 4.6 step 4：无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。**判定 defer 后建 issue 不再二次确认**。仅 `pri-p0`（incident）请求用户决策，或 area/type 判不定（`validate` 失败）时标 `deferred=labels-underivable` 回退草稿。
 - pri-p0 红线升级（incident-driven 或安全 CVE）

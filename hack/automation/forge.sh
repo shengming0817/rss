@@ -102,6 +102,7 @@ usage: forge.sh [--dry-run] <verb> [args...]
          pr-comment <pr> <body-file>        (prints created comment URL)
          pr-add-label <pr> <label> | pr-remove-label <pr> <label>
          pr-set-labels <pr> --add a,b --remove c,d
+         pr-set-status <pr> <in-progress|needs-review|needs-fix|needs-check|ready> <head-sha>
          pr-state <pr> | pr-refs <pr> | pr-mergeable <pr> | pr-web-url <pr>
          pr-diff <pr> | pr-diffstat <pr> | pr-comments-json <pr>
          branch-pr-merged <branch>   -> true|false (no open PR + has merged; squash-safe)
@@ -116,6 +117,47 @@ usage: forge.sh [--dry-run] <verb> [args...]
          issue-comment <n> <body-file> | subissue-link <parent> <child>
 Active forge from RSS_FORGE env or forge.conf DEFAULT_FORGE.
 EOF
+}
+
+# Converge the workflow labels using the existing backend operations. This is
+# not an atomic claim/CAS: callers serialize dispatch and bind comments to head.
+_pr_set_status() {
+    if [ "$#" -ne 3 ] || ! [[ "$1" =~ ^[0-9]+$ && "$3" =~ ^[0-9a-f]{40}$ ]]; then
+        echo 'forge pr-set-status: expected PR, status and reviewed/pushed head SHA' >&2
+        return 64
+    fi
+    local pr="$1" status="$2" head="$3" target="pr-status/$2"
+    case "$status" in
+        in-progress|needs-review|needs-fix|needs-check|ready) ;;
+        *) echo "forge pr-set-status: invalid status '$status'" >&2; return 64 ;;
+    esac
+    if _dry "pr-set-status $pr $status $head: check head/open PR, remove other workflow labels, add target, read back"; then return 0; fi
+    local refs state labels label
+    refs="$("_${FORGE}_pr_refs" "$pr")" || return 1
+    jq -e --arg head "$head" '.headSha == $head' <<< "$refs" >/dev/null || {
+        echo 'forge pr-set-status: head changed; regenerate evidence before switching' >&2; return 1;
+    }
+    state="$("_${FORGE}_pr_state" "$pr")" || return 1
+    jq -e '.state == "open" and (.labels | type == "array" and all(.[]; type == "string"))' <<< "$state" >/dev/null || {
+        echo 'forge pr-set-status: expected open PR with valid labels' >&2; return 1;
+    }
+    labels="$(jq -r --arg target "$target" '.labels[] | select((startswith("pr-status/") or startswith("pr-review/")) and . != $target)' <<< "$state")" || return 1
+    while IFS= read -r label; do
+        [ -n "$label" ] || continue
+        "_${FORGE}_pr_remove_label" "$pr" "$label" || return 1
+    done <<< "$labels"
+    if ! jq -e --arg target "$target" '.labels | index($target) != null' <<< "$state" >/dev/null; then
+        "_${FORGE}_pr_add_label" "$pr" "$target" || return 1
+    fi
+    state="$("_${FORGE}_pr_state" "$pr")" || return 1
+    jq -e --arg target "$target" '.state == "open" and ([.labels[] | select(startswith("pr-status/") or startswith("pr-review/"))] == [$target])' <<< "$state" >/dev/null || {
+        echo 'forge pr-set-status: label read-back mismatch; reconcile before dispatch' >&2; return 1;
+    }
+    refs="$("_${FORGE}_pr_refs" "$pr")" || return 1
+    jq -e --arg head "$head" '.headSha == $head' <<< "$refs" >/dev/null || {
+        echo 'forge pr-set-status: head changed during switch; label is not dispatch evidence' >&2; return 1;
+    }
+    printf '%s\n' "$state"
 }
 
 main() {
@@ -135,6 +177,7 @@ main() {
     esac
     # shellcheck source=/dev/null
     . "${FORGE_DIR}/forge/${FORGE}.sh"
+    if [ "$verb" = pr-set-status ]; then _pr_set_status "$@"; return; fi
     local fn="_${FORGE}_${verb//-/_}"
     if ! declare -F "${fn}" >/dev/null 2>&1; then
         echo "forge: verb '${verb}' not implemented for forge '${FORGE}'" >&2

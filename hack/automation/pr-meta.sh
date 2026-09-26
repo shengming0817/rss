@@ -145,8 +145,10 @@ ZERO_FINDINGS = {
 # triple (e.g. kind=fix with verdict=approved) would route derive_next down the
 # wrong branch, so emit fails closed on anything outside this set.
 COHERENT = {
-    ("ship", "ship", "needs-review-again"),
-    ("fix", "fix", "needs-check-fix"),
+    ("ship", "ship", "needs-review-again"),  # persisted v1 blocks
+    ("ship", "ship", "needs-review"),
+    ("fix", "fix", "needs-check-fix"),  # persisted v1 blocks
+    ("fix", "fix", "needs-check"),
     ("pr-review", "review", "approved"),
     ("pr-review", "review", "changes-requested"),
     ("pr-review", "check", "ready"),
@@ -232,12 +234,12 @@ def validate(obj, schema, path="$"):
 
 
 def derive_next(verdict, exhausted):
-    if verdict == "needs-review-again":
+    if verdict in ("needs-review", "needs-review-again"):
         return {"agent": "codex", "command": "codex review", "sandbox": True,
-                "triggerLabel": "pr-status/needs-review-again", "requiresSameHeadSha": True}
-    if verdict == "needs-check-fix":
+                "triggerLabel": "pr-status/" + verdict, "requiresSameHeadSha": True}
+    if verdict in ("needs-check", "needs-check-fix"):
         return {"agent": "claude", "command": "/pr-review --check", "sandbox": True,
-                "triggerLabel": "pr-status/needs-check-fix", "requiresSameHeadSha": True}
+                "triggerLabel": "pr-status/" + verdict, "requiresSameHeadSha": True}
     if verdict == "changes-requested":
         if exhausted:
             # Circuit breaker: 3 review<->fix rounds exhausted -> stop the loop,
@@ -347,8 +349,8 @@ def derive(facts):
 # verdict / cycle.round from these, so no producer re-states the mapping.
 PHASE_BY_KIND = {"ship": "ship", "fix": "fix", "ci": "check", "oos": "review"}
 FIXED_VERDICT_BY_KIND = {
-    "ship": "needs-review-again",
-    "fix": "needs-check-fix",
+    "ship": "needs-review",
+    "fix": "needs-check",
     "oos": "oos-filed",
 }
 
@@ -582,10 +584,10 @@ def do_selftest(schema):
     # F7: explicit expected-check count so a silently-dropped check fails the
     # selftest rather than printing "OK (N checks)" with a lower-than-expected N.
     # Update this constant whenever a check is added or removed. Breakdown:
-    #   9 round-trip + 2 five-state + 4 schema-reject + 4 forgery + 1 incoherent
-    #   + 1 oos-array + 1 ci-array + 2 exhausted + 18 emitblock-derive
-    #   + 5 kind-coverage + 13 kind-facts-contract + 5 oos-disposition = 65
-    EXPECTED_CHECKS = 65
+    #   11 round-trip + 6 legacy-migration + 2 five-state + 4 schema-reject + 4 forgery + 1 incoherent
+    #   + 1 oos-array + 1 ci-array + 2 exhausted + 20 emitblock-derive
+    #   + 5 kind-coverage + 13 kind-facts-contract + 5 oos-disposition = 75
+    EXPECTED_CHECKS = 75
 
     checks = 0
     failures = []
@@ -625,7 +627,9 @@ def do_selftest(schema):
 
     kinds = [
         ("ship",      "ship",   "needs-review-again"),
+        ("ship",      "ship",   "needs-review"),
         ("fix",       "fix",    "needs-check-fix"),
+        ("fix",       "fix",    "needs-check"),
         ("pr-review", "review", "approved"),
         ("pr-review", "review", "changes-requested"),  # non-exhausted, round=1
         ("pr-review", "check",  "ready"),
@@ -659,6 +663,28 @@ def do_selftest(schema):
                 ok(name)
         except Exception as e:
             failures.append("FAIL [%s]: %s" % (name, e))
+
+    # Persisted pre-migration blocks retain their original routing and round.
+    # Lock the old label independently of derive_next, then exercise maxround
+    # so a routing rename cannot silently reset the automatic fix budget.
+    import contextlib
+    import io
+    for kind, verdict in (("ship", "needs-review-again"), ("fix", "needs-check-fix")):
+        obj = derive(_make_facts(kind, kind, verdict, rnd=2))
+        obj["next"]["triggerLabel"] = "pr-status/" + verdict
+        line = "<!-- %s %s -->" % (MARKER, base64.b64encode(canon(obj).encode()).decode())
+        decoded = valid_blocks(line, schema)
+        assert_eq("legacy/%s/decode" % kind, len(decoded), 1)
+        assert_eq("legacy/%s/round" % kind, decoded[0]["cycle"]["round"] if decoded else None, 2)
+        saved_stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO(line)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                do_maxround(schema, obj["repo"], obj["pr"])
+            assert_eq("legacy/%s/maxround" % kind, output.getvalue().strip(), "2")
+        finally:
+            sys.stdin = saved_stdin
 
     # ------------------------------------------------------------------
     # 2. 5-state assertion: changes-requested non-exhausted -> needs-fix
@@ -858,11 +884,12 @@ def do_selftest(schema):
         m.update(extra)
         return m
 
-    # ship: phase=ship, verdict=needs-review-again, round=0 (roundBase ignored)
+    # ship: phase=ship, verdict=needs-review, round=0 (roundBase ignored)
     try:
         f = derive_facts(_minimal("ship", 5, findings=ZERO_FINDINGS))
         assert_eq("emitblock/ship/phase", f["phase"], "ship")
-        assert_eq("emitblock/ship/verdict", f["verdict"], "needs-review-again")
+        assert_eq("emitblock/ship/verdict", f["verdict"], "needs-review")
+        assert_eq("emitblock/ship/label", derive(f)["next"]["triggerLabel"], "pr-status/needs-review")
         assert_eq("emitblock/ship/round", f["cycle"]["round"], 0)
     except Exception as e:
         failures.append("FAIL [emitblock/ship]: %s" % e)
@@ -871,7 +898,8 @@ def do_selftest(schema):
     try:
         f = derive_facts(_minimal("fix", 2, findings=ZERO_FINDINGS))
         assert_eq("emitblock/fix/phase", f["phase"], "fix")
-        assert_eq("emitblock/fix/verdict", f["verdict"], "needs-check-fix")
+        assert_eq("emitblock/fix/verdict", f["verdict"], "needs-check")
+        assert_eq("emitblock/fix/label", derive(f)["next"]["triggerLabel"], "pr-status/needs-check")
         assert_eq("emitblock/fix/round", f["cycle"]["round"], 3)
     except Exception as e:
         failures.append("FAIL [emitblock/fix]: %s" % e)

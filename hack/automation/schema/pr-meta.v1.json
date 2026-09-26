@@ -61,8 +61,8 @@
       "description": "Producer worktree path, or null when working on develop directly."
     },
     "verdict": {
-      "enum": ["needs-review-again", "approved", "changes-requested", "ready", "needs-check-fix", "ci-failed", "ci-green", "oos-filed"],
-      "description": "Workflow conclusion, bound to the real label state machine (pr-status/* and pr-review/* — see .github/project-template/PROJECT.md §2.5/§5)."
+      "enum": ["needs-review", "needs-check", "needs-review-again", "approved", "changes-requested", "ready", "needs-check-fix", "ci-failed", "ci-green", "oos-filed"],
+      "description": "Persisted review/workflow conclusion; distinct from the single pr-status/* label axis. Label routing is derived by pr-meta.sh (see .github/project-template/PROJECT.md §2.5/§5)."
     },
     "findings": {
       "type": "object",

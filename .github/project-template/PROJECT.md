@@ -80,23 +80,25 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
   `flag-planned` 已删——分别与 `pri-p0/p1` / `pri-p3` / 看板 Status 语义重叠；`flag-cond` 保留是因为它携带
   pri/Status 表达不了的"触发门控"信息。
 
-### 2.5 PR 状态 label（两正交轴）
+### 2.5 PR 状态 label（单轴）
 
-| 轴 | Label | 含义 |
-|----|-------|------|
-| **pr-status**（流转） | `pr-status/in-progress` | ship 实施 + 内置 review/fix 中 |
-| | `pr-status/needs-review-again` | 仅 ship 交接后首审一次（review 出 changes-requested 后转 needs-fix） |
-| | `pr-status/needs-fix` | review 出 changes-requested（非首审），待 `/fix` 修复 |
-| | `pr-status/needs-check-fix` | `/fix` 已修，待 `/pr-review --check` 验证修复是否到位 |
-| | `pr-status/ready` | `--check` 验证全修复，可合并 |
-| **pr-review**（审查结论） | `pr-review/approved` | review 无需改 |
-| | `pr-review/changes-requested` | review 提出需改项 |
+PR 同时只保留一个 `pr-status/*` 流程标签；审查结论保留在 pm 评论与机器块，不再贴 `pr-review/*`。
 
-流转见 §5。PR 始终恰好一个 `pr-status/*`，pr-review 轴 `approved` XOR `changes-requested`（切一侧必清同轴对侧）。`/fix` 不能直接到 `ready`——必过 `/pr-review --check` 验证（fix 不能自证完成）。`needs-review-again` 仅用于 ship 首次交接；review 出 changes-requested 后始终切 `needs-fix`（5-state）。
+| Label | 含义 |
+|-------|------|
+| `pr-status/in-progress` | ship 实施、内置 review/fix 与本地验证中 |
+| `pr-status/needs-review` | ship 已交接，待完整审查 |
+| `pr-status/needs-fix` | 有阻断 findings；等待或正在 fix，含本地验证期间 |
+| `pr-status/needs-check` | fix 已交接，待 `/pr-review --check` 独立复核 |
+| `pr-status/ready` | 当前 head 审查通过；合并仍须满足 CI 等门禁 |
 
-### 2.6 cx-XX（复杂度，1 个，必填 CLI 贴）
-
-`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic / feature 容器不贴（跨多 PR、无单一 diff，§1.1）。PBI 叶子的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫；selftest 直接运行 `bash hack/automation/issue-labels.sh selftest`。
+统一使用 `bash hack/automation/forge.sh pr-set-status <PR#> <status> <head-sha>` 切换，status 不带前缀。
+传入本阶段实际验证/审查并写入机器块的 SHA，禁止临时读取新 head 来替代证据中的 SHA。
+入口检查开放 PR 与 head，清理其它 `pr-status/*` 和旧 `pr-review/*`，保留无关标签，完成后回读标签与 head。
+各 forge 标签 API 不提供原子切换：中间可能短暂无标签，失败时报告并重新核对后重试，不能当作交接成功。
+消费者只在恰好一个状态标签且与 fresh canonical 机器块一致时派发。
+`/fix` 执行期间保持 `needs-fix`，不回 `in-progress`；重复派发由消费者对机器块 idempotencyKey 的持久化互斥领取防止，标签不充当运行锁。
+`/fix` 不能自证 `ready`，必须经过独立 check；`ready` 后新增提交使旧审查失效，应对新 head 重新审查并产出证据。
 
 ---
 
@@ -166,43 +168,43 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 **等待期间的执行与沟通**：进入等待时只说明一次原因、UTC 到期时间和到期后的动作；没有新信息时保持静默，禁止每分钟报时、倒计数或重复“仍在等待 / 未查询状态”。纯等待不属于实施进展，不应为了凑进度更新而制造消息。优先使用环境支持且已获授权的定时唤醒；否则按工具与上级指令允许的最长等待时长续等，分段返回本身不触发用户消息，也不触发外部状态查询。只有用户主动询问、出现异常或到期检查取得结果时才更新。未实际建立唤醒机制时，不得结束任务并声称会自动回来；到期检查仍须完成。
 
-**外部 app handoff contract**：外部 app 是 `needs-review-again` / `needs-check-fix` 的实时消费者，不受主 agent 交接等待限制；`/pr-monitor` 是上述等待期满后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、未重复领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
+**外部 app handoff contract**：外部 app 是 `needs-review` / `needs-check` 的实时消费者，不受主 agent 交接等待限制；`/pr-monitor` 是上述等待期满后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、对 idempotencyKey 完成持久化互斥领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
 
 | live label | latest block | allowed dispatch |
 |------|------|------|
-| `pr-status/needs-review-again` | `kind=ship` + `verdict=needs-review-again` + `next.triggerLabel=pr-status/needs-review-again` | `codex review` |
-| `pr-status/needs-check-fix` | `kind=fix` + `verdict=needs-check-fix` + `next.triggerLabel=pr-status/needs-check-fix` | `/pr-review --check` |
+| `pr-status/needs-review` | `kind=ship` + `verdict=needs-review` + `next.triggerLabel=pr-status/needs-review` | `codex review` |
+| `pr-status/needs-check` | `kind=fix` + `verdict=needs-check` + `next.triggerLabel=pr-status/needs-check` | `/pr-review --check` |
 | `pr-status/needs-fix` | `kind=pr-review` + `verdict=changes-requested` + `next.triggerLabel=pr-status/needs-fix` | `/fix`（`/pr-monitor` 过 handoff 门——fresh canonical block + verdict + same-head + next 一致——才接力；Cx / scope 判定下放 `/fix`，读 finding 文件 + `byCx`） |
 
+单轴迁移须先暂停消费者派发，更新外部 app 的标签映射，再为开放 PR 核对当前 head 与原 findings/round，并重新发布对应机器块后切标签，最后恢复派发。新 ship/fix 块写入 `needs-review` / `needs-check` verdict；历史 v1 的 `needs-review-again` / `needs-check-fix` 仍可 canonical 解码和计入 round，但旧路由不触发新消费者。迁移不能只重贴标签或重置 round：保留原 cycle.round、findings、refs，用 `emit-block --round-base`（ship 固定 0，fix 为原 round−1）重发；旧 head 先重新审查。仅改仓库不能证明外部 app 已同步，生产消费者必须先满足同 head、机器块校验与互斥领取契约再启用。
+
+离线状态切换测试：`python3 hack/automation/forge/status.selftest.py`。
 离线契约测试直接运行 `bash hack/automation/pr-meta.sh selftest`（离线，无网络）；该协议 selftest 独立于 Rust 代码验证门。
 
 ```
 /ship <issue>
-  实施 → PR 创建 → 贴 pr-status/in-progress
-  → ship：内置 6 维 reviewer → IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）→ 内置修复 Cx1/Cx2 → push/冲突预检 → deferred 留痕 + pm:ship
-  → 切 pr-status/needs-review-again（首审唯一使用点）→ `make ci CI_BASE=<remote>/develop`；外部 app 可先行 review
-  → 等待满 15min（期间禁止查询状态）→ 启动一次 pr-monitor --mode=auto 监听交接（needs-fix 自动 /fix；单次跑完即止）
+  实施 → PR 创建 → pr-set-status in-progress
+  → 内置 review + findings 处置 → 本地 make ci 与必要精确复验
+  → push 最终 head / 冲突预检 → deferred 留痕 + pm:ship（绑定最终 head）
+  → pr-set-status needs-review → 等待满 15min → pr-monitor --mode=auto
 
-[review 轮] codex review 或 /pr-review <PR#>
-  → 贴 findings 评论（codex / pm:pr-review）
-  → 有需改 → 切 pr-review/changes-requested + pr-status/needs-fix
-  → 无需改（无 findings）→ 切 pr-review/approved + pr-status/ready（无需 fix/check 的终态）
+/pr-review <PR#>
+  → 对当前 head 完整审查 → 贴 pm:pr-review
+  → 有阻断项：pr-set-status needs-fix
+  → 无阻断项：pr-set-status ready
 
-/fix <PR#>（pr-status/needs-fix 时；可多次跑，≤3 轮自动循环）
-  → bash hack/automation/pr-comments.sh latest <N> pr-review（最新 pm:pr-review findings）→ 过滤最新一轮
-  → triage + IN_SCOPE Cx3/Cx4 单次批量处置（先逐项给建议+理由，再一次确认；defer 后自动建 issue、不二次确认）+ Cx1/Cx2 修复 → push/冲突预检 → deferred 留痕 + pm:fix
-  → 切 pr-status/needs-check-fix + 移除 pr-status/needs-fix → `make ci CI_BASE=<remote>/develop`
-  → 外部 app 可在 label 后先行执行 /pr-review --check
-  → 等待满 15min（期间禁止查询状态）→ 启动一次 pr-monitor --mode=auto 监听 check 交接
+/fix <PR#>
+  保持 needs-fix → triage + 修复 → 本地 make ci 与必要精确复验
+  → push 最终 head / 冲突预检 → deferred 留痕 + pm:fix（绑定最终 head）
+  → pr-set-status needs-check → 等待满 15min → pr-monitor --mode=auto
 
-/pr-review <PR#> --check（验证上一轮 findings 是否修复 + 抓回归）
-  → 逐条核对当前代码：✅已修复 / ❌未修复 / ⚠️回归 / 🔧部分 → 贴 pm:pr-review（--check）
-  → 全 ✅ → 切 pr-status/ready + pr-review/approved
-  → 有 ❌/⚠️/🔧 → 切 pr-review/changes-requested + pr-status/needs-fix
-              + 移除 pr-review/approved + 移除 pr-status/needs-check-fix → 回 /fix
+/pr-review <PR#> --check
+  → 独立验证上一轮 findings + 回归检查 → 贴 pm:pr-review
+  → 有未修复/回归/部分修复或误判 OOS：pr-set-status needs-fix
+  → 无阻断项：pr-set-status ready
 ```
 
-> 不变式：PR 始终恰好一个 `pr-status/*`、pr-review 轴 `approved` XOR `changes-requested`（切换时同步移除同轴对侧）；每阶段结束都贴评论留痕（约定，无 CI 机器门），标记按来源不编 round 号。`needs-review-again` 只在 ship 首次交接后出现一次；所有后续 review→changes-requested 均切 `needs-fix`（5-state 不变式）。
+> 各阶段通过 §2.5 的统一入口切状态，不手工拼 add/remove 列表。先完成验证与必要修复，再发布绑定最终 head 的评论，最后切触发标签；发生合并或额外修改后须验证受影响范围并更新证据。完整审查和修复复核保持不同入口，自动 review↔fix 最多 3 轮。
 > `/fix` 不能直接到 `ready`——必过 `/pr-review --check` 独立验证（fix 不能自证完成）。
 > 本地验证政策遵循[验证规则](../../docs/rules/verification-scope.md)；本节只拥有 PR 状态流转与交接顺序。
 > **IN_SCOPE Cx3/Cx4 批量处置门**：ship/fix 切触发 label 前，先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由：属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。如果存在这类 finding，**只发起一次批量处置请求**，用户可全盘采纳建议，或按 finding ID 覆盖个别项；没有 IN_SCOPE Cx3/Cx4 时不发起沟通。**判 defer 后自动建 issue 跟踪（机器可判定 artifact，不再二次确认）**，与 OOS artifact-before-trigger 同序；全部 deferred issue 已建方可切 label。
