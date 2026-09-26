@@ -42,7 +42,7 @@
 - 处置（批量处置门判修/defer，非未决）：⏸ defer（已建 #N，原因：<…>）｜或 ✅ 已修（批量处置确认：<措施>，commit <sha>）
 </details>
 
-**下一步**：切 `pr-status/needs-review`（待再审：codex / `/pr-review`）。
+**下一步**：切 `pr-status/needs-review-again`（待再审：codex / `/pr-review`）。
 
 ---
 🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
@@ -73,7 +73,7 @@
 - 处置（批量处置门判修/defer，非未决）：⏸ defer（已建 #N，原因 + 升级窗口：<…>）｜或 ✅ 已修（批量处置确认：<措施>，commit <sha>）
 </details>
 
-**下一步**：切 `pr-status/needs-check`（待 `/pr-review --check` 验证；fix 不直接到 ready）。
+**下一步**：切 `pr-status/needs-check-fix`（待 `/pr-review --check` 验证；fix 不直接到 ready）。
 
 ---
 🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>

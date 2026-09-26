@@ -17,7 +17,7 @@
 #   - pr labels: no `az repos pr` label subcommand -> REST POST/GET/DELETE.
 #     `az repos pr show` does NOT return labels (field is null) -> read-back goes
 #     through the pullRequestLabels GET. DELETE is by resolved label id (GUID),
-#     not name: a "/" in a label name (e.g. pr-status/needs-review) 404s on
+#     not name: a "/" in a label name (e.g. pr-status/needs-review-again) 404s on
 #     the name route even URL-encoded, so we look the id up from the GET first.
 #   - pr-diff / pr-diffstat: ADO REST exposes no line-level +/- -> computed from
 #     local git against the active remote's branches.

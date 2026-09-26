@@ -87,9 +87,9 @@ PR 同时只保留一个 `pr-status/*` 流程标签；审查结论保留在可�
 | Label | 含义 |
 |-------|------|
 | `pr-status/in-progress` | ship 实施、内置 review/fix 与本地验证中 |
-| `pr-status/needs-review` | ship 已交接，待完整审查 |
+| `pr-status/needs-review-again` | ship 已完成内置审查并交接，待外部完整再审 |
 | `pr-status/needs-fix` | 有阻断 findings；等待或正在 fix，含本地验证期间 |
-| `pr-status/needs-check` | fix 已交接，待 `/pr-review --check` 独立复核 |
+| `pr-status/needs-check-fix` | fix 已交接，待 `/pr-review --check` 独立复核 |
 | `pr-status/ready` | 当前 head 审查通过；合并仍须满足 CI 等门禁 |
 
 统一使用 `bash hack/automation/forge.sh pr-set-status <PR#> <status> <head-sha>` 切换，status 不带前缀。
@@ -176,15 +176,15 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 | 唯一流程标签 | 下一步 |
 |------|------|
-| `pr-status/needs-review` | 完整 `/pr-review` |
-| `pr-status/needs-check` | `/pr-review --check` |
+| `pr-status/needs-review-again` | 完整 `/pr-review` |
+| `pr-status/needs-check-fix` | `/pr-review --check` |
 | `pr-status/needs-fix` | `/fix`；从最新受信 review 评论读取 findings |
 
 执行技能核对评论正文的实际 head SHA 与 live head，缺失或不一致时重新审查，不把旧结论当作当前事实。完整审查可以直接针对 live head 开始；fix/check 必须有相应 findings/修复记录。`ready` 表示审查通过，不代表 CI 已通过。
 
 **自动轮次**：从 `bash hack/automation/pr-comments.sh json <PR#>` 返回的受信评论中计数 `kind=fix`；每次完成 fix 只贴一次 pm:fix，重试发布前先核对是否已存在。已有 3 条 fix 评论则停止自动 fix；重复评论保守计入预算，不能删除评论来重置次数。读取失败不视为 0。独立 check 仍可完成最后一轮复核；用户明确要求继续修复时按其指示执行。
 
-**迁移**：外部 app 先暂停 RSS 派发并更新规则中的旧标签名称，再逐个核对开放 PR 的当前 head 与可读结论，通过统一入口迁移标签，最后恢复派发。旧评论保留历史记录，新评论不再追加隐藏元数据；不会通过删除历史评论重置自动修复预算。仅改仓库不代表运行中桌面 app 的规则已同步。
+**标签兼容**：继续使用既有 `pr-status/needs-review-again` / `pr-status/needs-check-fix` 触发名及外部 app 规则，含义不变。如开放 PR 曾误贴 `pr-status/needs-review` / `pr-status/needs-check`，核对当前 head 与可读结论后，通过统一入口恢复对应原名；入口会清理误贴名称。旧评论保留历史记录，新评论不追加隐藏元数据，不通过删除评论重置自动修复预算。
 
 定向状态切换测试：`python3 hack/automation/forge/status.selftest.py`。
 
@@ -193,7 +193,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
   实施 → PR 创建 → pr-set-status in-progress
   → 内置 review + findings 处置 → 本地 make ci 与必要精确复验
   → push 最终 head / 冲突预检 → deferred 留痕 + pm:ship（绑定最终 head）
-  → pr-set-status needs-review → 等待满 15min → pr-monitor --mode=auto
+  → pr-set-status needs-review-again → 等待满 15min → pr-monitor --mode=auto
 
 /pr-review <PR#>
   → 对当前 head 完整审查 → 贴 pm:pr-review
@@ -203,7 +203,7 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 /fix <PR#>
   保持 needs-fix → triage + 修复 → 本地 make ci 与必要精确复验
   → push 最终 head / 冲突预检 → deferred 留痕 + pm:fix（绑定最终 head）
-  → pr-set-status needs-check → 等待满 15min → pr-monitor --mode=auto
+  → pr-set-status needs-check-fix → 等待满 15min → pr-monitor --mode=auto
 
 /pr-review <PR#> --check
   → 独立验证上一轮 findings + 回归检查 → 贴 pm:pr-review

@@ -158,7 +158,7 @@ echo "✅ 已贴评论：$URL"                                                  
 
 ## 模式 B：--check 验证（确认上一轮 findings 是否修复 + 抓回归）
 
-> `/pr-review <PR#> --check` 走本模式：**不做全新六维 review**，只验证上一轮发现的问题是否真修复，并在这些站点抓 `/fix` 引入的回归。配 `pr-status/needs-check`（PROJECT.md §5：fix 不能自证完成，必过本验证才能 ready）。
+> `/pr-review <PR#> --check` 走本模式：**不做全新六维 review**，只验证上一轮发现的问题是否真修复，并在这些站点抓 `/fix` 引入的回归。配 `pr-status/needs-check-fix`（PROJECT.md §5：fix 不能自证完成，必过本验证才能 ready）。
 
 ### B1 读上一轮 findings（无损源）
 

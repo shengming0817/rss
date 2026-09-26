@@ -102,7 +102,7 @@ usage: forge.sh [--dry-run] <verb> [args...]
          pr-comment <pr> <body-file>        (prints created comment URL)
          pr-add-label <pr> <label> | pr-remove-label <pr> <label>
          pr-set-labels <pr> --add a,b --remove c,d
-         pr-set-status <pr> <in-progress|needs-review|needs-fix|needs-check|ready> <head-sha>
+         pr-set-status <pr> <in-progress|needs-review-again|needs-fix|needs-check-fix|ready> <head-sha>
          pr-state <pr> | pr-refs <pr> | pr-mergeable <pr> | pr-web-url <pr>
          pr-diff <pr> | pr-diffstat <pr> | pr-comments-json <pr>
          branch-pr-merged <branch>   -> true|false (no open PR + has merged; squash-safe)
@@ -128,7 +128,7 @@ _pr_set_status() {
     fi
     local pr="$1" status="$2" head="$3" target="pr-status/$2"
     case "$status" in
-        in-progress|needs-review|needs-fix|needs-check|ready) ;;
+        in-progress|needs-review-again|needs-fix|needs-check-fix|ready) ;;
         *) echo "forge pr-set-status: invalid status '$status'" >&2; return 64 ;;
     esac
     if _dry "pr-set-status $pr $status $head: check head/open PR, add target, remove other workflow labels, read back"; then return 0; fi
