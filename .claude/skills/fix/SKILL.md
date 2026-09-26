@@ -14,6 +14,8 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ## 输入解析
 优先级：**PR 号**（裸数字先按 PR 试 → `bash hack/automation/pr-comments.sh latest <N> pr-review` 取最新一条 pm:pr-review body 作为 findings 源；**只取最新一轮**——该 body 的 `<details>` 无损详表即本轮 findings；为空 → 无待修 review，报告退出。回退：pr-review body 为空时取最新一条 codex review/comment。**跳过**自己上一轮的 `pm:ship`/`pm:fix`/`pm:ci`/`pm:oos` 留痕（已处理）与早于该最新 review 的旧 `pm:pr-review`，**不回头处理上一轮已 triage 的 findings**）> **文件:行号** > **自然语言**（Grep/Glob）。**issue 号不再受理**——裸数字一律先按 PR 解析；issue 状态核查 + triage 收敛到 `issues` 技能（判定后建议 `/ship #<N>` 或 file:line）。
 
+**PR 状态入口**：先用 `forge.sh pr-state <PR#>` 确认 PR 开放，再读取 refs 与最新 review 正文。自动接力只接受唯一 `pr-status/needs-fix` 且无旧 `pr-review/*`；其它状态、缺失或冲突标签只报告，不修改代码。用户直接指定 PR 修复时，确认当前 head 上的待修 findings 后，先用 `forge.sh pr-set-status <PR#> needs-fix <已核对的 headSha>` 统一状态；切换成功后才能开始修改和验证。用户对修复预算的例外不会使 ready/check 标签适用于正在修复的 PR。
+
 **自动修复预算（PR 输入）**：按 `PROJECT.md` §5 从受信 pm:fix 评论计数；已有 3 条则停止自动 fix，用户明确要求继续时例外。读取失败不当作 0。读取最新 review 正文的 head SHA，与 live PR head 核对；自动接力遇到缺失或不一致时报告需重新 review，不凭旧结论直接修改。
 
 ---

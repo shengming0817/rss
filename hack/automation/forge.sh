@@ -141,8 +141,8 @@ _pr_set_status() {
     jq -e '.state == "open" and (.labels | type == "array" and all(.[]; type == "string"))' <<< "$state" >/dev/null || {
         echo 'forge pr-set-status: expected open PR with valid labels' >&2; return 1;
     }
-    local previous failed=0 same_head=0
-    previous="$(jq -r '[.labels[] | select(startswith("pr-status/"))] | if length == 1 then .[0] else "" end' <<< "$state")" || return 1
+    local original="$state" previous failed=0 same_head=0
+    previous="$(jq -r '.labels[] | select(startswith("pr-status/") or startswith("pr-review/"))' <<< "$state")" || return 1
     labels="$(jq -r --arg target "$target" '.labels[] | select((startswith("pr-status/") or startswith("pr-review/")) and . != $target)' <<< "$state")" || return 1
     # Keep needs-fix visible if adding the handoff target fails. Multiple labels
     # during the switch are deliberately non-dispatchable for cooperating callers.
@@ -165,12 +165,14 @@ _pr_set_status() {
     fi
     if [ "$failed" -ne 0 ]; then
         echo 'forge pr-set-status: switch failed; attempting compensation' >&2
-        # Restore a single prior workflow state; never restore ready when the
-        # reviewed head cannot be confirmed. Backend failures remain failures.
-        if [ -n "$previous" ] && { [ "$previous" != pr-status/ready ] || [ "$same_head" -eq 1 ]; }; then
-            "_${FORGE}_pr_add_label" "$pr" "$previous" >/dev/null || echo 'forge pr-set-status: compensation failed restoring prior status' >&2
-        fi
-        if [ "$target" != "$previous" ]; then
+        # Restore the whole prior workflow set, including conflicts: a failed
+        # cleanup must not accidentally leave one dispatchable legacy state.
+        while IFS= read -r label; do
+            [ -n "$label" ] || continue
+            if [ "$label" = pr-status/ready ] && [ "$same_head" -eq 0 ]; then continue; fi
+            "_${FORGE}_pr_add_label" "$pr" "$label" >/dev/null || echo 'forge pr-set-status: compensation failed restoring prior status' >&2
+        done <<< "$previous"
+        if ! jq -e --arg target "$target" '.labels | index($target) != null' <<< "$original" >/dev/null; then
             "_${FORGE}_pr_remove_label" "$pr" "$target" >/dev/null || echo 'forge pr-set-status: compensation failed removing target' >&2
         fi
         if [ "$same_head" -eq 0 ]; then

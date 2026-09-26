@@ -112,6 +112,21 @@ class StatusTests(unittest.TestCase):
         self.assertIn('pr-status/needs-fix', self.labels())
         self.assertNotIn('pr-status/needs-check', self.labels())
 
+    def test_partial_cleanup_restores_conflicting_initial_states(self):
+        original = ['area-tooling', 'pr-status/needs-fix', 'pr-status/needs-review',
+                    'pr-review/changes-requested']
+        self.write_state(original)
+        result = self.invoke(FAIL_REMOVE='pr-status/needs-review')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sorted(self.labels()), sorted(original))
+
+    def test_partial_cleanup_restores_legacy_conflict_when_target_existed(self):
+        original = ['pr-status/needs-check', 'pr-review/approved', 'pr-review/changes-requested']
+        self.write_state(original)
+        result = self.invoke(FAIL_REMOVE='pr-review/changes-requested')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sorted(self.labels()), sorted(original))
+
     def test_add_failure_reported_and_retry_converges(self):
         self.assertNotEqual(self.invoke(FAIL_ADD='yes').returncode, 0)
         self.assertIn('pr-status/needs-fix', self.labels())

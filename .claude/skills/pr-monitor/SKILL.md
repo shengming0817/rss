@@ -1,6 +1,6 @@
 ---
 name: pr-monitor
-description: "PR 状态单次接力检查：按唯一 pr-status 标签路由，读取可读评论核对提交与 findings；默认接力 fix，--role=review 接力完整审查或修复复核。自身不贴评论、不切标签。"
+description: "PR 状态单次接力检查：按唯一 pr-status 标签路由，读取可读评论核对提交与 findings；默认按状态接力 review/fix/check，--role 可限制接力范围。自身不贴评论、不切标签。"
 argument-hint: "<PR#> --mode=auto [--role=fix|review]"
 allowed-tools: [Bash, Read, Skill]
 ---
@@ -12,7 +12,7 @@ ship/fix 按 `PROJECT.md` §5 等待后调用一次；每次最多启动一个�
 
 ## 输入
 
-`<PR#> --mode=auto [--role=fix|review]`。PR 号允许 `#` 前缀；默认 role=fix。
+`<PR#> --mode=auto [--role=fix|review]`。PR 号允许 `#` 前缀；不传 role 时按状态自动选择动作；显式 role=fix/review 仅过滤可接力阶段。
 拒绝非正整数 PR、未知参数及非 fix/review 的 role。
 
 ## 读取与核对
@@ -27,13 +27,15 @@ bash hack/automation/pr-comments.sh json <PR#>
 只接受一个 §2.5 定义的 `pr-status/*`，且不能同时残留 `pr-review/*`；缺失、未知或冲突标签只报告，不派发。
 从受信评论按 `createdAt` 选择各类型最新正文，按以下表格决定动作：
 
-| 状态 | 默认 fix 角色 | review 角色 |
-|---|---|---|
-| `in-progress` | 报告实施中并结束 | 同左 |
-| `needs-review` | 报告待 review 并结束 | 调 `/pr-review <PR#>` 完整审查当前 head |
-| `needs-fix` | 核对最新 review 的提交 SHA 与 live head 一致且有阻断 findings，再调 `/fix <PR#>` | 报告待 fix 并结束 |
-| `needs-check` | 报告待 check 并结束 | 核对最新 fix 的提交 SHA 与 live head 一致，且有对应 review findings，再调 `/pr-review <PR#> --check` |
-| `ready` | 核对最新 review 对当前 head 的通过结论，报告审查通过并结束；不声明 CI 或合并条件满足 | 同左 |
+| 状态 | 默认动作 |
+|---|---|
+| `in-progress` | 报告实施中并结束 |
+| `needs-review` | 调 `/pr-review <PR#>` 完整审查当前 head |
+| `needs-fix` | 核对最新 review 的提交 SHA 与 live head 一致且有阻断 findings，再调 `/fix <PR#>` |
+| `needs-check` | 核对最新 fix 的提交 SHA 与 live head 一致，且有对应 review findings，再调 `/pr-review <PR#> --check` |
+| `ready` | 核对最新 review 对当前 head 的通过结论，报告审查通过并结束；不声明 CI 或合并条件满足 |
+
+显式 `--role=fix` 只接力 needs-fix；`--role=review` 只接力 needs-review/needs-check。其它待处理状态只报告，不因 role 不匹配改标签。ship/fix 的默认调用不加 role 过滤，能兜底全部待处理阶段。
 
 评论缺少明确提交 SHA、结论或与当前 head 不一致时，只报告需要重新审查；不会猜测旧评论对应的提交。
 同类评论按最新选择，不能为了得到匹配 SHA 回退到更早一条。
