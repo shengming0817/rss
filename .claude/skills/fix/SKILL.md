@@ -7,14 +7,14 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 # 问题诊断与修复
 
-> 真源 = 激活 forge 的 issue/work-item tracker + 看板（经 `forge.sh` 适配）；label / 评级 rubric 与 PR 流转见 `.github/project-template/PROJECT.md`，issue / PR 评论 body 见 `backlog.md` / `pr-comment.md`，协议块由 `pr-meta.sh` 生成。
+> 真源 = 激活 forge 的 issue/work-item tracker + 看板（经 `forge.sh` 适配）；label / 评级 rubric 与 PR 流转见 `.github/project-template/PROJECT.md`，issue / PR 评论 body 见 `backlog.md` / `pr-comment.md`。
 
 ---
 
 ## 输入解析
 优先级：**PR 号**（裸数字先按 PR 试 → `bash hack/automation/pr-comments.sh latest <N> pr-review` 取最新一条 pm:pr-review body 作为 findings 源；**只取最新一轮**——该 body 的 `<details>` 无损详表即本轮 findings；为空 → 无待修 review，报告退出。回退：pr-review body 为空时取最新一条 codex review/comment。**跳过**自己上一轮的 `pm:ship`/`pm:fix`/`pm:ci`/`pm:oos` 留痕（已处理）与早于该最新 review 的旧 `pm:pr-review`，**不回头处理上一轮已 triage 的 findings**）> **文件:行号** > **自然语言**（Grep/Glob）。**issue 号不再受理**——裸数字一律先按 PR 解析；issue 状态核查 + triage 收敛到 `issues` 技能（判定后建议 `/ship #<N>` 或 file:line）。
 
-**熔断闸门（PR 输入）**：先 `bash hack/automation/pr-meta.sh extract <PR#>`（EC=0 读 `cycle.exhausted` / `next.agent`；EC≠0 无块/stale → 降级 `pr-meta.sh round`）——`cycle.exhausted == true` 或 `next.agent == "human"` 或 `round ≥ 3` → 打印「review↔fix 已达 3 轮上限，转人工」退出，不修。（`next.agent=human` / `exhausted` = 自动闭环停派、交回人接管，非禁止 /fix 技能本身；后续由人处理。）
+**自动修复预算（PR 输入）**：按 `PROJECT.md` §5 从受信 pm:fix 评论计数；已有 3 条则停止自动 fix，用户明确要求继续时例外。读取失败不当作 0。读取最新 review 正文的 head SHA，与 live PR head 核对；自动接力遇到缺失或不一致时报告需重新 review，不凭旧结论直接修改。
 
 ---
 
@@ -168,7 +168,7 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 **不可直接修（须经批量处置门或推荐方案）**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
 
-> 判 Cx 优先读 `pr-meta.sh extract` 的 `findings.byCx`（`cx3==0 ∧ cx4==0 ∧ (cx1+cx2)>0` = 无 Cx3+）。
+> 判 Cx 读取最新 review 评论的逐条 `[P·Cx·维度]`，不能仅凭汇总计数代替逐条处置。
 
 **何时沟通**: 见文末 §沟通规则；Cx3/Cx4 仅在存在 IN_SCOPE finding 时发起一次批量处置请求，其余默认按 3.4 表处置。
 
@@ -239,14 +239,14 @@ scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-t
 
 ### 4.6 Git 收尾
 
-> **pm:* 评论统一**：填 `.github/project-template/pr-comment.md`（无损 `file:line` + 详表入 `<details>`），用 `pr-meta.sh emit-block --kind=<k> --pr=<PR#>` 追加机器块，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的 URL。
+> **pm:* 评论统一**：填 `.github/project-template/pr-comment.md`（无损 `file:line` + 详表入 `<details>`），正文写明实际处理的完整 head SHA，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的 URL。
 
 1. **本地验证（交接前）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make ci CI_BASE=<remote>/develop`；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI，修复后按以下步骤交接。fix 执行及验证期间保持 `pr-status/needs-fix`，不切回 `in-progress`。
 2. **提交 + push**：仅 `git add` 修复文件，按 4.1 commit/push；无 PR 才用填好的 `pull_request_template.md` 调 `forge.sh pr-create`。
 3. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。 合并改变 head 后精确验证受影响范围，再生成评论。
-4. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（`--kind=oos`，每 item 必带 `issue` 或 `deferred`，否则 emit-block 拒绝）。
-5. **pm:fix**（`--kind=fix`，绑定最终已验证 head；OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
-6. **切 label**：按 `PROJECT.md` §2.5/§5 使用 `forge.sh pr-set-status <PR#> needs-check <已验证且写入机器块的 head-sha>`。全部 deferred issue、pm 评论先落地，方可切状态；失败不得宣称交接完成。
+4. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（每条 finding 必须写明已建 issue 或 deferred 原因）。
+5. **pm:fix**（绑定最终已验证 head；OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
+6. **切 label**：按 `PROJECT.md` §2.5/§5 使用 `forge.sh pr-set-status <PR#> needs-check <已验证且写入评论正文的 head-sha>`。全部 deferred issue、pm 评论先落地，方可切状态；失败不得宣称交接完成。
 7. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check` 后执行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）请求用户决策。

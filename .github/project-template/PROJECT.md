@@ -82,7 +82,7 @@ work-item **类型层级**是结构轴（容器 vs 叶子 / 归属），与 §2 
 
 ### 2.5 PR 状态 label（单轴）
 
-PR 同时只保留一个 `pr-status/*` 流程标签；审查结论保留在 pm 评论与机器块，不再贴 `pr-review/*`。
+PR 同时只保留一个 `pr-status/*` 流程标签；审查结论保留在可读 pm 评论，不再贴 `pr-review/*`。
 
 | Label | 含义 |
 |-------|------|
@@ -93,12 +93,16 @@ PR 同时只保留一个 `pr-status/*` 流程标签；审查结论保留在 pm �
 | `pr-status/ready` | 当前 head 审查通过；合并仍须满足 CI 等门禁 |
 
 统一使用 `bash hack/automation/forge.sh pr-set-status <PR#> <status> <head-sha>` 切换，status 不带前缀。
-传入本阶段实际验证/审查并写入机器块的 SHA，禁止临时读取新 head 来替代证据中的 SHA。
-入口检查开放 PR 与 head，清理其它 `pr-status/*` 和旧 `pr-review/*`，保留无关标签，完成后回读标签与 head。
-各 forge 标签 API 不提供原子切换：中间可能短暂无标签，失败时报告并重新核对后重试，不能当作交接成功。
-消费者只在恰好一个状态标签且与 fresh canonical 机器块一致时派发。
-`/fix` 执行期间保持 `needs-fix`，不回 `in-progress`；重复派发由消费者对机器块 idempotencyKey 的持久化互斥领取防止，标签不充当运行锁。
+传入本阶段实际验证/审查并写入评论正文的 SHA，禁止临时读取新 head 来替代证据中的 SHA。
+入口检查开放 PR 与 head，先添加目标再清理其它 `pr-status/*` 和旧 `pr-review/*`，保留无关标签，完成后回读标签与 head。
+各 forge 标签 API 不提供原子切换：中间可能短暂有多个标签，消费者此时不派发；失败时尽力恢复旧状态并撤销新目标，head 失效时撤销 ready。补偿也可能失败，必须回读报告，不能当作交接成功。
+消费者只在恰好一个流程标签时按该状态派发；评论保存 findings、审查结论和对应提交，供执行技能核对。
+`/fix` 执行期间保持 `needs-fix`，不回 `in-progress`；同一 PR 不并发启动多个执行者；调度去重属于调用方，标签和本技能都不充当运行锁。
 `/fix` 不能自证 `ready`，必须经过独立 check；`ready` 后新增提交使旧审查失效，应对新 head 重新审查并产出证据。
+
+### 2.6 cx-XX（复杂度，1 个，必填 CLI 贴）
+
+`cx-1` / `cx-2` / `cx-3` / `cx-4`（语义见 §3.2 rubric）。与 pri 同为评级两轴之一、载体对称（都是 label），cx **必填**：建 issue 时必须定级并显式 `--label cx-X`（与 pri 对称，无 unknown sentinel——定不到级也要在 §3.2 rubric 里就近取一档）；review/fix finding 派生的 issue 从 finding 的 `[…Cx…]` tag 自动带上对应 cx。epic / feature 容器不贴（跨多 PR、无单一 diff，§1.1）。PBI 叶子的 area/type/pri/cx 完整性由 `hack/automation/issue-labels.sh validate` 守卫；selftest 直接运行 `bash hack/automation/issue-labels.sh selftest`。
 
 ---
 
@@ -168,18 +172,21 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 
 **等待期间的执行与沟通**：进入等待时只说明一次原因、UTC 到期时间和到期后的动作；没有新信息时保持静默，禁止每分钟报时、倒计数或重复“仍在等待 / 未查询状态”。纯等待不属于实施进展，不应为了凑进度更新而制造消息。优先使用环境支持且已获授权的定时唤醒；否则按工具与上级指令允许的最长等待时长续等，分段返回本身不触发用户消息，也不触发外部状态查询。只有用户主动询问、出现异常或到期检查取得结果时才更新。未实际建立唤醒机制时，不得结束任务并声称会自动回来；到期检查仍须完成。
 
-**外部 app handoff contract**：外部 app 是 `needs-review` / `needs-check` 的实时消费者，不受主 agent 交接等待限制；`/pr-monitor` 是上述等待期满后必跑的一次性兜底检查器。消费者只能在同仓、非 draft、可信作者、same-head、无已记录失败、对 idempotencyKey 完成持久化互斥领取的前提下 dispatch，并且必须同时满足 live label 与最新 fresh canonical 机器块：
+**标签交接**：桌面 prmonitor 按配置标签触发任务；仓库 `/pr-monitor` 是等待期满后的一次性兜底。二者是不同执行者，调用方应避免同时接管同一 PR。路由只由唯一 `pr-status/*` 决定：
 
-| live label | latest block | allowed dispatch |
-|------|------|------|
-| `pr-status/needs-review` | `kind=ship` + `verdict=needs-review` + `next.triggerLabel=pr-status/needs-review` | `codex review` |
-| `pr-status/needs-check` | `kind=fix` + `verdict=needs-check` + `next.triggerLabel=pr-status/needs-check` | `/pr-review --check` |
-| `pr-status/needs-fix` | `kind=pr-review` + `verdict=changes-requested` + `next.triggerLabel=pr-status/needs-fix` | `/fix`（`/pr-monitor` 过 handoff 门——fresh canonical block + verdict + same-head + next 一致——才接力；Cx / scope 判定下放 `/fix`，读 finding 文件 + `byCx`） |
+| 唯一流程标签 | 下一步 |
+|------|------|
+| `pr-status/needs-review` | 完整 `/pr-review` |
+| `pr-status/needs-check` | `/pr-review --check` |
+| `pr-status/needs-fix` | `/fix`；从最新受信 review 评论读取 findings |
 
-单轴迁移须先暂停消费者派发，更新外部 app 的标签映射，再为开放 PR 核对当前 head 与原 findings/round，并重新发布对应机器块后切标签，最后恢复派发。新 ship/fix 块写入 `needs-review` / `needs-check` verdict；历史 v1 的 `needs-review-again` / `needs-check-fix` 仍可 canonical 解码和计入 round，但旧路由不触发新消费者。迁移不能只重贴标签或重置 round：保留原 cycle.round、findings、refs，用 `emit-block --round-base`（ship 固定 0，fix 为原 round−1）重发；旧 head 先重新审查。仅改仓库不能证明外部 app 已同步，生产消费者必须先满足同 head、机器块校验与互斥领取契约再启用。
+执行技能核对评论正文的实际 head SHA 与 live head，缺失或不一致时重新审查，不把旧结论当作当前事实。完整审查可以直接针对 live head 开始；fix/check 必须有相应 findings/修复记录。`ready` 表示审查通过，不代表 CI 已通过。
 
-离线状态切换测试：`python3 hack/automation/forge/status.selftest.py`。
-离线契约测试直接运行 `bash hack/automation/pr-meta.sh selftest`（离线，无网络）；该协议 selftest 独立于 Rust 代码验证门。
+**自动轮次**：从 `bash hack/automation/pr-comments.sh json <PR#>` 返回的受信评论中计数 `kind=fix`；每次完成 fix 只贴一次 pm:fix，重试发布前先核对是否已存在。已有 3 条 fix 评论则停止自动 fix；重复评论保守计入预算，不能删除评论来重置次数。读取失败不视为 0。独立 check 仍可完成最后一轮复核；用户明确要求继续修复时按其指示执行。
+
+**迁移**：外部 app 先暂停 RSS 派发并更新规则中的旧标签名称，再逐个核对开放 PR 的当前 head 与可读结论，通过统一入口迁移标签，最后恢复派发。旧评论保留历史记录，新评论不再追加隐藏元数据；不会通过删除历史评论重置自动修复预算。仅改仓库不代表运行中桌面 app 的规则已同步。
+
+定向状态切换测试：`python3 hack/automation/forge/status.selftest.py`。
 
 ```
 /ship <issue>

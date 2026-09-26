@@ -24,7 +24,7 @@ _azure_pr_state() {
 }
 _azure_pr_remove_label() {
     echo remove >> "$STATE_DIR/calls"
-    [ "${FAIL_REMOVE:-}" != yes ] || return 1
+    [ "${FAIL_REMOVE:-}" != "$2" ] || return 1
     [ "${IGNORE_REMOVE:-}" != yes ] || return 0
     jq --arg label "$2" '.labels -= [$label]' "$STATE_DIR/state.json" > "$STATE_DIR/next.json"
     mv "$STATE_DIR/next.json" "$STATE_DIR/state.json"
@@ -99,20 +99,34 @@ class StatusTests(unittest.TestCase):
         self.assertFalse((self.root / 'calls').exists())
 
     def test_head_drift_during_switch_is_reported(self):
-        self.assertNotEqual(self.invoke(DRIFT='after').returncode, 0)
+        self.assertNotEqual(self.invoke('ready', DRIFT='after').returncode, 0)
+        self.assertNotIn('pr-status/ready', self.labels())
+        self.assertIn('pr-status/needs-fix', self.labels())
 
     def test_read_failure_does_not_mutate(self):
         self.assertNotEqual(self.invoke(FAIL_READ='yes').returncode, 0)
         self.assertFalse((self.root / 'calls').exists())
 
-    def test_remove_failure_stops_before_add(self):
-        self.assertNotEqual(self.invoke(FAIL_REMOVE='yes').returncode, 0)
-        self.assertNotIn('add', (self.root / 'calls').read_text())
+    def test_remove_failure_restores_old_status(self):
+        self.assertNotEqual(self.invoke(FAIL_REMOVE='pr-review/changes-requested').returncode, 0)
+        self.assertIn('pr-status/needs-fix', self.labels())
+        self.assertNotIn('pr-status/needs-check', self.labels())
 
     def test_add_failure_reported_and_retry_converges(self):
         self.assertNotEqual(self.invoke(FAIL_ADD='yes').returncode, 0)
+        self.assertIn('pr-status/needs-fix', self.labels())
         self.assertEqual(self.invoke().returncode, 0)
         self.assertEqual(sorted(self.labels()), ['area-tooling', 'pr-status/needs-check'])
+
+    def test_existing_ready_is_revoked_on_head_drift(self):
+        self.write_state(['pr-status/ready', 'pr-review/approved'])
+        self.assertNotEqual(self.invoke('ready', DRIFT='after').returncode, 0)
+        self.assertNotIn('pr-status/ready', self.labels())
+
+    def test_compensation_failure_is_reported(self):
+        result = self.invoke('ready', DRIFT='after', FAIL_REMOVE='pr-status/ready')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('compensation failed', result.stderr)
 
     def test_readback_detects_ignored_removal(self):
         self.assertNotEqual(self.invoke(IGNORE_REMOVE='yes').returncode, 0)

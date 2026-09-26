@@ -10,25 +10,18 @@
 > **IN_SCOPE Cx3/Cx4 必带批量处置结果，不准停留在 `遗留`**：ship/fix 先为全部 IN_SCOPE Cx3/Cx4 生成建议及理由，再发起一次批量处置请求；用户可全盘采纳建议，或按 finding ID 覆盖个别项。没有 IN_SCOPE Cx3/Cx4 时不发起沟通。评论里每项必标 `✅ 已修（批量处置确认）` 或 `⏸ defer：已建 #N（<原因>）`（判 defer 后自动建 issue、不二次确认）——`⏸ 遗留（需人工决策）` 这类**未决态不得带过切 label**。
 > **禁止有损浓缩**——只写计数 / 模糊一句话会让 fix 与后续建 issue 丢失定位与根因，违背本约定。
 
-## 机器块（`rss-pr-meta:v1`，隐藏，自动化执行器消费）
+## 可读记录
 
-> 五种评论 footer **之后**各带一行**隐藏机器块**，供外部 app 实时监听与 `/pr-monitor` 单次兜底检查消费：
-> `<!-- rss-pr-meta:v1 <标准 base64(JSON)> -->`（CommonMark 隐藏，肉眼不可见）。
->
-> - **产**（贴评论的技能/工具）：调 `bash hack/automation/pr-meta.sh emit-block --kind=<kind> --pr=<N> [flags]` 得该行，**追加到填好的 body 末尾**再贴。producer 只供不可推导的事实：`--findings='<json>'`（ship/fix/pr-review 计数）/ `--ci='<json>'`（ci）/ `--oos='<json>'`（oos）；pr-review 另需 `--phase=review|check` + `--verdict=<结论>`。**phase/verdict/cycle.round、refs(repo/baseRef/headRef/headSha)、session/worktree 全部由 emit-block 派生**（refs 经 `bash hack/automation/forge.sh pr-refs <N>`、roundBase 经 `round <PR>`、session/worktree 经 env；可经 `--head-sha`/`--base-ref`/`--head-ref`/`--round-base`/`--session`/`--worktree` override）。无 `jq` 拼 facts JSON、无手写 phase/verdict/round——`schema`/`cycle.exhausted`/`next`/`idempotencyKey` 亦 emit-block 派生，手填无意义。
-> - **kind→{phase,verdict,round} 派生规则单源 = `pr-meta.sh` 的 `derive_facts`（selftest golden-lock）**。本文档只定义 producer contract：ship/fix/pr-review 必须传 `--findings`，ci 必须传完整 `--ci`，oos 必须传非空 `--oos.items`（**每条 item 必带 `issue`（已建 issue 号/URL）或 `deferred`（`pri-p0-incident`｜`labels-underivable`）之一——disposition funnel 强制，缺则 emit-block 拒绝**）；pr-review 的 phase/verdict 是 caller judgment，ci verdict 从 ci facts 派生。**不在本文档或任何 skill 重述派生映射**（重述=漂移面，本 issue #1774 即为消除它）。
-> - **消费**：`bash hack/automation/pr-meta.sh extract <PR#>` 拉评论 → 取最新块 → base64 解码 → schema 校验 → 比对 live `headSha`（不一致=过期，丢弃）。
-> - **熔断（auto review↔fix ≤3 轮）**：`cycle.round` = 已完成 fix 轮数；`round ≥ maxRounds(3)` → `cycle.exhausted=true`，且 `changes-requested` 的 `next.agent` 被 helper 强制为 `human`——守护进程必停派、转人工，不得继续 auto 循环。
-> - **标准 base64（非 url）**：CommonMark 禁 HTML 注释正文含 `--`；标准 base64 字母表 `A-Za-z0-9+/=` 无 `-`，结构上不可能产 `--`/`-->`（base64url 含 `-`，会破块）。
-> - schema 单源 = `hack/automation/schema/pr-meta.v1.json`；helper = `hack/automation/pr-meta.sh`（`emit-block`/`decode`/`extract`/`round`/`selftest`）。消费侧只接受 canonical 块（派生字段必须 = emit-block 由块自身 facts 重算结果，防伪造）+ 仅信 `bash hack/automation/forge.sh pr-comments-json` 已过滤的受信 pm 评论（各 backend 信任来源：github=author_association OWNER/MEMBER/COLLABORATOR；azure/gitlab=`*_TRUSTED_AUTHORS` allowlist；过滤逻辑单源在 `forge.sh` 各 backend）。**人读 footer 不动其格式**——footer 人读、机器块 dispatch，二者并存。
-> - **kind 列表**：`ship`（pm:ship）/ `fix`（pm:fix）/ `pr-review`（pm:pr-review）/ `ci`（pm:ci）/ `oos`（pm:oos）。phase/verdict/round 派生见上方 `derive_facts` 单源条。ci 类型 capability-gated：激活 forge=azure 无 CI（Pipelines 额度有限、不迁移），ci-* 返回 no-ci，不贴 pm:ci。
-> - **protocol 健全性测试**：`bash hack/automation/pr-meta.sh selftest` 可直接运行；它守 PR 协议、独立于 Rust 代码验证门。
+评论正文写明本阶段实际处理的完整 head SHA、审查/修复结论和验证结果；切状态使用同一 SHA。
+`pm:*` 标记仅供按评论类型检索，不携带隐藏执行状态。findings、OOS 处置和修复轮次依据可读评论核对。
 
 ## ship 评论（`<!-- pm:ship -->`）
 
 ```markdown
 <!-- pm:ship -->
 ## 🛠 ship review + fix
+
+**提交**：<本阶段实际处理的完整 head SHA>
 
 **reviewer** <数> · **Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
@@ -53,7 +46,6 @@
 
 ---
 🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
-<!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=ship` 生成追加于此（phase/verdict/round 派生见 §机器块）；勿手填 base64 -->
 ```
 
 ## fix 评论（`<!-- pm:fix -->`，每次 fix 都贴）
@@ -61,6 +53,8 @@
 ```markdown
 <!-- pm:fix -->
 ## 🔁 fix（findings triage + fix）
+
+**提交**：<本阶段实际处理的完整 head SHA>
 
 **Findings** <总数>（已修 Cx1/Cx2 <n> · Cx3/Cx4 处置 <m>（修/defer）· OUT_OF_SCOPE <k>）
 
@@ -83,7 +77,6 @@
 
 ---
 🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
-<!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=fix` 生成追加于此（phase/verdict/round 派生见 §机器块）；勿手填 base64 -->
 ```
 
 ## pr-review 评论（`<!-- pm:pr-review -->`，独立 review 留痕）
@@ -94,6 +87,8 @@
 ```markdown
 <!-- pm:pr-review -->
 ## 🔍 pr-review（六维度分级审查）
+
+**提交**：<本阶段实际处理的完整 head SHA>
 
 **根因簇** <N> · **Findings** <M>（P0 <a>·P1 <b>·P2 <c>·P3 <d> ｜ Cx1 <w>·Cx2 <x>·Cx3 <y>·Cx4 <z>）· **结论** <通过/需修复/需讨论>
 
@@ -120,16 +115,17 @@
 
 ---
 🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
-<!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=pr-review --phase=review|check --verdict=<结论>` 生成追加于此（round 派生见 §机器块）；勿手填 base64 -->
 ```
 
 ## pm:ci 评论（`<!-- pm:ci -->`）
 
-> 外部 CI-capable producer 的检查结果记录；ship/fix 不生产或等待 pm:ci，本地验证与交接按 [PROJECT](PROJECT.md) §5 执行。`ci-green` 是终态（`next.agent=null`），`ci-failed` 路由至 `next.agent=human`，本评论只记录外部检查结果。
+> 外部 CI-capable producer 的检查结果记录；ship/fix 不生产或等待 pm:ci，本地验证与交接按 [PROJECT](PROJECT.md) §5 执行。本评论只记录外部检查结果，不触发自动修复。
 
 ```markdown
 <!-- pm:ci -->
 ## CI 检查结果
+
+**提交**：<本阶段实际处理的完整 head SHA>
 
 **状态**：<通过 / 失败>（已通过 <n> / 共 <total> 个检查）
 
@@ -139,16 +135,17 @@
 
 ---
 🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
-<!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=ci --ci='<json>'` 生成追加于此（verdict 由 ci.failedChecks 派生，round 派生见 §机器块）；勿手填 base64 -->
 ```
 
 ## pm:oos 评论（`<!-- pm:oos -->`）
 
-> Out-of-scope findings 的**无损**独立记录。ship/fix 在贴本评论前按 `backlog.md` 成文、经 `issue-labels.sh validate` 后用 `forge.sh issue-create` 把每条 finding 落为 backlog issue，正文回填 issue 号；无法自动建（`pri-p0` incident / area·type 判不定）的标 `deferred` 并回退草稿。每条 finding 为一个 lossless item（file:line + 三维根因 + 三级方案种子 + 处置 `issue`｜`deferred`），机器块中以 `oos.items[]` 数组携带（详见 schema `pr-meta.v1.json`）。与 pm:ship / pm:fix 解耦：OOS finding 移出主评论详表，改为一行指针（`→ 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）`）。
+> Out-of-scope findings 的**无损**独立记录。ship/fix 在贴本评论前按 `backlog.md` 成文、经 `issue-labels.sh validate` 后用 `forge.sh issue-create` 把每条 finding 落为 backlog issue，正文回填 issue 号；无法自动建（`pri-p0` incident / area·type 判不定）的标 `deferred` 并回退草稿。每条 finding 为一个 lossless item（file:line + 三维根因 + 三级方案种子 + 处置 `issue`｜`deferred`），逐条保留在下面的可读记录中。与 pm:ship / pm:fix 解耦：OOS finding 移出主评论详表，改为一行指针（`→ 🚦 OUT_OF_SCOPE（详见本 PR 的 pm:oos 评论）`）。
 
 ```markdown
 <!-- pm:oos -->
 ## Out-of-Scope Findings（已自动建 issue）
+
+**提交**：<本阶段实际处理的完整 head SHA>
 
 **OOS Findings** <k> 条（已从 pm:ship/pm:fix 的主评论分离，本评论为无损存档；每条已建 issue 或显式 deferred）
 
@@ -163,5 +160,4 @@
 
 ---
 🤖 PR <N> · Generated with <Claude Code|Codex> · branch <head 分支> · worktree <路径|—> · session <会话id|—>
-<!-- 机器块占位：贴评论前由 `pr-meta.sh emit-block --kind=oos --oos='{"items":[…]}'` 生成追加于此（items 各 finding 携 fileLine/rootCause/solutionSeeds + 处置 `issue`｜`deferred`，二者必居其一否则 emit 拒绝；phase/verdict/round 派生见 §机器块）；勿手填 base64 -->
 ```

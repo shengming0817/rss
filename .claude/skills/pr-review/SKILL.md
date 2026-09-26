@@ -67,6 +67,8 @@ ACTUAL_SHA=$(git -C "$WORKTREE" rev-parse HEAD)
 - 改动文件清单：`git -C "$WORKTREE" diff --name-only "$(bash hack/automation/forge.sh remote)/develop...HEAD"`
 - title / body 是可选 review 上下文（PR 元信息，forge 相关，可选）
 
+记录本轮实际审查的完整 head SHA，评论正文与切状态使用同一 SHA；结束时发现 live head 改变则重新审查，不发布旧版本的通过状态。
+
 以下读取全部以 `$WORKTREE` 为根；改动文件清单只提供 repo-relative path
 输入，不作为文件内容来源。
 
@@ -149,9 +151,8 @@ echo "✅ 已贴评论：$URL"                                                  
 
 贴失败（非 0 退出）则报错退出，不静默跳过。footer 格式见 `.github/project-template/pr-comment.md`（PR#/工具/分支/worktree/session，AI 自填）。
 
-**追加机器块**（贴评论前，接口见 `pr-comment.md` §机器块）：verdict 按结论取 `approved`（无 finding）/ `changes-requested`（有 finding）；`bash hack/automation/pr-meta.sh emit-block --kind=pr-review --pr=<N> --phase=review --verdict=<上> --findings='<计数 json>'`（round carry / refs / 熔断全由 emit-block 派生），输出单行追加到填好的 `pm:pr-review` body 末尾再贴。`changes-requested` 且已达 3 轮上限时 emit-block 置 `next.agent=human`（熔断），窗口提示「review↔fix 已达 3 轮上限，转人工」。
 
-贴完按结论通过 `PROJECT.md` §2.5 的统一入口切状态：有阻断项用 `bash hack/automation/forge.sh pr-set-status <N> needs-fix <本轮审查并写入机器块的 headSha>`；无阻断项用同一命令切 `ready`。不再写 `pr-review/*` 标签；SHA 不一致或切换失败则报告，不能以 live 新 SHA 替代审查证据。
+贴完按结论通过 `PROJECT.md` §2.5 的统一入口切状态：有阻断项用 `bash hack/automation/forge.sh pr-set-status <N> needs-fix <本轮审查并写入评论正文的 headSha>`；无阻断项用同一命令切 `ready`。不再写 `pr-review/*` 标签；SHA 不一致或切换失败则报告，不能以 live 新 SHA 替代审查证据。
 
 ---
 
@@ -193,13 +194,13 @@ echo "✅ 已贴评论：$URL"                                                  
 
 1. **验证表**（主输出，逐条）：`F{n} [原 P·Cx·维度] repo-relative-path:line → ✅/❌/⚠️/🔧/🔲 + 一句证据`
 2. **汇总**：已修复 N / 未修复 M / 回归 K / 部分 J / 范围外合理 R（🔲）/ 误判OSS S
-3. **结论 + 流转建议**（判定规则收敛）：`verdict=changes-requested ⟺ ∃（IN_SCOPE 为 ❌/⚠️/🔧）或（被声明 OSS 经评估不合理）`；合理 OSS（🔲）一律不触发。
+3. **结论 + 流转建议**（判定规则收敛）：`需修复 ⟺ ∃（IN_SCOPE 为 ❌/⚠️/🔧）或（被声明 OSS 经评估不合理）`；合理 OSS（🔲）一律不触发。
    - 无触发项 → 通过统一入口切 `pr-status/ready`
    - 有触发项 → 通过统一入口切 `pr-status/needs-fix`，未修/回归/误判OSS 项带 `file:line` 回 `/fix`
 
 ### B5 贴 pm:pr-review（--check 留痕）+ 切 label
 
-窗口打印 B4 后，贴 `pm:pr-review` 评论（--check 变体：每条 finding 带 ✅/❌/⚠️/🔧/🔲 状态替代簇归属，summary 用 已修复N/未修复M/回归K/范围外合理R/误判OSS S）——窗口=主输出、评论=留痕，两者都做（见 `PROJECT.md` §5）。**追加机器块**（贴评论前，接口见 `pr-comment.md` §机器块）：verdict 取 `ready`（无触发项，🔲 合理 OSS 不算）/ `changes-requested`（有 IN_SCOPE ❌/⚠️/🔧 或 误判OSS）；`bash hack/automation/pr-meta.sh emit-block --kind=pr-review --pr=<N> --phase=check --verdict=<上> --findings='<标准计数 json：total/fixed/unresolved/blocking/byP/byCx——合理 OSS(🔲) 归 unresolved「deferred/OOS」、误判 OSS 归 blocking；范围外/误判细分仅入上面人读 summary，不进 --findings（schema additionalProperties:false，加字段会被 emit-block 拒）>'`（round carry / refs 全派生）追加到 body 末尾。贴评论：`URL=$(bash hack/automation/forge.sh pr-comment <N> <填好的 pm:pr-review 模板>)`，回显 `echo "✅ 已贴评论：$URL"`；再按 B4 结论调用 `forge.sh pr-set-status <N> <ready|needs-fix> <本轮 check 并写入机器块的 headSha>`，由统一入口清理其它流程标签并回读。
+窗口打印 B4 后，按 `pr-comment.md` 的 --check 变体贴评论，包含本轮实际 check 的 head SHA、逐条状态与验证证据。用 `bash hack/automation/forge.sh pr-comment <N> <评论文件>` 发布并回显 URL；再按 B4 结论调用 `forge.sh pr-set-status <N> <ready|needs-fix> <本轮 check 的 headSha>`，由统一入口清理其它流程标签并回读。
 
 ---
 
@@ -217,4 +218,4 @@ echo "✅ 已贴评论：$URL"                                                  
 3. 无 worktree 自动创建 `worktrees/review-pr<N>`；既有 worktree 复用，不重建
 4. 主 agent 输出含 Read/Grep 证据 + 根因簇视图先于 Finding 详表；维度名内部一致
 5. 阶段 6 贴 `<!-- pm:pr-review -->` 评论（含 footer + 每条 finding 的 file:line）+ 回显 comment URL/id
-6. `--check` 模式：读上一轮 findings（拆 IN_SCOPE / 被声明 OSS）→ IN_SCOPE 逐条 Read 验证 ✅/❌/⚠️/🔧（含抓回归），被声明 OSS 评估分类合理性（合理 + 留痕 → 🔲 不计入；合理无留痕 → 🔲 不触发但出补建 action；误判 OSS → 计入 needs-fix）→ 窗口主输出验证表 + 贴 pm:pr-review（--check）→ 按 `changes-requested ⟺ IN_SCOPE 未修 或 误判OSS`（合理 🔲 不触发）切 label（无触发 → ready / 有触发 → needs-fix，统一入口保证单轴）
+6. `--check` 模式：读上一轮 findings（拆 IN_SCOPE / 被声明 OSS）→ IN_SCOPE 逐条 Read 验证 ✅/❌/⚠️/🔧（含抓回归），被声明 OSS 评估分类合理性（合理 + 留痕 → 🔲 不计入；合理无留痕 → 🔲 不触发但出补建 action；误判 OSS → 计入 needs-fix）→ 窗口主输出验证表 + 贴 pm:pr-review（--check）→ 按 `需修复 ⟺ IN_SCOPE 未修 或 误判OSS`（合理 🔲 不触发）切 label（无触发 → ready / 有触发 → needs-fix，统一入口保证单轴）

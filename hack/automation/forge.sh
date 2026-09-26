@@ -2,7 +2,7 @@
 # forge.sh — forge-agnostic CLI adapter for the rss PR / issue automation.
 #
 # WHY: the project-management skills (ship/fix/issues/pr-monitor/pr-review) and
-# the pr-meta / issue-labels scripts must not embed raw forge CLI commands or
+# the pr-comments / issue-labels scripts must not embed raw forge CLI commands or
 # forge-specific concepts inline. Every forge operation funnels through this
 # single adapter: callers speak forge-neutral VERBS, the adapter dispatches to
 # the active forge backend (github|azure|gitlab) and NORMALISES the output so
@@ -23,7 +23,7 @@
 #
 # Active forge: RSS_FORGE env > forge.conf DEFAULT_FORGE.
 #
-# Normalised output shapes (forge-neutral, consumed by pr-meta.sh / skills):
+# Normalised output shapes (forge-neutral, consumed by pr-comments.sh / skills):
 #   repo-slug             -> "<seg1>/<seg2>"           (two segments; schema-safe)
 #   remote                -> active forge's git remote name
 #   has-ci                -> "true" | "false"
@@ -34,7 +34,7 @@
 #   pr-mergeable <pr>     -> "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
 #   pr-diffstat <pr>      -> integer (additions + deletions)
 #   pr-comments-json <pr> -> [{createdAt,author,url,body,kind}] trusted-author pm:* comments
-#                            (consumed via pr-comments.sh; skills/pr-meta never parse forge output)
+#                            (consumed via pr-comments.sh; skills never parse forge output)
 #   pr-comment <pr> <f>   -> created comment URL on stdout
 #   ci-* (no-ci forge)    -> "no-ci"
 #
@@ -131,7 +131,7 @@ _pr_set_status() {
         in-progress|needs-review|needs-fix|needs-check|ready) ;;
         *) echo "forge pr-set-status: invalid status '$status'" >&2; return 64 ;;
     esac
-    if _dry "pr-set-status $pr $status $head: check head/open PR, remove other workflow labels, add target, read back"; then return 0; fi
+    if _dry "pr-set-status $pr $status $head: check head/open PR, add target, remove other workflow labels, read back"; then return 0; fi
     local refs state labels label
     refs="$("_${FORGE}_pr_refs" "$pr")" || return 1
     jq -e --arg head "$head" '.headSha == $head' <<< "$refs" >/dev/null || {
@@ -141,22 +141,46 @@ _pr_set_status() {
     jq -e '.state == "open" and (.labels | type == "array" and all(.[]; type == "string"))' <<< "$state" >/dev/null || {
         echo 'forge pr-set-status: expected open PR with valid labels' >&2; return 1;
     }
+    local previous failed=0 same_head=0
+    previous="$(jq -r '[.labels[] | select(startswith("pr-status/"))] | if length == 1 then .[0] else "" end' <<< "$state")" || return 1
     labels="$(jq -r --arg target "$target" '.labels[] | select((startswith("pr-status/") or startswith("pr-review/")) and . != $target)' <<< "$state")" || return 1
-    while IFS= read -r label; do
-        [ -n "$label" ] || continue
-        "_${FORGE}_pr_remove_label" "$pr" "$label" || return 1
-    done <<< "$labels"
+    # Keep needs-fix visible if adding the handoff target fails. Multiple labels
+    # during the switch are deliberately non-dispatchable for cooperating callers.
     if ! jq -e --arg target "$target" '.labels | index($target) != null' <<< "$state" >/dev/null; then
-        "_${FORGE}_pr_add_label" "$pr" "$target" || return 1
+        "_${FORGE}_pr_add_label" "$pr" "$target" >/dev/null || failed=1
     fi
-    state="$("_${FORGE}_pr_state" "$pr")" || return 1
-    jq -e --arg target "$target" '.state == "open" and ([.labels[] | select(startswith("pr-status/") or startswith("pr-review/"))] == [$target])' <<< "$state" >/dev/null || {
-        echo 'forge pr-set-status: label read-back mismatch; reconcile before dispatch' >&2; return 1;
-    }
-    refs="$("_${FORGE}_pr_refs" "$pr")" || return 1
-    jq -e --arg head "$head" '.headSha == $head' <<< "$refs" >/dev/null || {
-        echo 'forge pr-set-status: head changed during switch; label is not dispatch evidence' >&2; return 1;
-    }
+    if [ "$failed" -eq 0 ]; then
+        while IFS= read -r label; do
+            [ -n "$label" ] || continue
+            "_${FORGE}_pr_remove_label" "$pr" "$label" >/dev/null || { failed=1; break; }
+        done <<< "$labels"
+    fi
+    state="$("_${FORGE}_pr_state" "$pr")" || failed=1
+    jq -e --arg target "$target" '.state == "open" and ([.labels[] | select(startswith("pr-status/") or startswith("pr-review/"))] == [$target])' <<< "$state" >/dev/null || failed=1
+    if refs="$("_${FORGE}_pr_refs" "$pr")" && jq -e --arg head "$head" '.headSha == $head' <<< "$refs" >/dev/null; then
+        same_head=1
+    else
+        echo 'forge pr-set-status: head changed or unavailable during switch' >&2
+        failed=1
+    fi
+    if [ "$failed" -ne 0 ]; then
+        echo 'forge pr-set-status: switch failed; attempting compensation' >&2
+        # Restore a single prior workflow state; never restore ready when the
+        # reviewed head cannot be confirmed. Backend failures remain failures.
+        if [ -n "$previous" ] && { [ "$previous" != pr-status/ready ] || [ "$same_head" -eq 1 ]; }; then
+            "_${FORGE}_pr_add_label" "$pr" "$previous" >/dev/null || echo 'forge pr-set-status: compensation failed restoring prior status' >&2
+        fi
+        if [ "$target" != "$previous" ]; then
+            "_${FORGE}_pr_remove_label" "$pr" "$target" >/dev/null || echo 'forge pr-set-status: compensation failed removing target' >&2
+        fi
+        if [ "$same_head" -eq 0 ]; then
+            "_${FORGE}_pr_remove_label" "$pr" pr-status/ready >/dev/null || echo 'forge pr-set-status: compensation failed revoking ready' >&2
+        fi
+        # No success is reported even if compensation succeeds. Show remaining
+        # labels so callers can reconcile a partial/failed remote operation.
+        "_${FORGE}_pr_state" "$pr" >&2 || echo 'forge pr-set-status: compensation read-back failed' >&2
+        return 1
+    fi
     printf '%s\n' "$state"
 }
 
