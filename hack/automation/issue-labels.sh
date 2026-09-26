@@ -25,7 +25,6 @@
 #   issue-labels.sh selftest                    offline red/green regression
 # Exit: 0 ok | 1 forge/IO error | 2 validation violation | 64 usage error
 #
-# ref: hack/automation/pr-meta.sh — subcommand dispatch + embedded selftest shape.
 
 set -euo pipefail
 

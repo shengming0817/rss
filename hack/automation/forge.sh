@@ -2,7 +2,7 @@
 # forge.sh — forge-agnostic CLI adapter for the rss PR / issue automation.
 #
 # WHY: the project-management skills (ship/fix/issues/pr-monitor/pr-review) and
-# the pr-meta / issue-labels scripts must not embed raw forge CLI commands or
+# the pr-comments / issue-labels scripts must not embed raw forge CLI commands or
 # forge-specific concepts inline. Every forge operation funnels through this
 # single adapter: callers speak forge-neutral VERBS, the adapter dispatches to
 # the active forge backend (github|azure|gitlab) and NORMALISES the output so
@@ -23,7 +23,7 @@
 #
 # Active forge: RSS_FORGE env > forge.conf DEFAULT_FORGE.
 #
-# Normalised output shapes (forge-neutral, consumed by pr-meta.sh / skills):
+# Normalised output shapes (forge-neutral, consumed by pr-comments.sh / skills):
 #   repo-slug             -> "<seg1>/<seg2>"           (two segments; schema-safe)
 #   remote                -> active forge's git remote name
 #   has-ci                -> "true" | "false"
@@ -34,7 +34,7 @@
 #   pr-mergeable <pr>     -> "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
 #   pr-diffstat <pr>      -> integer (additions + deletions)
 #   pr-comments-json <pr> -> [{createdAt,author,url,body,kind}] trusted-author pm:* comments
-#                            (consumed via pr-comments.sh; skills/pr-meta never parse forge output)
+#                            (consumed via pr-comments.sh; skills never parse forge output)
 #   pr-comment <pr> <f>   -> created comment URL on stdout
 #   ci-* (no-ci forge)    -> "no-ci"
 #
@@ -102,6 +102,7 @@ usage: forge.sh [--dry-run] <verb> [args...]
          pr-comment <pr> <body-file>        (prints created comment URL)
          pr-add-label <pr> <label> | pr-remove-label <pr> <label>
          pr-set-labels <pr> --add a,b --remove c,d
+         pr-set-status <pr> <in-progress|needs-review|needs-fix|needs-check|ready> <head-sha>
          pr-state <pr> | pr-refs <pr> | pr-mergeable <pr> | pr-web-url <pr>
          pr-diff <pr> | pr-diffstat <pr> | pr-comments-json <pr>
          branch-pr-merged <branch>   -> true|false (no open PR + has merged; squash-safe)
@@ -116,6 +117,73 @@ usage: forge.sh [--dry-run] <verb> [args...]
          issue-comment <n> <body-file> | subissue-link <parent> <child>
 Active forge from RSS_FORGE env or forge.conf DEFAULT_FORGE.
 EOF
+}
+
+# Converge the workflow labels using the existing backend operations. This is
+# not an atomic claim/CAS: callers serialize dispatch and bind comments to head.
+_pr_set_status() {
+    if [ "$#" -ne 3 ] || ! [[ "$1" =~ ^[0-9]+$ && "$3" =~ ^[0-9a-f]{40}$ ]]; then
+        echo 'forge pr-set-status: expected PR, status and reviewed/pushed head SHA' >&2
+        return 64
+    fi
+    local pr="$1" status="$2" head="$3" target="pr-status/$2"
+    case "$status" in
+        in-progress|needs-review|needs-fix|needs-check|ready) ;;
+        *) echo "forge pr-set-status: invalid status '$status'" >&2; return 64 ;;
+    esac
+    if _dry "pr-set-status $pr $status $head: check head/open PR, add target, remove other workflow labels, read back"; then return 0; fi
+    local refs state labels label
+    refs="$("_${FORGE}_pr_refs" "$pr")" || return 1
+    jq -e --arg head "$head" '.headSha == $head' <<< "$refs" >/dev/null || {
+        echo 'forge pr-set-status: head changed; regenerate evidence before switching' >&2; return 1;
+    }
+    state="$("_${FORGE}_pr_state" "$pr")" || return 1
+    jq -e '.state == "open" and (.labels | type == "array" and all(.[]; type == "string"))' <<< "$state" >/dev/null || {
+        echo 'forge pr-set-status: expected open PR with valid labels' >&2; return 1;
+    }
+    local original="$state" previous failed=0 same_head=0
+    previous="$(jq -r '.labels[] | select(startswith("pr-status/") or startswith("pr-review/"))' <<< "$state")" || return 1
+    labels="$(jq -r --arg target "$target" '.labels[] | select((startswith("pr-status/") or startswith("pr-review/")) and . != $target)' <<< "$state")" || return 1
+    # Keep needs-fix visible if adding the handoff target fails. Multiple labels
+    # during the switch are deliberately non-dispatchable for cooperating callers.
+    if ! jq -e --arg target "$target" '.labels | index($target) != null' <<< "$state" >/dev/null; then
+        "_${FORGE}_pr_add_label" "$pr" "$target" >/dev/null || failed=1
+    fi
+    if [ "$failed" -eq 0 ]; then
+        while IFS= read -r label; do
+            [ -n "$label" ] || continue
+            "_${FORGE}_pr_remove_label" "$pr" "$label" >/dev/null || { failed=1; break; }
+        done <<< "$labels"
+    fi
+    state="$("_${FORGE}_pr_state" "$pr")" || failed=1
+    jq -e --arg target "$target" '.state == "open" and ([.labels[] | select(startswith("pr-status/") or startswith("pr-review/"))] == [$target])' <<< "$state" >/dev/null || failed=1
+    if refs="$("_${FORGE}_pr_refs" "$pr")" && jq -e --arg head "$head" '.headSha == $head' <<< "$refs" >/dev/null; then
+        same_head=1
+    else
+        echo 'forge pr-set-status: head changed or unavailable during switch' >&2
+        failed=1
+    fi
+    if [ "$failed" -ne 0 ]; then
+        echo 'forge pr-set-status: switch failed; attempting compensation' >&2
+        # Restore the whole prior workflow set, including conflicts: a failed
+        # cleanup must not accidentally leave one dispatchable legacy state.
+        while IFS= read -r label; do
+            [ -n "$label" ] || continue
+            if [ "$label" = pr-status/ready ] && [ "$same_head" -eq 0 ]; then continue; fi
+            "_${FORGE}_pr_add_label" "$pr" "$label" >/dev/null || echo 'forge pr-set-status: compensation failed restoring prior status' >&2
+        done <<< "$previous"
+        if ! jq -e --arg target "$target" '.labels | index($target) != null' <<< "$original" >/dev/null; then
+            "_${FORGE}_pr_remove_label" "$pr" "$target" >/dev/null || echo 'forge pr-set-status: compensation failed removing target' >&2
+        fi
+        if [ "$same_head" -eq 0 ]; then
+            "_${FORGE}_pr_remove_label" "$pr" pr-status/ready >/dev/null || echo 'forge pr-set-status: compensation failed revoking ready' >&2
+        fi
+        # No success is reported even if compensation succeeds. Show remaining
+        # labels so callers can reconcile a partial/failed remote operation.
+        "_${FORGE}_pr_state" "$pr" >&2 || echo 'forge pr-set-status: compensation read-back failed' >&2
+        return 1
+    fi
+    printf '%s\n' "$state"
 }
 
 main() {
@@ -135,6 +203,7 @@ main() {
     esac
     # shellcheck source=/dev/null
     . "${FORGE_DIR}/forge/${FORGE}.sh"
+    if [ "$verb" = pr-set-status ]; then _pr_set_status "$@"; return; fi
     local fn="_${FORGE}_${verb//-/_}"
     if ! declare -F "${fn}" >/dev/null 2>&1; then
         echo "forge: verb '${verb}' not implemented for forge '${FORGE}'" >&2

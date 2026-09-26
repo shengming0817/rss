@@ -3,7 +3,7 @@
 #
 # This is the ACTIVE backend for this repo (rss defaults to GitHub origin). Every
 # function here is a faithful port of the `gh` commands that previously lived
-# inline in the skills and the pr-meta / issue-labels scripts. This is ONE of the
+# inline in the skills and the pr-comments / issue-labels scripts. This is ONE of the
 # three sanctioned homes for raw `gh` invocations (forge.sh + forge/*.sh);
 # forge-guard-selftest.sh enforces it.
 #

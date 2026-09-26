@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # pr-comments.sh — pm:* comment PROTOCOL helper. The single fetch/sort/filter point
 # over the forge adapter's structured comments (`forge.sh pr-comments-json`). Skills
-# and pr-meta consume THIS helper — they never parse forge output directly
+# consume THIS helper — they never parse forge output directly
 # (ADR forge-abstraction, C1 refactor).
 #
 #   pr-comments.sh latest <pr> <kind>   newest trusted pm:<kind> comment body ("" if none)
-#   pr-comments.sh bodies <pr>          all trusted pm:* bodies, oldest→newest (pr-meta block scan)
 #   pr-comments.sh json   <pr>          raw structured array passthrough
 #
 # kind ∈ ship|fix|pr-review|ci|oos. "trusted author" + pm-marker filtering live in
@@ -25,17 +24,12 @@ cmd_latest() { # <pr> <kind>
         '[.[] | select(.kind == $k)] | sort_by(.createdAt) | (last // {}) | (.body // "")'
 }
 
-cmd_bodies() { # <pr>
-    _fetch "$1" | jq -r 'sort_by(.createdAt) | .[].body'
-}
-
 cmd_json() { _fetch "$1"; }
 
 usage() {
     cat >&2 <<'EOF'
-usage: pr-comments.sh <latest|bodies|json> <pr> [kind]
+usage: pr-comments.sh <latest|json> <pr> [kind]
   latest <pr> <kind>   newest trusted pm:<kind> comment body ("" if none)
-  bodies <pr>          all trusted pm:* bodies, oldest->newest
   json   <pr>          raw [{createdAt,author,url,body,kind}] passthrough
 kind: ship|fix|pr-review|ci|oos
 EOF
@@ -47,10 +41,9 @@ main() {
     shift || true
     case "${sub}" in
         latest) cmd_latest "$@" ;;
-        bodies) cmd_bodies "$@" ;;
         json)   cmd_json "$@" ;;
         -h|--help|help) usage; exit 0 ;;
-        *) echo "pr-comments.sh: unknown subcommand '${sub}' (latest|bodies|json)" >&2; exit 64 ;;
+        *) echo "pr-comments.sh: unknown subcommand '${sub}' (latest|json)" >&2; exit 64 ;;
     esac
 }
 
