@@ -70,7 +70,7 @@ ACTUAL_SHA=$(git -C "$WORKTREE" rev-parse HEAD)
 以下读取全部以 `$WORKTREE` 为根；改动文件清单只提供 repo-relative path
 输入，不作为文件内容来源。
 
-必读：CLAUDE.md + `docs/rules/*.md`（repo 级规则，develop/PR 合入后可用；若任一文件缺失则 fail-fast，不执行后续审查流程）+
+必读：CLAUDE.md（or AGENTS.md） + `docs/rules/*.md`（repo 级规则，develop/PR 合入后可用）+
 `.github/project-template/PROJECT.md` §3（P/Cx 评级单源）。
 rules 已瘦身，pr-review 阶段全量读取，避免本审查流程因条件过滤漏加载规则。
 
