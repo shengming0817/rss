@@ -54,7 +54,7 @@ class StatusTests(unittest.TestCase):
     def write_state(self, labels, state='open'):
         (self.root / 'state.json').write_text(json.dumps({'state': state, 'labels': labels}))
 
-    def invoke(self, status='needs-check', head=HEAD, **env):
+    def invoke(self, status='needs-check-fix', head=HEAD, **env):
         return subprocess.run(['bash', str(self.root / 'forge.sh'), 'pr-set-status', '42', status, head],
                               env=os.environ | {'RSS_FORGE': 'azure', 'STATE_DIR': str(self.root)} | env,
                               capture_output=True, text=True)
@@ -63,12 +63,12 @@ class StatusTests(unittest.TestCase):
         return json.loads((self.root / 'state.json').read_text())['labels']
 
     def test_cleans_legacy_and_conflicting_labels_preserves_unrelated(self):
-        self.write_state(['area-tooling', 'flag-cond', 'pr-status/needs-review-again',
-                          'pr-status/needs-check-fix', 'pr-status/needs-fix',
+        self.write_state(['area-tooling', 'flag-cond', 'pr-status/needs-review',
+                          'pr-status/needs-check', 'pr-status/needs-fix',
                           'pr-review/approved', 'pr-review/changes-requested'])
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(sorted(self.labels()), ['area-tooling', 'flag-cond', 'pr-status/needs-check'])
+        self.assertEqual(sorted(self.labels()), ['area-tooling', 'flag-cond', 'pr-status/needs-check-fix'])
 
     def test_repeat_is_noop(self):
         self.assertEqual(self.invoke().returncode, 0)
@@ -77,14 +77,14 @@ class StatusTests(unittest.TestCase):
         self.assertEqual((self.root / 'calls').read_text(), calls)
 
     def test_all_five_targets(self):
-        for target in ('in-progress', 'needs-review', 'needs-fix', 'needs-check', 'ready'):
+        for target in ('in-progress', 'needs-review-again', 'needs-fix', 'needs-check-fix', 'ready'):
             with self.subTest(target=target):
                 result = self.invoke(target)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(sorted(self.labels()), ['area-tooling', 'pr-status/' + target])
 
     def test_invalid_target_and_missing_head_do_not_mutate(self):
-        for status, head in [('approved', HEAD), ('needs-check-fix', HEAD), ('ready', '')]:
+        for status, head in [('approved', HEAD), ('needs-review', HEAD), ('needs-check', HEAD), ('ready', '')]:
             with self.subTest(status=status, head=head):
                 self.assertNotEqual(self.invoke(status, head).returncode, 0)
                 self.assertFalse((self.root / 'calls').exists())
@@ -110,18 +110,18 @@ class StatusTests(unittest.TestCase):
     def test_remove_failure_restores_old_status(self):
         self.assertNotEqual(self.invoke(FAIL_REMOVE='pr-review/changes-requested').returncode, 0)
         self.assertIn('pr-status/needs-fix', self.labels())
-        self.assertNotIn('pr-status/needs-check', self.labels())
+        self.assertNotIn('pr-status/needs-check-fix', self.labels())
 
     def test_partial_cleanup_restores_conflicting_initial_states(self):
-        original = ['area-tooling', 'pr-status/needs-fix', 'pr-status/needs-review',
+        original = ['area-tooling', 'pr-status/needs-fix', 'pr-status/needs-review-again',
                     'pr-review/changes-requested']
         self.write_state(original)
-        result = self.invoke(FAIL_REMOVE='pr-status/needs-review')
+        result = self.invoke(FAIL_REMOVE='pr-status/needs-review-again')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(sorted(self.labels()), sorted(original))
 
     def test_partial_cleanup_restores_legacy_conflict_when_target_existed(self):
-        original = ['pr-status/needs-check', 'pr-review/approved', 'pr-review/changes-requested']
+        original = ['pr-status/needs-check-fix', 'pr-review/approved', 'pr-review/changes-requested']
         self.write_state(original)
         result = self.invoke(FAIL_REMOVE='pr-review/changes-requested')
         self.assertNotEqual(result.returncode, 0)
@@ -131,7 +131,7 @@ class StatusTests(unittest.TestCase):
         self.assertNotEqual(self.invoke(FAIL_ADD='yes').returncode, 0)
         self.assertIn('pr-status/needs-fix', self.labels())
         self.assertEqual(self.invoke().returncode, 0)
-        self.assertEqual(sorted(self.labels()), ['area-tooling', 'pr-status/needs-check'])
+        self.assertEqual(sorted(self.labels()), ['area-tooling', 'pr-status/needs-check-fix'])
 
     def test_existing_ready_is_revoked_on_head_drift(self):
         self.write_state(['pr-status/ready', 'pr-review/approved'])
