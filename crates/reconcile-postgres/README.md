@@ -2,7 +2,7 @@
 
 PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` schema 和调用方配置好的 SQLx `PgPool`；不依赖消息数据库安装。
 
-`PgStore::new(pool, control)` 验证组件版本、必要结构、FORCE RLS、函数实现和运行角色。默认事务对每次实际借出的连接再次校验同一 canonical admission，构造后权限或 DDL 漂移会拒绝业务回调并隔离连接。它接管 pool 生命周期，`close(control)` 关闭该 pool 及其 clones 的 admission，并有界 drain；调用方先停止/join worker。连接的 TLS、凭据和认证由调用方配置。
+`PgStore::new(pool, control)` 验证组件版本、必要结构、FORCE RLS、函数实现和运行角色。实际操作在租户事务内重新校验 canonical admission，构造后权限或 DDL 漂移会拒绝业务回调并隔离连接。空领取扫描先核对当前角色、ACL、FORCE RLS 和精确租户策略，再只读发现到期候选；没有候选时不检查完整函数体和结构。有候选才完整准入并重新领取。纯结构漂移可在空闲期延后发现，但不得越过实际领取或业务操作；通知和空结果均不授予执行权。它接管 pool 生命周期，`close(control)` 关闭该 pool 及其 clones 的 admission，并有界 drain；调用方先停止/join worker。连接的 TLS、凭据和认证由调用方配置。
 
 ## 安装与存储责任
 
@@ -16,7 +16,7 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 准入精确校验组件八项 CHECK 的定义集合及 validated 状态；缺失、弱化、额外约束或
 `NOT VALID` 均返回 `StorageContract`。定义顺序和约束名称不影响语义匹配。运行池每次实际借出
-连接同样检查，不保留旧的仅数量判定。规范 schema 禁止负数/超出 u32 的 failures、非法目标身份、
+连接执行实际操作时同样检查；空发现只检查当前安全边界。规范 schema 禁止负数/超出 u32 的 failures、非法目标身份、
 非正 wake version、负 epoch 和不合法 lease 形状；它不能证明任意外部存储破坏从未发生。
 
 准入失败发生在 claim/业务回调前。若 claim SQL 或行转换失败，整批事务回滚，不返回部分成功 claim；

@@ -1,11 +1,13 @@
 use super::*;
 mod corruption;
+mod discovery;
 pub async fn run(
     store: &PgStore,
     pool: &PgPool,
     owner: &PgPool,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    discovery::run(store, pool, owner, c).await?;
     corruption::run(store, pool, owner, c).await?;
     application_lock_timeout_rolls_back(store, owner, c).await?;
     scheduling(store, owner, c).await?;

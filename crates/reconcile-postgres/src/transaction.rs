@@ -1,5 +1,6 @@
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs and pool/inner.rs@v0.9.0
 //! ref: baseline 5b63e10 adapters/postgres/src/cotx/settlement.rs
+use crate::probe::Admission;
 use futures::future::BoxFuture;
 use rss_reconcile::{Control, Error, ErrorKind, Scope, Timer};
 use rss_request_context::TenantId;
@@ -58,11 +59,13 @@ impl PgStore {
     {
         control.check()?;
         control
-            .run(
-                self.transact(scope.tenant(), control.remaining(), (), move |_, tx| {
-                    operation(tx)
-                }),
-            )
+            .run(self.transact(
+                scope.tenant(),
+                control.remaining(),
+                Admission::Full,
+                (),
+                move |_, tx| operation(tx),
+            ))
             .await
             .map_err(Error::uncertain)
     }
@@ -71,6 +74,7 @@ impl PgStore {
         &self,
         scope: &Scope,
         control: &Control<'_, T>,
+        admission: Admission,
         operation: F,
     ) -> Result<R, Error>
     where
@@ -78,11 +82,13 @@ impl PgStore {
     {
         control.check()?;
         control
-            .run(
-                self.transact(scope.tenant(), control.remaining(), (), move |_, tx| {
-                    operation(tx)
-                }),
-            )
+            .run(self.transact(
+                scope.tenant(),
+                control.remaining(),
+                admission,
+                (),
+                move |_, tx| operation(tx),
+            ))
             .await
             .map_err(Error::uncertain)
     }
@@ -99,7 +105,13 @@ impl PgStore {
     {
         control.check()?;
         control
-            .run(self.transact(scope.tenant(), control.remaining(), context, operation))
+            .run(self.transact(
+                scope.tenant(),
+                control.remaining(),
+                Admission::Full,
+                context,
+                operation,
+            ))
             .await
             .map_err(Error::uncertain)
     }
@@ -107,6 +119,7 @@ impl PgStore {
         &self,
         tenant: TenantId,
         timeout: Duration,
+        admission: Admission,
         mut context: C,
         operation: F,
     ) -> Result<R, Error>
@@ -118,12 +131,12 @@ impl PgStore {
             connection: self.pool.acquire().await.map_err(map_sql)?,
             quarantine: true,
         };
-        crate::probe::validate_connection(&mut lease.connection).await?;
         let mut tx = lease.connection.begin().await.map_err(map_sql)?;
         #[cfg(feature = "integration")]
         let fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
         let result = async {
             setup(&mut tx, tenant, timeout).await?;
+            admission.validate(&mut tx).await?;
             operation(
                 &mut context,
                 &mut PgTransaction {
@@ -159,7 +172,7 @@ impl PgStore {
                 if fault == PgFault::RollbackFailedAfterAck as u8 {
                     return Err(Error::new(ErrorKind::RollbackFailed));
                 }
-                lease.quarantine = false;
+                lease.quarantine = error.kind() == ErrorKind::StorageContract;
                 Err(error)
             }
         }
