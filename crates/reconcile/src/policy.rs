@@ -7,6 +7,7 @@ pub struct Policy {
     pub(crate) lease: Duration,
     pub(crate) attempt: Duration,
     pub(crate) scan: Duration,
+    pub(crate) idle_scan: Duration,
     backoff: Duration,
     cap: Duration,
     pub(crate) max_attempts: u32,
@@ -17,7 +18,10 @@ pub struct PolicyConfig {
     pub concurrency: usize,
     pub lease_ttl: Duration,
     pub attempt_timeout: Duration,
+    /// Delay before observing a successfully applied target again.
     pub scan_interval: Duration,
+    /// Recovery scan interval when no known target is due sooner.
+    pub idle_scan_interval: Duration,
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
     /// Includes the first attempt; 1 means no automatic retry after the first failure.
@@ -31,6 +35,7 @@ impl TryFrom<PolicyConfig> for Policy {
             lease_ttl: lease,
             attempt_timeout: attempt,
             scan_interval: scan,
+            idle_scan_interval: idle_scan,
             initial_backoff: backoff,
             max_backoff: cap,
             max_attempts,
@@ -41,7 +46,9 @@ impl TryFrom<PolicyConfig> for Policy {
                 && d.subsec_nanos().is_multiple_of(1_000_000)
         };
         if !(1..=64).contains(&concurrency)
-            || ![lease, attempt, scan, backoff, cap].into_iter().all(valid)
+            || ![lease, attempt, scan, idle_scan, backoff, cap]
+                .into_iter()
+                .all(valid)
             || lease < Duration::from_millis(3)
             || cap < backoff
             || !(1..=1000).contains(&max_attempts)
@@ -53,6 +60,7 @@ impl TryFrom<PolicyConfig> for Policy {
             lease,
             attempt,
             scan,
+            idle_scan,
             backoff,
             cap,
             max_attempts,

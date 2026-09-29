@@ -97,16 +97,11 @@ impl DurableStore for Store {
         _: &Control<'_, T>,
     ) -> Result<Vec<Token>, Error> {
         let scan = self.scans.fetch_add(1, Ordering::SeqCst);
-        if let Some((at, delay)) = self.scan_delay
-            && scan == at
-        {
-            tokio::time::sleep(delay).await;
-        }
         if let Some(kind) = self.scan_failure {
             return Err(Error::new(kind));
         }
         let now = self.clock.now();
-        Ok(self
+        let claims = self
             .lock()
             .iter_mut()
             .filter(|r| r.target.scope() == scope && !r.leased && !r.suspended && r.due <= now)
@@ -121,7 +116,14 @@ impl DurableStore for Store {
                     failures: r.failures,
                 }
             })
-            .collect())
+            .collect();
+        // The query result reflects its start; transport can return after a due time.
+        if let Some((at, delay)) = self.scan_delay
+            && scan == at
+        {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(claims)
     }
     async fn renew<T: Timer>(
         &self,
@@ -252,6 +254,7 @@ fn policy_with_attempts(max_attempts: u32) -> Result<Policy, Error> {
         lease_ttl: Duration::from_millis(15),
         attempt_timeout: Duration::from_millis(100),
         scan_interval: Duration::from_millis(2),
+        idle_scan_interval: Duration::from_millis(2),
         initial_backoff: Duration::from_millis(2),
         max_backoff: Duration::from_millis(8),
         max_attempts,
@@ -528,6 +531,7 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
         lease_ttl: Duration::from_secs(2),
         attempt_timeout: Duration::from_millis(500),
         scan_interval: Duration::from_secs(1),
+        idle_scan_interval: Duration::from_secs(1),
         initial_backoff: Duration::from_millis(2),
         max_backoff: Duration::from_millis(10),
         max_attempts: 3,
@@ -668,6 +672,7 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
         lease_ttl: Duration::from_secs(2),
         attempt_timeout: Duration::from_millis(50),
         scan_interval: Duration::from_secs(1),
+        idle_scan_interval: Duration::from_secs(1),
         initial_backoff: Duration::from_millis(2),
         max_backoff: Duration::from_millis(8),
         max_attempts: 2,
@@ -715,6 +720,242 @@ async fn nontransient_scan_failure_returns_without_retry_or_settlement() -> anyh
         assert_eq!(store.scans.load(Ordering::SeqCst), 1);
         assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
         assert_eq!(store.releases.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result<()> {
+    for behavior in [0, 1] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_millis(100), &cancel);
+        let store = Store {
+            rows: Mutex::new(vec![]),
+            clock: Clock::new(),
+            lost: false,
+            scans: AtomicUsize::new(0),
+            scan_delay: None,
+            scan_failure: None,
+            finishes: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        };
+        let scope = scope()?;
+        let policy = Policy::try_from(PolicyConfig {
+            concurrency: 2,
+            lease_ttl: Duration::from_millis(30),
+            attempt_timeout: Duration::from_millis(50),
+            scan_interval: Duration::from_millis(2),
+            idle_scan_interval: Duration::from_secs(1),
+            initial_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(10),
+            max_attempts: 2,
+        })?;
+        store
+            .wake(&Target::new(scope.clone(), "work")?, &control)
+            .await?;
+        let report = run(
+            &store,
+            &business(behavior),
+            &scope,
+            policy,
+            &control,
+            |_| {},
+        )
+        .await?;
+        if behavior == 0 {
+            assert_eq!(
+                report.converged, 1,
+                "reobservation must precede the idle recovery scan"
+            );
+        } else {
+            assert_eq!(report.retried, 1);
+            assert_eq!(report.suspended, 1, "retry must retain its own due time");
+        }
+        assert!(
+            store.scans.load(Ordering::SeqCst) < 10,
+            "settled work must return to the idle scan interval"
+        );
+    }
+    Ok(())
+}
+
+fn idle_store() -> Store {
+    Store {
+        rows: Mutex::new(vec![]),
+        clock: Clock::new(),
+        lost: false,
+        scans: AtomicUsize::new(0),
+        scan_delay: None,
+        scan_failure: None,
+        finishes: AtomicUsize::new(0),
+        releases: AtomicUsize::new(0),
+    }
+}
+fn idle_policy(scan: Duration, idle: Duration) -> Result<Policy, Error> {
+    Policy::try_from(PolicyConfig {
+        concurrency: 2,
+        lease_ttl: Duration::from_millis(90),
+        attempt_timeout: Duration::from_millis(100),
+        scan_interval: scan,
+        idle_scan_interval: idle,
+        initial_backoff: Duration::from_millis(5),
+        max_backoff: Duration::from_millis(10),
+        max_attempts: 2,
+    })
+}
+#[tokio::test(start_paused = true)]
+async fn lost_notification_recovers_in_a_free_slot_while_another_task_runs() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_millis(25), &cancel);
+    let store = idle_store();
+    let scope = scope()?;
+    store
+        .wake(&Target::new(scope.clone(), "long")?, &control)
+        .await?;
+    let business = business(2);
+    let late = async {
+        control.sleep(Duration::from_millis(5)).await;
+        store
+            .wake(&Target::new(scope.clone(), "lost-hint")?, &control)
+            .await
+    };
+    let (result, wake) = tokio::join!(
+        run(
+            &store,
+            &business,
+            &scope,
+            idle_policy(Duration::from_millis(2), Duration::from_millis(10))?,
+            &control,
+            |_| {}
+        ),
+        late,
+    );
+    result?;
+    wake?;
+    assert_eq!(business.observed.load(Ordering::SeqCst), 2);
+    assert_eq!(business.peak.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+#[tokio::test(start_paused = true)]
+async fn future_reobservation_survives_early_notifications_and_slow_scans() -> anyhow::Result<()> {
+    for slow in [false, true] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_millis(80), &cancel);
+        let mut store = idle_store();
+        if slow {
+            store.scan_delay = Some((1, Duration::from_millis(20)));
+        }
+        let scope = scope()?;
+        store
+            .wake(&Target::new(scope.clone(), "work")?, &control)
+            .await?;
+        let business = business(0);
+        let notify = tokio::sync::Notify::new();
+        let early = async {
+            control.sleep(Duration::from_millis(5)).await;
+            notify.notify_one();
+        };
+        let (report, ()) = tokio::join!(
+            run_with_notify(
+                &store,
+                &business,
+                &scope,
+                idle_policy(Duration::from_millis(10), Duration::from_secs(1))?,
+                &control,
+                &notify,
+                |_| {}
+            ),
+            early,
+        );
+        assert_eq!(report?.converged, 1, "slow scan={slow}");
+        assert!(store.scans.load(Ordering::SeqCst) < 10);
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Result<()> {
+    struct Waking<'a> {
+        store: &'a Store,
+        observations: AtomicUsize,
+        suspend: bool,
+    }
+    impl Reconciler<Token> for Waking<'_> {
+        type State = bool;
+        async fn observe<T: Timer>(
+            &self,
+            claim: &Token,
+            control: &Control<'_, T>,
+        ) -> Result<ReconcileDiff<bool>, Error> {
+            if self.observations.fetch_add(1, Ordering::SeqCst) == 0 {
+                // The durable wake happens while the original claim is held.
+                // Do not send a Notify: completion must drive its own discovery.
+                self.store.wake(claim.target(), control).await?;
+                control.sleep(Duration::from_millis(3)).await;
+                if self.suspend {
+                    return Err(Error::new(ErrorKind::Permanent));
+                }
+            }
+            Ok(ReconcileDiff::between(
+                DesiredState::present(true),
+                ActualState::present(true),
+            ))
+        }
+        async fn apply<T: Timer>(
+            &self,
+            _: &Token,
+            _: ReconcileDiff<bool>,
+            _: &Control<'_, T>,
+        ) -> Result<(), Error> {
+            Err(Error::new(ErrorKind::Invariant))
+        }
+    }
+    for suspend in [false, true] {
+        for concurrency in [1, 2] {
+            for slow_scan in [false, true] {
+                let clock = Clock::new();
+                let cancel = CancellationToken::new();
+                let control = Control::new(&clock, Duration::from_millis(50), &cancel);
+                let mut store = idle_store();
+                if slow_scan {
+                    store.scan_delay = Some((1, Duration::from_millis(10)));
+                }
+                let scope = scope()?;
+                store
+                    .wake(&Target::new(scope.clone(), "newer")?, &control)
+                    .await?;
+                let reconciler = Waking {
+                    store: &store,
+                    observations: AtomicUsize::new(0),
+                    suspend,
+                };
+                let policy = Policy::try_from(PolicyConfig {
+                    concurrency,
+                    lease_ttl: Duration::from_secs(1),
+                    attempt_timeout: Duration::from_millis(100),
+                    scan_interval: Duration::from_millis(2),
+                    idle_scan_interval: Duration::from_secs(24 * 60 * 60),
+                    initial_backoff: Duration::from_millis(5),
+                    max_backoff: Duration::from_millis(10),
+                    max_attempts: 2,
+                })?;
+                let report = run(&store, &reconciler, &scope, policy, &control, |_| {}).await?;
+                assert_eq!(
+                    reconciler.observations.load(Ordering::SeqCst),
+                    2,
+                    "suspend={suspend}, concurrency={concurrency}, slow_scan={slow_scan}"
+                );
+                assert_eq!(report.converged, if suspend { 1 } else { 2 });
+                assert_eq!(report.suspended, u64::from(suspend));
+                assert!(
+                    store.scans.load(Ordering::SeqCst) < 6,
+                    "no short polling after convergence"
+                );
+            }
+        }
     }
     Ok(())
 }

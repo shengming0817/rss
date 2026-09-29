@@ -86,6 +86,7 @@ async fn scenario(
         lease_ttl: Duration::from_secs(10),
         attempt_timeout: Duration::from_secs(5),
         scan_interval: Duration::from_millis(10),
+        idle_scan_interval: Duration::from_millis(10),
         initial_backoff: Duration::from_millis(5),
         max_backoff: Duration::from_millis(50),
         max_attempts: 3,

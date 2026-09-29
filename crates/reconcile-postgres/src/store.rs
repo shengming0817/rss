@@ -137,7 +137,12 @@ impl DurableStore for PgStore {
         }
         let ttl = millis(lease)?;
         let scope = scope.clone();
-        self.controlled_tx(&scope.clone(),control,move |tx| Box::pin(async move {
+        self.controlled_tx(&scope.clone(),control,crate::probe::Admission::Discovery,move |tx| Box::pin(async move {
+            // Read only a hint. No row locks or claims exist until the full admission below.
+            let due: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND next_run<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp()))")
+                .bind(scope.tenant().to_string()).bind(scope.reconciler()).fetch_one(&mut *tx.connection).await.map_err(map_sql)?;
+            if !due { return Ok(Vec::new()); }
+            crate::probe::validate_structure(tx.connection).await?;
             let rows=sqlx::query("SELECT tenant_id::text,reconciler,entity,token::text,epoch,wake_version,failures FROM rss_reconcile.claim_due($1::uuid,$2,$3,$4)")
                 .bind(scope.tenant().to_string()).bind(scope.reconciler()).bind(limit as i32).bind(ttl).fetch_all(&mut *tx.connection).await.map_err(map_sql)?;
             rows.into_iter().map(|row| {
@@ -155,16 +160,21 @@ impl DurableStore for PgStore {
     ) -> Result<(), Error> {
         let ttl = millis(lease)?;
         let key = Key::from(claim);
-        self.controlled_tx(claim.target.scope(), control, move |tx| {
-            Box::pin(async move {
-                key.query("SELECT rss_reconcile.renew($1::uuid,$2,$3,$4::uuid,$5,$6)")
-                    .bind(ttl)
-                    .execute(&mut *tx.connection)
-                    .await
-                    .map_err(map_sql)?;
-                Ok(())
-            })
-        })
+        self.controlled_tx(
+            claim.target.scope(),
+            control,
+            crate::probe::Admission::Full,
+            move |tx| {
+                Box::pin(async move {
+                    key.query("SELECT rss_reconcile.renew($1::uuid,$2,$3,$4::uuid,$5,$6)")
+                        .bind(ttl)
+                        .execute(&mut *tx.connection)
+                        .await
+                        .map_err(map_sql)?;
+                    Ok(())
+                })
+            },
+        )
         .await
     }
     async fn finish<T: Timer>(
@@ -181,9 +191,15 @@ impl DurableStore for PgStore {
         };
         let key = Key::from(claim);
         let wake = claim.wake;
-        self.controlled_tx(claim.target.scope(), control, move |tx| {
-            Box::pin(async move {
-                key.query("SELECT rss_reconcile.finish($1::uuid,$2,$3,$4::uuid,$5,$6,$7,$8,$9)")
+        self.controlled_tx(
+            claim.target.scope(),
+            control,
+            crate::probe::Admission::Full,
+            move |tx| {
+                Box::pin(async move {
+                    key.query(
+                        "SELECT rss_reconcile.finish($1::uuid,$2,$3,$4::uuid,$5,$6,$7,$8,$9)",
+                    )
                     .bind(wake)
                     .bind(result)
                     .bind(delay)
@@ -191,9 +207,10 @@ impl DurableStore for PgStore {
                     .execute(&mut *tx.connection)
                     .await
                     .map_err(map_sql)?;
-                Ok(())
-            })
-        })
+                    Ok(())
+                })
+            },
+        )
         .await
     }
     async fn release<T: Timer>(
@@ -202,15 +219,20 @@ impl DurableStore for PgStore {
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
         let key = Key::from(claim);
-        self.controlled_tx(claim.target.scope(), control, move |tx| {
-            Box::pin(async move {
-                key.query("SELECT rss_reconcile.release($1::uuid,$2,$3,$4::uuid,$5)")
-                    .execute(&mut *tx.connection)
-                    .await
-                    .map_err(map_sql)?;
-                Ok(())
-            })
-        })
+        self.controlled_tx(
+            claim.target.scope(),
+            control,
+            crate::probe::Admission::Full,
+            move |tx| {
+                Box::pin(async move {
+                    key.query("SELECT rss_reconcile.release($1::uuid,$2,$3,$4::uuid,$5)")
+                        .execute(&mut *tx.connection)
+                        .await
+                        .map_err(map_sql)?;
+                    Ok(())
+                })
+            },
+        )
         .await
     }
 }

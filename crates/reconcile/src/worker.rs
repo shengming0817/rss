@@ -4,7 +4,10 @@ use crate::{
     Scope, Target, Timer,
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
 use tokio::sync::Notify;
 /// The core operation that produced an observed target failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,9 +66,15 @@ struct Active<'a, F> {
     targets: HashSet<Target>,
     report: Report,
     observe: F,
+    due: BTreeSet<Duration>,
+    idle_scan: Duration,
 }
 impl<F: FnMut(Observation)> Active<'_, F> {
-    fn record(&mut self, target: Target, outcome: Outcome) {
+    fn record(&mut self, target: Target, outcome: Outcome, now: Duration) {
+        if let Ok(Completion::Reobserve(after) | Completion::Retry { after, .. }) = &outcome.result
+        {
+            self.schedule(now, *after);
+        }
         self.targets.remove(&target);
         if let Some(failure) = outcome.prior {
             self.emit(&target, failure);
@@ -84,6 +93,24 @@ impl<F: FnMut(Observation)> Active<'_, F> {
                 self.emit(&target, failure);
             }
         }
+    }
+    fn schedule(&mut self, now: Duration, after: Duration) {
+        // Longer deadlines are covered by the recovery scan. These hints carry no
+        // claim authority and exist only after acknowledged settlement.
+        if after < self.idle_scan {
+            self.due.insert(now.saturating_add(after));
+        }
+    }
+    fn scanned_through(&mut self, started: Duration) {
+        // A deadline reached during a slow scan still needs a subsequent scan.
+        while self.due.first().is_some_and(|due| *due <= started) {
+            self.due.pop_first();
+        }
+    }
+    fn delay(&self, now: Duration) -> Duration {
+        self.due.first().map_or(self.idle_scan, |due| {
+            due.saturating_sub(now).min(self.idle_scan)
+        })
     }
     fn emit(&mut self, target: &Target, failure: Failure) {
         (self.observe)(Observation::AttemptFailed {
@@ -167,6 +194,8 @@ async fn run_inner<
         targets: HashSet::new(),
         report: Report::default(),
         observe,
+        due: BTreeSet::new(),
+        idle_scan: policy.idle_scan,
     };
     loop {
         if control.check().is_err() {
@@ -177,6 +206,7 @@ async fn run_inner<
             let started = control.elapsed();
             let available = policy.concurrency - before;
             let batch = claim_round(store, scope, available, policy, control, &mut active).await;
+            active.scanned_through(started);
             let freed = active.tasks.len() < before;
             match batch {
                 Ok(claims) => {
@@ -208,7 +238,8 @@ async fn run_inner<
                         ErrorKind::Transient | ErrorKind::Deadline | ErrorKind::CommitUnknown
                     ) =>
                 {
-                    active.scan_error(scope, e)
+                    active.scan_error(scope, e);
+                    active.schedule(control.elapsed(), policy.scan);
                 }
                 Err(e) => return Err(e),
             }
@@ -216,17 +247,19 @@ async fn run_inner<
                 continue;
             }
         }
+        let delay = active.delay(control.elapsed());
+        let available = active.tasks.len() < policy.concurrency;
         let event = control
             .run(async {
                 tokio::select! {
                     result=active.tasks.next(),if !active.tasks.is_empty()=>Ok(result),
-                    ()=wake_hint(notify)=>Ok(None),
-                    ()=control.sleep(policy.scan)=>Ok(None),
+                    ()=wake_hint(notify),if available=>Ok(None),
+                    ()=control.sleep(delay),if available=>Ok(None),
                 }
             })
             .await;
         match event {
-            Ok(Some((target, outcome))) => active.record(target, outcome),
+            Ok(Some((target, outcome))) => active.record(target, outcome, control.elapsed()),
             Ok(None) => {}
             Err(_) => return Ok(active.report),
         }
@@ -253,7 +286,7 @@ async fn claim_round<S: DurableStore, T: Timer, F: FnMut(Observation) + Send>(
     loop {
         tokio::select! {
             result=&mut scan=>return result,
-            Some((target,outcome))=active.tasks.next(),if !active.tasks.is_empty()=>active.record(target,outcome),
+            Some((target,outcome))=active.tasks.next(),if !active.tasks.is_empty()=>active.record(target,outcome,control.elapsed()),
         }
     }
 }

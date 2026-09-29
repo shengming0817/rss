@@ -93,6 +93,7 @@ async fn recover(
             lease_ttl: Duration::from_secs(1),
             attempt_timeout: Duration::from_millis(300),
             scan_interval: Duration::from_millis(3),
+            idle_scan_interval: Duration::from_millis(3),
             initial_backoff: Duration::from_millis(2),
             max_backoff: Duration::from_millis(10),
             max_attempts: 3,

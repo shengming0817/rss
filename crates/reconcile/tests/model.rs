@@ -24,6 +24,7 @@ fn bounded_policy_and_saturating_backoff() -> Result<(), rss_reconcile::Error> {
             lease_ttl: Duration::from_millis(30),
             attempt_timeout: Duration::from_millis(10),
             scan_interval: Duration::from_millis(1),
+            idle_scan_interval: Duration::from_millis(1),
             initial_backoff: Duration::from_millis(2),
             max_backoff: Duration::from_millis(8),
             max_attempts: 3,

@@ -273,6 +273,7 @@ fn policy() -> Result<Policy, Error> {
         lease_ttl: Duration::from_secs(1),
         attempt_timeout: Duration::from_millis(200),
         scan_interval: Duration::from_millis(10),
+        idle_scan_interval: Duration::from_millis(10),
         initial_backoff: Duration::from_millis(10),
         max_backoff: Duration::from_millis(20),
         max_attempts: 2,
