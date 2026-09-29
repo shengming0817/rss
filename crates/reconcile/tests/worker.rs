@@ -875,3 +875,87 @@ async fn future_reobservation_survives_early_notifications_and_slow_scans() -> a
     }
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Result<()> {
+    struct Waking<'a> {
+        store: &'a Store,
+        observations: AtomicUsize,
+        suspend: bool,
+    }
+    impl Reconciler<Token> for Waking<'_> {
+        type State = bool;
+        async fn observe<T: Timer>(
+            &self,
+            claim: &Token,
+            control: &Control<'_, T>,
+        ) -> Result<ReconcileDiff<bool>, Error> {
+            if self.observations.fetch_add(1, Ordering::SeqCst) == 0 {
+                // The durable wake happens while the original claim is held.
+                // Do not send a Notify: completion must drive its own discovery.
+                self.store.wake(claim.target(), control).await?;
+                control.sleep(Duration::from_millis(3)).await;
+                if self.suspend {
+                    return Err(Error::new(ErrorKind::Permanent));
+                }
+            }
+            Ok(ReconcileDiff::between(
+                DesiredState::present(true),
+                ActualState::present(true),
+            ))
+        }
+        async fn apply<T: Timer>(
+            &self,
+            _: &Token,
+            _: ReconcileDiff<bool>,
+            _: &Control<'_, T>,
+        ) -> Result<(), Error> {
+            Err(Error::new(ErrorKind::Invariant))
+        }
+    }
+    for suspend in [false, true] {
+        for concurrency in [1, 2] {
+            for slow_scan in [false, true] {
+                let clock = Clock::new();
+                let cancel = CancellationToken::new();
+                let control = Control::new(&clock, Duration::from_millis(50), &cancel);
+                let mut store = idle_store();
+                if slow_scan {
+                    store.scan_delay = Some((1, Duration::from_millis(10)));
+                }
+                let scope = scope()?;
+                store
+                    .wake(&Target::new(scope.clone(), "newer")?, &control)
+                    .await?;
+                let reconciler = Waking {
+                    store: &store,
+                    observations: AtomicUsize::new(0),
+                    suspend,
+                };
+                let policy = Policy::try_from(PolicyConfig {
+                    concurrency,
+                    lease_ttl: Duration::from_secs(1),
+                    attempt_timeout: Duration::from_millis(100),
+                    scan_interval: Duration::from_millis(2),
+                    idle_scan_interval: Duration::from_secs(24 * 60 * 60),
+                    initial_backoff: Duration::from_millis(5),
+                    max_backoff: Duration::from_millis(10),
+                    max_attempts: 2,
+                })?;
+                let report = run(&store, &reconciler, &scope, policy, &control, |_| {}).await?;
+                assert_eq!(
+                    reconciler.observations.load(Ordering::SeqCst),
+                    2,
+                    "suspend={suspend}, concurrency={concurrency}, slow_scan={slow_scan}"
+                );
+                assert_eq!(report.converged, if suspend { 1 } else { 2 });
+                assert_eq!(report.suspended, u64::from(suspend));
+                assert!(
+                    store.scans.load(Ordering::SeqCst) < 6,
+                    "no short polling after convergence"
+                );
+            }
+        }
+    }
+    Ok(())
+}
