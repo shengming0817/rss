@@ -6,7 +6,7 @@
 
 每次领取工作后执行 `observe → diff → apply`。只有 observe 确认无差异才记录 Converged；apply 成功持久化 Reobserve，下一轮重新观察。多个实体并行，同实体单飞，扫描和续租等待不阻断在途回调。一个持久 wake version 防止旧完成吞掉新工作。
 
-`Policy::try_from(PolicyConfig { ... })` 用具名字段明确 concurrency、lease_ttl、attempt_timeout、scan_interval、initial_backoff、max_backoff、max_attempts；要求并发 1..=64、最大尝试次数 max_attempts 1..=1000（包含第一次尝试）、整毫秒正时长（至多 24h），lease 至少 3ms。退避计数持久化，重启不重置；永久/invariant 错误及重试耗尽暂停到下一次显式 wake。成功提交动作只重置失败计数，不等于业务收敛。
+`Policy::try_from(PolicyConfig { ... })` 用具名字段明确 concurrency、lease_ttl、attempt_timeout、scan_interval、idle_scan_interval、initial_backoff、max_backoff、max_attempts；要求并发 1..=64、最大尝试次数 max_attempts 1..=1000（包含第一次尝试）、整毫秒正时长（至多 24h），lease 至少 3ms。`scan_interval` 控制成功动作后的 Reobserve 和可恢复扫描错误的重试；`idle_scan_interval` 控制空闲补扫。已确认提交的 Reobserve / Retry 截止时间可提前唤醒，通知丢失或进程重启仍由补扫恢复。退避计数持久化，重启不重置；永久/invariant 错误及重试耗尽暂停到下一次显式 wake。成功提交动作只重置失败计数，不等于业务收敛。
 
 `run` 没有 detached task。取消、截止时间或丢 lease 会 drop 对应回调；未完成 claim 通过 TTL 恢复。panic 原样传播到运行 owner，保留原 payload，不转成可重试错误。`Observation::AttemptFailed` 保留目标、Observe/Apply/Renew/Finish 阶段、ErrorKind 与脱敏 source，Retry/Suspended 的原因也会发出；`ScanFailed` 携带 scope 与错误。Report 是本次执行计数，execution_failed 按目标尝试计数，scan_failed 按失败扫描操作计数，claim_unknown_batches 按结果未知的领取批次计数，不是业务事务 receipt。调用方停止并 join worker 后再关闭 provider。
 
