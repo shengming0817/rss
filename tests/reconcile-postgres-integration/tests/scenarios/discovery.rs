@@ -53,6 +53,15 @@ pub(super) async fn run(
     store
         .finish(&claimed, Completion::Converged, control)
         .await?;
+    safety(store, owner, control, scope).await
+}
+
+async fn safety(
+    store: &PgStore,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+    scope: &Scope,
+) -> anyhow::Result<()> {
     for (damage, repair) in [
         (
             "GRANT UPDATE ON rss_reconcile.targets TO reconcile_runtime",
