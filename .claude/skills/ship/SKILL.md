@@ -44,7 +44,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 - 按依赖顺序排列的文件级改动；
 - 串行/并行任务 DAG 与文件 owner，同一文件只归一个任务；
-- 与改动载体匹配的 TDD 失败用例和最小回归命令；
+- 预期行为与验收标准；
 - 文档、迁移、兼容性或安全影响（适用时）。
 
 按 `CLAUDE.md` 与相关 `docs/rules/` 生成计划。展示计划作为进度信息；无新的实质歧义时直接进入阶段 3，阶段 5 复用此 DAG，不重新分组。
@@ -57,23 +57,23 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 ---
 
-## 阶段 4：TDD
+## 阶段 4：TDD 与验证
 
-在 `<worktree>` 中先添加与改动载体匹配的测试或结构守卫，覆盖正常、边界和错误路径；运行阶段 2 选定的最小命令，确认目标测试先失败，再进入实施。测试范围、覆盖率和最终验证遵循 `CLAUDE.md`。
+新增或变更可测试行为、修复可复现 bug 时，先写或复用测试并确认失败。一批相关代码、脚本或配置逻辑改动完成后，运行对应的最小验证并确认通过。代码任务交付前运行一次 `make ci`。验证失败并修复后，复验失败项及受影响范围。
 
 ---
 
 ## 阶段 5：实施
 
-按阶段 2 的 DAG 逐批执行；无文件交叉且无逻辑依赖的任务可并行，有前置依赖的任务串行。需要派发时使用 `developer` agent（执行约束见 `.claude/agents/developer.md`）；每个 developer prompt（包括阶段 8 的修复派发）必须包含绝对 `<worktree>` 路径，明确授权按 ship 流程提交且只提交所属文件，并要求读取、编辑、测试和 Git 操作全部绑定该路径，禁止落到主仓或其他 worktree。
+按阶段 2 的 DAG 逐批执行；无文件交叉且无逻辑依赖的任务可并行，有前置依赖的任务串行。读取、编辑、测试和 Git 操作全部绑定绝对 `<worktree>` 路径，只提交所属文件，禁止落到主仓或其他 worktree。
 
-每批完成后汇总改动、commit 和最小测试结果；失败先定位根因并在本批修复。全部批次完成后检查计划覆盖和文件归属，不在此重复最终本地验证。
+每批完成后汇总改动和 commit。全部批次完成后检查计划覆盖和文件归属。
 
 ---
 
 ## 阶段 6：PR
 
-使用 `.github/project-template/pull_request_template.md` 填写 PR，执行仓库 benchmark gate，通过激活 forge helper 推送并创建 PR，然后按 `.github/project-template/PROJECT.md` §5 进入 `in-progress` 流程。
+使用 `.github/project-template/pull_request_template.md` 填写 PR，通过激活 forge helper 推送并创建 PR，然后按 `.github/project-template/PROJECT.md` §5 进入 `in-progress` 流程。
 
 ---
 
@@ -88,10 +88,9 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ## 阶段 8：Findings 处置与收尾
 
 1. 完整展示聚类后的 findings，并保留可定位证据。
-2. IN_SCOPE Cx1/Cx2 直接派 `developer` 修复，不逐条询问。只要存在任一 IN_SCOPE Cx3/Cx4，就必须严格按 `.github/project-template/PROJECT.md` §5 发起一次批量处置，由用户对整批建议作出决策；只有不存在此类 finding 时才不沟通。这是顶部自主推进规则的显式决策门，不以“方案无歧义”为由跳过。
-3. **本地验证（交接前）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make -C <worktree> ci CI_BASE=<remote>/develop`（绝对路径）；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI。
-4. 推送最终修复并完成冲突预检；合并或额外修改后精确验证受影响范围。按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、绑定最终 head 的可读评论 artifact，最后用 §2.5 的 `forge.sh pr-set-status` 切 `needs-review-again`；内容格式引用 `backlog.md` 和 `pr-comment.md`。
-5. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
+2. IN_SCOPE Cx1/Cx2 直接修复，不逐条询问。只要存在任一 IN_SCOPE Cx3/Cx4，就必须严格按 `.github/project-template/PROJECT.md` §5 发起一次批量处置，由用户对整批建议作出决策；只有不存在此类 finding 时才不沟通。这是顶部自主推进规则的显式决策门，不以“方案无歧义”为由跳过。
+3. 推送最终修复并完成冲突预检。按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、绑定最终 head 的可读评论 artifact，最后用 §2.5 的 `forge.sh pr-set-status` 切 `needs-review-again`；内容格式引用 `backlog.md` 和 `pr-comment.md`。
+4. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
 
 artifact 必须先于总结与触发 label 落地；具体顺序见 `.github/project-template/PROJECT.md` §5。
 

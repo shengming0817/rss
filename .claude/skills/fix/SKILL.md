@@ -11,7 +11,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 ---
 
-## 输入解析
+## 阶段 1: 输入解析
 优先级：**PR 号**（裸数字先按 PR 试 → `bash hack/automation/pr-comments.sh latest <N> pr-review` 取最新一条 pm:pr-review body 作为 findings 源；**只取最新一轮**——该 body 的 `<details>` 无损详表即本轮 findings；为空 → 无待修 review，报告退出。回退：pr-review body 为空时取最新一条 codex review/comment。**跳过**自己上一轮的 `pm:ship`/`pm:fix`/`pm:ci`/`pm:oos` 留痕（已处理）与早于该最新 review 的旧 `pm:pr-review`，**不回头处理上一轮已 triage 的 findings**）> **文件:行号** > **自然语言**（Grep/Glob）。**issue 号不再受理**——裸数字一律先按 PR 解析；issue 状态核查 + triage 收敛到 `issues` 技能（判定后建议 `/ship #<N>` 或 file:line）。
 
 **PR 状态入口**：先用 `forge.sh pr-state <PR#>` 确认 PR 开放，再读取 refs 与最新 review 正文。自动接力只接受唯一 `pr-status/needs-fix` 且无旧 `pr-review/*`；其它状态、缺失或冲突标签只报告，不修改代码。用户直接指定 PR 修复时，确认当前 head 上的待修 findings 后，先用 `forge.sh pr-set-status <PR#> needs-fix <已核对的 headSha>` 统一状态；切换成功后才能开始修改和验证。用户对修复预算的例外不会使 ready/check 标签适用于正在修复的 PR。
@@ -20,94 +20,30 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 ---
 
-## 阶段 1: 问题定位
-
-### 1.1 找到问题代码
-
-按精度递进：明确路径 → Read；模糊描述 → Grep 类型/方法签名 → Grep 错误码/注释 → Agent(Explore) 调用图。三层均无果 → 请求用户补充上下文。
-
-### 1.2 追踪调用链 + 数据流
-
-从问题代码向上（调用方）和向下（被调用方）追踪。跨 3+ 包用 Agent(Explore)。
-同时追踪数据流：数据源 → 变换 → 消费者。
-
-### 1.3 确认问题是否存在
+## 阶段 2: 问题确认
 
 | 状态 | 含义 | 下一步 |
 |------|------|--------|
-| **CONFIRMED** | 问题真实存在，可以复现 | → 进入阶段 2 |
+| **CONFIRMED** | 问题真实存在，可以复现 | 诊断请求 → 阶段 6；修复请求 → 阶段 3 |
 | **RESOLVED** | 问题已被修复（给出证据：哪行代码、哪个 PR） | → 向用户报告，结束 |
 | **CHANGED** | 代码重构过，问题形态变化 | → 向用户描述新形态，确认是否继续 |
 | **CANNOT_VERIFY** | 无法确认（缺少上下文、需要运行时验证） | → 请求更多信息 |
 
-输出含：状态 / 位置 / 调用链 / 数据流 / 问题描述（自己总结，不照搬 backlog）。
-
-### 1.4 复现测试（Reproduction Test First）
-
-CONFIRMED 后、修复前，先构造一个能**复现问题**的测试用例：
-
-1. 基于调用链和数据流分析，编写最小测试用例触发问题
-2. 运行测试确认 FAIL（证明问题可复现）
-3. 将此测试作为修复验收标准
-
-| 场景 | 操作 |
-|------|------|
-| 已有测试可稍加修改复现 | 修改已有测试 + 确认 FAIL |
-| 需新写测试 | 在 `xxx.rs` 的 `#[cfg(test)]` 模块新增 `fn xxx_bug描述()` |
-| 并发问题 | 写可触发的竞态测试（`tokio::test` / `loom`，必要时 `cargo test` 下复现） |
-| 无法在单测中复现（需运行时状态） | 标注 `RUNTIME_ONLY`，跳过此步 |
+本阶段输出：状态 / 位置 / 问题描述 / 根因 / 影响范围 / Cx 分级 / 范围归属 / 判定依据，作为阶段 3 的输入。
 
 ---
 
-## 阶段 2: 根因分析 + 复杂度分级（CONFIRMED 后执行）
+## 阶段 3: 修复方案与决策
 
-### 2.1 根因三维度
+### 3.1 方案设计原则（贯穿阶段 3；进入阶段 4 / 输出 Cx3+ 方案 / 提交批量汇总前强制自检）
 
-- **代码层面**: 哪行代码、哪个设计决策导致的
-- **架构层面**: 是否系统性（Grep 同模式，1 处=局部，3+=架构缺陷）。架构缺陷 → 请求用户裁定局部修还是系统性重构
-- **历史层面**: git log 搜索同类已有修复，发现团队惯例，避免退化
-
-### 2.2 影响范围
-
-直接影响 / 间接影响（列出受影响文件）/ 同类问题（Grep 相同模式数量）
-
-### 2.3 复杂度分级
-
-**必须对问题做复杂度判定**，决定后续方案形态（方案数见 3.1）。**Cx1-4 定义单源在 `.github/project-template/PROJECT.md` §3.2**（= 改动量/实现风险，本技能不复制）。
-
-> Cx1 表示"容易修"，不代表"不重要"。IN_SCOPE/RELATED/OUT_OF_SCOPE 按 `.github/project-template/PROJECT.md` §3.3 判定，与 Cx 等级无关——Cx1 也可以是 IN_SCOPE 且必须修。
-
-判定依据（按顺序检查）：
-1. 修复涉及多少个文件？（`Grep` 搜索所有受影响的调用点）
-2. 是否需要修改底座 crate（`rss-transactional-messaging` / `rss-runtime` / `rss-contract` 等）的 trait 或类型？
-3. 是否需要修改数据库 schema（migration）？
-4. 是否影响组合根（assembly / bin crate）的组装逻辑？
-5. 同类问题在其他模块是否重复出现？（1 处=局部，3+=系统性）
-
-### 2.4 当前分支归属判定
-
-按 `.github/project-template/PROJECT.md` §3.3 确定 finding 是否属于当前分支/PR：
-
-1. 用 `/usr/bin/git diff --name-only "$(bash hack/automation/forge.sh remote)/develop...HEAD"` 取得当前分支改动文件。
-2. 对照 finding 的文件、调用链与当前改动的直接影响关系。
-3. 有关联 PR 时，检查任务/issue/PR 描述、验收标准以及已读取的最新 review 上下文，确认 finding ID 或需求是否明确在范围内。
-4. 按 §3.3 输出 IN_SCOPE / RELATED / OUT_OF_SCOPE、判定证据和对应执行结果；不得仅因文件不在 diff 中就判 OUT_OF_SCOPE。
-
-输出含：代码/架构/历史三维度根因、复杂度、当前分支归属（含理由）、影响范围（直接/间接/同类）、历史修复。
-
----
-
-## 阶段 3: 修复方案设计
-
-### 方案设计原则（贯穿 3.0-3.4；进入阶段 4 / 输出 Cx3+ 方案 / 提交批量汇总前强制自检）
-
-- **彻底**：根因级修复，不留 TODO/FIXME/follow-up；阶段 2.2 列出的"同类"问题一并纳入。自检"是否还藏 TODO、兼容代码、未列入的同类？"
+- **彻底**：根因级修复，不留 TODO/FIXME/follow-up；已发现的"同类"问题一并纳入。自检"是否还藏 TODO、兼容代码、未列入的同类？"
 - **不向后兼容**：直接改签名/删字段/换实现，不留 deprecation 别名、shim、双路径。自检"是否留了别名、旧字段、双路径？"
 - **优雅简洁**：最少代码、最少抽象、最少新文件，不预设未来需求。自检"能否用更少代码、抽象、新文件达成？"
 
-不通过 → 修订；必须保留的违反项 → 显式列入"遗留 / 取舍说明"，不得默默放行。默认走彻底方案；Cx2 最小修复仅在 3.2 明确"不能现在做"时启用，必须给升级窗口 + 按 §沟通规则闸门输出 issue 建议命令。批量时"搭车修"同样适用。
+不通过 → 修订；必须保留的违反项 → 显式列入"遗留 / 取舍说明"，不得默默放行。默认走彻底方案；Cx2 最小修复仅在 3.3 确认彻底方案无法当前实施时启用，必须给升级窗口 + 按 §沟通规则闸门输出 issue 建议命令。批量时"搭车修"同样适用。
 
-### 3.0 对标参考查询（Cx2+ 必须执行）
+### 3.2 对标参考查询（Cx2+ 必须执行）
 
 Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减：
 
@@ -122,69 +58,25 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 
 ---
 
-### 3.1 方案分级
-
-| 等级 | 方案数 | 形态 |
-|------|--------|------|
-| Cx1 | 1 | 直接修，跳过比较 |
-| Cx2 | 2 | A 最小修复 + B 彻底方案 |
-| Cx3 | 3 | A 最小 + B 彻底 + C 重构 |
-| Cx4 | 详细方案（会话 / PR） | 生成方案；是否执行由 3.4 的批量处置结果决定 |
-
-每个方案须含：改动范围、原理、优缺点、遗留（仅最小修复）、预估改动量、参考来源（Cx2+ 必填）。
-
-### 3.2 时机判断：现在做还是后面做
-
-**必须给出明确的时机建议**，回答三个问题：
-
-**Q0: 是否属于当前分支？** 取 2.4 归属结果：**OUT_OF_SCOPE** → 自动建 backlog issue（4.6 step 4；pri-p0/标签判不定除外），跳过 Q1-Q3；**IN_SCOPE / RELATED** → 进 Q1（RELATED 改动量大可 defer）。
-
-**Q1: 推荐现在做还是后面做？**（仅 IN_SCOPE / RELATED 继续）
-
-| 推荐 | 判定条件 |
-|------|---------|
-| **现在做** | 安全漏洞 / 运行时崩溃 / 阻塞其他工作 / 改动量 ≤ 50 行 |
-| **本迭代做** | 有明确影响但不紧急 / 改动量 50-200 行 / 不阻塞他人 |
-| **下迭代做** | 设计级问题 / 改动量 200+ 行 / 需要先完成其他前置工作 |
-| **记录不做** | 理论风险但实际不触发 / 修复代价远大于收益 |
-
-**Q2: 能不能现在做？** 检查：已有 issue 依赖、活跃分支冲突、底座 crate（`rss-transactional-messaging` / `rss-runtime` / `rss-contract`）trait 消费方。
-
-**Q3: 最小修复的有效期？** 给出彻底方案的建议时间窗口。
-
-### 3.3 详细修复计划
-
-文件级改动清单。收尾验证统一按§4.6 第 1 步执行；验证政策遵循[验证规则](../../../docs/rules/verification-scope.md)。
-
-### 3.4 执行决策
+### 3.3 执行决策
 
 | 复杂度                                                      | 条件 | 决策 |
 |----------------------------------------------------------|------|-----|
 | Cx1/Cx2 + IN_SCOPE + 不改底座 crate trait/migration/组合根/并发语义 | 全满足 | 直接修 |
-| Cx2 + IN_SCOPE + 触禁域 + 能做                          | — | 执行推荐方案（A/B 比较） |
+| Cx2 + IN_SCOPE + 触禁域 + 能做                          | — | 执行推荐方案 |
 | Cx2 + 不能做（有前置依赖）                                         | — | 记录报告，标注阻塞 |
 | **Cx3/Cx4 IN_SCOPE** | 任何 | 如存在，执行下方单次批量处置门；无这类 finding 时不沟通 |
-| 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（4.6 step 4；pri-p0/判不定除外） |
+| 任何 + OUT_OF_SCOPE                                        | — | 不修，自动建 backlog issue（阶段 5 step 4；pri-p0/判不定除外） |
 
-**Cx3/Cx4 单次批量处置门**：先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由。属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。然后只发起一次批量处置请求：用户可全盘采纳建议，或按 finding ID 覆盖个别项。判当前 PR 修的记 `✅ 已修`并纳入本轮；判 defer 的自动建 issue、记 `⏸ defer`，不再二次确认。
+**Cx3/Cx4 单次批量处置门**：先为全部 IN_SCOPE Cx3/Cx4 生成「当前 PR 修」or「defer」的建议及理由。属于原验收范围且是正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他 Cx3/Cx4 建议 defer。然后只发起一次批量处置请求：用户可全盘采纳建议，或按 finding ID 覆盖个别项。判当前 PR 修的纳入阶段 4，完成后记 `✅ 已修`；判 defer 的自动建 issue、记 `⏸ defer`，不再二次确认。
 
 **不可直接修（须经批量处置门或推荐方案）**: 并发语义变更、trait 签名修改、新依赖、数据流方向变更、Cx3+。
 
 > 判 Cx 读取最新 review 评论的逐条 `[P·Cx·维度]`，不能仅凭汇总计数代替逐条处置。
 
-**何时沟通**: 见文末 §沟通规则；Cx3/Cx4 仅在存在 IN_SCOPE finding 时发起一次批量处置请求，其余默认按 3.4 表处置。
+**何时沟通**: 见文末 §沟通规则；Cx3/Cx4 仅在存在 IN_SCOPE finding 时发起一次批量处置请求，其余默认按 3.3 表处置。
 
-### 3.5 执行前任务清单（阶段 3 → 4 门禁）
-
-**用 TaskCreate 注册每项任务**，执行时 TaskUpdate 更新状态（✔/◼/◻）。
-
-规则：
-- 所有 finding 都创建 task，OUT_OF_SCOPE 标注 `[→ 自动建 issue（4.6 step 4）；pri-p0/判不定除外]`
-- 单条 Cx1 IN_SCOPE → 跳过清单直接修；批量或 Cx2+ → 必须创建
-- 最后两项固定：`commit + push` + `闭合/创建 GitHub issues`
-- 创建后立即执行，不等确认
-
-### 3.6 决策自检信号（3.4 → 4.x hook 锚点）
+### 3.4 决策自检信号（3.3 → 阶段 4 hook 锚点）
 
 进阶段 4 改代码前，发一次决策自检信号：
 
@@ -192,78 +84,47 @@ Cx2 及以上问题，**先查参考实现再动手**。三层按权威性递减
 bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 ```
 
-`PreToolUse(Bash)` hook 锚定该命令：本次 fix 首次发信号会 deny 并回喂「措施符合彻底、不向后兼容 措施优雅简洁、AI HARD的原则吗」。收到后**真正**按四原则复审本次 fix 方案（彻底 / 不向后兼容 / 优雅简洁 / AI-HARD），按需回调 3.1–3.4 决策，再重发同一命令即放行、进入阶段 4。机制同 ExitPlanMode 的 `.claude/hooks/exitplan-self-audit.sh`，但**每个 /fix 都自检**（消费式 toggle，非每会话一次）。这是自检提醒，**不是**新的用户决策门（不重复 §沟通规则）。
+`PreToolUse(Bash)` hook 锚定该命令：本次 fix 首次发信号会 deny 并回喂「措施符合彻底、不向后兼容 措施优雅简洁、AI HARD的原则吗」。收到后**真正**按四原则复审本次 fix 方案（彻底 / 不向后兼容 / 优雅简洁 / AI-HARD），按需回调 3.3 决策，再重发同一命令即放行、进入阶段 4。机制同 ExitPlanMode 的 `.claude/hooks/exitplan-self-audit.sh`，但**每个 /fix 都自检**（消费式 toggle，非每会话一次）。这是自检提醒，**不是**新的用户决策门（不重复 §沟通规则）。
 
 ---
 
-## 阶段 4: 执行修复
+## 阶段 4: 实施修复与验证
 
-### 4.1 Commit 格式
+新增或变更可测试行为、修复可复现 bug 时，先写或复用测试并确认失败。
 
-在当前分支直接修改。Commit: `fix(<scope>): <问题简述>` + 根因 + 复杂度 + Refs + Co-Authored-By。
-scope 按 crate 名（扁平 workspace，如 `rss-saga` / `rss-runtime` / `rss-transactional-messaging` / `rss-transactional-messaging-postgres`）。安全约束：只 add 修复文件（不 add -A）；不 amend。
+按阶段 3 的执行决策实施修复。一批相关代码、脚本或配置逻辑改动完成后，运行对应的最小验证并确认通过。代码任务交付前运行一次 `make ci`。验证失败并修复后，复验失败项及受影响范围。
 
-### 4.2 执行代码修改（逐编辑测试循环）
+---
 
-> **批量并行**：4+ 条 finding 时按 `cargo metadata --no-deps --format-version 1` 返回的实际 workspace package（含 integration package）聚类；非 Cargo 文件按共同 owner 聚类，再派发 `developer` sub-agent（**同 crate 同 agent** 防写冲突，组内串行执行下面循环）；并发 4-9→2 / ≥10→3；≤3 条由主 agent 直接处理。triage 同理可按聚类并行（`Explore`）。
+## 阶段 5: 提交与交接
 
-对每个任务，执行 Edit-Test Loop + 状态更新：
-
-1. **TaskUpdate → in_progress**（开始处理当前任务）
-2. Read 目标文件
-3. Edit / Write 修改代码
-4. **Rust crate 改动**：对受影响 crate 运行快速 build 与阶段 1.4 的复现测试；**非 crate 改动**：直接运行对应的最小复现测试，不强制 Cargo build/test
-5. 立即检查测试结果
-6. 如果测试失败：
-   - 分析失败原因
-   - 如果是当前编辑引入 → 立即修正，重回步骤 3
-   - 如果是暴露了后续步骤的依赖 → 记录，继续下一步骤
-7. 测试通过 → **TaskUpdate → completed** → 进入下一个任务
-
-### 4.3 编辑循环收敛
-
-确认每条 finding 的复现测试与适用的 Edit-Test Loop 已通过；最终本地验证统一按§4.6 第 1 步在**交接前**执行。
-
-### 4.4 测试失败处理（分层回退）
-
-| Round | 策略 |
-|-------|------|
-| 1-2 | 在当前方案上迭代修正 |
-| 3 | `git stash` + 切换到备选方案重新执行 |
-| 4 | 回滚（`git checkout -- <文件>`），Cx1 标 ESCALATE，Cx2 降级到最小修复标遗留 |
-
-### 4.5 验证修复
-
-重新执行阶段 1 的定位逻辑，确认：
-- 原问题代码已被替换
-- 数据流已正确保护
-- 测试覆盖了问题场景
-
-### 4.6 Git 收尾
+非 PR 输入：登记 deferred 项并输出修复结果；按用户授权执行提交、推送或创建 PR。PR 输入、新建或已授权关联的 PR，执行以下交接流程。
 
 > **pm:* 评论统一**：填 `.github/project-template/pr-comment.md`（无损 `file:line` + 详表入 `<details>`），正文写明实际处理的完整 head SHA，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的 URL。
 
-1. **本地验证（交接前）**：按[验证规则](../../../docs/rules/verification-scope.md)运行一次 `make ci CI_BASE=<remote>/develop`；返回 session 后仅以空输入 `write_stdin` 续等，`yield_time_ms` 取工具及上级约束允许的最大值，禁止 sleep 后轮询日志、进程或 artifact；结束后集中修复并仅精确复验失败项及受影响测试，同阶段不重跑完整 CI，修复后按以下步骤交接。fix 执行及验证期间保持 `pr-status/needs-fix`，不切回 `in-progress`。
-2. **提交 + push**：仅 `git add` 修复文件，按 4.1 commit/push；无 PR 才用填好的 `pull_request_template.md` 调 `forge.sh pr-create`。
-3. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。 合并改变 head 后精确验证受影响范围，再生成评论。
-4. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。OOS 另贴 pm:oos（每条 finding 必须写明已建 issue 或 deferred 原因）。
+1. **PR 状态**：fix 执行及验证期间保持 `pr-status/needs-fix`，不切回 `in-progress`。
+2. **提交 + push**：仅 `git add` 修复文件，commit/push。
+3. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。 冲突处理引入改动后复验受影响范围，再基于最终 head 生成评论。
+4. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明本次输入来源，有来源 PR 时注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。PR 流程的 OOS 另贴 pm:oos（每条 finding 必须写明已建 issue 或 deferred 原因）。
 5. **pm:fix**（绑定最终已验证 head；OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 6. **切 label**：按 `PROJECT.md` §2.5/§5 使用 `forge.sh pr-set-status <PR#> needs-check-fix <已验证且写入评论正文的 head-sha>`。全部 deferred issue、pm 评论先落地，方可切状态；失败不得宣称交接完成。
-7. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check-fix` 后执行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后 **TaskUpdate → completed**。
+7. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check-fix` 后执行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后汇总交接结果。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）请求用户决策。
 
 ---
 
-## 阶段 5: 输出 + 验证
+## 阶段 6: 输出
 
-窗口打印诊断 / 修复报告是主输出、pm:fix 评论（4.6 已贴）是无损留痕，两者都做（输出纪律单源见 `PROJECT.md` §5）。
+窗口打印诊断 / 修复报告；PR 流程同时发布阶段 5 的 pm:fix 评论，保留完整 findings 和实际提交 SHA。
 
 - 诊断报告（未修）
 - 修复报告（已修）
 - 批量验证（审查报告）
 
-**验证**（4.6 已执行，此处复核，不再查找）：核对 fix 评论 + `pr-status` 已切；全部 deferred（OOS + 批量处置判 defer 的 Cx3+/RELATED）issue 已自动建 + 回填 #N（pri-p0/判不定除外）。
+输出含：状态 / 位置 / 根因 / 影响范围 / Cx 分级 / 范围归属 / 判定依据 / 处置结果或建议 / 验证结果 / 遗留项。
+
+**交接结果**：记录提交 SHA、deferred issue 链接或未建单原因；PR 流程同时记录 PR、pm:fix 评论链接和最终 `pr-status`。
 
 ---
 
@@ -271,7 +132,7 @@ Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri
 
 **默认按分析结果自动决策。** 仅以下情况请求决策：
 - 无法定位问题代码
-- 测试失败且 4 轮回退后仍无法修正
-- 存在 IN_SCOPE Cx3/Cx4 时，按 3.4 将全部 finding 合并为一次批量处置请求；无这类 finding 时不沟通
-- **OUT_OF_SCOPE / 批量处置判定 defer 的 Cx3+/RELATED / /fix 派生新问题 → 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 4.6 step 4：无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。**判定 defer 后建 issue 不再二次确认**。仅 `pri-p0`（incident）请求用户决策，或 area/type 判不定（`validate` 失败）时标 `deferred=labels-underivable` 回退草稿。
+- 修复遇到无法自行解决的阻塞
+- 存在 IN_SCOPE Cx3/Cx4 时，按 3.3 将全部 finding 合并为一次批量处置请求；无这类 finding 时不沟通
+- **OUT_OF_SCOPE / 批量处置判定 defer 的 Cx3+/RELATED / /fix 派生新问题 → 默认自动 `bash hack/automation/forge.sh issue-create` + 回填 #N**（流程见 阶段 5 step 4：无损填 backlog.md body + 派生四轴标签 → `issue-labels.sh validate` → 建单）。**判定 defer 后建 issue 不再二次确认**。仅 `pri-p0`（incident）请求用户决策，或 area/type 判不定（`validate` 失败）时标 `deferred=labels-underivable` 回退草稿。
 - pri-p0 红线升级（incident-driven 或安全 CVE）
