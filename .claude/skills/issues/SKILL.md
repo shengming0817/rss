@@ -27,7 +27,7 @@ allowed-tools: [Read, Grep, Bash, Agent, AskUserQuestion]
 
 ### 3.2 生成实施顺序
 
-- 未完成任务按未完成前置的依赖层级分 Wave；已完成前置视为已满足，已完成任务单列。Wave 层数和成员数无上限。
+- 未完成任务按未完成前置的依赖层级分实施 Wave；已完成前置视为已满足，已完成任务单列。实施 Wave 层数和成员数无上限。
 - 同 Wave 内，根据文件、产出与消费关系及资源冲突，划分并行组或串行链，并说明冲突原因。
 - 同层展示和串行定序按优先级、基础产出、Cx、issue 编号排序。
 - 依赖成环或无法确认时先澄清；未完成的外部依赖标为阻塞。
@@ -38,7 +38,7 @@ allowed-tools: [Read, Grep, Bash, Agent, AskUserQuestion]
 
 用 `subissue-link` 关联已授权的候选，已关联的跳过；用 `issue-comment` 追加已授权的实施顺序评论。
 
-评论使用可见标记 `pm:epic-wave` 和纯文本格式。
+实施顺序由最新的可见 `pm:epic-wave` 评论承载，评论使用纯文本格式。
 
 ## 4. 输出
 

@@ -4,7 +4,7 @@
 # Closes the Cx labeling loop. A non-epic backlog issue must carry exactly one
 # each of area-* / type-* / pri-* / cx-* — cx is now MANDATORY, symmetric to pri
 # (PROJECT.md §2.6). An epic backlog issue requires area-*/pri-* and must NOT
-# carry any cx-* (epic 不贴 cx — PROJECT.md :23). Non-backlog issues are out of
+# carry any cx-* (epic 不贴 cx — PROJECT.md §1.1). Non-backlog issues are out of
 # scope (return ok).
 #
 # INVARIANT: non-epic backlog ⇒ exactly-one {area,type,pri,cx}; epic ⇒
@@ -109,7 +109,7 @@ _require_one() {
 # server-side label existence provided this backstop. Azure Boards tags are free-text
 # so the validator must enforce it explicitly (F8 regression fix).
 # _validate_labels CSV [TIER] -> 0 ok | 2 violation.
-# TIER (PROJECT.md §1.1 Work Item Type 三层映射): pbi|feature|epic|"" — the structure
+# TIER (PROJECT.md §1.1 工作项层级): pbi|feature|epic|"" — the structure
 # axis. Container tiers (epic/feature) carry area+pri only and forbid type/cx; the PBI
 # leaf requires area+type+pri+cx. Empty TIER infers from the `epic` label (else pbi) so
 # the label-only callers (PBI pre-create gate, epic-label create) keep working; Feature has no

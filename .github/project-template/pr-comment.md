@@ -119,7 +119,7 @@
 
 ## pm:ci 评论（`<!-- pm:ci -->`）
 
-> 外部 CI-capable producer 的检查结果记录；ship/fix 不生产或等待 pm:ci，本地验证与交接按 [PROJECT](PROJECT.md) §5 执行。本评论只记录外部检查结果，不触发自动修复。
+> 外部 CI-capable producer 的检查结果记录；ship/fix 的验证由各自技能编排，交接遵循 [PROJECT](PROJECT.md) §5 的状态契约。本评论只记录外部检查结果，不触发自动修复。
 
 ```markdown
 <!-- pm:ci -->

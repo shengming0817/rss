@@ -2,7 +2,7 @@
 
 > **切分原则**：
 > - **模版**（本文件夹）拥有「issue / PR / 评论里写什么内容、什么结构」（WHAT）。
-> - **`PROJECT.md`**（本文件夹）是「label 体系 / 看板字段 / 评级 rubric / PR 流程」的治理单源。
+> - **`PROJECT.md`**（本文件夹）是「工作项层级 / label 体系 / 评级 / 看板与 Wave 载体 / PR 状态契约」的定义单源。
 > - **技能** 拥有「跑什么 forge 命令、做什么决策、按什么算法排 wave、切什么 label」的编排（HOW/WHEN）。
 >
 > 引用方向**单向**：技能 / CI → 模版 + PROJECT.md。模版与 PROJECT.md **不反向列出谁引用它们**，也不互抄内容（label 清单只在 PROJECT.md，模版指向它）。
@@ -13,9 +13,10 @@
 
 | 文件 | 拥有内容 |
 |------|---------|
-| `PROJECT.md` | label 体系 / 看板字段 / 评级 rubric / PR 流程（治理单源） |
+| `PROJECT.md` | 工作项层级、标签、评级、看板与 Wave 载体、PR 状态契约 |
 | `backlog.md` | 新建 backlog issue 的 body 骨架（现状 / 修复方向 / Files / Trigger / Source） |
 | `epic.md` | epic body 骨架（目标 / 验收 / 实施顺序段） |
+| `feature.md` | 按明确需求使用的 Feature body 骨架 |
 | `pull_request_template.md` | PR body 骨架（Summary / Why / Refs / Risk / Test plan） |
 | `pr-comment.md` | `pm:ship` / `pm:fix` / `pm:pr-review` PR 评论格式（含可追溯 footer） |
 
