@@ -289,7 +289,7 @@ impl<R: Send> Store for PgStore<R> {
             }; // reason: Expire before the deadline is the reducer's explicit no-op.
             let outcome = row
                 .command
-                .transition(event, current, self.now(tx).await?)
+                .transition(event, current, time)
                 .map_err(error)?;
             if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
                 return Err(error(Error::InvalidSnapshot));
