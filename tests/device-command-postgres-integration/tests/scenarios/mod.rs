@@ -7,12 +7,14 @@ pub(super) use review::{
 mod ingress;
 pub(super) use ingress::{actual_state_redelivery, permanent_inputs};
 mod regressions;
+mod time;
 use super::*;
 pub(super) use regressions::{
     authority_rollback, catalog_drift, closed_catalog, compose_replay_after_advance,
     delayed_publication_read, immutable_facts, late_controls,
 };
 use rss_transactional_messaging_postgres::PgTransactionFault;
+pub(super) use time::controlled_time;
 pub(super) async fn lifecycle(f: &Fixture) -> anyhow::Result<()> {
     let s = scope(TENANT)?;
     let c = Coordinate::new(1, 1)?;
@@ -230,7 +232,11 @@ pub(super) async fn uncertainty(f: &mut Fixture) -> anyhow::Result<()> {
         "unknown"
     );
     f.runtime.close().await;
-    let (runtime, store, outbox) = stores(f.config.clone()).await?;
+    let (runtime, store, outbox) = stores(
+        f.config.clone(),
+        rss_device_command_postgres::CommandClock::Postgres,
+    )
+    .await?;
     f.runtime = runtime;
     f.store = store;
     f.outbox = outbox;
@@ -246,7 +252,11 @@ async fn publication_uncertainty(f: &mut Fixture) -> anyhow::Result<()> {
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     assert!(f.recover(s).await.is_err());
-    let (runtime, store, outbox) = stores(f.config.clone()).await?;
+    let (runtime, store, outbox) = stores(
+        f.config.clone(),
+        rss_device_command_postgres::CommandClock::Postgres,
+    )
+    .await?;
     f.runtime.close().await;
     f.runtime = runtime;
     f.store = store;
@@ -327,7 +337,14 @@ async fn admission(f: &Fixture) -> anyhow::Result<()> {
     sqlx::raw_sql("GRANT UPDATE ON rss_device_command.commands TO device_runtime")
         .execute(&f.owner)
         .await?;
-    assert!(stores(f.config.clone()).await.is_err());
+    assert!(
+        stores(
+            f.config.clone(),
+            rss_device_command_postgres::CommandClock::Postgres
+        )
+        .await
+        .is_err()
+    );
     sqlx::raw_sql("REVOKE UPDATE ON rss_device_command.commands FROM device_runtime")
         .execute(&f.owner)
         .await?;

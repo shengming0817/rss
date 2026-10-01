@@ -264,7 +264,11 @@ pub(crate) async fn catalog_drift(f: &Fixture) -> anyhow::Result<()> {
         ),
     ] {
         sqlx::raw_sql(change).execute(&f.owner).await?;
-        let admitted = stores(f.config.clone()).await;
+        let admitted = stores(
+            f.config.clone(),
+            rss_device_command_postgres::CommandClock::Postgres,
+        )
+        .await;
         sqlx::raw_sql(restore).execute(&f.owner).await?;
         assert!(admitted.is_err());
     }
@@ -283,7 +287,11 @@ pub(crate) async fn closed_catalog(f: &Fixture) -> anyhow::Result<()> {
     ] {
         let mut session = f.owner.acquire().await?;
         sqlx::raw_sql(change).execute(&mut *session).await?;
-        let admitted = stores(f.config.clone()).await;
+        let admitted = stores(
+            f.config.clone(),
+            rss_device_command_postgres::CommandClock::Postgres,
+        )
+        .await;
         if let Ok((runtime, _, _)) = &admitted {
             runtime.close().await;
         }
@@ -342,7 +350,11 @@ async fn compose_replay_case(
     );
     if unknown {
         f.runtime.close().await;
-        let (runtime, store, outbox) = stores(f.config.clone()).await?;
+        let (runtime, store, outbox) = stores(
+            f.config.clone(),
+            rss_device_command_postgres::CommandClock::Postgres,
+        )
+        .await?;
         f.runtime = runtime;
         f.store = store;
         f.outbox = outbox;

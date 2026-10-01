@@ -153,7 +153,14 @@ async fn scenario(
     let store = committed(
         runtime
             .local_tx(s.tenant(), budget()?, move |tx| {
-                Box::pin(async move { PgStore::new(tx, selected).await })
+                Box::pin(async move {
+                    PgStore::new(
+                        tx,
+                        selected,
+                        rss_device_command_postgres::CommandClock::Postgres,
+                    )
+                    .await
+                })
             })
             .await,
     )?;
