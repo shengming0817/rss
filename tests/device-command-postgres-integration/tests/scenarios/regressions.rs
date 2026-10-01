@@ -113,23 +113,21 @@ pub(crate) async fn authority_rollback(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
+    let (f, clock) = f.controlled().await?;
     let s = Scope::new(
         scope(TENANT)?.tenant(),
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440002")?,
     );
     let c = Coordinate::new(1, 1)?;
     f.initialize(s, c).await?;
-    let now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint")
-            .fetch_one(&f.owner)
-            .await?;
+    let expires = 100;
     for id in ["late-cancel", "late-supersede", "late-reject"] {
         let request = CommandSpec::new(
             s,
             CommandId::parse(id)?,
             c,
             StateDigest::from_bytes([7; 32]),
-            now + 1_000_000,
+            expires,
         );
         let msg = message(id, s.tenant())?;
         let store = f.store.clone();
@@ -143,7 +141,7 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
     }
     f.publish().await?;
     let _page = f.recover(s).await?;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    clock.advance_to(expires)?;
     let store = f.store.clone();
     let id = CommandId::parse("late-cancel")?;
     let result = committed(
@@ -174,20 +172,18 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
         f.load("late-supersede", s).await?.map(|c| c.status()),
         Some(Status::Superseded)
     );
+    f.runtime.close().await;
     Ok(())
 }
 pub(crate) async fn delayed_publication_read(f: &Fixture) -> anyhow::Result<()> {
+    let (f, clock) = f.controlled().await?;
     let s = Scope::new(
         scope(TENANT)?.tenant(),
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440003")?,
     );
     let c = Coordinate::new(1, 1)?;
     f.initialize(s, c).await?;
-    let now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint")
-            .fetch_one(&f.owner)
-            .await?;
-    let expires = now + 1_000_000;
+    let expires = 100;
     let request = CommandSpec::new(
         s,
         CommandId::parse("slow-confirm")?,
@@ -217,12 +213,8 @@ pub(crate) async fn delayed_publication_read(f: &Fixture) -> anyhow::Result<()> 
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await;
-        let seen: i64 = sqlx::query_scalar(
-            "SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint",
-        )
-        .fetch_one(&f.owner)
-        .await?;
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let seen = clock.now();
+        clock.advance_to(expires)?;
         lock.rollback().await?;
         ready??;
         assert!(
@@ -237,6 +229,7 @@ pub(crate) async fn delayed_publication_read(f: &Fixture) -> anyhow::Result<()> 
         page?.commands.first().map(Command::status),
         Some(Status::TimedOut)
     );
+    f.runtime.close().await;
     Ok(())
 }
 pub(crate) async fn catalog_drift(f: &Fixture) -> anyhow::Result<()> {
@@ -264,7 +257,11 @@ pub(crate) async fn catalog_drift(f: &Fixture) -> anyhow::Result<()> {
         ),
     ] {
         sqlx::raw_sql(change).execute(&f.owner).await?;
-        let admitted = stores(f.config.clone()).await;
+        let admitted = stores(
+            f.config.clone(),
+            rss_device_command_postgres::CommandClock::Postgres,
+        )
+        .await;
         sqlx::raw_sql(restore).execute(&f.owner).await?;
         assert!(admitted.is_err());
     }
@@ -283,7 +280,11 @@ pub(crate) async fn closed_catalog(f: &Fixture) -> anyhow::Result<()> {
     ] {
         let mut session = f.owner.acquire().await?;
         sqlx::raw_sql(change).execute(&mut *session).await?;
-        let admitted = stores(f.config.clone()).await;
+        let admitted = stores(
+            f.config.clone(),
+            rss_device_command_postgres::CommandClock::Postgres,
+        )
+        .await;
         if let Ok((runtime, _, _)) = &admitted {
             runtime.close().await;
         }
@@ -342,7 +343,11 @@ async fn compose_replay_case(
     );
     if unknown {
         f.runtime.close().await;
-        let (runtime, store, outbox) = stores(f.config.clone()).await?;
+        let (runtime, store, outbox) = stores(
+            f.config.clone(),
+            rss_device_command_postgres::CommandClock::Postgres,
+        )
+        .await?;
         f.runtime = runtime;
         f.store = store;
         f.outbox = outbox;

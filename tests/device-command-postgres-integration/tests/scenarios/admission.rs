@@ -111,7 +111,11 @@ async fn reject(f: &Fixture, change: &str, restore: &str, reason: &str) -> anyho
         .await?;
     result?;
     assert_eq!(snapshot(f).await?, before, "admission must be read-only");
-    let (runtime, _, _) = stores(f.config.clone()).await?;
+    let (runtime, _, _) = stores(
+        f.config.clone(),
+        rss_device_command_postgres::CommandClock::Postgres,
+    )
+    .await?;
     runtime.close().await;
     Ok(())
 }

@@ -29,7 +29,7 @@ Install the separately versioned messaging schema with its own documented runtim
 component installations never read, modify, migrate or adopt historical `device_commands` rows.
 Future changes to this component's persisted format require append-only upgrades.
 
-`PgStore::new(tx, outbox)` checks its schema revision, RLS and runtime privilege boundary using
+`PgStore::new(tx, outbox, CommandClock::Postgres)` checks its schema revision, RLS and runtime privilege boundary using
 an existing tenant-bound transaction. Rejections log structured `phase="probe"` and a closed
 `reason` (`revision`, `relations`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
 `unknown`), without database names, credentials or role names. Every constructor and operation validates the transaction's private runtime provenance against
@@ -85,8 +85,14 @@ head blocks successors, including later commands. This component does not bypass
 `device-command-postgres-integration` exercises real TLS PostgreSQL, minimum runtime grants,
 concurrency, transaction rollback, suppressed commit ACK, Inbox early-report redelivery and
 process kills before/after commit. The outbox settlement fixture supplies simulated confirmation;
-it proves database recovery, not a real broker or device deployment. No new fault-injection
-public feature is added; tests reuse the messaging adapter's integration hooks.
+it proves database recovery, not a real broker or device deployment. Command decisions use the explicit constructor argument `CommandClock::Postgres`; `PgStore::now`
+exposes the same Unix-microsecond source to consumer deadline validation. The `integration` feature
+adds an instance-scoped `IntegrationClock`, shared explicitly by stores via `CommandClock::Controlled`.
+Freeze before queueing and advance only after committed acceptance; negative values and rollback
+are rejected. It changes command decision time only: transaction budgets, authorization, message
+leases and audit time retain their own providers. Controlled stores still enforce original storage
+admission and transaction ownership. Tests reuse the messaging adapter's separate integration hooks
+for commit uncertainty.
 
 `python3 hack/device-command-package-proof.py --source` runs independent core-only and PostgreSQL source consumers. With
 `--artifacts DIR --revision SHA` it consumes the exact candidate bundle and checks its identities.

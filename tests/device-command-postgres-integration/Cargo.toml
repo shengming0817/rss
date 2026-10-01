@@ -13,7 +13,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
 serde_json.workspace = true
 rss-device-command.workspace = true
-rss-device-command-postgres.workspace = true
+rss-device-command-postgres = { workspace = true, features = ["integration"] }
 rss-request-context.workspace = true
 rss-contract.workspace = true
 rss-transactional-messaging.workspace = true

@@ -8,6 +8,7 @@ use std::sync::Arc;
 /// Device commands sharing the supplied transaction with the existing message adapter.
 pub struct PgStore<R> {
     outbox: Arc<PgOutboxStore<R>>,
+    clock: crate::CommandClock,
 }
 impl<R: Send> PgStore<R> {
     /// Validate component storage/role on the caller's configured transaction.
@@ -15,10 +16,17 @@ impl<R: Send> PgStore<R> {
     pub async fn new(
         tx: &mut PgTransaction<'_>,
         outbox: Arc<PgOutboxStore<R>>,
+        clock: crate::CommandClock,
     ) -> Result<Self, PgError> {
         outbox.validate_transaction(tx)?;
         crate::probe::validate(tx).await?;
-        Ok(Self { outbox })
+        Ok(Self { outbox, clock })
+    }
+    /// Read this store's authoritative command time in Unix microseconds.
+    /// The transaction must belong to the admitted runtime, even with an integration clock.
+    pub async fn now(&self, tx: &mut PgTransaction<'_>) -> Result<i64, PgError> {
+        self.outbox.validate_transaction(tx)?;
+        self.clock.now(tx).await
     }
     async fn mutate(
         &self,
@@ -37,7 +45,7 @@ impl<R: Send> PgStore<R> {
         let previous = stored.command.version();
         let outcome = stored
             .command
-            .transition(event, current, now(tx).await?)
+            .transition(event, current, self.now(tx).await?)
             .map_err(error)?;
         save(tx, &stored.command, previous).await?;
         Ok(Transition {
@@ -127,7 +135,7 @@ impl<R: Send> Store for PgStore<R> {
                 let previous = row.command.version();
                 let outcome = row
                     .command
-                    .transition(Event::Supersede, next, now(tx).await?)
+                    .transition(Event::Supersede, next, self.now(tx).await?)
                     .map_err(error)?;
                 if outcome != Outcome::Advanced {
                     return Err(error(Error::InvalidSnapshot));
@@ -171,7 +179,7 @@ impl<R: Send> Store for PgStore<R> {
         if current != spec.coordinate() {
             return Err(error(Error::Fenced));
         }
-        let command = Command::queue(spec, now(tx).await?).map_err(error)?;
+        let command = Command::queue(spec, self.now(tx).await?).map_err(error)?;
         let r = command.record();
         let s = r.spec.scope();
         let t = s.tenant().to_string();
@@ -234,7 +242,7 @@ impl<R: Send> Store for PgStore<R> {
         let previous = row.command.version();
         let outcome = row
             .command
-            .report(input, current, now(tx).await?)
+            .report(input, current, self.now(tx).await?)
             .map_err(error)?;
         save(tx, &row.command, previous).await?;
         Ok(Transition {
@@ -264,24 +272,30 @@ impl<R: Send> Store for PgStore<R> {
         let mut commands = Vec::with_capacity(rows.len());
         for mut row in rows {
             let previous = row.command.version();
-            let time = now(tx).await?;
+            let mut time = self.now(tx).await?;
             let event = if current != row.command.spec().coordinate() {
                 Event::Supersede
             } else if time >= row.command.spec().deadline() {
                 Event::Expire
-            } else if row.command.status() == Status::Queued
-                && self
+            } else if row.command.status() == Status::Queued {
+                let published = self
                     .outbox
                     .is_published(tx, &row.domain, &row.message_id, row.fingerprint)
-                    .await?
-            {
-                Event::Published
+                    .await?;
+                // Confirmation can block across expiry. The reducer receives the final
+                // provider sample, never the pre-confirmation time.
+                time = self.now(tx).await?;
+                if published {
+                    Event::Published
+                } else {
+                    Event::Expire
+                }
             } else {
                 Event::Expire
             }; // reason: Expire before the deadline is the reducer's explicit no-op.
             let outcome = row
                 .command
-                .transition(event, current, now(tx).await?)
+                .transition(event, current, time)
                 .map_err(error)?;
             if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
                 return Err(error(Error::InvalidSnapshot));

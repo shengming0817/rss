@@ -64,7 +64,8 @@ async fn device_child() -> anyhow::Result<()> {
         PgPassword::new("fixture-only"),
         PgPrivateCa::from_pem(std::fs::read(std::env::var("DEVICE_TEST_CA")?)?)?,
     );
-    let (runtime, store, _) = stores(config).await?;
+    let (runtime, store, _) =
+        stores(config, rss_device_command_postgres::CommandClock::Postgres).await?;
     let s = scope(TENANT)?;
     let name = std::env::var("DEVICE_TEST_ID")?;
     let request = spec(&name, s, Coordinate::new(2, 3)?)?;

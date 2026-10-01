@@ -122,6 +122,7 @@ struct Fixture {
 }
 async fn stores(
     config: PgConfig,
+    clock: rss_device_command_postgres::CommandClock,
 ) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore<()>>, Arc<PgOutboxStore<()>>)> {
     let runtime =
         Arc::new(PgRuntime::connect(config, Timer::new(), fence_fixture::binding()).await?);
@@ -139,7 +140,7 @@ async fn stores(
     let store = Arc::new(committed(
         runtime
             .local_tx(TenantId::parse(TENANT)?, budget()?, move |tx| {
-                Box::pin(async move { PgStore::new(tx, selected).await })
+                Box::pin(async move { PgStore::new(tx, selected, clock).await })
             })
             .await,
     )?);
@@ -188,7 +189,11 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
         PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
     );
     fence_fixture::provision(&owner).await?;
-    let (runtime, store, outbox) = stores(config.clone()).await?;
+    let (runtime, store, outbox) = stores(
+        config.clone(),
+        rss_device_command_postgres::CommandClock::Postgres,
+    )
+    .await?;
     Ok(Fixture {
         runtime,
         store,
@@ -198,6 +203,25 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
     })
 }
 impl Fixture {
+    async fn controlled(
+        &self,
+    ) -> anyhow::Result<(Self, Arc<rss_device_command_postgres::IntegrationClock>)> {
+        use rss_device_command_postgres::{CommandClock, IntegrationClock};
+        let clock = Arc::new(IntegrationClock::new(10)?);
+        let (runtime, store, outbox) =
+            stores(self.config.clone(), CommandClock::Controlled(clock.clone())).await?;
+        Ok((
+            Self {
+                runtime,
+                store,
+                outbox,
+                owner: self.owner.clone(),
+                config: self.config.clone(),
+            },
+            clock,
+        ))
+    }
+
     async fn initialize(&self, s: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
         let store = self.store.clone();
         committed(
@@ -338,6 +362,7 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
         scenarios::authority_pages(&fixture).await?;
         scenarios::composition_boundaries(&fixture).await?;
         scenarios::compose_replay_after_advance(&mut fixture).await?;
+        scenarios::controlled_time(&fixture).await?;
         fixture.runtime.close().await;
         fixture.owner.close().await;
         Ok::<(), anyhow::Error>(())

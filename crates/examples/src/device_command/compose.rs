@@ -24,7 +24,12 @@ pub async fn bootstrap(
     runtime
         .local_tx(scope.tenant(), deadline, move |tx| {
             Box::pin(async move {
-                let store = PgStore::new(tx, outbox).await?;
+                let store = PgStore::new(
+                    tx,
+                    outbox,
+                    rss_device_command_postgres::CommandClock::Postgres,
+                )
+                .await?;
                 store.initialize(tx, scope, coordinate).await
             })
         })
@@ -41,7 +46,12 @@ pub async fn enqueue(
     runtime
         .local_tx(spec.scope().tenant(), deadline, move |tx| {
             Box::pin(async move {
-                let store = PgStore::new(tx, outbox).await?;
+                let store = PgStore::new(
+                    tx,
+                    outbox,
+                    rss_device_command_postgres::CommandClock::Postgres,
+                )
+                .await?;
                 store.queue(tx, spec, message).await
             })
         })

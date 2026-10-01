@@ -23,7 +23,12 @@ pub(super) async fn admission_reason(f: &Fixture, expected: &str) -> anyhow::Res
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
-    let result = stores(f.config.clone()).with_subscriber(subscriber).await;
+    let result = stores(
+        f.config.clone(),
+        rss_device_command_postgres::CommandClock::Postgres,
+    )
+    .with_subscriber(subscriber)
+    .await;
     anyhow::ensure!(result.is_err(), "drifted schema admitted");
     let bytes = capture
         .0
@@ -214,11 +219,22 @@ pub(crate) async fn composition_boundaries(f: &Fixture) -> anyhow::Result<()> {
 }
 
 async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
-    let (other_runtime, _, other_outbox) = stores(f.config.clone()).await?;
+    let (other_runtime, _, other_outbox) = stores(
+        f.config.clone(),
+        rss_device_command_postgres::CommandClock::Postgres,
+    )
+    .await?;
     let foreign = committed(
         f.runtime
             .local_tx(s.tenant(), budget()?, move |tx| {
-                Box::pin(async move { PgStore::new(tx, other_outbox).await })
+                Box::pin(async move {
+                    PgStore::new(
+                        tx,
+                        other_outbox,
+                        rss_device_command_postgres::CommandClock::Postgres,
+                    )
+                    .await
+                })
             })
             .await,
     )
@@ -265,7 +281,14 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
     let other = committed(
         f.runtime
             .local_tx(s.tenant(), budget()?, move |tx| {
-                Box::pin(async move { PgStore::new(tx, selected).await })
+                Box::pin(async move {
+                    PgStore::new(
+                        tx,
+                        selected,
+                        rss_device_command_postgres::CommandClock::Postgres,
+                    )
+                    .await
+                })
             })
             .await,
     )?;
