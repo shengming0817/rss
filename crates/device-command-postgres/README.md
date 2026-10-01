@@ -29,7 +29,7 @@ Install the separately versioned messaging schema with its own documented runtim
 component installations never read, modify, migrate or adopt historical `device_commands` rows.
 Future changes to this component's persisted format require append-only upgrades.
 
-`PgStore::new(tx, outbox)` checks its schema revision, RLS and runtime privilege boundary using
+`PgStore::new(tx, outbox, CommandClock::Postgres)` checks its schema revision, RLS and runtime privilege boundary using
 an existing tenant-bound transaction. Rejections log structured `phase="probe"` and a closed
 `reason` (`revision`, `relations`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
 `unknown`), without database names, credentials or role names. Every constructor and operation validates the transaction's private runtime provenance against
