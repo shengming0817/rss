@@ -1,6 +1,6 @@
 ---
 name: ship
-description: "全流程实施编排：探索→计划→worktree→TDD→实施→PR→内置 review→findings 处置→交付。L1 跳过探索，L2 定向探索，L3（默认）并行探索。"
+description: "全流程实施编排：探索→计划→worktree→实施（TDD）→PR→内置 review→findings 处置→CI→交接。L1 跳过探索，L2 定向探索，L3（默认）并行探索。"
 argument-hint: "[--level=L1|L2|L3] <#issue-number 或任务描述>"
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ---
@@ -47,7 +47,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 - 预期行为与验收标准；
 - 文档、迁移、兼容性或安全影响（适用时）。
 
-按 `CLAUDE.md` 与相关 `docs/rules/` 生成计划。展示计划作为进度信息；无新的实质歧义时直接进入阶段 3，阶段 5 复用此 DAG，不重新分组。
+按 `CLAUDE.md` 与相关 `docs/rules/` 生成计划。展示计划作为进度信息；无新的实质歧义时直接进入阶段 3，阶段 4 复用此 DAG，不重新分组。
 
 ---
 
@@ -57,29 +57,23 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 ---
 
-## 阶段 4：TDD 与验证
+## 阶段 4：实施
 
 新增或变更可测试行为、修复可复现 bug 时，先写或复用测试并确认失败。
 
-每批次修改完成后、提交前运行受影响测试，通过后提交。代码任务全部修改完成且各批测试通过后，运行一次项目规定的 CI。每阶段一次收集全部失败，集中修复后复验失败项及受影响范围。
-
----
-
-## 阶段 5：实施
-
 按阶段 2 的 DAG 逐批执行；无文件交叉且无逻辑依赖的任务可并行，有前置依赖的任务串行。读取、编辑、测试和 Git 操作全部绑定绝对 `<worktree>` 路径，只提交所属文件，禁止落到主仓或其他 worktree。
 
-每批受影响测试通过后汇总改动并提交。全部批次完成后检查计划覆盖和文件归属。
+每批次修改完成后、提交前运行受影响测试，一次收集全部失败，集中修复后复验失败项及受影响范围；通过后汇总改动并提交。全部批次完成后检查计划覆盖和文件归属。
 
 ---
 
-## 阶段 6：PR
+## 阶段 5：PR
 
 使用 `.github/project-template/pull_request_template.md` 填写 PR，通过激活 forge helper 推送并创建 PR，然后按 `.github/project-template/PROJECT.md` §5 进入 `in-progress` 流程。
 
 ---
 
-## 阶段 7：Review（内置首审）
+## 阶段 6：Review（内置首审）
 
 按 `.claude/agents/reviewer.md` 的派发分档启动内置 reviewer。主 agent 对结果去重并按根因聚类；P/Cx 评级引用 `.github/project-template/PROJECT.md` §3，Finding 范围归属引用 `PROJECT.md` §3.3，后续流程引用 §5。
 
@@ -87,18 +81,20 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 ---
 
-## 阶段 8：Findings 处置与收尾
+## 阶段 7：Findings 处置与交接
 
 1. 完整展示聚类后的 findings，并保留可定位证据。
 2. IN_SCOPE Cx1/Cx2 直接修复，不逐条询问。只要存在任一 IN_SCOPE Cx3/Cx4，就必须严格按 `.github/project-template/PROJECT.md` §5 发起一次批量处置，由用户对整批建议作出决策；只有不存在此类 finding 时才不沟通。这是顶部自主推进规则的显式决策门，不以“方案无歧义”为由跳过。
-3. 推送最终修复并完成冲突预检。按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、绑定最终 head 的可读评论 artifact，最后用 §2.5 的 `forge.sh pr-set-status` 切 `needs-review-again`；内容格式引用 `backlog.md` 和 `pr-comment.md`。
-4. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
+3. 每批受影响测试通过后提交并推送修复，完成冲突预检；冲突处理引入的修改也在测试通过后提交。
+4. **项目 CI**：全部实施、review 修复和冲突处理完成，且受影响测试通过后，代码任务运行一次项目规定的 CI。一次收集全部失败，集中修复后复验失败项及受影响范围；通过后提交并推送 CI 修复。
+5. 验证通过后，按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、绑定最终 head 的可读评论 artifact，最后用 §2.5 的 `forge.sh pr-set-status` 切 `needs-review-again`；内容格式引用 `backlog.md` 和 `pr-comment.md`。
+6. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
 
 artifact 必须先于总结与触发 label 落地；具体顺序见 `.github/project-template/PROJECT.md` §5。
 
 ---
 
-## 阶段 9：交付报告
+## 阶段 8：交付报告
 
 向用户报告：
 
