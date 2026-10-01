@@ -28,13 +28,6 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。本�
 `5b63e10a1b396b0ff70b7d1e6e55db296cd7a891` 中的记录为来源。
 全部相关历史能力提取完成后删除本规则。
 
-## 修改代码前
-
-1. 先 `Read` 目标文件，`Grep` 搜索已有实现
-2. 编辑循环按改动类型运行最小复现测试；收尾统一运行 `make ci CI_BASE=<remote>/develop`。
-   验证范围、选择策略与等待边界遵循[验证规则](docs/rules/verification-scope.md)。
-3. 只改需要改的
-
 ## 参考框架
 
 新建或重构层内模块时，先用 `WebFetch` 读对标源码，commit message 注明 `ref: {framework} {file}`。

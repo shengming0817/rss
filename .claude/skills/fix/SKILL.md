@@ -92,7 +92,7 @@ bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 
 新增或变更可测试行为、修复可复现 bug 时，先写或复用测试并确认失败。
 
-按阶段 3 的执行决策实施修复。一批相关代码、脚本或配置逻辑改动完成后，运行对应的最小验证并确认通过。代码任务交付前运行一次 `make ci`。验证失败并修复后，复验失败项及受影响范围。
+按阶段 3 的执行决策实施修复。每批次修改完成后、提交前运行受影响测试，通过后按已有授权提交。代码任务全部修改完成且各批测试通过后，运行一次项目规定的 CI。每阶段一次收集全部失败，集中修复后复验失败项及受影响范围。
 
 ---
 
@@ -103,7 +103,7 @@ bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 > **pm:* 评论统一**：填 `.github/project-template/pr-comment.md`（无损 `file:line` + 详表入 `<details>`），正文写明实际处理的完整 head SHA，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的 URL。
 
 1. **PR 状态**：fix 执行及验证期间保持 `pr-status/needs-fix`，不切回 `in-progress`。
-2. **提交 + push**：仅 `git add` 修复文件，commit/push。
+2. **提交 + push**：仅 `git add` 修复文件，提交已通过批次测试的修改并 push；已提交的批次直接 push。
 3. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。 冲突处理引入改动后复验受影响范围，再基于最终 head 生成评论。
 4. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明本次输入来源，有来源 PR 时注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。PR 流程的 OOS 另贴 pm:oos（每条 finding 必须写明已建 issue 或 deferred 原因）。
 5. **pm:fix**（绑定最终已验证 head；OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
