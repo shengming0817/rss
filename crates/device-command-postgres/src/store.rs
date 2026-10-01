@@ -272,18 +272,24 @@ impl<R: Send> Store for PgStore<R> {
         let mut commands = Vec::with_capacity(rows.len());
         for mut row in rows {
             let previous = row.command.version();
-            let time = self.now(tx).await?;
+            let mut time = self.now(tx).await?;
             let event = if current != row.command.spec().coordinate() {
                 Event::Supersede
             } else if time >= row.command.spec().deadline() {
                 Event::Expire
-            } else if row.command.status() == Status::Queued
-                && self
+            } else if row.command.status() == Status::Queued {
+                let published = self
                     .outbox
                     .is_published(tx, &row.domain, &row.message_id, row.fingerprint)
-                    .await?
-            {
-                Event::Published
+                    .await?;
+                // Confirmation can block across expiry. The reducer receives the final
+                // provider sample, never the pre-confirmation time.
+                time = self.now(tx).await?;
+                if published {
+                    Event::Published
+                } else {
+                    Event::Expire
+                }
             } else {
                 Event::Expire
             }; // reason: Expire before the deadline is the reducer's explicit no-op.
