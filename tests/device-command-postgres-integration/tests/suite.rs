@@ -203,6 +203,25 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
     })
 }
 impl Fixture {
+    async fn controlled(
+        &self,
+    ) -> anyhow::Result<(Self, Arc<rss_device_command_postgres::IntegrationClock>)> {
+        use rss_device_command_postgres::{CommandClock, IntegrationClock};
+        let clock = Arc::new(IntegrationClock::new(10)?);
+        let (runtime, store, outbox) =
+            stores(self.config.clone(), CommandClock::Controlled(clock.clone())).await?;
+        Ok((
+            Self {
+                runtime,
+                store,
+                outbox,
+                owner: self.owner.clone(),
+                config: self.config.clone(),
+            },
+            clock,
+        ))
+    }
+
     async fn initialize(&self, s: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
         let store = self.store.clone();
         committed(

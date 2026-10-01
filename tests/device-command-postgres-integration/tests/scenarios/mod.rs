@@ -462,18 +462,16 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
+    let (f, clock) = f.controlled().await?;
     let s = scope(TENANT)?;
     let c = Coordinate::new(2, 3)?;
-    let now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint")
-            .fetch_one(&f.owner)
-            .await?;
+    let expires = 100;
     let request = CommandSpec::new(
         s,
         CommandId::parse("expires")?,
         c,
         StateDigest::from_bytes([7; 32]),
-        now + 1_000_000,
+        expires,
     );
     let msg = message("expires", s.tenant())?;
     let store = f.store.clone();
@@ -484,7 +482,7 @@ pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
             })
             .await,
     )?;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    clock.advance_to(expires)?;
     let _page = f.recover(s).await?;
     assert_eq!(
         f.load("expires", s)
@@ -504,7 +502,8 @@ pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
             .await,
     )?;
     assert_eq!(transition.command.status(), Status::Cancelled);
-    sql_and_cursor_bounds(f).await?;
+    sql_and_cursor_bounds(&f).await?;
+    f.runtime.close().await;
     Ok(())
 }
 async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
