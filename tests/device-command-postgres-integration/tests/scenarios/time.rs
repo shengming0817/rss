@@ -11,72 +11,32 @@ pub(crate) async fn controlled_time(f: &Fixture) -> anyhow::Result<()> {
     let clock = Arc::new(IntegrationClock::new(10)?);
     let (runtime, store, _) =
         stores(f.config.clone(), CommandClock::Controlled(clock.clone())).await?;
-    let request = CommandSpec::new(
-        s,
-        CommandId::parse("clock-boundary")?,
-        c,
-        StateDigest::from_bytes([7; 32]),
-        100,
-    );
-    let queued = store.clone();
-    let msg = message("clock-boundary", s.tenant())?;
-    let command = committed(
-        runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
-                Box::pin(async move { queued.queue(tx, request, msg).await })
-            })
-            .await,
-    )?;
-    assert_eq!(command.record().queued_at, 10);
-    clock.advance_to(99)?;
-    let recovered = store.clone();
-    let before = committed(
-        runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
-                Box::pin(async move {
-                    recovered
-                        .recover(
-                            tx,
-                            s,
-                            BatchLimit::new(10).map_err(|_| {
-                                PgError::from(sqlx::Error::Protocol("invalid batch".into()))
-                            })?,
-                            None,
-                        )
-                        .await
-                })
-            })
-            .await,
-    )?;
-    assert_eq!(before.commands[0].status(), Status::Queued);
+    before_deadline(&runtime, &store, &clock, s, c).await?;
     let (restarted, recovered, _) =
         stores(f.config.clone(), CommandClock::Controlled(clock.clone())).await?;
     clock.advance_to(100)?;
-    let selected = recovered.clone();
-    let expired = committed(
-        restarted
-            .local_tx(s.tenant(), budget()?, move |tx| {
-                Box::pin(async move {
-                    selected
-                        .recover(
-                            tx,
-                            s,
-                            BatchLimit::new(10).map_err(|_| {
-                                PgError::from(sqlx::Error::Protocol("invalid batch".into()))
-                            })?,
-                            None,
-                        )
-                        .await
-                })
-            })
-            .await,
-    )?;
+    let expired = recover(&restarted, recovered.clone(), s).await?;
     assert_eq!(expired.commands[0].status(), Status::TimedOut);
     assert_eq!(expired.commands[0].record().terminal_at, Some(100));
     assert_eq!(
         f.load("clock-boundary", s).await?,
         Some(expired.commands[0].clone())
     );
+    late_queue_and_ownership(f, &restarted, &recovered, &clock, s, c).await?;
+    postgres_time(f).await?;
+    runtime.close().await;
+    restarted.close().await;
+    Ok(())
+}
+
+async fn late_queue_and_ownership(
+    f: &Fixture,
+    restarted: &PgRuntime,
+    recovered: &Arc<PgStore<()>>,
+    clock: &IntegrationClock,
+    s: Scope,
+    c: Coordinate,
+) -> anyhow::Result<()> {
     clock.advance_to(101)?;
     let selected = recovered.clone();
     let msg = message("clock-late", s.tenant())?;
@@ -110,6 +70,10 @@ pub(crate) async fn controlled_time(f: &Fixture) -> anyhow::Result<()> {
         )
         .is_err()
     );
+    Ok(())
+}
+async fn postgres_time(f: &Fixture) -> anyhow::Result<()> {
+    let s = scope(TENANT)?;
     let before: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint")
             .fetch_one(&f.owner)
@@ -127,7 +91,59 @@ pub(crate) async fn controlled_time(f: &Fixture) -> anyhow::Result<()> {
             .fetch_one(&f.owner)
             .await?;
     assert!((before..=after).contains(&actual));
-    runtime.close().await;
-    restarted.close().await;
+    Ok(())
+}
+
+async fn recover(
+    runtime: &PgRuntime,
+    store: Arc<PgStore<()>>,
+    scope: Scope,
+) -> anyhow::Result<RecoveryPage> {
+    let limit = BatchLimit::new(10)?;
+    committed(
+        runtime
+            .local_tx(scope.tenant(), budget()?, move |tx| {
+                Box::pin(async move { store.recover(tx, scope, limit, None).await })
+            })
+            .await,
+    )
+}
+
+async fn queue(
+    runtime: &PgRuntime,
+    store: Arc<PgStore<()>>,
+    s: Scope,
+    c: Coordinate,
+) -> anyhow::Result<Command> {
+    let request = CommandSpec::new(
+        s,
+        CommandId::parse("clock-boundary")?,
+        c,
+        StateDigest::from_bytes([7; 32]),
+        100,
+    );
+    let queued = store.clone();
+    let msg = message("clock-boundary", s.tenant())?;
+    committed(
+        runtime
+            .local_tx(s.tenant(), budget()?, move |tx| {
+                Box::pin(async move { queued.queue(tx, request, msg).await })
+            })
+            .await,
+    )
+}
+
+async fn before_deadline(
+    runtime: &PgRuntime,
+    store: &Arc<PgStore<()>>,
+    clock: &IntegrationClock,
+    s: Scope,
+    c: Coordinate,
+) -> anyhow::Result<()> {
+    let command = queue(runtime, store.clone(), s, c).await?;
+    assert_eq!(command.record().queued_at, 10);
+    clock.advance_to(99)?;
+    let before = recover(runtime, store.clone(), s).await?;
+    assert_eq!(before.commands[0].status(), Status::Queued);
     Ok(())
 }
