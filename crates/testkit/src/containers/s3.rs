@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use aws_sdk_s3::{
     Client,
-    config::{Credentials, Region, RetryConfig, timeout::TimeoutConfig},
+    config::{Credentials, Region, retry::RetryConfig, timeout::TimeoutConfig},
     error::{ProvideErrorMetadata, SdkError},
     types::{
         BucketLifecycleConfiguration, BucketVersioningStatus, DefaultRetention, ExpirationStatus,
@@ -15,7 +15,7 @@ use aws_smithy_http_client::tls::{self, TrustStore};
 use testcontainers::core::IntoContainerPort as _;
 use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage, ImageExt as _};
 
-use super::runtime::run_container_command;
+use super::runtime::run_container_command_output;
 use super::{NetworkAttachment, Result, start_on_network, tls_material};
 const ARCHIVE_BUCKET: &str = "archive";
 const UNVERSIONED_BUCKET: &str = "archive-unversioned";
@@ -32,7 +32,7 @@ const IMAGE: &str = "1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87c
 
 fn archive_policy() -> String {
     format!(
-        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["s3:GetBucketVersioning","s3:GetBucketObjectLockConfiguration","s3:GetLifecycleConfiguration"],"Resource":["arn:aws:s3:::{ARCHIVE_BUCKET}","arn:aws:s3:::{UNVERSIONED_BUCKET}","arn:aws:s3:::{UNLOCKED_BUCKET}"]}},{{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:GetObjectRetention","s3:PutObject","s3:PutObjectRetention"],"Resource":"arn:aws:s3:::{ARCHIVE_BUCKET}/*"}}]}}"#
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["s3:GetBucketVersioning","s3:GetBucketObjectLockConfiguration"],"Resource":["arn:aws:s3:::{ARCHIVE_BUCKET}","arn:aws:s3:::{UNVERSIONED_BUCKET}","arn:aws:s3:::{UNLOCKED_BUCKET}"]}},{{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:GetObjectRetention","s3:PutObject","s3:PutObjectRetention"],"Resource":"arn:aws:s3:::{ARCHIVE_BUCKET}/*"}}]}}"#
     )
 }
 
@@ -298,25 +298,38 @@ async fn buckets(admin: &Client) -> Result<()> {
 // Native admin bodies are JSON; curl bundled in the pinned image owns SigV4 and TLS.
 // S3 does not provide identity administration. Keep these calls private to fixture setup.
 async fn workload_identity(container: &ContainerAsync<GenericImage>) -> Result<()> {
-    for (path, body) in [
+    for (operation, path, body) in [
         (
+            "create workload policy",
             format!("add-canned-policy?name={POLICY_NAME}"),
             "/rss-s3/policy.json",
         ),
         (
+            "create workload user",
             format!("add-user?accessKey={WORKLOAD_USER}"),
             "/rss-s3/user.json",
+        ),
+        (
+            "attach workload policy",
+            format!(
+                "set-user-or-group-policy?policyName={POLICY_NAME}&userOrGroup={WORKLOAD_USER}&isGroup=false"
+            ),
+            "/dev/null",
         ),
     ] {
         let url = format!("https://localhost:{PORT}/rustfs/admin/v3/{path}");
         let auth = format!("{ROOT_USER}:{ROOT_PASSWORD}");
         let file = format!("@{body}");
-        run_container_command(
+        let output = run_container_command_output(
             container,
-            "initialize scoped S3 identity",
+            operation,
             &[
                 "curl",
                 "--fail",
+                "--output",
+                "/dev/null",
+                "--write-out",
+                "%{http_code}",
                 "--silent",
                 "--show-error",
                 "--max-time",
@@ -337,6 +350,12 @@ async fn workload_identity(container: &ContainerAsync<GenericImage>) -> Result<(
             ],
         )
         .await?;
+        let status = output.stdout.trim().parse::<u16>().ok();
+        anyhow::ensure!(
+            output.exit_code == Some(0),
+            "S3 fixture {operation} failed (status={status:?}, exit={:?})",
+            output.exit_code
+        );
     }
     Ok(())
 }
@@ -345,7 +364,7 @@ async fn workload_identity(container: &ContainerAsync<GenericImage>) -> Result<(
 pub async fn s3_tls_archive(attachment: NetworkAttachment<'_>) -> Result<S3ArchiveFixture> {
     let material = tls_material(attachment.dns_name)?;
     let user = serde_json::to_vec(&serde_json::json!({
-        "secretKey": WORKLOAD_PASSWORD, "status": "enabled", "policy": POLICY_NAME,
+        "secretKey": WORKLOAD_PASSWORD, "status": "enabled",
     }))?;
     let container = start_on_network(
         GenericImage::new("rustfs/rustfs", IMAGE)
