@@ -35,6 +35,10 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 ## 阶段 3: 修复方案与决策
 
+先用 Read/Grep 核实具体修改点（仓库、文件、函数）、真实消费者和前置依赖，标明已就绪与缺失部分。
+
+按依赖和可验证产出确定 **1–8 个实施批次**；每批列出修改点、前置依赖、产出与完成判定，并明确本次修复范围和完成边界。
+
 ### 3.1 方案设计原则（贯穿阶段 3；进入阶段 4 / 输出 Cx3+ 方案 / 提交批量汇总前强制自检）
 
 - **彻底**：根因级修复，不留 TODO/FIXME/follow-up；已发现的"同类"问题一并纳入。自检"是否还藏 TODO、兼容代码、未列入的同类？"
@@ -90,9 +94,9 @@ bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 
 ## 阶段 4: 实施修复与验证
 
-新增或变更可测试行为、修复可复现 bug 时，先写或复用测试并确认失败。
+按阶段 3 的执行决策逐批修复。以“批次 i/n”说明本批目标，完成后报告产出、状态和剩余缺口，再按已有授权提交。依赖变化时调整剩余批次，整项计划保持 1–8 批；相关修复归回所属批次。
 
-按阶段 3 的执行决策实施修复。每批次修改完成后、提交前运行受影响测试，一次收集全部失败，集中修复后复验失败项及受影响范围；通过后按已有授权提交。
+正式 CI、T2 及直接调用同一 runner 的验证仅在阶段 5 集中执行。
 
 ---
 
@@ -103,9 +107,9 @@ bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 > **pm:* 评论统一**：填 `.github/project-template/pr-comment.md`（无损 `file:line` + 详表入 `<details>`），正文写明实际处理的完整 head SHA，再用 `forge.sh pr-comment` 发布并回显 stdout 返回的 URL。
 
 1. **PR 状态**：fix 执行及验证期间保持 `pr-status/needs-fix`，不切回 `in-progress`。
-2. **提交 + push**：仅 `git add` 修复文件，提交已通过批次测试的修改并 push；已提交的批次直接 push。
-3. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、复验受影响范围、commit/push 后按同一上限重检。
-4. **项目 CI**：本轮修复和冲突处理完成，且受影响测试通过后，代码任务运行一次项目规定的 CI。一次收集全部失败，集中修复后复验失败项及受影响范围；通过后提交并推送 CI 修复。
+2. **提交 + push**：仅 `git add` 修复文件，按已有授权提交并 push；已提交的批次直接 push。
+3. **冲突预检（阻塞）**：先 fetch 激活 remote，再用 `forge.sh pr-mergeable <PR#>` 最多轮询 5 次（间隔约 10s）；仍为 `UNKNOWN` 则停下报告。冲突则 merge 最新 remote/develop、commit/push 后按同一上限重检。
+4. **集中验证**：全部计划批次、本轮修复和冲突处理完成后，代码任务按目标仓入口执行必要 T2，再运行一次项目 CI；CI 已承载的同项 T2 复用该入口的结果。每次收集全部失败，集中修复后精确复验失败项及受影响范围；通过后提交并推送验证修复。
 5. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明本次输入来源，有来源 PR 时注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。PR 流程的 OOS 另贴 pm:oos（每条 finding 必须写明已建 issue 或 deferred 原因）。
 6. **pm:fix**（绑定最终已验证 head；OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 7. **切 label**：按 `PROJECT.md` §2.5/§5 使用 `forge.sh pr-set-status <PR#> needs-check-fix <已验证且写入评论正文的 head-sha>`。全部 deferred issue、pm 评论先落地，方可切状态；失败不得宣称交接完成。
