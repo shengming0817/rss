@@ -13,11 +13,11 @@ pub use wait::{await_delay, await_try};
 mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
-    BridgeNetwork, FixtureError, KafkaTlsFixture, KafkaTlsServerIdentity, MinioTlsFixture,
-    MqttTlsFixture, NetworkAttachment, PgConnParams, PgTlsFixture, PgTlsServerIdentity,
-    RabbitFixture, RabbitTlsFixture, RedisFixture, bridge_network, exclusive_kafka_tls,
-    exclusive_mqtt_tls, exclusive_rabbitmq, launch, managed_redis, minio_tls_archive, postgres_tls,
-    rabbitmq_tls, shared_kafka_tls, shared_mqtt_tls, shared_rabbitmq,
+    BridgeNetwork, FixtureError, KafkaTlsFixture, KafkaTlsServerIdentity, MqttTlsFixture,
+    NetworkAttachment, PgConnParams, PgTlsFixture, PgTlsServerIdentity, RabbitFixture,
+    RabbitTlsFixture, RedisFixture, S3ArchiveFixture, bridge_network, exclusive_kafka_tls,
+    exclusive_mqtt_tls, exclusive_rabbitmq, launch, managed_redis, postgres_tls, rabbitmq_tls,
+    s3_tls_archive, shared_kafka_tls, shared_mqtt_tls, shared_rabbitmq,
 };
 
 /// A bounded readiness probe exhausted its total deadline.

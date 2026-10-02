@@ -4903,6 +4903,8 @@ dependencies = [
 name = "testkit"
 version = "0.0.0"
 dependencies = [
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
  "anyhow",
  "rcgen",
  "serde",

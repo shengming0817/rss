@@ -284,8 +284,8 @@ mod tests;
 mod mqtt;
 pub use mqtt::{MqttTlsFixture, exclusive_mqtt_tls, shared_mqtt_tls};
 
-mod minio;
-pub use minio::{MinioTlsFixture, minio_tls_archive};
+mod s3;
+pub use s3::{S3ArchiveFixture, s3_tls_archive};
 
 mod launcher;
 pub use launcher::launch;

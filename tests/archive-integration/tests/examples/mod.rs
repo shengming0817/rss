@@ -8,19 +8,19 @@ async fn example_consumer() -> anyhow::Result<()> {
 }
 async fn run() -> anyhow::Result<()> {
     let network = testkit::bridge_network("archive-example").await?;
-    let minio = testkit::minio_tls_archive(testkit::NetworkAttachment {
+    let s3 = testkit::s3_tls_archive(testkit::NetworkAttachment {
         network: network.name(),
         dns_name: "archive-example-s3",
     })
     .await?;
     let f = fixture::Fixture::new(&network).await?;
     let mut input = f.input("archive_worker");
-    let credentials = minio.workload();
+    let credentials = s3.workload();
     input["endpoint"] = serde_json::json!(credentials.endpoint_url());
     input["access_key"] = serde_json::json!(credentials.access_key_id());
     input["secret_key"] = serde_json::json!(credentials.secret_access_key());
-    input["s3_ca"] = serde_json::json!(minio.ca_pem());
-    input["bucket"] = serde_json::json!(minio.archive_bucket());
+    input["s3_ca"] = serde_json::json!(s3.ca_pem());
+    input["bucket"] = serde_json::json!(s3.archive_bucket());
     match std::env::var("RSS_ARCHIVE_EXAMPLE") {
         Ok(binary) => {
             testkit::example_process::run_binary(
@@ -49,15 +49,14 @@ async fn run() -> anyhow::Result<()> {
     let json:serde_json::Value=sqlx::query_scalar("SELECT object FROM rss_transactional_messaging.archive_objects WHERE verified AND prepared IS NULL").fetch_one(&f.admin).await?;
     let object: rss_transactional_messaging_recovery::archive::Object =
         serde_json::from_value(json)?;
-    minio
-        .assert_admin_cannot_delete_retained_version(
-            &object.key,
-            object
-                .version
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("immutable version missing"))?,
-        )
-        .await?;
+    s3.assert_admin_cannot_delete_retained_version(
+        &object.key,
+        object
+            .version
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("immutable version missing"))?,
+    )
+    .await?;
     f.admin.close().await;
     Ok(())
 }
