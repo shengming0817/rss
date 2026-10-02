@@ -3,6 +3,7 @@ use std::time::Duration;
 use aws_sdk_s3::{
     Client,
     config::{Credentials, Region, RetryConfig, timeout::TimeoutConfig},
+    error::{ProvideErrorMetadata, SdkError},
     types::{
         BucketLifecycleConfiguration, BucketVersioningStatus, DefaultRetention, ExpirationStatus,
         LifecycleExpiration, LifecycleRule, LifecycleRuleFilter, NoncurrentVersionExpiration,
@@ -104,7 +105,7 @@ impl S3ArchiveFixture {
             .version_id(version)
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("delete expired fixture version failed"))?;
+            .map_err(|e| sdk_failure("delete expired fixture version failed", e))?;
         let result = self
             .admin
             .head_object()
@@ -150,13 +151,39 @@ impl S3ArchiveFixture {
             .version_id(version)
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("retained fixture version disappeared"))?;
+            .map_err(|e| sdk_failure("retained fixture version disappeared", e))?;
         anyhow::ensure!(
             object.version_id() == Some(version),
             "retained fixture version changed"
         );
         Ok(())
     }
+}
+
+fn sdk_failure<E: ProvideErrorMetadata>(
+    operation: &'static str,
+    error: SdkError<E>,
+) -> anyhow::Error {
+    let status = error.raw_response().map(|r| r.status().as_u16());
+    let category = match &error {
+        SdkError::TimeoutError(_) => "timeout",
+        SdkError::DispatchFailure(_) => "transport",
+        SdkError::ConstructionFailure(_) => "request",
+        SdkError::ResponseError(_) => "response",
+        SdkError::ServiceError(_) => match error
+            .as_service_error()
+            .and_then(ProvideErrorMetadata::code)
+        {
+            Some("AccessDenied") => "access-denied",
+            Some("InvalidAccessKeyId" | "SignatureDoesNotMatch") => "authentication",
+            Some("InvalidRequest" | "InvalidArgument" | "InvalidBucketName") => "configuration",
+            Some("NoSuchBucket" | "NoSuchKey" | "NoSuchVersion") => "missing",
+            Some("SlowDown" | "Throttling") => "throttled",
+            _ => "service",
+        },
+        _ => "sdk",
+    };
+    anyhow::anyhow!("S3 fixture {operation} (category={category}, status={status:?})")
 }
 
 fn admin_client(endpoint: &str, ca: &str) -> Result<Client> {
@@ -200,7 +227,7 @@ async fn buckets(admin: &Client) -> Result<()> {
         .object_lock_enabled_for_bucket(true)
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("create locked fixture bucket failed"))?;
+        .map_err(|e| sdk_failure("create locked fixture bucket failed", e))?;
     admin
         .put_object_lock_configuration()
         .bucket(ARCHIVE_BUCKET)
@@ -221,7 +248,7 @@ async fn buckets(admin: &Client) -> Result<()> {
         )
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("configure fixture retention failed"))?;
+        .map_err(|e| sdk_failure("configure fixture retention failed", e))?;
     admin
         .put_bucket_lifecycle_configuration()
         .bucket(ARCHIVE_BUCKET)
@@ -244,14 +271,14 @@ async fn buckets(admin: &Client) -> Result<()> {
         )
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("configure fixture lifecycle failed"))?;
+        .map_err(|e| sdk_failure("configure fixture lifecycle failed", e))?;
     for bucket in [NEIGHBOR_BUCKET, UNVERSIONED_BUCKET, UNLOCKED_BUCKET] {
         admin
             .create_bucket()
             .bucket(bucket)
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("create fixture posture bucket failed"))?;
+            .map_err(|e| sdk_failure("create fixture posture bucket failed", e))?;
     }
     admin
         .put_bucket_versioning()
@@ -263,7 +290,7 @@ async fn buckets(admin: &Client) -> Result<()> {
         )
         .send()
         .await
-        .map_err(|_| anyhow::anyhow!("configure unlocked fixture versioning failed"))?;
+        .map_err(|e| sdk_failure("configure unlocked fixture versioning failed", e))?;
     Ok(())
 }
 
@@ -346,16 +373,32 @@ pub async fn s3_tls_archive(attachment: NetworkAttachment<'_>) -> Result<S3Archi
     let port = container.get_host_port_ipv4(PORT).await?;
     let endpoint_url = format!("https://{host}:{port}");
     let admin = admin_client(&endpoint_url, &material.ca_pem)?;
+    let mut last_failure = None;
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if admin.list_buckets().send().await.is_ok() {
-                break;
+            match admin.list_buckets().send().await {
+                Ok(_) => return Ok::<(), anyhow::Error>(()),
+                Err(error) => {
+                    let rejected = error
+                        .raw_response()
+                        .is_some_and(|r| (400..500).contains(&r.status().as_u16()));
+                    let failure = sdk_failure("TLS readiness", error);
+                    if rejected {
+                        return Err(failure);
+                    }
+                    last_failure = Some(failure);
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .map_err(|_| anyhow::anyhow!("RustFS TLS readiness deadline elapsed"))?;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "RustFS TLS readiness deadline elapsed; last_failure={}",
+            last_failure.map_or_else(|| "operation pending".into(), |e| e.to_string())
+        )
+    })??;
     buckets(&admin).await?;
     workload_identity(&container).await?;
     Ok(S3ArchiveFixture {
