@@ -68,7 +68,7 @@ fn settled<T, E: std::fmt::Display>(
         |e| Err(anyhow::anyhow!("fenced: {e}")),
     )
 }
-fn client(f: &testkit::MinioTlsFixture) -> anyhow::Result<Client> {
+fn client(f: &testkit::S3ArchiveFixture) -> anyhow::Result<Client> {
     let c = f.workload();
     let tls = tls::TlsContext::builder()
         .with_trust_store(TrustStore::empty().with_pem_certificate(f.ca_pem().as_bytes().to_vec()))
@@ -104,17 +104,17 @@ async fn real_archive_closed_loop() -> anyhow::Result<()> {
 #[allow(clippy::cognitive_complexity)] // reason: ordered real-provider fixture lifecycle and adjacent assertions.
 async fn run() -> anyhow::Result<()> {
     let network = testkit::bridge_network("archive").await?;
-    let minio = testkit::minio_tls_archive(testkit::NetworkAttachment {
+    let s3 = testkit::s3_tls_archive(testkit::NetworkAttachment {
         network: network.name(),
         dns_name: "archive-s3",
     })
     .await?;
-    let sdk = client(&minio)?;
-    let store = Unverified::new(sdk.clone(), minio.archive_bucket().into())?
+    let sdk = client(&s3)?;
+    let store = Unverified::new(sdk.clone(), s3.archive_bucket().into())?
         .verify(&Wall, deadline())
         .await
         .context("verify real bucket")?;
-    Box::pin(adapter_errors(&sdk, &minio)).await?;
+    Box::pin(adapter_errors(&sdk, &s3)).await?;
     let bytes = b"exact version fixture".to_vec();
     let p = Prepared {
         object: Object {
@@ -131,25 +131,23 @@ async fn run() -> anyhow::Result<()> {
         .await
         .context("short object PUT")?;
     assert_eq!(store.put(&p, deadline()).await?, object);
-    minio
-        .assert_admin_cannot_delete_retained_version(
-            &object.key,
-            object
-                .version
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("version"))?,
-        )
-        .await?;
+    s3.assert_admin_cannot_delete_retained_version(
+        &object.key,
+        object
+            .version
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("version"))?,
+    )
+    .await?;
     tokio::time::sleep(Duration::from_secs(4)).await;
-    minio
-        .delete_expired_version(
-            &object.key,
-            object
-                .version
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("version"))?,
-        )
-        .await?;
+    s3.delete_expired_version(
+        &object.key,
+        object
+            .version
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("version"))?,
+    )
+    .await?;
     assert!(
         store
             .inspect(&object, true, deadline())
@@ -292,7 +290,7 @@ async fn run() -> anyhow::Result<()> {
     Box::pin(lease_budget(&repository, &owner)).await?;
     Box::pin(fault_matrix(&repository, &store, &owner)).await?;
     unreadable_archive(&repository, &store, &owner).await?;
-    expiry_reconciliation(&repository, &store, &owner, &minio).await?;
+    expiry_reconciliation(&repository, &store, &owner, &s3).await?;
     fair_scan(&repository, &owner).await?;
     Box::pin(fault_receipt(&repository, &store, &owner)).await?;
     Box::pin(interrupted_fault_receipt(&repository, &store, &owner)).await?;
@@ -738,7 +736,7 @@ async fn expiry_reconciliation(
     repository: &PgArchiveRepository,
     store: &rss_transactional_messaging_recovery_s3::S3ArchiveStore,
     owner: &sqlx::PgPool,
-    minio: &testkit::MinioTlsFixture,
+    s3: &testkit::S3ArchiveFixture,
 ) -> anyhow::Result<()> {
     let id = seed(owner, "elapsed-horizon").await?;
     let r = request(id, 1, Hold::Release).await?;
@@ -770,15 +768,14 @@ async fn expiry_reconciliation(
         settled(invoke(repository, store, &r).await)?,
         Outcome::Retained
     );
-    minio
-        .delete_expired_version(
-            &object.key,
-            object
-                .version
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("version"))?,
-        )
-        .await?;
+    s3.delete_expired_version(
+        &object.key,
+        object
+            .version
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("version"))?,
+    )
+    .await?;
     expire(owner, &r).await?;
     assert_eq!(
         settled(invoke(repository, store, &r).await)?,
@@ -1079,8 +1076,8 @@ async fn unreadable_archive(
     Ok(())
 }
 
-async fn adapter_errors(sdk: &Client, minio: &testkit::MinioTlsFixture) -> anyhow::Result<()> {
-    let denied = Unverified::new(sdk.clone(), minio.neighbor_bucket().into())?
+async fn adapter_errors(sdk: &Client, s3: &testkit::S3ArchiveFixture) -> anyhow::Result<()> {
+    let denied = Unverified::new(sdk.clone(), s3.neighbor_bucket().into())?
         .verify(&Wall, deadline())
         .await;
     assert!(
@@ -1088,8 +1085,8 @@ async fn adapter_errors(sdk: &Client, minio: &testkit::MinioTlsFixture) -> anyho
         "real IAM denial must not be transient or missing"
     );
     for (bucket, versioned) in [
-        (minio.unversioned_bucket(), false),
-        (minio.unlocked_bucket(), true),
+        (s3.unversioned_bucket(), false),
+        (s3.unlocked_bucket(), true),
     ] {
         let posture = sdk.get_bucket_versioning().bucket(bucket).send().await?;
         assert_eq!(
@@ -1114,7 +1111,7 @@ async fn adapter_errors(sdk: &Client, minio: &testkit::MinioTlsFixture) -> anyho
             .build(),
     );
     assert!(matches!(
-        Unverified::new(unavailable_client, minio.archive_bucket().into())?
+        Unverified::new(unavailable_client, s3.archive_bucket().into())?
             .verify(&Wall, deadline())
             .await,
         Err(Error::Unavailable)

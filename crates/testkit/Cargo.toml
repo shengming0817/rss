@@ -18,10 +18,12 @@ rcgen = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-smithy-http-client = { workspace = true, optional = true }
 
 [features]
 default = []
-containers = ["dep:testcontainers", "dep:tempfile", "tokio/signal", "tokio/rt-multi-thread", "tokio/macros", "dep:anyhow", "dep:rcgen", "dep:serde_json", "dep:serde", "tokio/sync", "tokio/process", "tokio/io-util"]
+containers = ["dep:aws-sdk-s3", "dep:aws-smithy-http-client", "dep:testcontainers", "dep:tempfile", "tokio/signal", "tokio/rt-multi-thread", "tokio/macros", "dep:anyhow", "dep:rcgen", "dep:serde_json", "dep:serde", "tokio/sync", "tokio/process", "tokio/io-util"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }

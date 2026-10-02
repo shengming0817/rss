@@ -4904,6 +4904,8 @@ name = "testkit"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
  "rcgen",
  "serde",
  "serde_json",

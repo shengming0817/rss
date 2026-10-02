@@ -16,7 +16,7 @@ repository determine whether an actual retention horizon permits HOT cleanup.
 Archive `put` also requires `s3:PutObjectRetention` because retention is explicit per object.
 HEAD/checksum and GET need object/version read and retention permissions; SSE-KMS configurations
 must additionally supply the permissions required by S3. No credentials are discovered by the library.
-`tests/archive-integration` runs real TLS MinIO and PostgreSQL: locked-version deletion refusal,
+`tests/archive-integration` runs real TLS RustFS and PostgreSQL: locked-version deletion refusal,
 short-lived exact-version disappearance, safe purge, response loss after real PUT, commit uncertainty,
 wrong evidence, tenant isolation, holds and fencing. These are S3-compatible provider proofs, not an
 AWS production deployment or IAM/KMS compliance claim.
