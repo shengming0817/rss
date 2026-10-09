@@ -55,8 +55,8 @@ BEGIN
  PERFORM check_execution();
  IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit NOT BETWEEN 1 AND 64 OR p_ttl_ms NOT BETWEEN 1 AND 86400000 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
  FOR r IN
-  SELECT source_seq,dr_operation AS op FROM outbox_candidates(p_tenant,p_domain)
-  WHERE eligible_at<=clock_timestamp() ORDER BY source_seq
+  SELECT c.source_seq,c.dr_operation AS op FROM outbox_candidates(p_tenant,p_domain) c
+  WHERE c.eligible_at<=clock_timestamp() ORDER BY c.source_seq
  LOOP
   EXIT WHEN used>=p_limit;
   SELECT * INTO o FROM outbox src WHERE src.seq=r.source_seq FOR UPDATE SKIP LOCKED;

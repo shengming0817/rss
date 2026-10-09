@@ -338,7 +338,7 @@ Fresh installation uses `MIGRATION_SQL` (0001–0011). Upgrade exactly once from
 |---|---|
 | 0001 | `RECOVERY_UPGRADE_SQL` (0002–0011) |
 | 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0011) |
-| 0004 or 0005 | Apply each remaining numbered migration in order, through 0010 |
+| 0004 or 0005 | Apply each remaining numbered migration in order, through 0011 |
 | 0006 | `DR_UPGRADE_SQL` (0007–0011) |
 | 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0011; empty Outbox) |
 | 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010–0011; empty Outbox) |

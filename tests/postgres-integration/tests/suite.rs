@@ -502,6 +502,15 @@ async fn producer_admission_rejections(
         .execute(owner)
         .await?;
 
+    sqlx::raw_sql("CREATE ROLE tmsg_wakeup_only NOLOGIN; GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_wakeup_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.next_outbox_wakeup(uuid,text) TO tmsg_wakeup_only; GRANT tmsg_wakeup_only TO tmsg_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
+    let wakeup_role =
+        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding()).await;
+    sqlx::raw_sql("REVOKE tmsg_wakeup_only FROM tmsg_runtime; REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.next_outbox_wakeup(uuid,text) FROM tmsg_wakeup_only; REVOKE USAGE ON SCHEMA rss_transactional_messaging FROM tmsg_wakeup_only; DROP ROLE tmsg_wakeup_only").execute(owner).await?;
+    assert!(
+        wakeup_role.is_err(),
+        "producer must reject SET-accessible wakeup capability"
+    );
+
     sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime").execute(owner).await?;
     assert!(
         PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding())
@@ -520,6 +529,7 @@ async fn producer_relay_denied(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
     let tenant = message("transaction-only").metadata().tenant_id();
     for statement in [
         "SELECT rss_transactional_messaging.claim_outbox(NULL,NULL,NULL,NULL)",
+        "SELECT rss_transactional_messaging.next_outbox_wakeup(NULL,NULL)",
         "SELECT rss_transactional_messaging.outbox_lease(NULL,NULL,NULL,NULL,NULL,NULL)",
         "SELECT rss_transactional_messaging.settle_outbox(NULL,NULL,NULL,NULL,NULL,NULL)",
     ] {

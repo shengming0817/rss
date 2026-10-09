@@ -150,6 +150,8 @@ expected_policies(relation, name, roles, predicate) AS (
     WHERE p.oid IS NULL OR NOT p.prosecdef OR p.proowner <> (SELECT oid FROM relay_role)
       OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp' = ANY(p.proconfig))
       OR has_function_privilege(current_user, p.oid, 'EXECUTE') IS DISTINCT FROM (NOT $2)
+      OR ($2 AND f.signature='rss_transactional_messaging.next_outbox_wakeup(uuid,text)'
+        AND EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_function_privilege(r.oid,p.oid,'EXECUTE')))
       OR EXISTS (SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f',p.proowner))) a
         WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')))),
  ('constraints', NOT EXISTS (SELECT 1 FROM expected_constraints e LEFT JOIN pg_constraint c
