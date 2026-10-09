@@ -106,8 +106,7 @@ pub(super) async fn run(
     let error = store
         .next_wakeup(deadline())
         .await
-        .err()
-        .expect("fenced scheduling rejected");
+        .expect_err("fenced scheduling rejected");
     let multi = PgOutboxStore::<()>::new(
         runtime.clone(),
         MessagingDomain::parse("wakeup.scope")?,
@@ -157,6 +156,16 @@ async fn snapshots(
         idle.next_deadline().is_none(),
         "unbound tenant/domain cannot schedule this store"
     );
+    ready_snapshot(scoped, &store, owner, tenant).await?;
+    contended_snapshot(&store, owner).await
+}
+
+async fn ready_snapshot(
+    scoped: &Arc<PgRuntime>,
+    store: &PgOutboxStore<()>,
+    owner: &PgPool,
+    tenant: TenantId,
+) -> anyhow::Result<()> {
     append(
         scoped,
         vec![
@@ -179,6 +188,10 @@ async fn snapshots(
         before, after,
         "scheduling cannot alter ownership or durable state"
     );
+    Ok(())
+}
+
+async fn contended_snapshot(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow::Result<()> {
     let mut locked = owner.begin().await?;
     sqlx::query("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id='wakeup.ready' FOR UPDATE").execute(&mut *locked).await?;
     assert!(
@@ -238,6 +251,11 @@ async fn partition_and_lease(
     store
         .settle(claim, OutboxSettlement::Retry, deadline())
         .await?;
+    retry_and_expiry(&store, owner).await?;
+    drain_ordered(&store).await
+}
+
+async fn retry_and_expiry(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()+interval '10 seconds' WHERE message_id='wakeup.head'").execute(owner).await?;
     let retry = store.next_wakeup(deadline()).await?;
     assert!(!retry.due_now());
@@ -269,6 +287,10 @@ async fn partition_and_lease(
             .is_none()
     );
     drop(claim); // This intentionally leaves the original expired lease for durable recovery.
+    Ok(())
+}
+
+async fn drain_ordered(store: &PgOutboxStore<()>) -> anyhow::Result<()> {
     let reclaimed = store
         .claim_partition_heads(NonZeroUsize::MIN, deadline())
         .await?
