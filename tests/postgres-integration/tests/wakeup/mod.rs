@@ -268,6 +268,10 @@ async fn retry_and_expiry(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow::
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()-interval '1 second' WHERE message_id='wakeup.head'").execute(owner).await?;
     assert!(store.next_wakeup(deadline()).await?.due_now());
+    expired_lease(store, owner).await
+}
+
+async fn expired_lease(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow::Result<()> {
     let claim = store
         .claim_partition_heads(NonZeroUsize::MIN, deadline())
         .await?
