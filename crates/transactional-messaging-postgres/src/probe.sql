@@ -21,6 +21,7 @@ columns(relation, name, type, nullable) AS (VALUES
  ('outbox','lease_until','timestamp with time zone',true), ('outbox','automatic_retry_deadline','timestamp with time zone',true), ('outbox','recovery_version','bigint',false)),
 functions(signature) AS (VALUES
  ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'),
+ ('rss_transactional_messaging.next_outbox_wakeup(uuid,text)'),
  ('rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid)'),
  ('rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)')),
 write_functions(signature,result) AS (VALUES
@@ -58,6 +59,12 @@ expected_policies(relation, name, roles, predicate) AS (
  ('outbox','retry_count','0'), ('outbox','retry_after','clock_timestamp()')
 ), checks(reason, valid) AS (VALUES
  ('functions', to_regprocedure('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)') IS NULL),
+ ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text)')
+   AND NOT p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
+   AND 'search_path=pg_catalog, rss_transactional_messaging, pg_temp'=ANY(p.proconfig)
+   AND NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_function_privilege(r.oid,p.oid,'EXECUTE'))
+   AND NOT EXISTS(SELECT FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))),
+
  ('functions', NOT EXISTS (SELECT 1 FROM (VALUES
   ('rss_transactional_messaging.read_outbox_frame(bytea,integer,integer)','record'::regtype,true),
   ('rss_transactional_messaging.decode_outbox_message(bytea)','jsonb'::regtype,false)) f(signature,result,retset)

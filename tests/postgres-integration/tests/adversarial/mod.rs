@@ -362,6 +362,33 @@ pub(super) async fn run(
     concurrency(runtime.clone(), owner).await?;
     eprintln!("pg-suite phase=cancellation");
     cancellation(&config, owner).await?;
+    for (signature, role) in [
+        (
+            "rss_transactional_messaging.next_outbox_wakeup(uuid,text)",
+            "PUBLIC",
+        ),
+        (
+            "rss_transactional_messaging.outbox_candidates(uuid,text)",
+            "tmsg_runtime",
+        ),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "GRANT EXECUTE ON FUNCTION {signature} TO {role}"
+        )))
+        .execute(owner)
+        .await?;
+        let rejected =
+            PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "REVOKE EXECUTE ON FUNCTION {signature} FROM {role}"
+        )))
+        .execute(owner)
+        .await?;
+        assert!(
+            rejected.is_err(),
+            "scheduling capability exposure must reject admission"
+        );
+    }
     sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) TO PUBLIC").execute(owner).await?;
     assert!(
         PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
