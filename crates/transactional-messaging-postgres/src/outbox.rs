@@ -4,7 +4,7 @@ use crate::{
     envelope::Envelope,
     inbox::{fingerprint, milliseconds},
 };
-use rss_request_context::Deadline;
+use rss_request_context::{Clock, Deadline};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     message::MessagingDomain,
@@ -73,6 +73,30 @@ pub struct PgOutboxClaim {
     token: String,
     lease_us: Mutex<i64>,
 }
+/// Read-only scheduling hints for the store's admitted tenants and domain.
+///
+/// Due candidates may be locked or claimed by another relay. Neither hint grants a claim or proves
+/// delivery. Keep a periodic recovery scan: commits and concurrent settlements can change this snapshot.
+#[derive(Clone, Copy, Debug)]
+pub struct OutboxWakeup {
+    due_now: bool,
+    next_deadline: Option<Deadline>,
+}
+impl OutboxWakeup {
+    /// Whether the observed persistent state contains an already-due candidate.
+    /// Bound immediate rescans after an empty claim instead of spinning on a contended row.
+    #[must_use]
+    pub const fn due_now(self) -> bool {
+        self.due_now
+    }
+    /// Earliest observed future eligibility in the runtime's injected monotonic clock domain.
+    /// It is anchored before database I/O, so query and settlement time never extend the wait.
+    /// The deadline may already have elapsed when this snapshot is returned.
+    #[must_use]
+    pub const fn next_deadline(self) -> Option<Deadline> {
+        self.next_deadline
+    }
+}
 /// PostgreSQL outbox, generic over the selected publisher's receipt evidence.
 pub struct PgOutboxStore<R> {
     writer: PgOutboxWriter,
@@ -112,6 +136,62 @@ impl<R> PgOutboxStore<R> {
             }
         }
         Ok(false)
+    }
+    /// Observe durable scheduling without claiming, renewing or settling work.
+    ///
+    /// Shares the claim candidate definition, including partition heads, retry times, leases and
+    /// active DR generations. One absolute operation budget covers all bound tenants. As in claim,
+    /// fenced tenants are skipped and loss of every tenant returns ownership lost.
+    pub async fn next_wakeup(&self, deadline: OperationDeadline) -> Result<OutboxWakeup, PgError> {
+        let runtime = &self.writer.runtime;
+        let cutoff = Deadline::from_timeout(&runtime.timer, deadline.timeout())
+            .map_err(|_| PgError::invariant())?;
+        let mut admitted = false;
+        let mut wakeup = OutboxWakeup {
+            due_now: false,
+            next_deadline: None,
+        };
+        for &(tenant, _) in runtime.binding.tenants() {
+            let domain = self.writer.domain.as_str().to_owned();
+            let observed = runtime.timer.now();
+            let result = runtime
+                .relay(tenant, cutoff, move |connection| {
+                    Box::pin(async move {
+                        Ok(sqlx::query_as::<_, (bool, Option<i64>)>(
+                            "SELECT due_now,next_us FROM rss_transactional_messaging.next_outbox_wakeup($1::uuid,$2)",
+                        )
+                        .bind(tenant.to_string())
+                        .bind(domain)
+                        .fetch_one(connection)
+                        .await?)
+                    })
+                })
+                .await;
+            match result {
+                Ok((due_now, micros)) => {
+                    admitted = true;
+                    wakeup.due_now |= due_now;
+                    if let Some(micros) = micros {
+                        let micros = u64::try_from(micros).map_err(|_| PgError::invariant())?;
+                        let instant = observed
+                            .checked_add(Duration::from_micros(micros))
+                            .ok_or_else(PgError::invariant)?;
+                        let next = Deadline::at(instant);
+                        wakeup.next_deadline = Some(
+                            wakeup
+                                .next_deadline
+                                .map_or(next, |old| old.shortened_to(instant)),
+                        );
+                    }
+                }
+                Err(error) if error.kind() == MessagingErrorKind::OwnershipLost => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        if !admitted {
+            return Err(PgError::lost());
+        }
+        Ok(wakeup)
     }
     /// Reject a transaction from a different runtime before any companion operation.
     pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {

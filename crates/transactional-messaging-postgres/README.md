@@ -16,7 +16,7 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 
 Use an external migrator to provision a `rss_tmsg_relay` role with
 `NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION` and no membership
-in any other role, then execute the complete `MIGRATION_SQL` (0001–0010). The migrator must be able to transfer
+in any other role, then execute the complete `MIGRATION_SQL` (0001–0011). The migrator must be able to transfer
 function ownership to that role. Do not run migrations through the application pool.
 
 Registry consumers obtain the same versioned SQL through
@@ -26,15 +26,24 @@ file. Pin the adapter version in the external migrator (`rss-transactional-messa
 
 The runtime login must not own the schema/tables, be superuser, have BYPASSRLS, or belong to the
 relay role. Grant it schema USAGE; policy SELECT; Inbox SELECT/INSERT/UPDATE/DELETE; Outbox
-SELECT; and EXECUTE on `check_execution`, the three relay functions, `prepare_outbox_partitions(jsonb)`
+SELECT; and EXECUTE on `check_execution`, the three relay functions, `next_outbox_wakeup(uuid,text)`, `prepare_outbox_partitions(jsonb)`
 and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or sequence privilege. Grant no schema
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
+`PgOutboxStore::next_wakeup(deadline)` reads the same candidate definition as claim across its
+admitted tenants and domain. `OutboxWakeup::due_now()` reports already-due work;
+`next_deadline()` separately reports the earliest future eligibility, including retry/lease and active
+DR state. The deadline uses the injected runtime clock and is anchored before database I/O, so the
+query cannot extend the wait. Due work may be locked or claimed concurrently: bound immediate rescans
+and retain a recovery scan. These hints do not claim, settle, prove delivery or grant tenant access.
+The external migrator grants `next_outbox_wakeup(uuid,text)` to relay/consumer roles; private
+`outbox_candidates(uuid,text)` remains accessible only to the relay function owner.
+
 A producer that only commits business state and appends/reads Outbox uses
 `PgRuntime::connect_producer(config, timer, binding)`. Grant schema USAGE, policy/Outbox SELECT,
 `check_execution()`, `prepare_outbox_partitions(jsonb)` and `append_outbox(bytea,jsonb)` EXECUTE, but no Inbox privileges and no
-`claim_outbox`, `outbox_lease` or `settle_outbox` EXECUTE. Admission rejects those extra
+`claim_outbox`, `next_outbox_wakeup`, `outbox_lease` or `settle_outbox` EXECUTE. Admission rejects those extra
 capabilities, including inherited grants; PostgreSQL also denies relay calls at execution.
 Construct `PgOutboxWriter::new(runtime.clone(), domain)` from that shared runtime, and call
 `OutboxWriter::append` inside its `local_tx` alongside business SQL. The writer needs no publisher,
@@ -127,8 +136,8 @@ Consumer effect savepoint rollback releases allocator changes and disables furth
 that view while allowing the legitimate rejection receipt/DLQ to commit. Successful release retains
 locks until outer transaction settlement.
 
-`OUTBOX_PARTITION_UPGRADE_SQL` installs 0009–0010 after 0008; `OUTBOX_MESSAGE_UPGRADE_SQL` installs
-0010 after 0009. All upgrade constants include the current contract and require an empty Outbox.
+`OUTBOX_PARTITION_UPGRADE_SQL` installs 0009–0011 after 0008; `OUTBOX_MESSAGE_UPGRADE_SQL` installs
+0010–0011 after 0009. All upgrade constants include the current contract and require an empty Outbox.
 Existing ordered rows are rejected: their original commit order cannot be recovered by sorting `seq`.
 No backfill, old-schema runtime, advisory-lock fallback or dual ordering is provided. Use an empty
 ordered Outbox and replace the old runtime grants before reconnecting. The external operator owns
@@ -323,16 +332,16 @@ observation. It performs one mutation and never resets the total budget.
 
 ## Consumer archive schema and role cutover (#2302)
 
-Fresh installation uses `MIGRATION_SQL` (0001–0010). Upgrade exactly once from the installed boundary:
+Fresh installation uses `MIGRATION_SQL` (0001–0011). Upgrade exactly once from the installed boundary:
 
 | Installed through | Remaining SQL |
 |---|---|
-| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0010) |
-| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0010) |
-| 0004 or 0005 | Apply each remaining numbered migration in order, through 0010 |
-| 0006 | `DR_UPGRADE_SQL` (0007–0010) |
-| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0010; empty Outbox) |
-| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010; empty Outbox) |
+| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0011) |
+| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0011) |
+| 0004 or 0005 | Apply each remaining numbered migration in order, through 0011 |
+| 0006 | `DR_UPGRADE_SQL` (0007–0011) |
+| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0011; empty Outbox) |
+| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010–0011; empty Outbox) |
 
 Do not rerun aggregate constants containing already applied DDL. Migration 0005 replaces
 `archive_fault` with `archive_fault(uuid,uuid,bytea,text)`; grant that signature after upgrading.
@@ -386,7 +395,7 @@ single-tenant mode, automatic adoption of database values or legacy SQL overload
 fences only that tenant; a multi-tenant relay skips fenced tenants while serving its remaining scope.
 Reconstruct the affected runtime with a newly authorized binding after cutover.
 
-`DR_UPGRADE_SQL` applies migrations 0007–0010 after 0006, once, with traffic isolated and no existing Outbox rows. Fresh installs
+`DR_UPGRADE_SQL` applies migrations 0007–0011 after 0006, once, with traffic isolated and no existing Outbox rows. Fresh installs
 use `MIGRATION_SQL`. The external migrator must provision the singleton `storage_lineage` row with
 nonzero 16-byte target/lineage identifiers and each `tenant_epoch` row with a positive epoch before
 admitting traffic. Supply these values from independently verified restore/deployment evidence.
@@ -401,6 +410,7 @@ Replace Outbox grants with the current exact signatures:
 ```sql
 GRANT EXECUTE ON FUNCTION
  rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),
+ rss_transactional_messaging.next_outbox_wakeup(uuid,text),
  rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),
  rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),
  rss_transactional_messaging.prepare_outbox_partitions(jsonb),

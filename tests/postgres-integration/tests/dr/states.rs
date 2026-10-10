@@ -129,6 +129,11 @@ pub async fn run(
         "DR head prevents successor admission in the same batch"
     );
     assert_eq!(status(&store3, &p).await?, vec![MemberStatus::Publishing]);
+    let held = outbox4.next_wakeup(deadline()).await?;
+    assert!(
+        !held.due_now() && held.next_deadline().is_some(),
+        "DR member lease controls wakeup while its source is published"
+    );
     let claim = batch
         .into_iter()
         .next()
@@ -143,6 +148,11 @@ pub async fn run(
         .settle(claim, OutboxSettlement::Retry, deadline())
         .await?;
     assert_eq!(status(&store3, &p).await?, vec![MemberStatus::Pending]);
+    let retry = outbox4.next_wakeup(deadline()).await?;
+    assert!(
+        !retry.due_now() && retry.next_deadline().is_some(),
+        "DR member retry controls wakeup"
+    );
     assert!(
         outbox4
             .claim_partition_heads(two, deadline())
@@ -150,6 +160,7 @@ pub async fn run(
             .is_empty()
     );
     fixture_sql(owner,4,"UPDATE rss_transactional_messaging.dr_members SET retry_after=clock_timestamp()-interval '1 second' WHERE status='pending'").await?;
+    assert!(outbox4.next_wakeup(deadline()).await?.due_now());
     let claim = outbox4
         .claim_partition_heads(two, deadline())
         .await?
@@ -168,6 +179,11 @@ pub async fn run(
             .claim_partition_heads(two, deadline())
             .await?
             .is_empty()
+    );
+    let blocked = outbox4.next_wakeup(deadline()).await?;
+    assert!(
+        !blocked.due_now() && blocked.next_deadline().is_none(),
+        "blocked DR head cannot schedule its successor"
     );
     let store4 = Box::pin(PgDrStore::connect(
         operator.clone(),
