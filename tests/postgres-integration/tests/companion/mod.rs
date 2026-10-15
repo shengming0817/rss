@@ -130,7 +130,7 @@ async fn poison(
             Ok(())
         }))
         .await
-        .unwrap_err()
+        .expect_err("unfinished companion scope must reject reuse or commit")
         .kind(),
         MessagingErrorKind::Invariant
     );
@@ -199,7 +199,12 @@ async fn interrupted_scopes(
             })
             .await
             .fold(Ok, Err, Err, Err, Err, Err);
-        assert_eq!(outcome.unwrap_err().kind(), MessagingErrorKind::Invariant);
+        assert_eq!(
+            outcome
+                .expect_err("unfinished companion scope must reject reuse or commit")
+                .kind(),
+            MessagingErrorKind::Invariant
+        );
         let message = message(if cancel {
             "companion-cancelled-consumer"
         } else {
