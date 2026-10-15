@@ -160,8 +160,7 @@ async fn execute_transaction<
         }
     };
     let body = body.and_then(|disposition| {
-        tx.outbox_admission
-            .check_commit()
+        tx.check_commit()
             .map_err(PgConsumerEffectFailure::infrastructure)?;
         Ok(disposition)
     });
@@ -252,6 +251,8 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
         .map_err(PgConsumerEffectFailure::infrastructure)?;
     let remaining = tx.deadline();
     let disposition = effect.apply(tx, message, remaining).await?;
+    tx.check_scope()
+        .map_err(PgConsumerEffectFailure::infrastructure)?;
     if matches!(disposition, TerminalDisposition::Rejected(_)) {
         sqlx::query("ROLLBACK TO SAVEPOINT rss_tmsg_effect")
             .execute(&mut *tx.connection)
