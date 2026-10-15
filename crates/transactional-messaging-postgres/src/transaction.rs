@@ -526,7 +526,7 @@ impl PgRuntime {
         let result = within(&self.timer, cutoff, |_| async {
             view.setup_context(lock).await?;
             let value = operation(&mut context, &mut view).await?;
-            view.outbox_admission.check_commit()?;
+            view.check_commit()?;
             Ok(value)
         })
         .await;
@@ -709,6 +709,7 @@ impl rss_runtime::ManagedResource for PgRuntime {
 pub struct PgTransaction<'tx> {
     pub(crate) connection: &'tx mut PgConnection,
     pub(crate) outbox_admission: crate::outbox_admission::Admission,
+    scope_restored: bool,
     tenant: TenantId,
     cutoff: Deadline,
     timer: &'tx PgTimer,
@@ -724,11 +725,22 @@ impl PgTransaction<'_> {
         PgTransaction {
             connection,
             outbox_admission: crate::outbox_admission::Admission::Open,
+            scope_restored: true,
             tenant,
             cutoff,
             timer: &owner.timer,
             owner,
         }
+    }
+    pub(crate) fn check_scope(&self) -> Result<(), PgError> {
+        if !self.scope_restored {
+            return Err(PgError::invariant());
+        }
+        Ok(())
+    }
+    pub(crate) fn check_commit(&self) -> Result<(), PgError> {
+        self.check_scope()?;
+        self.outbox_admission.check_commit()
     }
     pub(crate) fn binding(&self) -> &ExecutionBinding {
         &self.owner.binding
@@ -768,7 +780,7 @@ impl PgTransaction<'_> {
     /// execution fence is checked and held through the outer commit or rollback.
     /// On success the original tenant and execution context are restored; `tenant_id`
     /// and outbox ownership never change. This grants no product authorization.
-    /// Propagate errors and abort the outer transaction if this future is cancelled.
+    /// Errors or cancellation permanently prevent further SQL and commit on this view.
     pub async fn with_tenant_connection<T: Send, F>(
         &mut self,
         tenant: TenantId,
@@ -777,10 +789,14 @@ impl PgTransaction<'_> {
     where
         F: for<'a> FnOnce(&'a mut PgConnection) -> BoxFuture<'a, Result<T, sqlx::Error>> + Send,
     {
+        self.check_scope()?;
+        // ref: sqlx-core 0.9.0 transaction.rs: mark unfinished before awaiting I/O.
+        self.scope_restored = false;
         within(self.timer, self.cutoff, |_| async {
             crate::fence::setup(self.connection, &self.owner.binding, tenant, true).await?;
             let result = operation(self.connection).await?;
             crate::fence::setup(self.connection, &self.owner.binding, self.tenant, false).await?;
+            self.scope_restored = true;
             Ok(result)
         })
         .await?
@@ -790,6 +806,7 @@ impl PgTransaction<'_> {
     where
         F: for<'a> FnOnce(&'a mut PgConnection) -> BoxFuture<'a, Result<T, sqlx::Error>> + Send,
     {
+        self.check_scope()?;
         stage(
             self.timer,
             self.cutoff,

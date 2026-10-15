@@ -34,6 +34,7 @@ impl PgOutboxWriter {
     /// append no message. This performs no SQL, grants no relay capability, and does not commit.
     /// It proves runtime ownership only; the host still owns tenant authorization and composition.
     pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
+        tx.check_scope()?;
         if !tx.belongs_to(&self.runtime) {
             tracing::warn!(
                 phase = "transaction",
