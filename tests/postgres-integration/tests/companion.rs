@@ -60,6 +60,21 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         stale.expect_err("source epoch changed").kind(),
         MessagingErrorKind::OwnershipLost
     );
+    let conflict = runtime.local_tx(target, deadline(), move |tx| Box::pin(async move {
+        tx.with_tenant_connection(source, move |c| Box::pin(async move {
+            for _ in 0..2 {
+                sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,'companion-conflict')")
+                    .bind(source.to_string()).execute(&mut *c).await?;
+            }
+            Ok(())
+        })).await
+    })).await.fold(Ok, Err, Err, Err, Err, Err);
+    assert_eq!(
+        conflict
+            .expect_err("original unique violation preserved")
+            .kind(),
+        MessagingErrorKind::Conflict
+    );
     let missing = TenantId::parse("99999999-9999-9999-9999-999999999999")?;
     let rejected = runtime
         .local_tx(target, deadline(), move |tx| {

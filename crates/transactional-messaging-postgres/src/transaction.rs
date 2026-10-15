@@ -766,7 +766,7 @@ impl PgTransaction<'_> {
     ///
     /// The companion must be admitted by the runtime's fixed execution binding. Its
     /// execution fence is checked and held through the outer commit or rollback.
-    /// On return the original tenant and execution context are restored; `tenant_id`
+    /// On success the original tenant and execution context are restored; `tenant_id`
     /// and outbox ownership never change. This grants no product authorization.
     /// Propagate errors and abort the outer transaction if this future is cancelled.
     pub async fn with_tenant_connection<T: Send, F>(
@@ -779,9 +779,9 @@ impl PgTransaction<'_> {
     {
         within(self.timer, self.cutoff, |_| async {
             crate::fence::setup(self.connection, &self.owner.binding, tenant, true).await?;
-            let result = operation(self.connection).await;
+            let result = operation(self.connection).await?;
             crate::fence::setup(self.connection, &self.owner.binding, self.tenant, false).await?;
-            result.map_err(PgError::from)
+            Ok(result)
         })
         .await?
     }
