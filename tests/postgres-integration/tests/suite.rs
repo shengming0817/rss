@@ -5,6 +5,7 @@ use rss_transactional_messaging::policy::OperationDeadline;
 mod fence_fixture;
 // reason: integration fixtures fail loudly on invalid static identities and test setup.
 mod adversarial;
+mod companion;
 mod conformance;
 mod examples;
 mod lifecycle;
@@ -80,6 +81,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         eprintln!("pg-suite phase=wakeup");
         Box::pin(wakeup::run(runtime.clone(), &owner, config.clone())).await?;
         eprintln!("pg-suite phase=outbox_roundtrip");
+        Box::pin(companion::run(runtime.clone(), &owner)).await?;
         outbox_roundtrip(runtime.clone()).await?;
         eprintln!("pg-suite phase=consumer_receipt");
         consumer_receipt(runtime.clone(), &owner).await?;

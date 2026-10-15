@@ -762,6 +762,29 @@ impl PgTransaction<'_> {
     pub fn deadline(&self) -> OperationDeadline {
         OperationDeadline::from_cutoff(self.cutoff, self.timer)
     }
+    /// Borrow a companion tenant's SQL scope while retaining this transaction's owner.
+    ///
+    /// The companion must be admitted by the runtime's fixed execution binding. Its
+    /// execution fence is checked and held through the outer commit or rollback.
+    /// On return the original tenant and execution context are restored; `tenant_id`
+    /// and outbox ownership never change. This grants no product authorization.
+    /// Propagate errors and abort the outer transaction if this future is cancelled.
+    pub async fn with_tenant_connection<T: Send, F>(
+        &mut self,
+        tenant: TenantId,
+        operation: F,
+    ) -> Result<T, PgError>
+    where
+        F: for<'a> FnOnce(&'a mut PgConnection) -> BoxFuture<'a, Result<T, sqlx::Error>> + Send,
+    {
+        within(self.timer, self.cutoff, |_| async {
+            crate::fence::setup(self.connection, &self.owner.binding, tenant, true).await?;
+            let result = operation(self.connection).await;
+            crate::fence::setup(self.connection, &self.owner.binding, self.tenant, false).await?;
+            result.map_err(PgError::from)
+        })
+        .await?
+    }
     /// Borrow the connection for a bounded SQL operation. No lifecycle authority is transferred.
     pub async fn with_connection<T: Send, F>(&mut self, operation: F) -> Result<T, PgError>
     where
