@@ -1,6 +1,6 @@
 //! Trusted transaction borrowing without transferring settlement or connection ownership.
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
-use crate::{Control, Error, ReadLimit, StagedAppend, Timer, Window, probe, repository};
+use crate::{Control, Error, ReadLimit, StagedAppend, Timer, Window, repository};
 use rss_ledger::{AppendRequest, Authenticator, LedgerId, Sequence};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::transaction::LocalTxDeadlineStage;
@@ -34,7 +34,8 @@ pub(crate) async fn lock_head(
 
 /// Stage an append in an existing SQLx transaction under its owner's absolute budget.
 ///
-/// Validates the actual connection, role and tenant setting. Does not change settings,
+/// Validates the request and actual tenant setting. Startup storage validation is owned
+/// by the host via `validate_connection`. Does not change settings,
 /// acquire a connection or settle the transaction. Propagate errors to the owner; after
 /// cancellation the owner must isolate any connection whose settlement is unconfirmed.
 pub async fn append_in_transaction<T: Timer>(
@@ -78,7 +79,7 @@ async fn validate(connection: &mut PgConnection, tenant: TenantId) -> Result<(),
     if actual != Some(tenant) {
         return Err(rss_ledger::Error::ScopeMismatch.into());
     }
-    probe::validate_connection(connection).await
+    Ok(())
 }
 
 pub(crate) async fn append(

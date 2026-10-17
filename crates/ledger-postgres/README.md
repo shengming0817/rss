@@ -51,7 +51,8 @@ PG 序号范围为 `0..=i64::MAX`，耗尽显式拒绝。
 
 `append_in_transaction` 与 `read_window_in_transaction` 借用宿主持有的
 `sqlx::Transaction<Postgres>`，接收认证器和宿主的同一绝对 `Control`。
-两个入口都校验实际连接的 schema、权限与 tenant GUC；tenant 缺失、非法或不匹配时明确拒绝，
+宿主先在启动阶段对实际运行连接调用 `validate_connection(connection, control)`，完整验证 schema 与权限。
+操作入口只校验 tenant GUC 和本次操作不变量；tenant 缺失、非法或不匹配时明确拒绝，
 读取不会把 RLS 过滤结果误报为空链。它们不获取其它连接、不改变 GUC/隔离级别、不结算事务。
 宿主必须传播错误、处理真实结算结果，并在未确认结算时隔离连接。
 窗口可包含该事务内尚未提交的记录，其认证结果不是提交证明。
@@ -59,7 +60,8 @@ PG 序号范围为 `0..=i64::MAX`，耗尽显式拒绝。
 ## 消息事务组合
 
 启用 `messaging` 后调用 `append_in(tx, Arc<Authenticator>, request)`，无需构造独立 pool 或 PgLedger；不另开事务、不改变 tenant GUC 或预算、
-不提交/回滚。实际借用连接的账本 schema/权限也会验证，不能用另一个 pool 的准入结果替代。
+不提交/回滚。宿主启动时通过原 owner 的事务调用 `validate_in(tx)`，继承该 owner 的绝对预算；
+不能用另一个 pool 的准入结果替代，也不能将该完整验证放回每次消息处理。
 
 ```rust,no_run
 # #[cfg(feature="messaging")]
@@ -120,7 +122,11 @@ GRANT SELECT ON ALL TABLES IN SCHEMA rss_ledger TO application_runtime;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger TO application_runtime;
 ```
 
-准入核验角色可达权限、列类型/空值、约束、租户 policy、函数体和函数权限。拒绝未知 schema，不自动修补。`AdmissionViolation` 以 Schema/Role/Permissions/Rls/Functions/Columns/Constraints 区分漂移，诊断不包含 SQL、对象名或租户数据。
+安装/启动准入核验角色可达权限、列类型/空值、约束、租户 policy、函数体和函数权限。拒绝未知 schema，不自动修补。`AdmissionViolation` 以 Schema/Role/Permissions/Rls/Functions/Columns/Constraints 区分漂移，诊断不包含 SQL、对象名或租户数据。
+数据库引擎、部署角色和宿主基础设施属于信任边界。结构/数据库角色变更前停止相关写入并排空，
+变更后重新验证再恢复服务；失败不接流。不承诺在下一次内部操作主动发现带外 GRANT/DDL。
+SQL 权限、RLS、租户与数据完整性检查仍生效；产品业务撤权不由这项部署检查替代。
+
 V1 是新的持久格式，无历史 audit migration 导入或双读兼容；必要后续升级由本 adapter 提供版本化 SQL，产品执行。
 具有管理员或持钥权限的主体仍处于信任边界内；该模型不能宣称防管理员重写或 WORM。
 
@@ -173,7 +179,8 @@ publication are distinct results.
 
 Use `lock_head_in_transaction` (SQLx) or `lock_head_in` (messaging) before business/outbox
 locks when the event depends on the transaction's final facts. Both validate the actual tenant,
-role and chain key, use the original connection/budget and retain the lock until settlement.
+and chain key, use the original connection/budget and retain the lock until settlement.
+Schema and role admission belongs to startup `validate_connection`, not each lock operation.
 An empty head can be created, but no entry or sequence is allocated. Append through the normal
 API after computing the facts; repeated locking in one transaction is safe. A lock is neither
 a staged event nor commit evidence. Propagate failures to the transaction owner.

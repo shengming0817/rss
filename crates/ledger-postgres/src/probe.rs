@@ -1,10 +1,25 @@
-use crate::{AdmissionViolation, Error, MIGRATION_SQL, error::sql_error};
+use crate::{AdmissionViolation, Control, Error, MIGRATION_SQL, Timer, error::sql_error};
 use sqlx::{PgConnection, PgPool, Row};
 pub(crate) async fn validate(pool: &PgPool) -> Result<(), Error> {
     let mut connection = pool.acquire().await.map_err(sql_error)?;
-    validate_connection(&mut connection).await
+    inspect(&mut connection).await
 }
-pub(crate) async fn validate_connection(connection: &mut PgConnection) -> Result<(), Error> {
+/// Validate the actual runtime role and Ledger schema at installation or startup.
+///
+/// Uses the host's connection and absolute budget; does not acquire another connection,
+/// change settings, repair the schema or settle a transaction. Validate every distinct
+/// runtime credential before accepting work. An unrelated pool's validation is insufficient.
+/// The host must bound server statements and retire the connection if cancellation leaves
+/// execution or settlement unconfirmed. Controlled schema/role changes require draining
+/// writers and validating again before resuming; live administrator drift is not polled.
+pub async fn validate_connection<T: Timer>(
+    connection: &mut PgConnection,
+    control: &Control<'_, T>,
+) -> Result<(), Error> {
+    control.run(inspect(connection)).await
+}
+
+pub(crate) async fn inspect(connection: &mut PgConnection) -> Result<(), Error> {
     let violation: Option<String> = sqlx::query_scalar(include_str!("probe.sql"))
         .fetch_optional(&mut *connection)
         .await

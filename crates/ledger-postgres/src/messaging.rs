@@ -1,9 +1,19 @@
-use crate::{Error, StagedAppend, borrowed};
+use crate::{Error, StagedAppend, borrowed, probe};
 use rss_ledger::{AppendRequest, Authenticator, LedgerId};
 use rss_redact::RedactedSource;
 use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging_postgres::{PgError, PgTransaction};
 use std::sync::Arc;
+/// Validate the actual message runtime connection during installation or startup.
+/// Inherits the owner's absolute budget; no extra clock, connection or settlement is created.
+/// Call before accepting work, not in each message effect. On failure the host must not
+/// admit work; propagate the error so the original owner settles or isolates the connection.
+pub async fn validate_in(tx: &mut PgTransaction<'_>) -> Result<(), Error> {
+    tx.with_connection(|connection| Box::pin(async move { Ok(probe::inspect(connection).await) }))
+        .await
+        .map_err(Error::Messaging)?
+}
+
 /// Lock a chain before business/outbox locks without producing an event.
 /// Inherits the message owner's tenant, connection and remaining budget; never settles.
 pub async fn lock_head_in(

@@ -145,6 +145,7 @@ async fn sqlx_borrow(
     // This one-shot host always retires its lease, including if cancellation drops a
     // pending BEGIN, operation or COMMIT. An error is never evidence of rollback.
     connection.close_on_drop();
+    rss_ledger_postgres::validate_connection(&mut connection, control).await?;
     let mut tx = connection.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
         .bind(request.ledger().tenant().to_string())
@@ -218,6 +219,21 @@ async fn messaging(
         )
         .await?,
     );
+    let startup_clock = Clock::new();
+    let startup_deadline = OperationDeadline::from_cutoff(
+        rss_request_context::Deadline::from_timeout(&startup_clock, Duration::from_secs(10))?,
+        &startup_clock,
+    );
+    runtime
+        .local_tx(tenant, startup_deadline, |tx| {
+            Box::pin(async move {
+                rss_ledger_postgres::validate_in(tx)
+                    .await
+                    .map_err(PgError::from)
+            })
+        })
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err)?;
     for rollback in [false, true] {
         let id = if rollback { "rollback" } else { "commit" };
         let req = request(tenant, id)?;

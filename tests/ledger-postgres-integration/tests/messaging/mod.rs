@@ -103,6 +103,14 @@ pub async fn run(
     let clock = super::Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    sqlx::raw_sql("GRANT UPDATE ON rss_ledger.entries TO ledger_runtime")
+        .execute(owner)
+        .await?;
+    assert!(startup(&runtime).await.is_err());
+    sqlx::raw_sql("REVOKE UPDATE ON rss_ledger.entries FROM ledger_runtime")
+        .execute(owner)
+        .await?;
+    startup(&runtime).await?;
     for (id, fail, unknown) in [
         ("success", false, false),
         ("failure", true, false),
@@ -158,22 +166,16 @@ pub async fn run(
             ));
         }
     }
-    for (id, drift) in [("borrowed-drift", true), ("stable-conflict", false)] {
+    {
+        let id = "stable-conflict";
         let m = message(id);
         let b = binding(&m);
         let r = request("inbox", id, b"original")?;
-        if !drift {
-            committed(store.append(&r, &control).await)?;
-        }
+        committed(store.append(&r, &control).await)?;
         let IdempotencyDisposition::Acquired(claim) = inbox.claim(b.identity(), deadline()).await?
         else {
             anyhow::bail!("expected claim")
         };
-        if drift {
-            sqlx::raw_sql("GRANT UPDATE ON rss_ledger.entries TO ledger_runtime")
-                .execute(owner)
-                .await?;
-        }
         let consumer = PgConsumerTx::receipt_only(
             runtime.clone(),
             Effect {
@@ -185,37 +187,26 @@ pub async fn run(
         let outcome = consumer
             .execute(&claim, &m, b.receipt_intent(), deadline())
             .await;
-        if drift {
-            sqlx::raw_sql("REVOKE UPDATE ON rss_ledger.entries FROM ledger_runtime")
-                .execute(owner)
-                .await?;
-        }
         use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
         let receipt = inbox.read_terminal(b.identity(), deadline()).await?;
-        if drift {
-            assert_eq!(outcome.status(), Status::InfrastructureTransient);
-            assert!(receipt.is_none());
-            assert!(committed(store.find(r.ledger(), r.record_id(), &control).await)?.is_none());
-        } else {
-            assert_eq!(outcome.status(), Status::Committed);
-            let receipt = receipt.ok_or_else(|| anyhow::anyhow!("missing rejection"))?;
-            assert_eq!(
-                receipt.disposition(),
-                TerminalDisposition::Rejected(
-                    rss_transactional_messaging::transaction::RejectKind::Permanent
-                )
-            );
-            assert!(!matches!(
-                inbox.claim(b.identity(), deadline()).await?,
-                IdempotencyDisposition::Acquired(_)
-            ));
-            assert_eq!(
-                committed(store.find(r.ledger(), r.record_id(), &control).await)?
-                    .ok_or_else(|| anyhow::anyhow!("missing original"))?
-                    .payload(),
-                b"original"
-            );
-        }
+        assert_eq!(outcome.status(), Status::Committed);
+        let receipt = receipt.ok_or_else(|| anyhow::anyhow!("missing rejection"))?;
+        assert_eq!(
+            receipt.disposition(),
+            TerminalDisposition::Rejected(
+                rss_transactional_messaging::transaction::RejectKind::Permanent
+            )
+        );
+        assert!(!matches!(
+            inbox.claim(b.identity(), deadline()).await?,
+            IdempotencyDisposition::Acquired(_)
+        ));
+        assert_eq!(
+            committed(store.find(r.ledger(), r.record_id(), &control).await)?
+                .ok_or_else(|| anyhow::anyhow!("missing original"))?
+                .payload(),
+            b"original"
+        );
     }
     let short_inbox = PgInboxStore::new(
         runtime.clone(),
@@ -243,5 +234,23 @@ pub async fn run(
     let r = request("inbox", "lease-expired", m.payload())?;
     assert!(committed(store.find(r.ledger(), r.record_id(), &control).await)?.is_none());
     runtime.close().await;
+    Ok(())
+}
+
+async fn startup(runtime: &PgRuntime) -> anyhow::Result<()> {
+    runtime
+        .local_tx(
+            rss_request_context::TenantId::parse(super::TENANT)?,
+            deadline(),
+            |tx| {
+                Box::pin(async move {
+                    rss_ledger_postgres::validate_in(tx)
+                        .await
+                        .map_err(rss_transactional_messaging_postgres::PgError::from)
+                })
+            },
+        )
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err)?;
     Ok(())
 }

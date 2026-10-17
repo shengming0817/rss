@@ -8,8 +8,9 @@ mod error;
 #[cfg(feature = "messaging")]
 mod messaging;
 #[cfg(feature = "messaging")]
-pub use messaging::{append_in, lock_head_in};
+pub use messaging::{append_in, lock_head_in, validate_in};
 mod probe;
+pub use probe::validate_connection;
 mod repository;
 mod transaction;
 pub use control::{Control, Timer};

@@ -13,6 +13,7 @@ pub(super) async fn run<T: Timer>(
     visibility(store, pool, control).await?;
     commit(store, pool, control).await?;
     replay(pool, control).await?;
+    validation_budget(pool).await?;
     cancellation(pool).await?;
     interruption::run(store, pool, owner, control).await?;
     permissions(pool, owner, control).await
@@ -200,39 +201,38 @@ async fn permissions<T: Timer>(
     owner: &PgPool,
     control: &Control<'_, T>,
 ) -> anyhow::Result<()> {
-    let request = request("borrowed", "event", b"original")?;
-    let authenticator = auth()?;
+    let mut connection = pool.acquire().await?;
+    validate_connection(&mut connection, control).await?;
     sqlx::raw_sql("GRANT UPDATE ON rss_ledger.entries TO ledger_runtime")
         .execute(owner)
         .await?;
-    let mut tx = pool.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(TENANT)
-        .execute(&mut *tx)
-        .await?;
     assert!(matches!(
-        lock_head_in_transaction(&mut tx, &authenticator, request.ledger(), control).await,
+        validate_connection(&mut connection, control).await,
         Err(Error::Admission(_))
     ));
-    assert!(matches!(
-        append_in_transaction(&mut tx, &authenticator, &request, control).await,
-        Err(Error::Admission(_))
-    ));
-    assert!(matches!(
-        read_window_in_transaction(
-            &mut tx,
-            &authenticator,
-            request.ledger(),
-            Sequence::new(0),
-            ReadLimit::new(1, 4096)?,
-            control
-        )
-        .await,
-        Err(Error::Admission(_))
-    ));
-    tx.rollback().await?;
     sqlx::raw_sql("REVOKE UPDATE ON rss_ledger.entries FROM ledger_runtime")
         .execute(owner)
         .await?;
+    validate_connection(&mut connection, control).await?;
+    Ok(())
+}
+
+async fn validation_budget(pool: &PgPool) -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let stopped = Control::new(&clock, Duration::from_secs(5), &cancel);
+    let mut tx = pool.begin().await?;
+    assert!(matches!(
+        validate_connection(&mut tx, &stopped).await,
+        Err(Error::Cancelled(LocalTxDeadlineStage::Setup))
+    ));
+    let running = CancellationToken::new();
+    let expired = Control::new(&clock, Duration::ZERO, &running);
+    assert!(matches!(
+        validate_connection(&mut tx, &expired).await,
+        Err(Error::Deadline(LocalTxDeadlineStage::Setup))
+    ));
+    tx.rollback().await?;
     Ok(())
 }
