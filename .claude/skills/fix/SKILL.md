@@ -113,7 +113,7 @@ bash "$CLAUDE_PROJECT_DIR/.claude/hooks/fix-self-audit.sh" emit
 5. **deferred 登记（先于 pm:fix 与切 label）**：所有 deferred——OOS finding + 批量处置判定 defer 的 IN_SCOPE Cx3+/RELATED——逐条按 `.github/project-template/backlog.md` 无损成文，从 `PROJECT.md` 取四轴标签，严格执行 `PROJECT.md` §1 的同标签 `validate --labels` → `forge.sh issue-create` 顺序，注明本次输入来源，有来源 PR 时注明 `Discovered via /fix #<original>`；`pri-p0`→请求用户决策、`validate` 失败→`deferred=labels-underivable` 回退草稿。PR 流程的 OOS 另贴 pm:oos（每条 finding 必须写明已建 issue 或 deferred 原因）。
 6. **pm:fix**（绑定最终已验证 head；OOS artifact 已存在、指针有效）：findings triage + 修复结果 + 遗留 IN_SCOPE；OOS 仅一行指针 `🚦 OUT_OF_SCOPE（见 pm:oos）`；用 `forge.sh pr-comment` 发布并回显 URL。
 7. **切 label**：按 `PROJECT.md` §2.5/§5 使用 `forge.sh pr-set-status <PR#> needs-check-fix <已验证且写入评论正文的 head-sha>`。全部 deferred issue、pm 评论先落地，方可切状态；失败不得宣称交接完成。
-8. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check-fix` 后执行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后汇总交接结果。
+8. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 10 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`（check-side）。外部 app 可在 `needs-check-fix` 后执行 `/pr-review --check`，pr-monitor 只做一次性交接兜底。完成后汇总交接结果。
 
 Priority：review finding 用原 `[P0-P3]`；`/fix` 派生默认 `pri-p2`；`pri-p0` 仅 incident（线上故障/数据完整性/CVE）请求用户决策。
 

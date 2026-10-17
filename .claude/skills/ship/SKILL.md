@@ -90,7 +90,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 3. 提交并推送本轮修复，完成冲突预检及冲突处理。
 4. **集中验证**：全部计划批次、review 修复和冲突处理完成后，代码任务按目标仓入口执行必要 T2，再运行一次项目 CI；CI 已承载的同项 T2 复用该入口的结果。每次收集全部失败，集中修复后精确复验失败项及受影响范围；通过后提交并推送验证修复。
 5. 验证通过后，按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、绑定最终 head 的可读评论 artifact，最后用 §2.5 的 `forge.sh pr-set-status` 切 `needs-review-again`；内容格式引用 `backlog.md` 和 `pr-comment.md`。
-6. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 15 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
+6. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 10 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
 
 artifact 必须先于总结与触发 label 落地；具体顺序见 `.github/project-template/PROJECT.md` §5。
 
