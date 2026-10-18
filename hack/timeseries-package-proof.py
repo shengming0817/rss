@@ -23,6 +23,7 @@ def main():
             forbidden |= {"sqlx", "rss-timeseries-postgres"}
         else:
             required["rss-timeseries-postgres"] = {"default"}
+            required["serde_json"].add("raw_value")
         record_graph(
             directory, allowed, set(),
             forbidden, required_features=required, required_dependencies=deps,

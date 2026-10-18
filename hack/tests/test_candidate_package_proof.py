@@ -151,10 +151,12 @@ class TimeseriesScenarios(unittest.TestCase):
                 forbidden = graph.call_args.args[3]
                 if scenario == "core":
                     self.assertIn("rss-timeseries-postgres", forbidden)
+                    self.assertNotIn("raw_value", graph.call_args.kwargs["required_features"]["serde_json"])
                     provider.assert_not_called()
                     self.assertEqual(cargo.call_args.args[0], ["run", "--locked", "--bin", "timeseries"])
                 else:
                     self.assertNotIn("rss-timeseries-postgres", forbidden)
+                    self.assertEqual(graph.call_args.kwargs["required_features"]["serde_json"], {"default", "std", "float_roundtrip", "raw_value"})
                     self.assertEqual(graph.call_args.kwargs["required_features"]["rss-timeseries-postgres"], {"default"})
                     self.assertEqual(provider.call_args.args[1:4], ("timeseries-postgres-integration", "suite", "examples::example_consumer"))
                     self.assertEqual(set(provider.call_args.args[4].values()), {"timeseries-install", "timeseries-pg"})
