@@ -47,6 +47,11 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  SELECT revision INTO r FROM rss_timeseries.namespaces WHERE tenant_id=t AND namespace=n FOR UPDATE;
  RETURN r;
 END $$;
+CREATE FUNCTION rss_timeseries.read_namespace(t uuid,n text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
+ IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='tenant'; END IF;
+ PERFORM 1 FROM rss_timeseries.namespaces WHERE tenant_id=t AND namespace=n FOR SHARE;
+END $$;
 CREATE OR REPLACE FUNCTION rss_timeseries.lock_stream(t uuid,n text,s text,g text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);

@@ -155,7 +155,9 @@ AdvanceCutoff permanently rejects new observations before the chosen boundary. P
 protects unfinished requested summaries, Counter/state boundary input and unexpired
 restore windows. It hides the pruned range before bounded physical removal, while
 completed retained summaries remain queryable. The raw frontier may lag the requested
-cutoff by the greatest necessary Counter/state lookback. Raw and summary cutoffs use
+cutoff by the greatest necessary Counter/state lookback. ObservedOnly transitions
+also retain their last predecessor, independently of duration coverage. If a newly
+requested computation has already lost required boundary input, it returns HistoryExpired. Raw and summary cutoffs use
 observation time; ExpireReceipts uses first acceptance time and never shortens replay_until.
 Receipt expiry is a stream operation, so a series-scoped grant cannot erase unrelated
 series' batch admission records.
@@ -170,7 +172,8 @@ obligations end. Stream closure remains durable after reclamation.
 A maintenance plan ID binds its complete request. Reusing it with different content
 conflicts; retrying an old step returns current progress without repeating its effects.
 Resume after token expiry by reauthorizing the identical request and omitting the token.
-Aggregate and maintenance tokens have separate authenticated domains. Namespace fence
-and summary-range scans also obey host point/byte/time budgets and fail explicitly when
+Aggregate and maintenance tokens have separate authenticated domains. Fence scans filter the relevant selection/window/kind before applying output
+budgets; repeated pruning merges the retained frontier. Summary-range scans and
+relevant fence output obey host point/byte/time budgets and fail explicitly when
 those limits are insufficient. Maintenance Blocked reasons are actionable prerequisites,
 not success or automatic policy changes.
