@@ -39,7 +39,7 @@ impl Writer for Rejecting {
         &self,
         _: &Authorized<ReceiptQuery>,
         _: Deadline,
-    ) -> Result<Lookup<ReceiptStatus>, Error> {
+    ) -> Result<Lookup<Receipt>, Error> {
         Err(Error::Unsupported)
     }
 }
@@ -188,11 +188,15 @@ fn independent_adapter_implements_all_ports_without_a_runtime() -> anyhow::Resul
         None,
         deadline,
     ))?;
+    let Selection::Exact { stream, series } = query.selection().clone() else {
+        anyhow::bail!("exact fixture")
+    };
+    let spec = SummarySpec::new(stream, series, one, CoveragePolicy::HoldLast(one), None)?;
     let aggregate = AggregateQuery::new(
-        query.clone(),
+        spec.clone(),
+        query.window(),
+        query.budget(),
         AggregateOp::Coverage,
-        one,
-        CoveragePolicy::HoldLast(one),
     )?;
     assert_eq!(aggregate.resolution_micros(), one);
     aggregate.binding()?;
@@ -203,9 +207,10 @@ fn independent_adapter_implements_all_ports_without_a_runtime() -> anyhow::Resul
     ))?;
     let maintenance = MaintenanceRequest::new(
         Id::new("plan")?,
-        query.selection().clone(),
-        query.window(),
-        MaintenanceAction::Recompute,
+        MaintenanceAction::Recompute {
+            spec,
+            window: query.window(),
+        },
         n,
     )?;
     reject(store.step(

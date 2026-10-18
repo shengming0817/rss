@@ -2,7 +2,7 @@ use crate::transaction::sql_error;
 use rss_timeseries::Error;
 use sqlx::{Connection, PgPool};
 // PostgreSQL 16 catalog projection; functions, columns, constraints, indexes and policies.
-const CATALOG: &str = "630dd3daf264f31f39e39bc1772a0662";
+const CATALOG: &str = "52e4b3887022335814771d52dd6ba471";
 pub(crate) async fn validate(pool: &PgPool) -> Result<String, Error> {
     let mut lease = pool.acquire().await.map_err(sql_error)?;
     // Admission cancellation must not return a possibly open transaction to the pool.
@@ -21,7 +21,7 @@ pub(crate) async fn validate(pool: &PgPool) -> Result<String, Error> {
     }
     let instance:String=sqlx::query_scalar("SELECT obj_description(oid,'pg_namespace') FROM pg_namespace WHERE nspname='rss_timeseries'")
         .fetch_one(&mut *tx).await.map_err(sql_error)?;
-    if !instance.starts_with("rss-timeseries-postgres:1:") || instance.len() != 62 {
+    if !instance.starts_with("rss-timeseries-postgres:2:") || instance.len() != 62 {
         return Err(Error::Invariant);
     }
     tx.rollback().await.map_err(sql_error)?;

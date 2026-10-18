@@ -34,6 +34,9 @@ struct Read {
 impl Read {
     async fn run(self, c: &mut PgConnection, clock: &impl Clock) -> Result<Page, Error> {
         let q = &self.query;
+        crate::lifecycle::read_lock(c, q.selection().scope()).await?;
+        let availability =
+            crate::lifecycle::availability(c, q, self.limits.max_points.get()).await?;
         let now = db_now(c).await?;
         let binding = q.binding()?;
         let token = self
@@ -164,7 +167,11 @@ impl Read {
         } else {
             None
         };
-        Ok(Page { rows, next })
+        Ok(Page {
+            rows,
+            next,
+            availability,
+        })
     }
 }
 impl<C: Clock> Reader for PgStore<C> {
@@ -198,11 +205,10 @@ impl<C: Clock> Reader for PgStore<C> {
     }
     async fn aggregate(
         &self,
-        _: &Authorized<AggregateQuery>,
-        _: Option<&Continuation>,
-        _: Deadline,
+        request: &Authorized<AggregateQuery>,
+        after: Option<&Continuation>,
+        deadline: Deadline,
     ) -> Result<AggregatePage, Error> {
-        // reason: aggregation and lifecycle are owned by TS-03 (#2811).
-        Err(Error::Unsupported)
+        crate::aggregate::read(self, request.request(), after, deadline).await
     }
 }

@@ -9,32 +9,31 @@ use sqlx::{PgConnection, Row};
 pub(crate) async fn lookup(
     c: &mut PgConnection,
     q: &ReceiptQuery,
-) -> Result<Lookup<ReceiptStatus>, Error> {
+) -> Result<Lookup<Receipt>, Error> {
     let stream = &q.stream;
-    let row=sqlx::query("SELECT digest,received_at,new_samples,replayed_samples,replay_until FROM rss_timeseries.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND batch_id=$5")
+    let row=sqlx::query("SELECT digest,received_at,new_samples,replayed_samples,replay_until,expired FROM rss_timeseries.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND batch_id=$5")
         .bind(stream.scope().tenant().to_string()).bind(stream.scope().namespace().as_str()).bind(stream.source().as_str()).bind(stream.generation().as_str()).bind(q.batch_id.as_str())
-        .fetch_optional(c).await.map_err(sql_error)?;
+        .fetch_optional(&mut *c).await.map_err(sql_error)?;
     let Some(row) = row else {
-        return Ok(Lookup::NotVisible);
+        return crate::lifecycle::absent_receipt(c, stream).await;
     };
     let digest: Vec<u8> = row.try_get("digest").map_err(sql_error)?;
     if digest != q.digest.as_bytes() {
         return Err(Error::Conflict);
     }
+    if row.try_get::<bool, _>("expired").map_err(sql_error)? {
+        return Ok(Lookup::Expired);
+    }
     let count = |key| -> Result<u32, Error> {
         u32::try_from(row.try_get::<i32, _>(key).map_err(sql_error)?).map_err(|_| Error::Invariant)
     };
-    Ok(Lookup::Found(ReceiptStatus {
-        receipt: Receipt::from_durable(ReceiptSnapshot {
-            identity: q.clone(),
-            received_at: Timestamp::new(row.try_get("received_at").map_err(sql_error)?)?,
-            new_samples: count("new_samples")?,
-            replayed_samples: count("replayed_samples")?,
-            replay_until: Timestamp::new(row.try_get("replay_until").map_err(sql_error)?)?,
-        })?,
-        raw: Visibility::Complete,
-        summarized_through: None,
-    }))
+    Ok(Lookup::Found(Receipt::from_durable(ReceiptSnapshot {
+        identity: q.clone(),
+        received_at: Timestamp::new(row.try_get("received_at").map_err(sql_error)?)?,
+        new_samples: count("new_samples")?,
+        replayed_samples: count("replayed_samples")?,
+        replay_until: Timestamp::new(row.try_get("replay_until").map_err(sql_error)?)?,
+    })?))
 }
 async fn lock(c: &mut PgConnection, s: &Stream) -> Result<(), Error> {
     sqlx::query("SELECT rss_timeseries.lock_stream($1::text::uuid,$2,$3,$4)")
@@ -61,9 +60,12 @@ async fn admit(
         batch_id: batch.id().clone(),
         digest: batch.digest()?,
     };
-    if let Lookup::Found(old) = lookup(c, &q).await? {
-        return Ok(Outcome::Replay(old.receipt));
+    match lookup(c, &q).await? {
+        Lookup::Found(old) => return Ok(Outcome::Replay(old)),
+        Lookup::Expired => return Err(Error::HistoryExpired),
+        Lookup::NotVisible => {} // reason: new identity still passes lifecycle admission below.
     }
+    crate::lifecycle::admit_stream(c, s).await?;
     // Share-lock definitions in one order before any sample writes; retirement takes UPDATE.
     let mut definitions = std::collections::BTreeMap::new();
     for sample in batch.samples() {
@@ -119,10 +121,10 @@ async fn admit(
     let Lookup::Found(result) = lookup(c, &q).await? else {
         return Err(Error::Invariant);
     };
-    if result.receipt.new_samples() + result.receipt.replayed_samples() != total as u32 {
+    if result.new_samples() + result.replayed_samples() != total as u32 {
         return Err(Error::Invariant);
     }
-    Ok(Outcome::Accepted(result.receipt))
+    Ok(Outcome::Accepted(result))
 }
 impl<C: Clock> Writer for PgStore<C> {
     fn guarantees(&self) -> &Guarantees {
@@ -149,7 +151,7 @@ impl<C: Clock> Writer for PgStore<C> {
         &self,
         request: &Authorized<ReceiptQuery>,
         deadline: Deadline,
-    ) -> Result<Lookup<ReceiptStatus>, Error> {
+    ) -> Result<Lookup<Receipt>, Error> {
         let q = request.request().clone();
         certain(
             self.transaction(q.stream.scope().tenant(), deadline, false, move |c, _| {

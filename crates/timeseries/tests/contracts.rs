@@ -410,36 +410,25 @@ fn query_bounds_order_latest_and_continuation_are_explicit() -> TestResult {
 #[test]
 fn aggregate_matrix_and_exact_statistics() -> TestResult {
     let q = query(QueryMode::History)?;
-    AggregateQuery::new(
-        q.clone(),
-        AggregateOp::Mean,
+    let Selection::Exact { stream, series } = q.selection().clone() else {
+        anyhow::bail!("exact fixture")
+    };
+    let spec = SummarySpec::new(
+        stream.clone(),
+        series.clone(),
         nz(1)?,
         CoveragePolicy::ObservedOnly,
+        None,
     )?;
+    AggregateQuery::new(spec.clone(), q.window(), q.budget(), AggregateOp::Mean)?;
+    assert!(AggregateQuery::new(spec, q.window(), q.budget(), AggregateOp::Rate).is_err());
     assert!(
-        AggregateQuery::new(
-            q.clone(),
-            AggregateOp::Rate,
+        SummarySpec::new(
+            stream,
+            series,
             nz(1)?,
-            CoveragePolicy::ObservedOnly
-        )
-        .is_err()
-    );
-    assert!(
-        AggregateQuery::new(
-            q.clone(),
-            AggregateOp::Mean,
-            nz(11)?,
-            CoveragePolicy::ObservedOnly
-        )
-        .is_err()
-    );
-    assert!(
-        AggregateQuery::new(
-            q,
-            AggregateOp::Mean,
-            nz(1)?,
-            CoveragePolicy::HoldLast(nz(1)?)
+            CoveragePolicy::HoldLast(nz(1)?),
+            None
         )
         .is_err()
     );
@@ -541,16 +530,18 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
     let q = query(QueryMode::History)?;
     let m = MaintenanceRequest::new(
         id("plan")?,
-        q.selection().clone(),
-        q.window(),
-        MaintenanceAction::Delete,
+        MaintenanceAction::Delete {
+            selection: q.selection().clone(),
+            window: q.window(),
+            restore_until: ts(30)?,
+        },
         budget()?.max_points,
     )?;
     let other = MaintenanceRequest::new(
         id("plan")?,
-        q.selection().clone(),
-        q.window(),
         MaintenanceAction::Restore {
+            selection: q.selection().clone(),
+            window: q.window(),
             deletion_fence: id("fence")?,
         },
         budget()?.max_points,
@@ -561,12 +552,10 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
     assert!(
         MaintenanceRequest::new(
             id("plan")?,
-            q.selection().clone(),
-            q.window(),
-            MaintenanceAction::Prune {
-                raw_before: ts(20)?,
-                summaries_before: ts(1)?,
-                receipts_before: ts(1)?
+            MaintenanceAction::Delete {
+                selection: q.selection().clone(),
+                window: Interval::new(ts(1)?, ts(1)?)?,
+                restore_until: ts(30)?
             },
             budget()?.max_points
         )
@@ -641,9 +630,11 @@ fn every_admitted_observation_has_a_representable_query_upper_bound() -> TestRes
     }
     MaintenanceRequest::new(
         id("boundary-cleanup")?,
-        selection,
-        window,
-        MaintenanceAction::Delete,
+        MaintenanceAction::Delete {
+            selection,
+            window,
+            restore_until: ts(i64::MAX)?,
+        },
         budget()?.max_points,
     )?;
     let mut rejected = last.input().clone();

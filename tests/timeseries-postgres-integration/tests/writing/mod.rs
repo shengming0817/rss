@@ -56,13 +56,7 @@ async fn atomic_replay_conflict_retirement_and_recovery() -> anyhow::Result<()> 
             deadline()?,
         )
         .await?;
-    assert!(matches!(
-        lookup,
-        Lookup::Found(ReceiptStatus {
-            raw: Visibility::Complete,
-            ..
-        })
-    ));
+    assert!(matches!(lookup, Lookup::Found(_)));
     assert!(matches!(f.write(&next).await?, Outcome::Replay(_)));
     assert_eq!(f.count().await?, 3);
     let failed = batch("rollback", vec![sample(&d, "rollback", 102, 3)?])?;

@@ -13,7 +13,7 @@ WITH reachable AS (
 )
 SELECT session_user=current_user
  AND has_schema_privilege(current_user,'rss_timeseries','USAGE')
- AND (SELECT count(*)=6 FROM relations WHERE NOT relispartition)
+ AND (SELECT count(*)=11 FROM relations WHERE NOT relispartition)
  AND (SELECT bool_and(relpersistence='p' AND relrowsecurity AND relforcerowsecurity AND relkind IN ('r','p')) FROM relations)
  AND (SELECT bool_and(has_table_privilege(current_user,oid,'SELECT')) FROM relations WHERE NOT relispartition)
  AND NOT EXISTS(SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole OR rolreplication)
@@ -22,7 +22,7 @@ SELECT session_user=current_user
  AND NOT EXISTS(SELECT FROM relations c CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE a.privilege_type='MAINTAIN' AND EXISTS(SELECT FROM reachable r WHERE r.oid=a.grantee OR pg_has_role(r.oid,a.grantee,'USAGE')))
  AND NOT EXISTS(SELECT FROM acl a WHERE a.grantee=0 OR (a.is_grantable AND EXISTS(SELECT FROM reachable r WHERE r.oid=a.grantee OR pg_has_role(r.oid,a.grantee,'USAGE'))))
  AND NOT EXISTS(SELECT FROM pg_auth_members m JOIN reachable r ON m.member=r.oid WHERE m.admin_option)
- AND (SELECT count(*)=7 AND bool_and(proconfig=ARRAY['search_path=pg_catalog, rss_timeseries'] AND CASE WHEN proname='create_partition' THEN NOT prosecdef AND NOT has_function_privilege(current_user,oid,'EXECUTE') ELSE prosecdef AND has_function_privilege(current_user,oid,'EXECUTE') END) FROM funcs)
+ AND (SELECT count(*)=22 AND bool_and(proconfig=ARRAY['search_path=pg_catalog, rss_timeseries'] AND CASE WHEN proname='create_partition' THEN NOT prosecdef AND NOT has_function_privilege(current_user,oid,'EXECUTE') ELSE prosecdef AND has_function_privilege(current_user,oid,'EXECUTE') END) FROM funcs)
  AND NOT EXISTS(SELECT FROM funcs f JOIN pg_roles r ON r.oid=f.proowner WHERE r.rolsuper OR r.rolbypassrls OR r.rolcanlogin OR r.rolcreaterole OR r.rolreplication OR r.oid IN(SELECT oid FROM reachable))
  AND NOT EXISTS(SELECT FROM relations c JOIN pg_roles r ON r.oid=c.relowner JOIN pg_namespace n ON n.nspname='rss_timeseries' WHERE r.rolsuper OR r.rolbypassrls OR r.rolcanlogin OR c.relowner<>n.nspowner)
  AND NOT EXISTS(SELECT FROM pg_trigger WHERE tgrelid IN(SELECT oid FROM relations) AND NOT tgisinternal)

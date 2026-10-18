@@ -1,15 +1,17 @@
 # rss-timeseries-postgres
 
 PostgreSQL 16 atomic time series admission, durable receipts, definition snapshots and
-bounded raw history/latest queries. TimescaleDB is not required. Products own
+bounded raw history/latest, aggregation and lifecycle operations. TimescaleDB is not required. Products own
 metric meaning, authentication, resource authority, source/generation activation,
 TLS/credentials, migrations, partitions and retention policy.
 
 ## Install and admit
 
 Execute `MIGRATION_SQL` once as a dedicated `NOLOGIN NOSUPERUSER NOBYPASSRLS` owner.
-This is a new V1 format; there is no legacy import or dual reader. Subsequent storage
-upgrades are append-only adapter-owned SQL, executed by the product with writers drained.
+Fresh installation runs `MIGRATION_SQL` (the ordered migration set). Existing V1
+installations run only `UPGRADE_V2_SQL`, with old writers drained, then reapply grants
+and admit the current adapter. The runtime accepts only V2; there is no dual reader.
+Producer V1 definition/sample/batch bytes and hashes remain unchanged.
 No migration or repair runs inside `PgStore::new`.
 
 The owner explicitly calls `rss_timeseries.create_partition(lo, hi)` for each
@@ -57,13 +59,14 @@ exact-version/content retries return their original state even after newer versi
 exist. Retirement is irreversible, preserves historical interpretation, and competes
 with new sample admission on the exact definition row.
 
-The six table families hold definition heads/versions, stream locks, batch receipts,
-sample identities and time-partitioned raw samples. A stream row serializes batches.
-A separate sample identity table enforces `(tenant, namespace, source, generation,
-sample_id)` across partitions and series. Time and sequence are immutable content,
-not extra identity keys. Sequence/version preserve the full u64 range in numeric
-columns; values and snapshots retain typed JSON bytes without a jsonb/f64 roundtrip.
-Text identity/order uses C collation and digests use byte ordering.
+Definitions, stream locks, receipts, sample identities and time-partitioned raw
+samples remain the admission owners. Lifecycle adds namespace coordination, fences,
+current maintenance state, requested summary ranges and sufficient statistics.
+A namespace lock precedes stream and definition locks, covering resource selections
+and streams created concurrently. Queries take a shared namespace lock for a consistent
+operation; pagination is still live across calls. Mutation functions remain the sole
+runtime DML surface. Numeric values and snapshots retain typed JSON bytes without an
+integer-to-float roundtrip. Text ordering uses C collation.
 
 An entire batch commits identities, raw samples and its receipt together. Same batch
 ID/content returns `Replay` with the original counts, receipt time and replay horizon;
@@ -72,14 +75,12 @@ and contributes to replayed_samples. Any conflict rejects the whole new batch.
 Retirement permits already accepted sample replay, including in a new batch, but
 rejects new samples. Batch identity is checked before retirement.
 
-`Limits::replay_micros` is a positive, explicit **minimum** replay guarantee from
-initial admission. The persisted receipt never extends on replay. This version does
-not prune raw data, definitions, identities or receipts. A retained receipt remains
-recoverable beyond its minimum horizon; elapsed time alone never produces `Expired`.
-Future lifecycle operations must preserve all outstanding receipt guarantees and
-identity fences; a missing record cannot authorize resurrection. Aggregation and
-maintenance are separate #2811 work: `aggregate` returns `Unsupported` and there is
-no `Maintainer` implementation. No infinite retention guarantee is implied.
+`Limits::replay_micros` is the explicit minimum replay guarantee from first admission.
+Elapsed time does not expire a retained receipt; ExpireReceipts performs the authorized
+bounded transition after that guarantee. Active streams retain identity/digest fences
+so expired receipt IDs conflict or return Expired instead of admitting data again.
+Admission receipts do not promise permanent raw visibility. Replaying an accepted
+sample never reconstructs a physically pruned row.
 
 ## Unknown outcomes and lifecycle
 
@@ -90,7 +91,8 @@ Dropping SQLx's transaction is not treated as rollback acknowledgment. There is 
 hidden recovery loop or new-ID retry. After reauthorization, read the original
 ReceiptQuery or repeat the exact original Batch. A matching durable receipt settles
 the result; a digest mismatch conflicts; `NotVisible` is never rollback evidence.
-Confirmed receipts report `Visibility::Complete` for raw data and no aggregate progress.
+Confirmed receipts contain only immutable admission facts. Query results report
+availability independently of acceptance.
 
 The injected monotonic Clock shares the caller Deadline domain. One absolute budget
 covers acquire, lock, statements, decoding and settlement, with server statement/lock
@@ -137,3 +139,41 @@ runs isolated core/PG consumers with explicit `--source` or exact `--artifacts D
 
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
 ref: PostgreSQL 16 declarative partitioning and row security
+
+## Bounded aggregation and maintenance
+
+Register a summary range with Recompute using an explicit `SummarySpec`. Each call
+processes at most the request item budget and persists the current fold/checkpoint;
+no scheduler or per-step journal is created. Input revisions restart interrupted folds
+after concurrent changes. A completed bucket is published atomically. New samples
+invalidate affected buckets (including the Counter/state lookahead); replays do not.
+Queries use compatible current summaries, otherwise the same arithmetic over raw input.
+Partial edges cannot be interpolated after raw retirement and return HistoryExpired.
+Output counts include nested state segments; byte, scan and deadline caps remain active.
+
+AdvanceCutoff permanently rejects new observations before the chosen boundary. Prune
+protects unfinished requested summaries, Counter/state boundary input and unexpired
+restore windows. It hides the pruned range before bounded physical removal, while
+completed retained summaries remain queryable. The raw frontier may lag the requested
+cutoff by the greatest necessary Counter/state lookback. ObservedOnly transitions
+also retain their last predecessor, independently of duration coverage. If a newly
+requested computation has already lost required boundary input, it returns HistoryExpired. Raw and summary cutoffs use
+observation time; ExpireReceipts uses first acceptance time and never shortens replay_until.
+Receipt expiry is a stream operation, so a series-scoped grant cannot erase unrelated
+series' batch admission records.
+
+Delete immediately hides rows and invalidates summaries; its write barrier survives
+Restore. Restore requires the original selection/window/fence before restore_until
+(database UTC). Overlapping deletion fences remain independently effective. Expired
+windows are physically removed by Prune after its cutoff/dependency checks. CloseStream
+prevents new batches, and Reclaim removes identities only after data and replay
+obligations end. Stream closure remains durable after reclamation.
+
+A maintenance plan ID binds its complete request. Reusing it with different content
+conflicts; retrying an old step returns current progress without repeating its effects.
+Resume after token expiry by reauthorizing the identical request and omitting the token.
+Aggregate and maintenance tokens have separate authenticated domains. Fence scans filter the relevant selection/window/kind before applying output
+budgets; repeated pruning merges the retained frontier. Summary-range scans and
+relevant fence output obey host point/byte/time budgets and fail explicitly when
+those limits are insufficient. Maintenance Blocked reasons are actionable prerequisites,
+not success or automatic policy changes.

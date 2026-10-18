@@ -103,6 +103,56 @@ pub(crate) struct Token {
     pub expires: i64,
     pub last: Position,
 }
+/// Separate domains prevent raw, aggregate and maintenance token substitution.
+impl CursorKey {
+    pub(crate) fn seal<T: Serialize>(
+        &self,
+        domain: &[u8],
+        binding: Digest,
+        instance: &str,
+        expires: i64,
+        value: &T,
+    ) -> Result<Continuation, Error> {
+        let mut payload = serde_json::to_vec(&(2u8, binding, instance, expires, value))
+            .map_err(|_| Error::Invariant)?;
+        let mut mac = self.mac()?;
+        mac.update(domain);
+        mac.update(&payload);
+        payload.extend_from_slice(&mac.finalize().into_bytes());
+        Ok(Continuation::new(
+            binding,
+            PageCursor::parse(&URL_SAFE_NO_PAD.encode(payload))
+                .map_err(|_| Error::BudgetExceeded)?,
+        ))
+    }
+    pub(crate) fn open<T: serde::de::DeserializeOwned>(
+        &self,
+        domain: &[u8],
+        cursor: &Continuation,
+        binding: Digest,
+        instance: &str,
+        now: i64,
+    ) -> Result<(i64, T), Error> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(cursor.verify(binding)?.as_str())
+            .map_err(|_| Error::InvalidCursor)?;
+        if bytes.len() < 32 {
+            return Err(Error::InvalidCursor);
+        }
+        let (payload, tag) = bytes.split_at(bytes.len() - 32);
+        let mut mac = self.mac()?;
+        mac.update(domain);
+        mac.update(payload);
+        mac.verify_slice(tag).map_err(|_| Error::InvalidCursor)?;
+        let (version, b, inst, expires, value): (u8, Digest, String, i64, T) =
+            serde_json::from_slice(payload).map_err(|_| Error::InvalidCursor)?;
+        if version != 2 || b != binding || inst != instance || expires <= now {
+            return Err(Error::InvalidCursor);
+        }
+        Ok((expires, value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

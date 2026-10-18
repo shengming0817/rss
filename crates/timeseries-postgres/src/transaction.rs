@@ -22,6 +22,7 @@ pub(crate) fn sql_error(e: sqlx::Error) -> Error {
         Some("TS001" | "23505") => Error::Conflict,
         Some("TS002") => Error::InvalidInput,
         Some("TS003") => Error::Retired,
+        Some("TS004") => Error::HistoryExpired,
         Some("42501") => Error::Unauthorized,
         Some("23514" | "23503" | "42P01" | "42703") => Error::Invariant,
         _ => Error::Unavailable,

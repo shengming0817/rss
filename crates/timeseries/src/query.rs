@@ -3,13 +3,13 @@ use crate::{
     Timestamp, digest,
 };
 use rss_contract::PageCursor;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroU64};
 
 /// Resource filters never cross tenants/namespaces. Results retain each source,
 /// generation and definition version; an empty key set selects all resource keys.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "selection", rename_all = "camelCase")]
 pub enum Selection {
     Exact {
@@ -30,7 +30,7 @@ impl Selection {
             Self::Resource { scope, .. } => scope,
         }
     }
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
             Self::Exact { stream, series }
                 if stream.scope() != &series.definition().spec().scope =>
@@ -59,7 +59,7 @@ impl Selection {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum QueryMode {
     History,
@@ -68,13 +68,13 @@ pub enum QueryMode {
 
 /// A mandatory positive work/output budget; providers must also bound scanned work
 /// using the operation deadline and their supported execution configuration.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryBudget {
     pub max_series: NonZeroU32,
     pub max_points: NonZeroU32,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Query {
     selection: Selection,
@@ -180,10 +180,11 @@ pub struct ObservedSample {
 #[derive(Clone, Debug)]
 pub struct Page {
     pub rows: Vec<ObservedSample>,
+    pub availability: crate::Availability,
     pub next: Option<Continuation>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AggregateOp {
     Min,
@@ -224,54 +225,43 @@ impl AggregateOp {
     }
 }
 /// An explicit product policy. Point observations alone never prove duration.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "coverage", content = "maxHoldMicros", rename_all = "camelCase")]
 pub enum CoveragePolicy {
     ObservedOnly,
     HoldLast(NonZeroU64),
 }
+/// A query pins the same statistical semantics used by durable recomputation.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AggregateQuery {
+    spec: crate::SummarySpec,
     query: Query,
     operation: AggregateOp,
-    resolution_micros: NonZeroU64,
-    coverage: CoveragePolicy,
 }
 impl AggregateQuery {
-    /// Aggregation is exact-series only: no implicit cross-source/version mixing.
     pub fn new(
-        query: Query,
+        spec: crate::SummarySpec,
+        window: Interval,
+        budget: QueryBudget,
         operation: AggregateOp,
-        resolution_micros: NonZeroU64,
-        coverage: CoveragePolicy,
     ) -> Result<Self, Error> {
-        let Selection::Exact { series, .. } = query.selection() else {
-            return Err(Error::Unsupported);
-        };
-        if !matches!(query.mode(), QueryMode::History) {
-            return Err(Error::InvalidInput);
-        }
-        operation.validate(&series.definition().spec().metric)?;
-        let state = matches!(
-            series.definition().spec().metric,
-            Metric::Bool | Metric::State { .. }
-        );
-        if (!state && matches!(coverage, CoveragePolicy::HoldLast(_)))
-            || (matches!(operation, AggregateOp::Coverage)
-                && matches!(coverage, CoveragePolicy::ObservedOnly))
+        spec.validate()?;
+        operation.validate(&spec.series().definition().spec().metric)?;
+        if matches!(operation, AggregateOp::Coverage)
+            && matches!(spec.coverage(), CoveragePolicy::ObservedOnly)
         {
             return Err(Error::InvalidInput);
         }
-        if resolution_micros.get() > query.window().width_micros() {
-            return Err(Error::InvalidInput);
-        }
+        let query = Query::new(spec.selection(), window, budget, QueryMode::History)?;
         Ok(Self {
+            spec,
             query,
             operation,
-            resolution_micros,
-            coverage,
         })
+    }
+    pub const fn spec(&self) -> &crate::SummarySpec {
+        &self.spec
     }
     pub const fn query(&self) -> &Query {
         &self.query
@@ -280,10 +270,10 @@ impl AggregateQuery {
         self.operation
     }
     pub const fn resolution_micros(&self) -> NonZeroU64 {
-        self.resolution_micros
+        self.spec.resolution_micros()
     }
     pub const fn coverage(&self) -> CoveragePolicy {
-        self.coverage
+        self.spec.coverage()
     }
     pub fn binding(&self) -> Result<Digest, Error> {
         digest(b"aggregate", self)
@@ -291,7 +281,7 @@ impl AggregateQuery {
 }
 
 /// Exact sufficient statistic. A mean is `sum/count`, not an average of means.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Sum {
     I128(i128),
     U128(u128),
@@ -320,7 +310,7 @@ impl Sum {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AggregateValue {
     Number(crate::Number),
     Sum(Sum),
@@ -339,42 +329,44 @@ pub enum AggregateValue {
     /// No valid observations, not a zero result.
     Missing,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateSegment {
     pub value: StateValue,
     pub window: Interval,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transition {
     pub at: Timestamp,
     pub from: StateValue,
     pub to: StateValue,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateDuration {
     pub value: StateValue,
     pub micros: u64,
 }
-#[derive(Clone, Copy, Debug)]
+/// Multiple independent defects may coexist in a bucket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Completeness {
-    Complete,
     Gaps,
     Overlap,
     ResetBoundary,
+    Boundary,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AggregateBucket {
     pub window: Interval,
     pub value: AggregateValue,
     pub valid_samples: u64,
     pub covered_micros: u64,
-    pub completeness: Completeness,
+    pub completeness: BTreeSet<Completeness>,
 }
 /// Provider output must respect the request's point/series budget including nested
 /// timeline segments/transitions. A watermark never proves future data cannot arrive.
 #[derive(Clone, Debug)]
 pub struct AggregatePage {
     pub buckets: Vec<AggregateBucket>,
+    pub availability: crate::Availability,
     pub resolution_micros: NonZeroU64,
     pub refreshed_through: Option<Timestamp>,
     pub next: Option<Continuation>,
@@ -385,7 +377,7 @@ impl std::fmt::Debug for Sum {
         f.write_str("Sum([redacted])")
     }
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StateValue {
     Bool(bool),
     State(Id),
