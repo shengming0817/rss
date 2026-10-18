@@ -1,5 +1,6 @@
 use super::aggregation::{aggregate, complete, plan, spec, window};
 use super::*;
+use anyhow::Context as _;
 use rss_timeseries_postgres::{
     StorageProfile, StoreConnections,
     timescale::{DedicatedTenant, Hypertable, StorageFormat},
@@ -19,7 +20,7 @@ fn dedicated() -> anyhow::Result<StorageProfile> {
     ))
 }
 async fn reopen(f: &Fixture) -> anyhow::Result<PgStore<Timer>> {
-    Ok(PgStore::new(
+    PgStore::new(
         f.profile.clone(),
         match &f.maintenance {
             Some(pool) => StoreConnections::Native {
@@ -33,7 +34,8 @@ async fn reopen(f: &Fixture) -> anyhow::Result<PgStore<Timer>> {
         CursorKey::new([17; 32]),
         deadline()?,
     )
-    .await?)
+    .await
+    .context("Timescale readmission")
 }
 async fn refresh(f: &Fixture, d: &Definition, name: &str, hi: i64) -> anyhow::Result<()> {
     complete(
@@ -48,12 +50,13 @@ async fn refresh(f: &Fixture, d: &Definition, name: &str, hi: i64) -> anyhow::Re
         )?,
     )
     .await
+    .context("native refresh")
 }
 #[tokio::test]
 async fn shared_atomic_replay_isolation_and_catalog_readmission() -> anyhow::Result<()> {
     let f = Fixture::on_profile("ts-shared", shared()?).await?;
     let d = definition(TENANT)?;
-    f.register(&d).await?;
+    f.register(&d).await.context("register definition")?;
     let b = batch(
         "cross-chunk",
         vec![sample(&d, "early", 1, 10)?, sample(&d, "later", 101, 20)?],
@@ -63,6 +66,14 @@ async fn shared_atomic_replay_isolation_and_catalog_readmission() -> anyhow::Res
     assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
     assert_eq!(f.count().await?, 2);
     let fresh = reopen(&f).await?;
+    let chunk:String=sqlx::query_scalar("SELECT format('%I.%I',chunk_schema,chunk_name) FROM timescaledb_information.chunks WHERE hypertable_schema='rss_timeseries' ORDER BY chunk_name LIMIT 1").fetch_one(&f.admin).await?;
+    let direct = format!("SELECT count(*) FROM {chunk}");
+    assert!(
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(direct.as_str()))
+            .fetch_one(&f.pool)
+            .await
+            .is_err()
+    );
     assert!(matches!(
         fresh
             .receipt(
@@ -78,13 +89,18 @@ async fn shared_atomic_replay_isolation_and_catalog_readmission() -> anyhow::Res
     )?;
     assert_eq!(f.write(&conflict).await.err(), Some(Error::Conflict));
     assert_eq!(f.count().await?, 2);
+    let move_chunk = format!("ALTER TABLE {chunk} SET SCHEMA public");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(move_chunk.as_str()))
+        .execute(&f.admin)
+        .await?;
+    assert!(reopen(&f).await.is_err());
     Ok(())
 }
 #[tokio::test]
 async fn native_refresh_late_delete_restore_columnstore_and_retention() -> anyhow::Result<()> {
     let f = Fixture::on_profile("ts-native", dedicated()?).await?;
     let d = definition(TENANT)?;
-    f.register(&d).await?;
+    f.register(&d).await.context("register definition")?;
     let b = batch(
         "initial",
         vec![sample(&d, "a", 1, 5)?, sample(&d, "b", 11, 8)?],
@@ -220,7 +236,7 @@ async fn native_refresh_late_delete_restore_columnstore_and_retention() -> anyho
 async fn native_unknown_checkpoint_revision_and_fixed_tenant() -> anyhow::Result<()> {
     let f = Fixture::on_profile("ts-native-recovery", dedicated()?).await?;
     let d = definition(TENANT)?;
-    f.register(&d).await?;
+    f.register(&d).await.context("register definition")?;
     f.write(&batch("initial", vec![sample(&d, "a", 1, u64::MAX)?])?)
         .await?;
     let r = plan(
@@ -292,7 +308,7 @@ async fn native_call_commit_before_publication_and_cleanup_rollback_recover() ->
 {
     let f = Fixture::on_profile("ts-native-publish-fault", dedicated()?).await?;
     let d = definition(TENANT)?;
-    f.register(&d).await?;
+    f.register(&d).await.context("register definition")?;
     f.write(&batch("one", vec![sample(&d, "one", 1, 11)?])?)
         .await?;
     let r = plan(

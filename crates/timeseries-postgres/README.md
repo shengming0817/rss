@@ -183,7 +183,14 @@ not success or automatic policy changes.
 Enable the additive `timescaledb` feature, then choose a `StorageProfile`. All stores
 share the same writer, receipt, transaction, query and lifecycle engine. Installation
 uses `profile.installation_sql()`; the host runs it once as the schema owner after an
-administrator installs the extension. No existing deployment migration is supported.
+administrator installs the extension. The installer creates a component-owned private
+`rss_timeseries_chunks` schema for raw chunks. Runtime must have no direct or inherited
+USAGE/CREATE on this schema. Timescale copies parent SELECT ACLs to newly created chunks
+without child RLS; private chunk placement therefore protects even future chunks.
+The extension's own internal schema remains available for its metadata APIs. Drain
+existing pools and prepared statements before role/DDL changes and re-admit afterward.
+
+No existing deployment migration is supported.
 The `timeseries-schema` example emits inspectable SQL for a minimal explicit profile.
 
 | Profile | Isolation | Raw storage | Aggregation |

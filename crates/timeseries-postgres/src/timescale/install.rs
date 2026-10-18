@@ -15,7 +15,9 @@ CREATE TABLE rss_timeseries.deployment (
  resolutions bigint[] NOT NULL
 );
 INSERT INTO rss_timeseries.deployment VALUES(true,'{profile}',{tenant},{interval},ARRAY[{resolutions}]::bigint[]);
-SELECT public.create_hypertable('rss_timeseries.samples',public.by_range('observed_at',{interval}::bigint),create_default_indexes=>false);
+CREATE SCHEMA rss_timeseries_chunks;
+REVOKE ALL ON SCHEMA rss_timeseries_chunks FROM PUBLIC;
+SELECT public.create_hypertable('rss_timeseries.samples','observed_at',associated_schema_name=>'rss_timeseries_chunks',chunk_time_interval=>{interval}::bigint,create_default_indexes=>false);
 CREATE FUNCTION rss_timeseries.integer_now() RETURNS bigint LANGUAGE sql STABLE
 SET search_path=pg_catalog,rss_timeseries AS $$ SELECT floor(extract(epoch FROM statement_timestamp())*1000000)::bigint $$;
 SELECT public.set_integer_now_func('rss_timeseries.samples','rss_timeseries.integer_now'::regproc);

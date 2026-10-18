@@ -283,11 +283,22 @@ async fn install_schema(
     sqlx::raw_sql(sqlx::AssertSqlSafe(profile.installation_sql()?.as_str()))
         .execute(&mut *c)
         .await?;
+    provision_profile(&mut c, profile).await?;
+    drop(c);
+    Ok(())
+}
+
+mod timescale;
+
+async fn provision_profile(
+    connection: &mut sqlx::PgConnection,
+    profile: &rss_timeseries_postgres::StorageProfile,
+) -> anyhow::Result<()> {
     if matches!(profile, rss_timeseries_postgres::StorageProfile::PostgreSQL) {
-        sqlx::raw_sql("SELECT rss_timeseries.create_partition(0,100); SELECT rss_timeseries.create_partition(100,9223372036854775807); RESET ROLE;").execute(&mut *c).await?;
-        sqlx::raw_sql(GRANTS).execute(&mut *c).await?;
+        sqlx::raw_sql("SELECT rss_timeseries.create_partition(0,100); SELECT rss_timeseries.create_partition(100,9223372036854775807); RESET ROLE;").execute(&mut *connection).await?;
+        sqlx::raw_sql(GRANTS).execute(&mut *connection).await?;
     } else {
-        sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_timeseries TO ts_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_timeseries TO ts_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_timeseries TO ts_runtime; REVOKE EXECUTE ON FUNCTION rss_timeseries.integer_now() FROM ts_runtime;").execute(&mut *c).await?;
+        sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_timeseries TO ts_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_timeseries TO ts_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_timeseries TO ts_runtime; REVOKE EXECUTE ON FUNCTION rss_timeseries.integer_now() FROM ts_runtime;").execute(&mut *connection).await?;
         if matches!(
             profile,
             rss_timeseries_postgres::StorageProfile::TimescaleDedicatedTenant(_)
@@ -295,12 +306,9 @@ async fn install_schema(
             sqlx::raw_sql(
                 "REVOKE EXECUTE ON FUNCTION rss_timeseries.project_gauge() FROM ts_runtime;",
             )
-            .execute(&mut *c)
+            .execute(&mut *connection)
             .await?;
         }
     }
-    drop(c);
     Ok(())
 }
-
-mod timescale;

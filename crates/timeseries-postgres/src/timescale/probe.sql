@@ -14,7 +14,7 @@ WITH RECURSIVE reachable AS (
 ), physical AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE EXISTS(SELECT FROM _timescaledb_catalog.hypertable h JOIN owned_hypertables o ON o.id=h.id WHERE h.schema_name=n.nspname AND h.table_name=c.relname)
- OR EXISTS(SELECT FROM _timescaledb_catalog.chunk h JOIN owned_hypertables o ON o.id=h.hypertable_id WHERE NOT h.dropped AND h.schema_name=n.nspname AND h.table_name=c.relname)
+ OR EXISTS(SELECT FROM _timescaledb_catalog.chunk h JOIN owned_hypertables o ON o.id=h.hypertable_id WHERE h.relid=c.oid)
 ), acl AS (
  SELECT a.grantee,a.is_grantable FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a WHERE n.nspname='rss_timeseries'
  UNION ALL SELECT a.grantee,a.is_grantable FROM relations c CROSS JOIN LATERAL aclexplode(c.relacl) a
@@ -32,7 +32,7 @@ SELECT session_user=current_user
  AND (SELECT bool_and(has_table_privilege(current_user,oid,'SELECT')) FROM relations WHERE relkind='r')
  AND NOT EXISTS(SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole OR rolreplication)
  AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN relations c WHERE c.relowner=r.oid OR has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES'))
- AND NOT EXISTS(SELECT FROM reachable r JOIN pg_namespace n ON n.nspname IN ('rss_timeseries','public','_timescaledb_internal','_timescaledb_catalog','_timescaledb_functions') WHERE n.nspowner=r.oid OR has_schema_privilege(r.oid,n.oid,'CREATE'))
+ AND NOT EXISTS(SELECT FROM reachable r JOIN pg_namespace n ON n.nspname IN ('rss_timeseries','rss_timeseries_chunks','public','_timescaledb_internal','_timescaledb_catalog','_timescaledb_functions') WHERE n.nspowner=r.oid OR has_schema_privilege(r.oid,n.oid,'CREATE'))
  AND NOT EXISTS(SELECT FROM acl a WHERE a.grantee=0 OR (a.is_grantable AND EXISTS(SELECT FROM reachable r WHERE r.oid=a.grantee OR pg_has_role(r.oid,a.grantee,'USAGE'))))
  AND NOT EXISTS(SELECT FROM pg_auth_members m JOIN reachable r ON m.member=r.oid WHERE m.admin_option)
  AND (SELECT count(*)=CASE WHEN $1 THEN 24 ELSE 22 END AND bool_and(proconfig=ARRAY['search_path=pg_catalog, rss_timeseries'] AND CASE WHEN proname IN ('integer_now','project_gauge') THEN NOT has_function_privilege(current_user,oid,'EXECUTE') ELSE prosecdef AND has_function_privilege(current_user,oid,'EXECUTE') END) FROM funcs)
@@ -50,10 +50,16 @@ SELECT session_user=current_user
  AND (SELECT count(*)=cardinality($3::bigint[]) FROM timescaledb_information.continuous_aggregates WHERE view_schema='rss_timeseries')
 
  AND (NOT $1 OR EXISTS(SELECT FROM pg_trigger WHERE tgrelid='rss_timeseries.samples'::regclass AND tgname='project_gauge' AND tgfoid=to_regprocedure('rss_timeseries.project_gauge()') AND tgtype=7 AND tgenabled='O'))
- AND NOT EXISTS(SELECT FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid CROSS JOIN reachable r WHERE i.inhparent='rss_timeseries.samples'::regclass AND (c.relowner=r.oid OR has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
+ AND NOT EXISTS(SELECT FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid CROSS JOIN reachable r WHERE i.inhparent='rss_timeseries.samples'::regclass AND (c.relowner=r.oid OR has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES')))
  AND NOT EXISTS(SELECT FROM pg_policy p JOIN relations c ON c.oid=p.polrelid WHERE p.polname<>'tenant' OR p.polcmd<>'*' OR NOT p.polpermissive OR p.polroles<>ARRAY[0::oid] OR pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM pg_get_expr(p.polwithcheck,p.polrelid) OR pg_get_expr(p.polqual,p.polrelid)<>'(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)')
 
  AND (SELECT bool_and(compression_enabled=$1) FROM timescaledb_information.hypertables WHERE hypertable_schema='rss_timeseries' AND hypertable_name='samples')
  AND (NOT $1 OR EXISTS(SELECT FROM timescaledb_information.hypertable_columnstore_settings WHERE hypertable='rss_timeseries.samples'::regclass AND segmentby='tenant_id,namespace,source,generation,series_digest' AND orderby='observed_at,sequence,sample_id' AND compress_interval_length IS NULL))
 
  AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN physical c WHERE c.relowner=r.oid OR has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES'))
+
+ AND NOT EXISTS(SELECT FROM reachable r WHERE has_schema_privilege(r.oid,'rss_timeseries_chunks','USAGE'))
+
+ AND EXISTS(SELECT FROM _timescaledb_catalog.hypertable WHERE schema_name='rss_timeseries' AND table_name='samples' AND associated_schema_name='rss_timeseries_chunks')
+ AND EXISTS(SELECT FROM pg_namespace a JOIN pg_namespace b ON a.nspowner=b.nspowner WHERE a.nspname='rss_timeseries_chunks' AND b.nspname='rss_timeseries')
+ AND NOT EXISTS(SELECT FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE i.inhparent='rss_timeseries.samples'::regclass AND n.nspname<>'rss_timeseries_chunks')

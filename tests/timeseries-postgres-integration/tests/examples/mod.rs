@@ -90,16 +90,7 @@ async fn timescale_run(native: bool) -> anyhow::Result<()> {
     let mut input = testkit::example_process::pg_input(&pg, "ts_migrator", TENANT);
     input["cursor_key"] = serde_json::to_value([17; 32])?;
     input["deployment"] = deployment.clone();
-    match std::env::var("RSS_TIMESERIES_INSTALL") {
-        Ok(binary) => {
-            testkit::example_process::run_binary(&binary, &input, Duration::from_secs(60)).await?;
-            eprintln!("external-provider-consumer PASS {binary}");
-        }
-        Err(std::env::VarError::NotPresent) => {
-            rss_examples::timeseries_timescale::install(serde_json::from_value(input)?).await?
-        }
-        Err(e) => return Err(e.into()),
-    }
+    install_timescale_example(input).await?;
     sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_timeseries TO ts_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_timeseries TO ts_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_timeseries TO ts_runtime; REVOKE EXECUTE ON FUNCTION rss_timeseries.integer_now() FROM ts_runtime").execute(&admin).await?;
     if native {
         sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_timeseries.project_gauge() FROM ts_runtime")
@@ -123,5 +114,19 @@ async fn timescale_run(native: bool) -> anyhow::Result<()> {
         .fetch_one(&admin)
         .await?;
     assert_eq!(remaining, 0);
+    Ok(())
+}
+
+async fn install_timescale_example(input: serde_json::Value) -> anyhow::Result<()> {
+    match std::env::var("RSS_TIMESERIES_INSTALL") {
+        Ok(binary) => {
+            testkit::example_process::run_binary(&binary, &input, Duration::from_secs(60)).await?;
+            eprintln!("external-provider-consumer PASS {binary}");
+        }
+        Err(std::env::VarError::NotPresent) => {
+            rss_examples::timeseries_timescale::install(serde_json::from_value(input)?).await?
+        }
+        Err(e) => return Err(e.into()),
+    }
     Ok(())
 }
