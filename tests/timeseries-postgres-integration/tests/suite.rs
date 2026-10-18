@@ -9,8 +9,10 @@ use std::{
     num::{NonZeroU32, NonZeroU64},
     time::{Duration, Instant},
 };
+mod aggregation;
 mod crash;
 mod examples;
+mod lifecycle;
 mod queries;
 mod security;
 mod writing;
@@ -45,12 +47,13 @@ impl Authority for Product {
             Access::Write(v) => v.stream().scope().tenant(),
             Access::Receipt(v) => v.stream.scope().tenant(),
             Access::Query(v) => v.selection().scope().tenant(),
+            Access::Aggregate(v) => v.spec().stream().scope().tenant(),
+            Access::Maintain(v) => v.scope().tenant(),
             Access::DefinitionRead(v) => v.scope.tenant(),
             Access::Definition(DefinitionMutation::Register { definition, .. }) => {
                 definition.spec().scope.tenant()
             }
             Access::Definition(DefinitionMutation::Retire { id, .. }) => id.scope.tenant(),
-            _ => return Err(Error::Unauthorized),
         };
         if tenant == self.0 {
             Ok(())
@@ -145,6 +148,9 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(name: &str) -> anyhow::Result<Self> {
+        Self::new_inner(name, false).await
+    }
+    async fn new_inner(name: &str, upgrade: bool) -> anyhow::Result<Self> {
         let network = testkit::bridge_network(name).await?;
         let pg = testkit::postgres_tls(
             testkit::NetworkAttachment {
@@ -165,17 +171,19 @@ impl Fixture {
             .max_connections(4)
             .connect_with(base.clone().username(&p.username).password(&p.password))
             .await?;
-        sqlx::raw_sql(ROLES).execute(&admin).await?;
-        let mut c = admin.acquire().await?;
-        sqlx::raw_sql("SET ROLE ts_owner").execute(&mut *c).await?;
-        sqlx::raw_sql(MIGRATION_SQL).execute(&mut *c).await?;
-        sqlx::raw_sql("SELECT rss_timeseries.create_partition(0,100); SELECT rss_timeseries.create_partition(100,9223372036854775807); RESET ROLE;").execute(&mut *c).await?;
-        sqlx::raw_sql(GRANTS).execute(&mut *c).await?;
-        drop(c);
+        install_schema(&admin, upgrade).await?;
         let pool = PgPoolOptions::new()
             .max_connections(6)
             .connect_with(base.username("ts_runtime").password("fixture-only"))
             .await?;
+        if upgrade {
+            upgrade_schema(&admin, &pool).await?;
+        }
+        let catalog: String = sqlx::query_scalar(include_str!(
+            "../../../crates/timeseries-postgres/src/catalog.sql"
+        ))
+        .fetch_one(&pool)
+        .await?;
         let store = PgStore::new(
             pool.clone(),
             Timer,
@@ -183,7 +191,8 @@ impl Fixture {
             CursorKey::new([17; 32]),
             deadline()?,
         )
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("store admission: {e:?}; catalog={catalog}"))?;
         Ok(Self {
             admin,
             pool,
@@ -226,4 +235,70 @@ impl Fixture {
                 .await?,
         )
     }
+}
+
+async fn seed_v1(c: &mut sqlx::PgConnection) -> anyhow::Result<()> {
+    let d = definition(TENANT)?;
+    let s = sample(&d, "v1", 50, 7)?;
+    let b = batch("v1", vec![s.clone()])?;
+    sqlx::raw_sql("SET ROLE ts_owner").execute(&mut *c).await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,false)")
+        .bind(TENANT)
+        .execute(&mut *c)
+        .await?;
+    sqlx::query("SELECT rss_timeseries.put_definition($1::text::uuid,'metrics','temperature',1,$2,$3,false)").bind(TENANT).bind(serde_json::to_vec(&d)?).bind(d.digest()?.as_bytes().as_slice()).execute(&mut *c).await?;
+    sqlx::query("SELECT rss_timeseries.put_sample($1,$2,$3,10)")
+        .bind(serde_json::to_vec(&s)?)
+        .bind(s.digest()?.as_bytes().as_slice())
+        .bind(s.input().series.digest()?.as_bytes().as_slice())
+        .execute(&mut *c)
+        .await?;
+    sqlx::query("SELECT rss_timeseries.put_batch($1::text::uuid,'metrics','sensor','generation','v1',$2,10,1,0,20)").bind(TENANT).bind(b.digest()?.as_bytes().as_slice()).execute(&mut *c).await?;
+    sqlx::raw_sql("RESET ROLE; RESET rss.tenant_id")
+        .execute(&mut *c)
+        .await?;
+    Ok(())
+}
+
+async fn install_schema(admin: &PgPool, upgrade: bool) -> anyhow::Result<()> {
+    sqlx::raw_sql(ROLES).execute(admin).await?;
+    let mut c = admin.acquire().await?;
+    sqlx::raw_sql("SET ROLE ts_owner").execute(&mut *c).await?;
+    let migration = if upgrade {
+        include_str!("../../../crates/timeseries-postgres/migrations/0001_create_timeseries.sql")
+    } else {
+        MIGRATION_SQL
+    };
+    sqlx::raw_sql(migration).execute(&mut *c).await?;
+    sqlx::raw_sql("SELECT rss_timeseries.create_partition(0,100); SELECT rss_timeseries.create_partition(100,9223372036854775807); RESET ROLE;").execute(&mut *c).await?;
+    sqlx::raw_sql(GRANTS).execute(&mut *c).await?;
+    if upgrade {
+        seed_v1(&mut c).await?;
+    }
+    drop(c);
+    Ok(())
+}
+
+async fn upgrade_schema(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
+    assert!(
+        PgStore::new(
+            pool.clone(),
+            Timer,
+            limits()?,
+            CursorKey::new([17; 32]),
+            deadline()?
+        )
+        .await
+        .is_err()
+    );
+    let mut owner = admin.acquire().await?;
+    sqlx::raw_sql("SET ROLE ts_owner")
+        .execute(&mut *owner)
+        .await?;
+    sqlx::raw_sql(rss_timeseries_postgres::UPGRADE_V2_SQL)
+        .execute(&mut *owner)
+        .await?;
+    sqlx::raw_sql("RESET ROLE").execute(&mut *owner).await?;
+    sqlx::raw_sql(GRANTS).execute(&mut *owner).await?;
+    Ok(())
 }

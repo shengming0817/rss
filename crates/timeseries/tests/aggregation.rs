@@ -70,7 +70,7 @@ fn unequal_bucket_means_and_large_integer_statistics() -> anyhow::Result<()> {
         },
         CoveragePolicy::ObservedOnly,
     )?;
-    let input = vec![
+    let input = [
         sample(&s, 1, value(u64::MAX), None)?,
         sample(&s, 2, value(1), None)?,
         sample(&s, 11, value(9), None)?,
@@ -108,7 +108,7 @@ fn cumulative_reset_gap_and_boundary_rollup() -> anyhow::Result<()> {
         },
         CoveragePolicy::ObservedOnly,
     )?;
-    let input = vec![
+    let input = [
         sample(&s, 1, value(5), Some(0))?,
         sample(&s, 6, value(9), Some(0))?,
         sample(&s, 11, value(15), Some(0))?,
@@ -136,7 +136,7 @@ fn delta_overlap_is_not_a_plausible_rate() -> anyhow::Result<()> {
         },
         CoveragePolicy::ObservedOnly,
     )?;
-    let input = vec![
+    let input = [
         sample(&s, 5, value(10), Some(0))?,
         sample(&s, 9, value(12), Some(3))?,
     ];
@@ -148,7 +148,7 @@ fn delta_overlap_is_not_a_plausible_rate() -> anyhow::Result<()> {
 #[test]
 fn state_hold_stops_at_missing_and_never_invents_online_time() -> anyhow::Result<()> {
     let s = spec(Metric::Bool, CoveragePolicy::HoldLast(n(5)?))?;
-    let input = vec![
+    let input = [
         sample(&s, 1, Reading::Valid(Value::Bool(true)), None)?,
         sample(&s, 3, Reading::Missing, None)?,
         sample(&s, 9, Reading::Valid(Value::Bool(false)), None)?,
@@ -173,5 +173,40 @@ fn invalid_order_and_output_budget_fail_closed() -> anyhow::Result<()> {
     let b = sample(&s, 2, Reading::Valid(Value::Bool(false)), None)?;
     assert!(Summary::compute(&s, w(0, 10)?, &[b.clone(), a.clone()], 10).is_err());
     assert!(Summary::compute(&s, w(0, 10)?, &[a, b], 2).is_err());
+    Ok(())
+}
+
+#[test]
+fn serialized_fold_resumes_large_gauge_and_same_time_state_without_recounting() -> anyhow::Result<()>
+{
+    let s = spec(
+        Metric::Gauge {
+            number: NumberKind::U64,
+        },
+        CoveragePolicy::ObservedOnly,
+    )?;
+    let mut fold = SummaryBuilder::new(s.clone(), w(0, 1000)?)?;
+    for at in 0..1000 {
+        fold.push(sample(&s, at, value(1), None)?, 2)?;
+        if at % 17 == 0 {
+            fold = serde_json::from_slice(&serde_json::to_vec(&fold)?)?;
+        }
+    }
+    assert!(
+        matches!(fold.finish(2)?.project(AggregateOp::Mean)?.value,AggregateValue::Mean {sum:Sum::U128(1000),count} if count.get()==1000)
+    );
+    let s = spec(Metric::Bool, CoveragePolicy::HoldLast(n(10)?))?;
+    let a = sample(&s, 1, Reading::Valid(Value::Bool(true)), None)?;
+    let mut changed = a.input().clone();
+    changed.sequence += 1;
+    changed.id = Id::new("replacement")?;
+    changed.reading = Reading::Valid(Value::Bool(false));
+    let mut fold = SummaryBuilder::new(s, w(0, 10)?)?;
+    fold.push(a, 10)?;
+    fold = serde_json::from_slice(&serde_json::to_vec(&fold)?)?;
+    fold.push(Sample::new(changed)?, 10)?;
+    let v = fold.finish(10)?.project(AggregateOp::Coverage)?;
+    assert_eq!(v.valid_samples, 1);
+    assert_eq!(v.covered_micros, 9);
     Ok(())
 }

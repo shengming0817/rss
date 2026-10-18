@@ -29,6 +29,8 @@ impl Authority for Operator {
             Access::Write(b) => b.stream().scope(),
             Access::Receipt(q) => q.stream.scope(),
             Access::Query(q) => q.selection().scope(),
+            Access::Aggregate(v) => v.spec().stream().scope(),
+            Access::Maintain(v) => v.scope(),
             _ => return Err(Error::Unauthorized),
         };
         if scope.tenant() == self.0 {
@@ -156,7 +158,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         anyhow::bail!("durable receipt missing")
     };
     anyhow::ensure!(
-        receipt.receipt.received_at() == first.received_at(),
+        receipt.received_at() == first.received_at(),
         "receipt changed"
     );
     let q = Query::new(
@@ -175,6 +177,159 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         result.rows.len() == 1 && result.rows[0].sample == sample && result.next.is_none(),
         "query failed exact value preservation"
     );
+    lifecycle(&reopened, &operator, &sample, &receipt).await?;
     store.close(budget()?).await?;
+    Ok(())
+}
+
+async fn maintain(
+    store: &PgStore<Timer>,
+    operator: &Operator,
+    id: &str,
+    action: MaintenanceAction,
+) -> anyhow::Result<()> {
+    let request = Authorized::<MaintenanceRequest>::verify(
+        operator,
+        MaintenanceRequest::new(
+            Id::new(id)?,
+            action,
+            NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+        )?,
+    )?;
+    let mut next = None;
+    for _ in 0..100 {
+        match confirmed(store.step(&request, next.as_ref(), budget()?).await?)? {
+            MaintenanceProgress::Complete { .. } => return Ok(()),
+            MaintenanceProgress::More { next: token, .. } => next = Some(token),
+            MaintenanceProgress::Blocked { reason } => {
+                anyhow::bail!("maintenance blocked: {reason:?}")
+            }
+        }
+    }
+    anyhow::bail!("example maintenance budget exhausted")
+}
+
+async fn lifecycle(
+    reopened: &PgStore<Timer>,
+    operator: &Operator,
+    sample: &Sample,
+    receipt: &Receipt,
+) -> anyhow::Result<()> {
+    let spec = SummarySpec::new(
+        sample.input().stream.clone(),
+        sample.input().series.clone(),
+        NonZeroU64::new(100).ok_or(Error::InvalidInput)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let window = Interval::new(Timestamp::new(0)?, Timestamp::new(200)?)?;
+    maintain(
+        reopened,
+        operator,
+        "refresh",
+        MaintenanceAction::Recompute {
+            spec: spec.clone(),
+            window,
+        },
+    )
+    .await?;
+    maintain(
+        reopened,
+        operator,
+        "delete",
+        MaintenanceAction::Delete {
+            selection: spec.selection(),
+            window,
+            restore_until: receipt.replay_until(),
+        },
+    )
+    .await?;
+    let hidden = Query::new(
+        spec.selection(),
+        window,
+        QueryBudget {
+            max_points: NonZeroU32::MIN,
+            max_series: NonZeroU32::MIN,
+        },
+        QueryMode::Latest,
+    )?;
+    anyhow::ensure!(
+        reopened
+            .query(
+                &Authorized::<Query>::verify(operator, hidden)?,
+                None,
+                budget()?
+            )
+            .await?
+            .rows
+            .is_empty(),
+        "deleted data visible"
+    );
+    maintain(
+        reopened,
+        operator,
+        "restore",
+        MaintenanceAction::Restore {
+            selection: spec.selection(),
+            window,
+            deletion_fence: Id::new("delete")?,
+        },
+    )
+    .await?;
+    maintain(
+        reopened,
+        operator,
+        "refresh-restored",
+        MaintenanceAction::Recompute {
+            spec: spec.clone(),
+            window,
+        },
+    )
+    .await?;
+    maintain(
+        reopened,
+        operator,
+        "cutoff",
+        MaintenanceAction::AdvanceCutoff {
+            selection: spec.selection(),
+            before: window.end(),
+        },
+    )
+    .await?;
+    maintain(
+        reopened,
+        operator,
+        "prune",
+        MaintenanceAction::Prune {
+            selection: spec.selection(),
+            raw_before: window.end(),
+            summaries_before: Timestamp::new(0)?,
+        },
+    )
+    .await?;
+    let q = AggregateQuery::new(
+        spec,
+        window,
+        QueryBudget {
+            max_points: NonZeroU32::new(10).ok_or(Error::InvalidInput)?,
+            max_series: NonZeroU32::MIN,
+        },
+        AggregateOp::Mean,
+    )?;
+    let aggregated = reopened
+        .aggregate(
+            &Authorized::<AggregateQuery>::verify(operator, q)?,
+            None,
+            budget()?,
+        )
+        .await?;
+    anyhow::ensure!(
+        aggregated.refreshed_through == Some(window.end())
+            && aggregated
+                .buckets
+                .iter()
+                .any(|b| matches!(b.value,AggregateValue::Mean {count,..} if count.get()==1)),
+        "retained summary missing"
+    );
     Ok(())
 }

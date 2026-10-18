@@ -48,6 +48,6 @@ async fn run() -> anyhow::Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_timeseries.samples")
         .fetch_one(&admin)
         .await?;
-    assert_eq!(count, 1);
+    assert_eq!(count, 0);
     Ok(())
 }
