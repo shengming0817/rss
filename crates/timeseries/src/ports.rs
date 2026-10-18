@@ -1,11 +1,10 @@
 use crate::{
     AggregatePage, AggregateQuery, Batch, Continuation, Definition, DefinitionState, Digest, Error,
-    Id, Interval, Page, Query, Scope, Stream, Timestamp, digest,
+    Id, MaintenanceProgress, MaintenanceRequest, Page, Query, Scope, Stream, Timestamp,
 };
 use rss_request_context::Deadline;
-use serde::Serialize;
 use std::future::Future;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 
 /// Exact lookup identity, independent of the latest definition version.
 #[derive(Clone, Debug)]
@@ -50,12 +49,6 @@ pub enum Lookup<T> {
 pub enum Atomicity {
     AtomicBatch,
     RecoverableBatch,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Visibility {
-    Pending,
-    Partial,
-    Complete,
 }
 /// Deployment-specific guarantees, declared by an adapter after validating its
 /// configuration. This is not an assertion that every backend shares a transaction.
@@ -126,104 +119,6 @@ impl Receipt {
         self.replay_until
     }
 }
-/// Read progress is separate from immutable admission. Complete raw visibility
-/// does not imply summary completion or visibility on every replica.
-#[derive(Clone, Debug)]
-pub struct ReceiptStatus {
-    pub receipt: Receipt,
-    pub raw: Visibility,
-    pub summarized_through: Option<Timestamp>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "operation", rename_all = "camelCase")]
-pub enum MaintenanceAction {
-    Recompute,
-    /// Separate layers; providers reject cleanup that destroys required recovery input.
-    Prune {
-        raw_before: Timestamp,
-        summaries_before: Timestamp,
-        receipts_before: Timestamp,
-    },
-    Delete,
-    /// Explicit restoration must match the existing deletion fence.
-    Restore {
-        deletion_fence: Id,
-    },
-}
-/// No scheduler or arbitrary command payload. Same plan ID with changed content
-/// conflicts, and the provider atomically fences each resumable step.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MaintenanceRequest {
-    id: Id,
-    selection: crate::Selection,
-    window: Interval,
-    action: MaintenanceAction,
-    max_items: NonZeroU32,
-}
-impl MaintenanceRequest {
-    pub fn new(
-        id: Id,
-        selection: crate::Selection,
-        window: Interval,
-        action: MaintenanceAction,
-        max_items: NonZeroU32,
-    ) -> Result<Self, Error> {
-        // Reuse the same scope/window validation, without implementing a query or executor.
-        Query::new(
-            selection.clone(),
-            window,
-            crate::QueryBudget {
-                max_series: max_items,
-                max_points: max_items,
-            },
-            crate::QueryMode::History,
-        )?;
-        if let MaintenanceAction::Prune {
-            raw_before,
-            summaries_before,
-            receipts_before,
-        } = action
-            && [raw_before, summaries_before, receipts_before]
-                .iter()
-                .any(|t| *t > window.end())
-        {
-            return Err(Error::InvalidInput);
-        }
-        Ok(Self {
-            id,
-            selection,
-            window,
-            action,
-            max_items,
-        })
-    }
-    pub const fn id(&self) -> &Id {
-        &self.id
-    }
-    pub const fn selection(&self) -> &crate::Selection {
-        &self.selection
-    }
-    pub const fn window(&self) -> Interval {
-        self.window
-    }
-    pub const fn action(&self) -> &MaintenanceAction {
-        &self.action
-    }
-    pub const fn max_items(&self) -> NonZeroU32 {
-        self.max_items
-    }
-    pub fn binding(&self) -> Result<Digest, Error> {
-        digest(b"maintenance", self)
-    }
-}
-#[derive(Clone, Debug)]
-pub enum MaintenanceProgress {
-    More { processed: u32, next: Continuation },
-    Complete { processed: u32, fence: Id },
-}
-
 /// Products authenticate callers and decide exact operation authority. This hook
 /// does not grant device registration, activate a generation or bypass storage fences.
 #[derive(Clone, Copy, Debug)]
@@ -304,7 +199,7 @@ pub trait Writer: Send + Sync {
         &self,
         request: &Authorized<ReceiptQuery>,
         deadline: Deadline,
-    ) -> impl Future<Output = Result<Lookup<ReceiptStatus>, Error>> + Send;
+    ) -> impl Future<Output = Result<Lookup<Receipt>, Error>> + Send;
 }
 /// Deadline is one absolute budget for every provider stage. Pagination binds the
 /// full query and provider read boundary; live pagination is not a snapshot promise.
