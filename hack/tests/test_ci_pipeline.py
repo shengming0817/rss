@@ -301,6 +301,54 @@ class PipelineTests(unittest.TestCase):
                     groups = [args[1] for name, args in calls if name == 'execute']
                     self.assertEqual(groups, list(pipeline.GROUPS) if 'execute' in expected else [])
 
+    def test_doctests_use_only_enabled_workspace_targets(self):
+        def package(name, kind, enabled):
+            return {'name': name, 'id': name, 'targets': [{'kind': [kind], 'doctest': enabled}]}
+        facts = {'workspace_members': ['library', 'integration', 'disabled', 'derive'], 'packages': [
+            package('library', 'lib', True), package('integration', 'test', False),
+            package('disabled', 'lib', False), package('derive', 'proc-macro', True),
+            package('external', 'lib', True)]}
+        cases = [(False, ['integration', 'disabled'], []),
+                 (False, ['integration', 'library'], ['library']),
+                 (True, [], ['derive', 'library'])]
+        for full, selected, expected in cases:
+            with self.subTest(full=full, selected=selected), patch.object(pipeline, 'run', side_effect=[json.dumps(facts), 7]) as run:
+                self.assertEqual(pipeline.docs(self.plan | {'full': full, 'packages': selected}), 7 if expected else 0)
+                self.assertEqual(run.call_count, 2 if expected else 1)
+                if expected:
+                    self.assertEqual(run.call_args.args[0], ['cargo', 'test', '--doc', '--locked', '--all-features',
+                                                           *[a for name in expected for a in ('-p', name)], '--no-fail-fast'])
+        with patch.object(pipeline, 'run', return_value=json.dumps(facts)):
+            with self.assertRaisesRegex(ValueError, 'unknown workspace packages'):
+                pipeline.docs(self.plan | {'full': False, 'packages': ['missing']})
+        with patch.object(pipeline, 'run', side_effect=RuntimeError('metadata failed')):
+            with self.assertRaisesRegex(RuntimeError, 'metadata failed'):
+                pipeline.docs(self.plan)
+
+    def test_real_integration_only_doctests_skip_without_hiding_library_failures(self):
+        # A real Cargo workspace proves target classification, not a second hand-written inventory.
+        import subprocess
+        root = self.root / 'doctest-workspace'
+        root.mkdir()
+        (root / 'Cargo.toml').write_text('[workspace]\nresolver="2"\nmembers=["library","integration"]\n')
+        for name, source, content in [('library', 'src/lib.rs', '//! ```\n//! compile_error!("doctest must execute");\n//! ```\n'),
+                                      ('integration', 'tests/suite.rs', '#[test] fn test() {}')]:
+            directory = root / name
+            (directory / source).parent.mkdir(parents=True)
+            (directory / 'Cargo.toml').write_text(f'[package]\nname="{name}"\nversion="0.1.0"\nedition="2024"\n')
+            (directory / source).write_text(content)
+        subprocess.run(['cargo', 'generate-lockfile'], cwd=root, check=True, capture_output=True, timeout=30)
+        def invoke(command, *, capture=False):
+            result = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=60)
+            if capture:
+                result.check_returncode()
+                return result.stdout
+            return result.returncode
+        with patch.object(pipeline, 'run', invoke):
+            self.assertEqual(pipeline.docs(self.plan | {'full': False, 'packages': ['integration']}), 0)
+            self.assertNotEqual(pipeline.docs(self.plan | {'full': False, 'packages': ['integration', 'library']}), 0)
+            self.assertNotEqual(pipeline.docs(self.plan), 0)
+
     def test_empty_selection_skips_tests_and_docs(self):
         for part in ('tests', 'all', 'docs'):
             with self.subTest(part=part), ExitStack() as stack:
