@@ -535,7 +535,10 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
             window: q.window(),
             restore_until: ts(30)?,
         },
-        budget()?.max_points,
+        MaintenanceBudget {
+            rows: budget()?.max_points,
+            buckets: budget()?.max_points,
+        },
     )?;
     let other = MaintenanceRequest::new(
         id("plan")?,
@@ -544,7 +547,10 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
             window: q.window(),
             deletion_fence: id("fence")?,
         },
-        budget()?.max_points,
+        MaintenanceBudget {
+            rows: budget()?.max_points,
+            buckets: budget()?.max_points,
+        },
     )?;
     let cursor = Continuation::new(m.binding()?, rss_contract::PageCursor::parse("YQ")?);
     assert!(cursor.verify(other.binding()?).is_err());
@@ -557,7 +563,10 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
                 window: Interval::new(ts(1)?, ts(1)?)?,
                 restore_until: ts(30)?
             },
-            budget()?.max_points
+            MaintenanceBudget {
+                rows: budget()?.max_points,
+                buckets: budget()?.max_points
+            }
         )
         .is_err()
     );
@@ -635,7 +644,10 @@ fn every_admitted_observation_has_a_representable_query_upper_bound() -> TestRes
             window,
             restore_until: ts(i64::MAX)?,
         },
-        budget()?.max_points,
+        MaintenanceBudget {
+            rows: budget()?.max_points,
+            buckets: budget()?.max_points,
+        },
     )?;
     let mut rejected = last.input().clone();
     rejected.observed_at = ts(i64::MAX)?;

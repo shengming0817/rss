@@ -7,11 +7,10 @@ TLS/credentials, migrations, partitions and retention policy.
 
 ## Install and admit
 
-Execute `MIGRATION_SQL` once as a dedicated `NOLOGIN NOSUPERUSER NOBYPASSRLS` owner.
-Fresh installation runs `MIGRATION_SQL` (the ordered migration set). Existing V1
-installations run only `UPGRADE_V2_SQL`, with old writers drained, then reapply grants
-and admit the current adapter. The runtime accepts only V2; there is no dual reader.
-Producer V1 definition/sample/batch bytes and hashes remain unchanged.
+Install the current schema once as a dedicated `NOLOGIN NOSUPERUSER NOBYPASSRLS`
+owner. Only fresh installations are supported; no legacy schema, data import or
+upgrade entrypoint is retained. The installation profile and runtime profile must
+match exactly. Producers retain the existing typed definition/sample/batch format.
 No migration or repair runs inside `PgStore::new`.
 
 The owner explicitly calls `rss_timeseries.create_partition(lo, hi)` for each
@@ -37,7 +36,7 @@ REVOKE EXECUTE ON FUNCTION rss_timeseries.create_partition(bigint,bigint)
 Runtime can read and execute the restricted mutation functions, but cannot directly
 INSERT/UPDATE/DELETE/TRUNCATE or provision partitions. All tables, including children,
 force RLS. Functions fix their search path; PUBLIC has no component permissions.
-`PgStore::new(pool, clock, limits, cursor_key, deadline)` checks the PostgreSQL 16
+`PgStore::new(profile, pool, clock, limits, cursor_key, deadline)` checks the PostgreSQL 16
 catalog, effective reachable-role permissions, functions and child partition policies.
 DDL/role changes require drain and re-admission. Unknown schema or unsafe privileges
 fail closed; schema comments alone do not prove admission. The database engine,

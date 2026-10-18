@@ -20,7 +20,10 @@ pub(super) fn plan(
     Ok(MaintenanceRequest::new(
         id(name)?,
         action,
-        NonZeroU32::new(cap).ok_or(Error::InvalidInput)?,
+        MaintenanceBudget {
+            rows: NonZeroU32::new(cap).ok_or(Error::InvalidInput)?,
+            buckets: NonZeroU32::new(cap).ok_or(Error::InvalidInput)?,
+        },
     )?)
 }
 pub(super) async fn complete(store: &PgStore<Timer>, r: MaintenanceRequest) -> anyhow::Result<()> {
@@ -85,6 +88,7 @@ async fn durable_rollup_late_invalidation_and_resumable_fold() -> anyhow::Result
         MaintenanceProgress::More { .. }
     ));
     let fresh = PgStore::new(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
         f.pool.clone(),
         Timer,
         limits()?,

@@ -21,7 +21,7 @@ pub(crate) async fn validate(pool: &PgPool) -> Result<String, Error> {
     }
     let instance:String=sqlx::query_scalar("SELECT obj_description(oid,'pg_namespace') FROM pg_namespace WHERE nspname='rss_timeseries'")
         .fetch_one(&mut *tx).await.map_err(sql_error)?;
-    if !instance.starts_with("rss-timeseries-postgres:2:") || instance.len() != 62 {
+    if !instance.starts_with("rss-timeseries-postgres:3:") || instance.len() != 62 {
         return Err(Error::Invariant);
     }
     tx.rollback().await.map_err(sql_error)?;

@@ -89,6 +89,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         cursor_micros: NonZeroU64::new(60_000_000).ok_or(Error::InvalidInput)?,
     };
     let store = PgStore::new(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
         pool.clone(),
         Timer,
         limits.clone(),
@@ -134,6 +135,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         "batch did not replay"
     );
     let reopened = PgStore::new(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
         pool.clone(),
         Timer,
         limits,
@@ -193,7 +195,10 @@ async fn maintain(
         MaintenanceRequest::new(
             Id::new(id)?,
             action,
-            NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+            MaintenanceBudget {
+                rows: NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+                buckets: NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+            },
         )?,
     )?;
     let mut next = None;

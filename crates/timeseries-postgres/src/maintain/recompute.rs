@@ -28,8 +28,8 @@ pub(super) async fn step(
             spec.selection(),
             window,
             QueryBudget {
-                max_points: r.max_items(),
-                max_series: r.max_items(),
+                max_points: r.budget().rows,
+                max_series: r.budget().rows,
             },
             QueryMode::History,
         )?;
@@ -62,8 +62,8 @@ pub(super) async fn step(
         spec.selection(),
         window,
         QueryBudget {
-            max_points: r.max_items(),
-            max_series: r.max_items(),
+            max_points: r.budget().rows,
+            max_series: r.budget().rows,
         },
         QueryMode::History,
     )?;
@@ -103,11 +103,11 @@ pub(super) async fn step(
     let s = spec.stream();
     let last = fold.last.as_ref();
     let rows=sqlx::query("SELECT raw FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at >= $6 AND observed_at<$7 AND ($8::bigint IS NULL OR (observed_at,sequence,sample_id)>($8,$9::text::numeric,$10::text COLLATE \"C\")) AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at,sequence,sample_id LIMIT $11")
- .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(spec.series().digest()?.as_bytes().as_slice()).bind(bucket.start().micros()).bind(bucket.end().micros()).bind(last.map(|p|p.0.micros())).bind(last.map(|p|p.1.to_string())).bind(last.map(|p|p.2.as_str())).bind(i64::from(r.max_items().get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
-    let more = rows.len() > r.max_items().get() as usize;
+ .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(spec.series().digest()?.as_bytes().as_slice()).bind(bucket.start().micros()).bind(bucket.end().micros()).bind(last.map(|p|p.0.micros())).bind(last.map(|p|p.1.to_string())).bind(last.map(|p|p.2.as_str())).bind(i64::from(r.budget().rows.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
+    let more = rows.len() > r.budget().rows.get() as usize;
     let mut total = 0usize;
     let mut processed = 0;
-    for row in rows.into_iter().take(r.max_items().get() as usize) {
+    for row in rows.into_iter().take(r.budget().rows.get() as usize) {
         let raw: Vec<u8> = row.try_get("raw").map_err(sql_error)?;
         total = total.checked_add(raw.len()).ok_or(Error::BudgetExceeded)?;
         if total > limits.max_bytes.get() as usize {

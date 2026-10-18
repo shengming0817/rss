@@ -6,6 +6,8 @@ mod definition;
 mod lifecycle;
 mod maintain;
 mod probe;
+mod profile;
+pub use profile::StorageProfile;
 mod read;
 mod transaction;
 mod write;
@@ -17,13 +19,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 #[cfg(feature = "integration")]
 pub use transaction::Fault;
 /// External schema owner executes this once. Runtime construction never executes DDL.
-pub const MIGRATION_SQL: &str = concat!(
-    include_str!("../migrations/0001_create_timeseries.sql"),
-    "\n",
-    include_str!("../migrations/0002_add_lifecycle.sql")
-);
-/// One-way V1 upgrade, executed by the host with old writers drained.
-pub const UPGRADE_V2_SQL: &str = include_str!("../migrations/0002_add_lifecycle.sql");
+pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_install.sql");
 /// Positive host caps; request point/series budgets may be lower. Bytes bound encoded output,
 /// not exact process memory. A finite replay minimum is persisted on every new batch.
 #[derive(Clone, Debug)]
@@ -48,6 +44,7 @@ pub struct PgStore<C> {
 impl<C: Clock> PgStore<C> {
     /// Validate deployment before serving requests. Roles/DDL changes require drain and re-admission.
     pub async fn new(
+        profile: StorageProfile,
         pool: PgPool,
         clock: C,
         limits: Limits,
@@ -60,7 +57,7 @@ impl<C: Clock> PgStore<C> {
             return Err(Error::InvalidInput);
         }
         let remaining = deadline.remaining(clock.now()).ok_or(Error::Deadline)?;
-        let instance = tokio::time::timeout(remaining, probe::validate(&pool))
+        let instance = tokio::time::timeout(remaining, profile.validate(&pool))
             .await
             .map_err(|_| Error::Deadline)??;
         let guarantees = Guarantees {

@@ -125,12 +125,12 @@ pub(super) async fn step(
     .bind(json(selection)?)
     .bind(raw_limit)
     .bind(summaries_before.micros())
-    .bind(r.max_items().get() as i32)
+    .bind(r.budget().rows.get() as i32)
     .fetch_one(c)
     .await
     .map_err(sql_error)?;
     let count = u32::try_from(count).map_err(|_| Error::Invariant)?;
-    Ok(if count < r.max_items().get() {
+    Ok(if count < r.budget().rows.get() {
         Step::Done(count)
     } else {
         Step::More(count)
@@ -161,12 +161,12 @@ pub(super) async fn expire(
             .bind(s.source().as_str())
             .bind(s.generation().as_str())
             .bind(before.micros())
-            .bind(r.max_items().get() as i32)
+            .bind(r.budget().rows.get() as i32)
             .fetch_one(c)
             .await
             .map_err(sql_error)?;
     let count = u32::try_from(count).map_err(|_| Error::Invariant)?;
-    Ok(if count < r.max_items().get() {
+    Ok(if count < r.budget().rows.get() {
         Step::Done(count)
     } else {
         Step::More(count)
@@ -194,12 +194,12 @@ pub(super) async fn reclaim(
             .bind(s.scope().namespace().as_str())
             .bind(s.source().as_str())
             .bind(s.generation().as_str())
-            .bind(r.max_items().get() as i32)
+            .bind(r.budget().rows.get() as i32)
             .fetch_one(c)
             .await
             .map_err(sql_error)?;
     let count = u32::try_from(count).map_err(|_| Error::Invariant)?;
-    Ok(if count < r.max_items().get() {
+    Ok(if count < r.budget().rows.get() {
         Step::Done(count)
     } else {
         Step::More(count)

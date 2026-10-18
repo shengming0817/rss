@@ -148,7 +148,7 @@ impl<C: Clock> Maintainer for PgStore<C> {
         deadline: Deadline,
     ) -> Result<Outcome<MaintenanceProgress>, Error> {
         let r = request.request().clone();
-        if r.max_items() > self.limits.max_points {
+        if r.budget().rows > self.limits.max_points {
             return Err(Error::BudgetExceeded);
         }
         let key = self.key.clone();

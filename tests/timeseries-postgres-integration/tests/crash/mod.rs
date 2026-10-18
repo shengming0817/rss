@@ -38,6 +38,7 @@ async fn restart_after_real_process_interruption() -> anyhow::Result<()> {
         ready??;
         let b = batch(name, vec![sample(&d, name, 20, 1)?])?;
         let reopened = PgStore::new(
+            rss_timeseries_postgres::StorageProfile::PostgreSQL,
             f.pool.clone(),
             Timer,
             limits()?,
@@ -82,6 +83,7 @@ async fn child() -> anyhow::Result<()> {
         )
         .await?;
     let store = PgStore::new(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
         pool,
         Timer,
         limits()?,
