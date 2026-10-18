@@ -27,7 +27,7 @@ async fn restart_after_real_process_interruption() -> anyhow::Result<()> {
         let ready=tokio::time::timeout(Duration::from_secs(20),async {
             loop {
                 if child.try_wait()?.is_some() {anyhow::bail!("child exited before boundary");}
-                let staged:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE application_name='timeseries-crash' AND state='idle in transaction' AND query LIKE '%put_batch%')").fetch_one(&f.admin).await?;
+                let staged:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE application_name='timeseries-crash' AND state='idle in transaction' AND query LIKE 'SELECT digest,received_at,%FROM rss_timeseries.batches%')").fetch_one(&f.admin).await?;
                 if (committed && marker.exists()) || (!committed && staged) {break;}
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }

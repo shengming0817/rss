@@ -165,3 +165,61 @@ async fn lock_budget_and_retirement_race() -> anyhow::Result<()> {
     assert_eq!(f.count().await?, 0);
     Ok(())
 }
+
+struct ShiftClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+impl Clock for ShiftClock {
+    #[allow(clippy::disallowed_methods)] // reason: fixture independently advances the injected monotonic clock.
+    fn now(&self) -> Instant {
+        Instant::now() + Duration::from_secs(self.0.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+#[tokio::test]
+async fn injected_deadline_is_checked_before_commit() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-clock").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let offset = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let store = PgStore::new(
+        f.pool.clone(),
+        ShiftClock(offset.clone()),
+        limits()?,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    let mut c = f.admin.acquire().await?;
+    sqlx::raw_sql("BEGIN; SELECT 1 FROM rss_timeseries.definition_heads FOR UPDATE")
+        .execute(&mut *c)
+        .await?;
+    let mut spec = d.spec().clone();
+    spec.version = 2;
+    let request = Authorized::<DefinitionMutation>::verify(
+        &authority(TENANT)?,
+        DefinitionMutation::Register {
+            definition: Definition::new(spec)?,
+            expected_latest: Some(d.digest()?),
+        },
+    )?;
+    let cutoff = deadline()?;
+    let task = tokio::spawn(async move { store.change(&request, cutoff).await });
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock' AND query LIKE '%lock_key%')").fetch_one(&f.admin).await?;
+            if waiting {break;}
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_,anyhow::Error>(())
+    }).await??;
+    offset.store(60, std::sync::atomic::Ordering::SeqCst);
+    sqlx::raw_sql("COMMIT").execute(&mut *c).await?;
+    assert!(matches!(task.await??, Outcome::Unknown));
+    // Serialize behind cleanup to observe the durable definition head after connection quarantine.
+    sqlx::raw_sql("BEGIN; SELECT 1 FROM rss_timeseries.definition_heads FOR UPDATE; COMMIT")
+        .execute(&mut *c)
+        .await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_timeseries.definitions")
+        .fetch_one(&f.admin)
+        .await?;
+    assert_eq!(count, 1);
+    Ok(())
+}
