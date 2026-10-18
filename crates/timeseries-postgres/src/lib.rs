@@ -1,7 +1,10 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+mod aggregate;
 mod cursor;
 mod definition;
+mod lifecycle;
+mod maintain;
 mod probe;
 mod read;
 mod transaction;
@@ -14,7 +17,13 @@ use std::num::{NonZeroU32, NonZeroU64};
 #[cfg(feature = "integration")]
 pub use transaction::Fault;
 /// External schema owner executes this once. Runtime construction never executes DDL.
-pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_create_timeseries.sql");
+pub const MIGRATION_SQL: &str = concat!(
+    include_str!("../migrations/0001_create_timeseries.sql"),
+    "\n",
+    include_str!("../migrations/0002_add_lifecycle.sql")
+);
+/// One-way V1 upgrade, executed by the host with old writers drained.
+pub const UPGRADE_V2_SQL: &str = include_str!("../migrations/0002_add_lifecycle.sql");
 /// Positive host caps; request point/series budgets may be lower. Bytes bound encoded output,
 /// not exact process memory. A finite replay minimum is persisted on every new batch.
 #[derive(Clone, Debug)]

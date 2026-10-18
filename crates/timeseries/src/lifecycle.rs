@@ -35,7 +35,10 @@ pub enum MaintenanceAction {
         selection: Selection,
         raw_before: Timestamp,
         summaries_before: Timestamp,
-        receipts_before: Timestamp,
+    },
+    ExpireReceipts {
+        stream: Stream,
+        before: Timestamp,
     },
     Delete {
         selection: Selection,
@@ -63,7 +66,9 @@ impl MaintenanceAction {
             | Self::Prune { selection, .. }
             | Self::Delete { selection, .. }
             | Self::Restore { selection, .. } => selection.scope(),
-            Self::CloseStream { stream } | Self::Reclaim { stream } => stream.scope(),
+            Self::CloseStream { stream }
+            | Self::Reclaim { stream }
+            | Self::ExpireReceipts { stream, .. } => stream.scope(),
         }
     }
     fn validate(&self) -> Result<(), Error> {
@@ -83,7 +88,7 @@ impl MaintenanceAction {
             }
             Self::AdvanceCutoff { selection, .. } => selection.validate(),
             Self::Prune { selection, .. } => selection.validate(),
-            Self::CloseStream { .. } | Self::Reclaim { .. } => Ok(()),
+            Self::CloseStream { .. } | Self::Reclaim { .. } | Self::ExpireReceipts { .. } => Ok(()),
         }
     }
 }

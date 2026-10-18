@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 mod aggregate;
-mod lifecycle;
 mod definition;
+mod lifecycle;
 pub use aggregate::*;
 pub use lifecycle::*;
 mod model;

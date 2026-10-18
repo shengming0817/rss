@@ -152,62 +152,58 @@ fn state_value(s: &Sample) -> Option<StateValue> {
         _ => None,
     }
 }
-pub(super) fn state(
+pub(super) fn state_piece(
     spec: &SummarySpec,
     window: Interval,
-    samples: &[Sample],
-) -> Result<(Vec<StateSegment>, Vec<Transition>), Error> {
-    let ordered = points(samples);
-    let mut segments = Vec::new();
-    let mut transitions = Vec::new();
-    for (idx, s) in ordered.iter().enumerate() {
-        let Some(value) = state_value(s) else {
-            continue;
-        };
-        let at = s.input().observed_at;
-        if at >= window.end() {
-            break;
-        }
-        if let Some(prev) = idx.checked_sub(1).and_then(|i| ordered.get(i))
-            && inside(at, window)
-            && let Some(from) = state_value(prev)
-        {
-            let continuous = match spec.coverage() {
-                CoveragePolicy::ObservedOnly => true,
-                CoveragePolicy::HoldLast(n) => {
-                    (at.micros() - prev.input().observed_at.micros()) as u64 <= n.get()
-                }
-            };
-            if continuous && from != value {
-                transitions.push(Transition {
-                    at,
-                    from,
-                    to: value.clone(),
-                });
+    previous: Option<&Sample>,
+    s: &Sample,
+    next: Option<&Sample>,
+) -> Result<(Option<StateSegment>, Option<Transition>), Error> {
+    let Some(value) = state_value(s) else {
+        return Ok((None, None));
+    };
+    let at = s.input().observed_at;
+    if at >= window.end() {
+        return Ok((None, None));
+    }
+    let mut transition = None;
+    if let Some(prev) = previous
+        && inside(at, window)
+        && let Some(from) = state_value(prev)
+    {
+        let continuous = match spec.coverage() {
+            CoveragePolicy::ObservedOnly => true,
+            CoveragePolicy::HoldLast(n) => {
+                (at.micros() - prev.input().observed_at.micros()) as u64 <= n.get()
             }
-        }
-        let end = match spec.coverage() {
-            CoveragePolicy::ObservedOnly => at,
-            CoveragePolicy::HoldLast(n) => Timestamp::new(
-                at.micros()
-                    .saturating_add(i64::try_from(n.get()).unwrap_or(i64::MAX)),
-            )?
-            .min(
-                ordered
-                    .get(idx + 1)
-                    .map_or(window.end(), |s| s.input().observed_at),
-            )
-            .min(window.end()),
         };
-        let start = at.max(window.start());
-        if end >= start {
-            segments.push(StateSegment {
-                value,
-                window: Interval::new(start, end)?,
+        if continuous && from != value {
+            transition = Some(Transition {
+                at,
+                from,
+                to: value.clone(),
             });
         }
     }
-    Ok((segments, transitions))
+    let end = match spec.coverage() {
+        CoveragePolicy::ObservedOnly => at,
+        CoveragePolicy::HoldLast(n) => Timestamp::new(
+            at.micros()
+                .saturating_add(i64::try_from(n.get()).unwrap_or(i64::MAX)),
+        )?
+        .min(next.map_or(window.end(), |s| s.input().observed_at))
+        .min(window.end()),
+    };
+    let start = at.max(window.start());
+    let segment = if end >= start {
+        Some(StateSegment {
+            value,
+            window: Interval::new(start, end)?,
+        })
+    } else {
+        None
+    };
+    Ok((segment, transition))
 }
 pub(super) fn project_state(
     segments: &[StateSegment],

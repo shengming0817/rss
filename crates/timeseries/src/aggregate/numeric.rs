@@ -63,7 +63,7 @@ impl Numeric {
         }
         Ok(())
     }
-    fn add(&mut self, n: Number) -> Result<(), Error> {
+    pub(super) fn add(&mut self, n: Number) -> Result<(), Error> {
         self.sum = self.sum.checked_add(as_sum(n))?;
         self.count = self.count.checked_add(1).ok_or(Error::NumericRange)?;
         self.extrema(n)

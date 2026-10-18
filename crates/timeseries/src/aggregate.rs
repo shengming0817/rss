@@ -166,47 +166,11 @@ impl Summary {
             }
             previous = Some(key);
         }
-        let mut defects = BTreeSet::new();
-        let valid = samples
-            .iter()
-            .filter(|s| {
-                inside(s.input().observed_at, window)
-                    && matches!(s.input().reading, Reading::Valid(_))
-            })
-            .count() as u64;
-        if samples.iter().any(|s| {
-            inside(s.input().observed_at, window) && !matches!(s.input().reading, Reading::Valid(_))
-        }) {
-            defects.insert(Completeness::Gaps);
+        let mut builder = SummaryBuilder::new(spec.clone(), window)?;
+        for sample in samples {
+            builder.push(sample.clone(), max_items)?;
         }
-        let data = match spec.series().definition().spec().metric {
-            Metric::Gauge { number } => {
-                Statistics::Numeric(numeric::Numeric::compute(number, window, samples)?)
-            }
-            Metric::Counter {
-                number,
-                temporality,
-            } => Statistics::Counter {
-                kind: number,
-                contributions: ordered::counter(spec, window, samples, temporality, &mut defects)?,
-            },
-            Metric::Bool | Metric::State { .. } => {
-                let (segments, transitions) = ordered::state(spec, window, samples)?;
-                Statistics::State {
-                    segments,
-                    transitions,
-                }
-            }
-        };
-        let result = Self {
-            window,
-            semantics: spec.semantics()?,
-            valid,
-            defects,
-            data,
-        };
-        result.check_size(max_items)?;
-        Ok(result)
+        builder.finish(max_items)
     }
     fn check_size(&self, max: usize) -> Result<(), Error> {
         let n = match &self.data {
@@ -297,4 +261,162 @@ impl Summary {
 }
 fn inside(at: Timestamp, w: Interval) -> bool {
     at >= w.start() && at < w.end()
+}
+
+/// Resumable bounded fold. Only two source observations are retained as boundary
+/// anchors; Gauge accumulation is constant-space regardless of input count.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SummaryBuilder {
+    spec: SummarySpec,
+    summary: Summary,
+    previous: Option<Sample>,
+    pending: Option<Sample>,
+}
+impl SummaryBuilder {
+    pub fn new(spec: SummarySpec, window: Interval) -> Result<Self, Error> {
+        spec.validate()?;
+        if window.width_micros() == 0 {
+            return Err(Error::InvalidInput);
+        }
+        let data = match spec.series().definition().spec().metric {
+            Metric::Gauge { number } => {
+                Statistics::Numeric(numeric::Numeric::compute(number, window, &[])?)
+            }
+            Metric::Counter { number, .. } => Statistics::Counter {
+                kind: number,
+                contributions: Vec::new(),
+            },
+            Metric::Bool | Metric::State { .. } => Statistics::State {
+                segments: Vec::new(),
+                transitions: Vec::new(),
+            },
+        };
+        let summary = Summary {
+            window,
+            semantics: spec.semantics()?,
+            valid: 0,
+            defects: BTreeSet::new(),
+            data,
+        };
+        Ok(Self {
+            spec,
+            summary,
+            previous: None,
+            pending: None,
+        })
+    }
+    pub fn push(&mut self, sample: Sample, max_items: usize) -> Result<(), Error> {
+        if !self.spec.selection().matches(&sample) {
+            return Err(Error::InvalidInput);
+        }
+        if let Some(p) = &self.pending {
+            if !sample.latest_cmp(p)?.is_gt() {
+                return Err(Error::Conflict);
+            }
+            let ordered = matches!(
+                self.spec.series().definition().spec().metric,
+                Metric::Counter {
+                    temporality: Temporality::Cumulative,
+                    ..
+                } | Metric::Bool
+                    | Metric::State { .. }
+            );
+            if ordered && p.input().observed_at == sample.input().observed_at {
+                self.pending = Some(sample);
+                return Ok(());
+            }
+        }
+        self.flush(Some(&sample))?;
+        self.pending = Some(sample);
+        self.summary.check_size(max_items)
+    }
+    fn flush(&mut self, next: Option<&Sample>) -> Result<(), Error> {
+        let Some(p) = self.pending.take() else {
+            return Ok(());
+        };
+        let w = self.summary.window;
+        let at = p.input().observed_at;
+        if inside(at, w) {
+            if matches!(p.input().reading, Reading::Valid(_)) {
+                self.summary.valid = self
+                    .summary
+                    .valid
+                    .checked_add(1)
+                    .ok_or(Error::NumericRange)?;
+            } else {
+                self.summary.defects.insert(Completeness::Gaps);
+            }
+        }
+        match &mut self.summary.data {
+            Statistics::Numeric(n) => {
+                if inside(at, w)
+                    && let Reading::Valid(Value::Number(v)) = p.input().reading
+                {
+                    n.add(v)?;
+                }
+            }
+            Statistics::Counter { contributions, .. } => {
+                if inside(at, w) {
+                    let mut input = Vec::new();
+                    if let Some(prev) = &self.previous {
+                        input.push(prev.clone());
+                    }
+                    input.push(p.clone());
+                    let Metric::Counter { temporality, .. } =
+                        self.spec.series().definition().spec().metric
+                    else {
+                        return Err(Error::Invariant);
+                    };
+                    let only = if temporality == Temporality::Delta {
+                        &input[input.len() - 1..]
+                    } else {
+                        input.as_slice()
+                    };
+                    contributions.extend(ordered::counter(
+                        &self.spec,
+                        w,
+                        only,
+                        temporality,
+                        &mut self.summary.defects,
+                    )?);
+                }
+            }
+            Statistics::State {
+                segments,
+                transitions,
+            } => {
+                let (segment, transition) =
+                    ordered::state_piece(&self.spec, w, self.previous.as_ref(), &p, next)?;
+                if let Some(s) = segment {
+                    segments.push(s);
+                }
+                if let Some(t) = transition {
+                    transitions.push(t);
+                }
+            }
+        }
+        self.previous = Some(p);
+        Ok(())
+    }
+    /// Explicit unavailable time cuts temporal continuity without inventing a producer sample.
+    pub fn interrupt(&mut self, at: Timestamp) -> Result<(), Error> {
+        let full = self.summary.window;
+        self.summary.window = Interval::new(full.start(), at.max(full.start()).min(full.end()))?;
+        self.flush(None)?;
+        self.summary.window = full;
+        self.previous = None;
+        self.summary.defects.insert(Completeness::Gaps);
+        Ok(())
+    }
+    pub fn last_observed_at(&self) -> Option<Timestamp> {
+        self.pending
+            .as_ref()
+            .or(self.previous.as_ref())
+            .map(|s| s.input().observed_at)
+    }
+    pub fn finish(mut self, max_items: usize) -> Result<Summary, Error> {
+        self.flush(None)?;
+        self.summary.check_size(max_items)?;
+        Ok(self.summary)
+    }
 }
