@@ -10,6 +10,7 @@ default-run = "rss-examples"
 workspace = true
 
 [features]
+timeseries-core = ["dep:rss-timeseries", "dep:rss-request-context"]
 webhook = ["execution-pg", "core", "rss-transactional-messaging/producer", "dep:rss-transactional-messaging-webhook", "dep:rss-transactional-messaging-postgres", "dep:rss-transactional-messaging-runtime", "rss-transactional-messaging-runtime/producer", "dep:rss-contract", "dep:ipnet"]
 default = []
 diagnostic = ["dep:rss-diag-context"]
@@ -61,6 +62,7 @@ recovery-archive = ["recovery-pg", "recovery-s3"]
 recovery-managed = ["recovery-archive", "rss-transactional-messaging-postgres/rss-runtime"]
 
 [dependencies]
+rss-timeseries = { workspace = true, optional = true }
 rss-transactional-messaging-webhook = { workspace = true, optional = true }
 ipnet = { workspace = true, optional = true }
 anyhow.workspace = true
@@ -186,3 +188,8 @@ required-features = ["recovery-archive"]
 name = "webhook"
 path = "src/bin/webhook.rs"
 required-features = ["webhook"]
+
+[[bin]]
+name = "timeseries"
+path = "src/bin/timeseries.rs"
+required-features = ["timeseries-core"]

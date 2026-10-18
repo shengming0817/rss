@@ -1,4 +1,4 @@
-"""The five consumer entrances must reject relabelled/unsafe Cargo archives."""
+"""The consumer entrances must reject relabelled/unsafe Cargo archives."""
 
 import hashlib
 import importlib.util
@@ -18,7 +18,7 @@ sys.path.insert(0, str(HACK))
 import package_proof
 
 REVISION = "a" * 40
-ENTRIES = ("axum", "mqtt", "ledger", "observation", "recovery")
+ENTRIES = ("axum", "mqtt", "ledger", "observation", "recovery", "timeseries")
 
 
 def bundle(root, *, sha=REVISION, dirty=False, extra=None):
