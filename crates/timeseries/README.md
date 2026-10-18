@@ -11,7 +11,9 @@ Gauge supports i64/u64/finite f64; Counter supports the same numeric representat
 with nonnegative values and explicit cumulative/delta intervals. Boolean and finite
 state values are not numbers. Missing and Failed readings are not zero/false.
 Timestamps are nonnegative signed-64-bit Unix microseconds; sub-microsecond conversion
-fails rather than truncating. Negative float zero normalizes to positive zero.
+fails rather than truncating. Observations stop at `i64::MAX - 1` microseconds;
+`i64::MAX` remains available as the exclusive query/maintenance upper bound, so
+every admitted observation can be read. Negative float zero normalizes to positive zero.
 
 A definition pins tenant/namespace/key/version, unit, metric kind and dimension
 rules. Same version/content is replay; changed content conflicts. A newer version

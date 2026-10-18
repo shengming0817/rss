@@ -596,3 +596,37 @@ fn finite_float_roundtrip_keeps_exact_bits() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn every_admitted_observation_has_a_representable_query_upper_bound() -> TestResult {
+    let last = gauge(i64::MAX - 1)?;
+    let window = Interval::new(ts(i64::MAX - 1)?, ts(i64::MAX)?)?;
+    let selection = Selection::Exact {
+        stream: stream()?,
+        series: last.input().series.clone(),
+    };
+    for mode in [QueryMode::History, QueryMode::Latest] {
+        let q = Query::new(selection.clone(), window, budget()?, mode)?;
+        assert!(q.matches(&last));
+        q.validate_page(&[ObservedSample {
+            sample: last.clone(),
+            received_at: ts(i64::MAX)?,
+        }])?;
+    }
+    MaintenanceRequest::new(
+        id("boundary-cleanup")?,
+        selection,
+        window,
+        MaintenanceAction::Delete,
+        budget()?.max_points,
+    )?;
+    let mut rejected = last.input().clone();
+    rejected.observed_at = ts(i64::MAX)?;
+    rejected.interval = Some(Interval::new(ts(0)?, ts(i64::MAX)?)?);
+    assert_eq!(Sample::new(rejected.clone()), Err(Error::NumericRange));
+    assert!(serde_json::from_slice::<Sample>(&serde_json::to_vec(&rejected)?).is_err());
+    let encoded = String::from_utf8(batch(vec![last])?.encode()?)?;
+    let malformed = encoded.replace("9223372036854775806", "9223372036854775807");
+    assert!(Batch::decode(malformed.as_bytes()).is_err());
+    Ok(())
+}

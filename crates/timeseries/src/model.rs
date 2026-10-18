@@ -148,6 +148,10 @@ impl From<Sample> for SampleInput {
 }
 impl Sample {
     pub fn new(input: SampleInput) -> Result<Self, Error> {
+        // Reserve the largest timestamp as an exclusive query/maintenance bound.
+        if input.observed_at.micros() == i64::MAX {
+            return Err(Error::NumericRange);
+        }
         if input.stream.scope() != &input.series.definition().spec().scope {
             return Err(Error::InvalidInput);
         }
