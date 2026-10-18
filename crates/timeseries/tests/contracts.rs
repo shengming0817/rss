@@ -113,6 +113,11 @@ fn values_preserve_precision_and_reject_invalid_construction_and_decode() -> Tes
     assert!(
         serde_json::from_str::<Number>(r#"{"type":"u64","value":18446744073709551616}"#).is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn numeric_extremes_roundtrip_without_coercion() -> TestResult {
     for number in [
         Number::I64(i64::MIN),
         Number::I64(i64::MAX),
@@ -314,6 +319,16 @@ fn stable_identity_and_batch_order_cover_cross_batch_conflicts() -> TestResult {
     assert!(batch(Vec::new()).is_err());
     assert!(batch(vec![a.clone(); Batch::MAX_SAMPLES + 1]).is_err());
     assert!(Batch::decode(&vec![b' '; Batch::MAX_BYTES + 1]).is_err());
+    Ok(())
+}
+
+#[test]
+fn cross_batch_replay_and_stream_isolation() -> TestResult {
+    let a = gauge(1)?;
+    let first = batch(vec![a.clone()])?;
+    let mut input = a.input().clone();
+    input.id = id("sample-2")?;
+    let b = Sample::new(input.clone())?;
     let other_batch = Batch::new(stream()?, id("batch-2")?, vec![a.clone()])?;
     assert_eq!(first.compare(&other_batch)?, IdentityMatch::Distinct);
     assert_eq!(other_batch.samples()[0].compare(&a)?, IdentityMatch::Replay);
