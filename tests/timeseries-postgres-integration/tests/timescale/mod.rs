@@ -278,7 +278,104 @@ async fn native_missing_extension_and_capability_drift_rejected() -> anyhow::Res
         .is_err()
     );
     let g = Fixture::on_profile("ts-native-drift", dedicated()?).await?;
+    sqlx::raw_sql("DO $$ DECLARE r record; BEGIN FOR r IN SELECT materialization_hypertable_schema AS s,materialization_hypertable_name AS n FROM timescaledb_information.continuous_aggregates WHERE view_schema='rss_timeseries' LOOP EXECUTE format('GRANT UPDATE ON %I.%I TO ts_runtime',r.s,r.n); END LOOP; END $$").execute(&g.admin).await?;
+    assert!(reopen(&g).await.is_err());
+    sqlx::raw_sql("DO $$ DECLARE r record; BEGIN FOR r IN SELECT materialization_hypertable_schema AS s,materialization_hypertable_name AS n FROM timescaledb_information.continuous_aggregates WHERE view_schema='rss_timeseries' LOOP EXECUTE format('REVOKE UPDATE ON %I.%I FROM ts_runtime',r.s,r.n); END LOOP; END $$").execute(&g.admin).await?;
+    reopen(&g).await?;
     sqlx::raw_sql("SET ROLE ts_owner; ALTER MATERIALIZED VIEW rss_timeseries.gauge_10 SET (timescaledb.materialized_only=false); RESET ROLE").execute(&g.admin).await?;
     assert!(reopen(&g).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_call_commit_before_publication_and_cleanup_rollback_recover() -> anyhow::Result<()>
+{
+    let f = Fixture::on_profile("ts-native-publish-fault", dedicated()?).await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    f.write(&batch("one", vec![sample(&d, "one", 1, 11)?])?)
+        .await?;
+    let r = plan(
+        "refresh",
+        MaintenanceAction::Recompute {
+            spec: spec(&d, 10)?,
+            window: window(0, 10)?,
+        },
+        1,
+    )?;
+    let auth = Authorized::<MaintenanceRequest>::verify(&authority(TENANT)?, r.clone())?;
+    for _ in 0..2 {
+        assert!(matches!(
+            confirmed(f.store.step(&auth, None, deadline()?).await?)?,
+            MaintenanceProgress::More { .. }
+        ));
+    }
+    f.store.inject_next_fault(Fault::BeforeCommit);
+    assert_eq!(
+        f.store.step(&auth, None, deadline()?).await.err(),
+        Some(Error::Unavailable)
+    );
+    let native: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_timeseries.gauge_10")
+        .fetch_one(&f.admin)
+        .await?;
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_timeseries.summaries")
+        .fetch_one(&f.admin)
+        .await?;
+    assert_eq!((native, published), (1, 0));
+    let fresh = reopen(&f).await?;
+    complete(&fresh, r).await?;
+    assert!(matches!(
+        aggregate(&fresh, spec(&d, 10)?, 0, 10).await?.buckets[0].value,
+        AggregateValue::Mean {
+            sum: Sum::U128(11),
+            ..
+        }
+    ));
+    let selection = spec(&d, 10)?.selection();
+    complete(
+        &fresh,
+        plan(
+            "cut",
+            MaintenanceAction::AdvanceCutoff {
+                selection: selection.clone(),
+                before: Timestamp::new(10)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    let prune = plan(
+        "prune",
+        MaintenanceAction::Prune {
+            selection,
+            raw_before: Timestamp::new(10)?,
+            summaries_before: Timestamp::new(0)?,
+        },
+        1,
+    )?;
+    let auth = Authorized::<MaintenanceRequest>::verify(&authority(TENANT)?, prune.clone())?;
+    for _ in 0..2 {
+        assert!(matches!(
+            confirmed(fresh.step(&auth, None, deadline()?).await?)?,
+            MaintenanceProgress::More { .. }
+        ));
+    }
+    fresh.inject_next_fault(Fault::BeforeCommit);
+    assert_eq!(
+        fresh.step(&auth, None, deadline()?).await.err(),
+        Some(Error::Unavailable)
+    );
+    let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_timeseries.gauge_10")
+        .fetch_one(&f.admin)
+        .await?;
+    assert_eq!(cached, 0);
+    complete(&reopen(&f).await?, prune).await?;
+    assert!(matches!(
+        aggregate(&fresh, spec(&d, 10)?, 0, 10).await?.buckets[0].value,
+        AggregateValue::Mean {
+            sum: Sum::U128(11),
+            ..
+        }
+    ));
     Ok(())
 }

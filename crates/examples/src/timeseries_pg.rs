@@ -211,7 +211,15 @@ pub(crate) async fn run_on(
         result.rows.len() == 1 && result.rows[0].sample == sample && result.next.is_none(),
         "query failed exact value preservation"
     );
-    lifecycle(&reopened, &operator, &sample, &receipt).await?;
+    lifecycle(
+        &reopened,
+        &operator,
+        &sample,
+        &receipt,
+        &pool,
+        maintenance.is_some(),
+    )
+    .await?;
     store.close(budget()?).await?;
     Ok(())
 }
@@ -251,6 +259,8 @@ async fn lifecycle(
     operator: &Operator,
     sample: &Sample,
     receipt: &Receipt,
+    pool: &sqlx::PgPool,
+    native: bool,
 ) -> anyhow::Result<()> {
     let spec = SummarySpec::new(
         sample.input().stream.clone(),
@@ -270,6 +280,16 @@ async fn lifecycle(
         },
     )
     .await?;
+    if native {
+        let total: String =
+            sqlx::query_scalar("SELECT total::text FROM rss_timeseries.gauge_100 WHERE bucket=100")
+                .fetch_one(pool)
+                .await?;
+        anyhow::ensure!(
+            total == u64::MAX.to_string(),
+            "native materialization did not preserve the exact sample"
+        );
+    }
     maintain(
         reopened,
         operator,

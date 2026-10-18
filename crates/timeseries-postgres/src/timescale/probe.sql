@@ -1,14 +1,26 @@
-WITH reachable AS (
+WITH RECURSIVE reachable AS (
  SELECT * FROM pg_roles WHERE rolname=current_user OR pg_has_role(current_user,oid,'SET')
 ), relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='rss_timeseries' AND c.relkind IN ('r','p','v','m','f')
 ), funcs AS (
  SELECT p.* FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='rss_timeseries'
+), owned_hypertables AS (
+ SELECT h.id,h.compressed_hypertable_id FROM _timescaledb_catalog.hypertable h
+ WHERE (h.schema_name='rss_timeseries' AND h.table_name='samples')
+ OR EXISTS(SELECT FROM timescaledb_information.continuous_aggregates a WHERE a.view_schema='rss_timeseries' AND h.schema_name=a.materialization_hypertable_schema AND h.table_name=a.materialization_hypertable_name)
+ UNION
+ SELECT h.id,h.compressed_hypertable_id FROM _timescaledb_catalog.hypertable h JOIN owned_hypertables o ON h.id=o.compressed_hypertable_id
+), physical AS (
+ SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE EXISTS(SELECT FROM _timescaledb_catalog.hypertable h JOIN owned_hypertables o ON o.id=h.id WHERE h.schema_name=n.nspname AND h.table_name=c.relname)
+ OR EXISTS(SELECT FROM _timescaledb_catalog.chunk h JOIN owned_hypertables o ON o.id=h.hypertable_id WHERE NOT h.dropped AND h.schema_name=n.nspname AND h.table_name=c.relname)
 ), acl AS (
  SELECT a.grantee,a.is_grantable FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a WHERE n.nspname='rss_timeseries'
  UNION ALL SELECT a.grantee,a.is_grantable FROM relations c CROSS JOIN LATERAL aclexplode(c.relacl) a
  UNION ALL SELECT a.grantee,a.is_grantable FROM relations c JOIN pg_attribute p ON p.attrelid=c.oid CROSS JOIN LATERAL aclexplode(p.attacl) a
+ UNION ALL SELECT a.grantee,a.is_grantable FROM physical c CROSS JOIN LATERAL aclexplode(c.relacl) a
+ UNION ALL SELECT a.grantee,a.is_grantable FROM physical c JOIN pg_attribute p ON p.attrelid=c.oid CROSS JOIN LATERAL aclexplode(p.attacl) a
  UNION ALL SELECT a.grantee,a.is_grantable FROM funcs p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
 )
 SELECT session_user=current_user
@@ -43,3 +55,5 @@ SELECT session_user=current_user
 
  AND (SELECT bool_and(compression_enabled=$1) FROM timescaledb_information.hypertables WHERE hypertable_schema='rss_timeseries' AND hypertable_name='samples')
  AND (NOT $1 OR EXISTS(SELECT FROM timescaledb_information.hypertable_columnstore_settings WHERE hypertable='rss_timeseries.samples'::regclass AND segmentby='tenant_id,namespace,source,generation,series_digest' AND orderby='observed_at,sequence,sample_id' AND compress_interval_length IS NULL))
+
+ AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN physical c WHERE c.relowner=r.oid OR has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES'))

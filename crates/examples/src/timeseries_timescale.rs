@@ -26,7 +26,7 @@ fn profile(input: &Input) -> anyhow::Result<StorageProfile> {
             StorageProfile::TimescaleDedicatedTenant(DedicatedTenant::new(
                 TenantId::parse(&input.common.pg.tenant)?,
                 chunk,
-                &[NonZeroU64::new(10).ok_or_else(|| anyhow::anyhow!("resolution"))?],
+                &[NonZeroU64::new(100).ok_or_else(|| anyhow::anyhow!("resolution"))?],
             )?)
         }
     })
