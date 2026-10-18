@@ -201,3 +201,11 @@ revision, package versions, archive digests and actual results.
 The `webhook-integration` fixture owns PG, HTTPS and independent receipt/signature assertions.
 Run `python3 hack/webhook-package-proof.py --source` or supply `--artifacts <bundle> --revision <SHA>`
 for the same independent consumer. Fixture credentials travel over stdin, not process arguments.
+
+## 时序核心
+
+`cargo run --locked -p rss-examples --features timeseries-core --bin timeseries`
+运行自定义累计计数器场景，断言完整 u64 精度、固定批次重放、跨批样本去重、
+内容冲突及定义退休。此场景不模拟数据库持久化；独立源码和候选包消费复用同一源码：
+`python3 hack/timeseries-package-proof.py --source`，或
+`python3 hack/timeseries-package-proof.py --artifacts <bundle> --revision <sha>`。

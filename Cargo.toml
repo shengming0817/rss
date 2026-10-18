@@ -3,6 +3,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/timeseries",
   "tests/webhook-integration",
   "crates/transactional-messaging-webhook",
   "crates/examples",
@@ -56,6 +57,7 @@ members = [
 # #2315: maintainer confirmed no published or external frozen Rust API commitments.
 compatibility-adoption = { baseline-rev = "fde9829ab01be3839465c18a7f04de10e152ab00", issue = 2315 }
 packages = [
+  { package = "rss-timeseries", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2809 } },
   { package = "rss-transactional-messaging-webhook", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2804 } },
   { package = "rss-ledger", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2312 } },
   { package = "rss-ledger-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2312 } },
@@ -100,6 +102,7 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-timeseries = { path = "crates/timeseries", version = "0.1.0" }
 rss-transactional-messaging-webhook = { path = "crates/transactional-messaging-webhook", version = "0.1.0" }
 ipnet = "2"
 rss-axum = { path = "crates/axum", version = "0.1.0", default-features = false }
