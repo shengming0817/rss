@@ -61,6 +61,13 @@ LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeserie
  AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? (j#>>'{series,definition,key}'))
  ELSE false END
 $$;
+CREATE FUNCTION rss_timeseries.overlaps(a jsonb,b jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
+ SELECT CASE WHEN a->>'selection'='exact' THEN rss_timeseries.matches(b,a)
+ WHEN b->>'selection'='exact' THEN rss_timeseries.matches(a,b)
+ ELSE a->'scope'=b->'scope' AND a->>'subject'=b->>'subject' AND a->>'resource'=b->>'resource'
+ AND (jsonb_array_length(a->'keys')=0 OR jsonb_array_length(b->'keys')=0 OR (a->'keys') ?| ARRAY(SELECT jsonb_array_elements_text(b->'keys'))) END
+$$;
 CREATE FUNCTION rss_timeseries.visible(j jsonb,at_time bigint) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
  SELECT NOT EXISTS(SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=(j#>>'{stream,scope,tenant}')::uuid AND f.namespace=j#>>'{stream,scope,namespace}'
@@ -71,7 +78,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  PERFORM rss_timeseries.lock_namespace(t,n);
  UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
  UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND hi>lo_time
- AND lo::numeric < hi_time::numeric + coalesce((convert_from(spec,'UTF8')::jsonb->>'maxGap')::numeric,(convert_from(spec,'UTF8')::jsonb#>>'{coverage,maxHoldMicros}')::numeric,0)
+ AND ((convert_from(spec,'UTF8')::jsonb#>>'{series,definition,metric,kind}' IN ('bool','state') AND convert_from(spec,'UTF8')::jsonb#>>'{coverage,coverage}'='observedOnly') OR lo::numeric < hi_time::numeric + coalesce((convert_from(spec,'UTF8')::jsonb->>'maxGap')::numeric,(convert_from(spec,'UTF8')::jsonb#>>'{coverage,maxHoldMicros}')::numeric,0))
  AND rss_timeseries.matches(sel,convert_from(spec,'UTF8')::jsonb);
 END $$;
 CREATE FUNCTION rss_timeseries.put_plan(t uuid,n text,i text,b bytea,s bytea,d boolean) RETURNS void
@@ -84,7 +91,10 @@ CREATE FUNCTION rss_timeseries.put_fence(t uuid,n text,i text,k text,sel jsonb,l
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
  IF EXISTS(SELECT FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND id=i) THEN RAISE EXCEPTION USING ERRCODE='TS001',MESSAGE='fence conflict'; END IF;
- IF k='cutoff' THEN DELETE FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind=k AND selection=sel; END IF;
+ IF k IN ('cutoff','pruned') THEN
+  SELECT greatest(h,coalesce(max(hi),h)) INTO h FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind=k AND selection=sel;
+  DELETE FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind=k AND selection=sel;
+ END IF;
  INSERT INTO rss_timeseries.fences VALUES(t,n,i,k,sel,l,h,u,false);
  IF k='delete' THEN PERFORM rss_timeseries.invalidate(t,n,sel,l,h); END IF;
 END $$;
@@ -147,6 +157,9 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  GET DIAGNOSTICS changed=ROW_COUNT; total:=total+changed;
  DELETE FROM rss_timeseries.summaries WHERE (tenant_id,namespace,spec_digest,lo) IN
  (SELECT tenant_id,namespace,spec_digest,lo FROM rss_timeseries.summaries WHERE tenant_id=t AND namespace=n AND hi<=s AND rss_timeseries.matches(sel,convert_from(spec,'UTF8')::jsonb) ORDER BY lo,spec_digest LIMIT greatest(cap-total,0));
+ GET DIAGNOSTICS changed=ROW_COUNT; total:=total+changed;
+ DELETE FROM rss_timeseries.fences WHERE (tenant_id,namespace,id) IN
+ (SELECT tenant_id,namespace,id FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind='delete' AND selection=sel AND hi<=r AND (restored OR restore_until<=floor(extract(epoch FROM clock_timestamp())*1000000)::bigint) ORDER BY id LIMIT greatest(cap-total,0));
  GET DIAGNOSTICS changed=ROW_COUNT; total:=total+changed;
  RETURN total;
 END $$;

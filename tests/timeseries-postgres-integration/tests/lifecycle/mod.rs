@@ -456,6 +456,24 @@ async fn restore_and_receipt_guarantees_block_physical_cleanup() -> anyhow::Resu
 #[tokio::test]
 async fn v1_upgrade_requires_current_schema_and_protects_new_objects() -> anyhow::Result<()> {
     let f = Fixture::new_inner("ts-upgrade", true).await?;
+    let old_sample = sample(&definition(TENANT)?, "v1", 50, 7)?;
+    let old = batch("v1", vec![old_sample.clone()])?;
+    let old_page = raw_page(&f, &definition(TENANT)?).await?;
+    assert!(old_page.rows.iter().any(|r| r.sample == old_sample));
+    let old_receipt = f
+        .store
+        .receipt(
+            &Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(&old)?)?,
+            deadline()?,
+        )
+        .await?;
+    assert!(
+        matches!(old_receipt,Lookup::Found(ref receipt) if receipt.identity().digest==old.digest()? && receipt.received_at()==Timestamp::new(10)?)
+    );
+    assert!(matches!(f.write(&old).await?, Outcome::Replay(_)));
+    let replay = confirmed(f.write(&batch("v1-new-batch", vec![old_sample])?).await?)?;
+    assert_eq!((replay.new_samples(), replay.replayed_samples()), (0, 1));
+
     let d = definition(TENANT)?;
     f.register(&d).await?;
     f.write(&batch("upgraded", vec![sample(&d, "upgraded", 1, 1)?])?)
@@ -720,5 +738,96 @@ async fn maintenance_child() -> anyhow::Result<()> {
     );
     std::fs::write(std::env::var("TS_MARKER")?, b"committed")?;
     std::future::pending::<()>().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_prunes_compact_frontiers_and_unrelated_deletes_do_not_exhaust_reads()
+-> anyhow::Result<()> {
+    let f = Fixture::new("ts-fence-growth").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    f.write(&batch("initial", vec![sample(&d, "initial", 100, 1)?])?)
+        .await?;
+    let selection = spec(&d, 10)?.selection();
+    let mut low = limits()?;
+    low.max_points = NonZeroU32::new(2).ok_or(Error::InvalidInput)?;
+    let store = PgStore::new(
+        f.pool.clone(),
+        Timer,
+        low,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    for i in 1..8 {
+        complete(
+            &store,
+            plan(
+                &format!("cut-{i}"),
+                MaintenanceAction::AdvanceCutoff {
+                    selection: selection.clone(),
+                    before: Timestamp::new(i)?,
+                },
+                1,
+            )?,
+        )
+        .await?;
+        complete(
+            &store,
+            plan(
+                &format!("prune-{i}"),
+                MaintenanceAction::Prune {
+                    selection: selection.clone(),
+                    raw_before: Timestamp::new(i)?,
+                    summaries_before: Timestamp::new(0)?,
+                },
+                1,
+            )?,
+        )
+        .await?;
+        let other = Selection::Resource {
+            scope: d.spec().scope.clone(),
+            subject: id("other-device")?,
+            resource: id(&format!("resource-{i}"))?,
+            keys: Default::default(),
+        };
+        complete(
+            &store,
+            plan(
+                &format!("delete-{i}"),
+                MaintenanceAction::Delete {
+                    selection: other,
+                    window: window(0, 10)?,
+                    restore_until: Timestamp::new(i64::MAX)?,
+                },
+                1,
+            )?,
+        )
+        .await?;
+    }
+    let q = Query::new(
+        selection,
+        window(90, 110)?,
+        QueryBudget {
+            max_points: NonZeroU32::MIN,
+            max_series: NonZeroU32::MIN,
+        },
+        QueryMode::Latest,
+    )?;
+    let page = store
+        .query(
+            &Authorized::<Query>::verify(&authority(TENANT)?, q)?,
+            None,
+            deadline()?,
+        )
+        .await?;
+    assert_eq!(page.rows.len(), 1);
+    assert!(page.availability.excluded.is_empty());
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM rss_timeseries.fences WHERE kind='pruned'")
+            .fetch_one(&f.admin)
+            .await?;
+    assert_eq!(count, 1);
     Ok(())
 }

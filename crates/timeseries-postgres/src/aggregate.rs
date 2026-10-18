@@ -15,13 +15,10 @@ pub(crate) async fn raw(
     limits: &Limits,
 ) -> Result<Summary, Error> {
     let s = spec.stream();
-    let lower = window
-        .start()
-        .micros()
-        .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
-        .max(0);
-    let rows=sqlx::query("WITH prior AS (SELECT raw,observed_at,sequence,sample_id FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at<$6 AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at DESC,sequence DESC,sample_id DESC LIMIT 1), current AS (SELECT raw,observed_at,sequence,sample_id FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at >= $6 AND observed_at<$7 AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at,sequence,sample_id LIMIT $8) SELECT raw FROM (SELECT * FROM prior UNION ALL SELECT * FROM current) x ORDER BY observed_at,sequence,sample_id LIMIT $8")
- .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(spec.series().digest()?.as_bytes().as_slice()).bind(lower).bind(window.end().micros()).bind(i64::from(limits.max_points.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
+    let prior = predecessor(c, spec, window.start()).await?;
+    ensure_boundary(c, spec, window.start(), prior.as_ref(), limits).await?;
+    let rows=sqlx::query("SELECT raw FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at >= $6 AND observed_at<$7 AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at,sequence,sample_id LIMIT $8")
+    .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(spec.series().digest()?.as_bytes().as_slice()).bind(window.start().micros()).bind(window.end().micros()).bind(i64::from(limits.max_points.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
     if rows.len() > limits.max_points.get() as usize {
         return Err(Error::BudgetExceeded);
     }
@@ -35,8 +32,17 @@ pub(crate) async fn raw(
         }
         samples.push(serde_json::from_slice(&data).map_err(|_| Error::Invariant)?);
     }
-    let gaps = deletions(c, spec, limits).await?;
+    let gap_window = Interval::new(
+        prior
+            .as_ref()
+            .map_or(window.start(), |p| p.input().observed_at),
+        window.end(),
+    )?;
+    let gaps = deletions(c, spec, gap_window, limits).await?;
     let mut builder = SummaryBuilder::new(spec.clone(), window)?;
+    if let Some(prior) = prior {
+        builder.push(prior, limits.max_points.get() as usize)?;
+    }
     for sample in samples {
         mask(&mut builder, &gaps, sample.input().observed_at)?;
         builder.push(sample, limits.max_points.get() as usize)?;
@@ -228,19 +234,25 @@ pub(crate) async fn read<C: Clock>(
 pub(crate) async fn deletions(
     c: &mut PgConnection,
     spec: &SummarySpec,
+    window: Interval,
     limits: &Limits,
 ) -> Result<Vec<Interval>, Error> {
-    let mut gaps: Vec<_> =
-        crate::lifecycle::fences(c, spec.stream().scope(), limits.max_points.get())
-            .await?
-            .into_iter()
-            .filter(|f| {
-                f.kind == "delete"
-                    && !f.restored
-                    && crate::lifecycle::overlaps(&f.selection, &spec.selection())
-            })
-            .map(|f| f.window)
-            .collect();
+    let mut gaps: Vec<_> = crate::lifecycle::fences(
+        c,
+        &spec.selection(),
+        window,
+        &["delete"],
+        limits.max_points.get(),
+    )
+    .await?
+    .into_iter()
+    .filter(|f| {
+        f.kind == "delete"
+            && !f.restored
+            && crate::lifecycle::overlaps(&f.selection, &spec.selection())
+    })
+    .map(|f| f.window)
+    .collect();
     gaps.sort_by_key(|w| w.start());
     Ok(gaps)
 }
@@ -256,6 +268,65 @@ pub(crate) fn mask(
                 .is_some_and(|last| gap.end() > last && gap.start() >= last)
         {
             builder.interrupt(gap.start())?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn predecessor(
+    c: &mut PgConnection,
+    spec: &SummarySpec,
+    at: Timestamp,
+) -> Result<Option<Sample>, Error> {
+    if matches!(
+        spec.series().definition().spec().metric,
+        Metric::Gauge { .. }
+            | Metric::Counter {
+                temporality: Temporality::Delta,
+                ..
+            }
+    ) {
+        return Ok(None);
+    }
+    let s = spec.stream();
+    let raw:Option<Vec<u8>>=sqlx::query_scalar("SELECT raw FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at<$6 AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at DESC,sequence DESC,sample_id DESC LIMIT 1")
+ .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(spec.series().digest()?.as_bytes().as_slice()).bind(at.micros()).fetch_optional(c).await.map_err(sql_error)?;
+    raw.map(|v| serde_json::from_slice(&v).map_err(|_| Error::Invariant))
+        .transpose()
+}
+pub(crate) async fn ensure_boundary(
+    c: &mut PgConnection,
+    spec: &SummarySpec,
+    at: Timestamp,
+    prior: Option<&Sample>,
+    limits: &Limits,
+) -> Result<(), Error> {
+    let observed_only = matches!(
+        spec.series().definition().spec().metric,
+        Metric::Bool | Metric::State { .. }
+    ) && spec.coverage() == CoveragePolicy::ObservedOnly;
+    let start = if observed_only {
+        0
+    } else {
+        at.micros()
+            .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
+            .max(0)
+    };
+    if start == at.micros() {
+        return Ok(());
+    }
+    let window = Interval::new(Timestamp::new(start)?, at)?;
+    for fence in crate::lifecycle::fences(
+        c,
+        &spec.selection(),
+        window,
+        &["pruned"],
+        limits.max_points.get(),
+    )
+    .await?
+    {
+        if prior.is_none_or(|p| p.input().observed_at < fence.window.end()) {
+            return Err(Error::HistoryExpired);
         }
     }
     Ok(())

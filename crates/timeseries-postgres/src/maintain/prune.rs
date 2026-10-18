@@ -9,7 +9,17 @@ async fn safe_raw(
     now: i64,
     limits: &Limits,
 ) -> Result<Result<i64, MaintenanceBlock>, Error> {
-    let fs = fences(c, r.scope(), limits.max_points.get()).await?;
+    let fs = fences(
+        c,
+        selection,
+        Interval::new(
+            Timestamp::new(0)?,
+            Timestamp::new(raw_before.micros().max(1))?,
+        )?,
+        &["cutoff", "delete"],
+        limits.max_points.get(),
+    )
+    .await?;
     if raw_before.micros() > 0
         && !fs.iter().any(|f| {
             f.kind == "cutoff" && covers(&f.selection, selection) && f.window.end() >= raw_before
@@ -26,17 +36,27 @@ async fn safe_raw(
     }) {
         return Ok(Err(MaintenanceBlock::RestoreWindow));
     }
-    let ranges=sqlx::query("SELECT spec,lo,hi FROM rss_timeseries.summary_ranges WHERE tenant_id=$1::text::uuid AND namespace=$2 AND lo<$3 AND hi>$4 AND rss_timeseries.matches($5::text::jsonb,convert_from(spec,'UTF8')::jsonb) LIMIT $6")
- .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(raw_before.micros()).bind(summaries_before.micros()).bind(json(selection)?).bind(i64::from(limits.max_points.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
+    let ranges=sqlx::query("SELECT spec,lo,hi FROM rss_timeseries.summary_ranges WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND rss_timeseries.matches($4::text::jsonb,convert_from(spec,'UTF8')::jsonb) LIMIT $5")
+ .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(summaries_before.micros()).bind(json(selection)?).bind(i64::from(limits.max_points.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
     if ranges.len() > limits.max_points.get() as usize {
         return Err(Error::BudgetExceeded);
     }
     let mut halo = 0u64;
+    let mut anchor_limit = raw_before.micros();
     for row in ranges {
         let spec: SummarySpec =
             serde_json::from_slice(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)
                 .map_err(|_| Error::Invariant)?;
         halo = halo.max(spec.lookback());
+        if matches!(
+            spec.series().definition().spec().metric,
+            Metric::Bool | Metric::State { .. }
+        ) && spec.coverage() == CoveragePolicy::ObservedOnly
+            && let Some(prior) = crate::aggregate::predecessor(c, &spec, raw_before).await?
+        {
+            anchor_limit = anchor_limit.min(prior.input().observed_at.micros());
+        }
+
         let lo: i64 = row.try_get("lo").map_err(sql_error)?;
         let hi: i64 = row.try_get("hi").map_err(sql_error)?;
         let start = lo.max(spec.bucket(summaries_before)?.start().micros());
@@ -54,7 +74,8 @@ async fn safe_raw(
     Ok(Ok(raw_before
         .micros()
         .saturating_sub(i64::try_from(halo).unwrap_or(i64::MAX))
-        .max(0)))
+        .max(0)
+        .min(anchor_limit)))
 }
 pub(super) async fn step(
     c: &mut PgConnection,

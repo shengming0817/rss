@@ -6,17 +6,6 @@ pub(super) struct Fold {
     builder: Option<SummaryBuilder>,
     last: Option<(Timestamp, u64, Id)>,
 }
-async fn predecessor(
-    c: &mut PgConnection,
-    spec: &SummarySpec,
-    at: Timestamp,
-) -> Result<Option<Sample>, Error> {
-    let s = spec.stream();
-    let raw:Option<Vec<u8>>=sqlx::query_scalar("SELECT raw FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at<$6 AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at DESC,sequence DESC,sample_id DESC LIMIT 1")
- .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(spec.series().digest()?.as_bytes().as_slice()).bind(at.micros()).fetch_optional(c).await.map_err(sql_error)?;
-    raw.map(|v| serde_json::from_slice(&v).map_err(|_| Error::Invariant))
-        .transpose()
-}
 pub(super) async fn step(
     c: &mut PgConnection,
     r: &MaintenanceRequest,
@@ -86,7 +75,6 @@ pub(super) async fn step(
     {
         return Err(Error::HistoryExpired);
     }
-    let gaps = crate::aggregate::deletions(c, spec, limits).await?;
     let fold = state.fold.as_mut().ok_or(Error::Invariant)?;
     if fold.revision != revision {
         fold.at = window.start();
@@ -97,11 +85,21 @@ pub(super) async fn step(
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
         let mut builder = SummaryBuilder::new(spec.clone(), bucket)?;
-        if let Some(prior) = predecessor(c, spec, fold.at).await? {
+        let prior = crate::aggregate::predecessor(c, spec, fold.at).await?;
+        crate::aggregate::ensure_boundary(c, spec, fold.at, prior.as_ref(), limits).await?;
+        if let Some(prior) = prior {
             builder.push(prior, limits.max_points.get() as usize)?;
         }
         fold.builder = Some(builder);
     }
+    let gap_start = fold
+        .builder
+        .as_ref()
+        .and_then(SummaryBuilder::last_observed_at)
+        .unwrap_or(bucket.start());
+    let gaps =
+        crate::aggregate::deletions(c, spec, Interval::new(gap_start, bucket.end())?, limits)
+            .await?;
     let s = spec.stream();
     let last = fold.last.as_ref();
     let rows=sqlx::query("SELECT raw FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at >= $6 AND observed_at<$7 AND ($8::bigint IS NULL OR (observed_at,sequence,sample_id)>($8,$9::text::numeric,$10::text COLLATE \"C\")) AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at,sequence,sample_id LIMIT $11")

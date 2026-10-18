@@ -176,3 +176,328 @@ async fn recompute_unknown_and_late_write_cannot_publish_stale_revision() -> any
     );
     Ok(())
 }
+
+fn ordered_sample(
+    d: &Definition,
+    name: &str,
+    at: i64,
+    value: Value,
+    start: Option<i64>,
+) -> anyhow::Result<Sample> {
+    let input = SampleInput {
+        stream: Stream::new(d.spec().scope.clone(), id("sensor")?, id("generation")?),
+        series: Series::new(
+            d.clone(),
+            id("device")?,
+            id("resource")?,
+            Default::default(),
+        )?,
+        id: id(name)?,
+        sequence: at as u64,
+        observed_at: Timestamp::new(at)?,
+        interval: start.map(|v| window(v, at)).transpose()?,
+        reading: Reading::Valid(value),
+    };
+    Ok(Sample::new(input)?)
+}
+async fn ordered_read(
+    store: &PgStore<Timer>,
+    spec: SummarySpec,
+    range: Interval,
+    op: AggregateOp,
+) -> anyhow::Result<AggregatePage> {
+    let q = AggregateQuery::new(
+        spec,
+        range,
+        QueryBudget {
+            max_series: NonZeroU32::MIN,
+            max_points: NonZeroU32::new(100).ok_or(Error::InvalidInput)?,
+        },
+        op,
+    )?;
+    Ok(store
+        .aggregate(
+            &Authorized::<AggregateQuery>::verify(&authority(TENANT)?, q)?,
+            None,
+            deadline()?,
+        )
+        .await?)
+}
+fn ordered_spec(
+    s: &Sample,
+    coverage: CoveragePolicy,
+    gap: Option<NonZeroU64>,
+) -> anyhow::Result<SummarySpec> {
+    Ok(SummarySpec::new(
+        s.input().stream.clone(),
+        s.input().series.clone(),
+        NonZeroU64::new(10).ok_or(Error::InvalidInput)?,
+        coverage,
+        gap,
+    )?)
+}
+#[tokio::test]
+async fn ordered_provider_boundaries_survive_late_data_deletion_and_pruning() -> anyhow::Result<()>
+{
+    let f = Fixture::new("ts-ordered").await?;
+    let mut ds = definition(TENANT)?.spec().clone();
+    ds.key = id("counter")?;
+    ds.metric = Metric::Counter {
+        number: NumberKind::U64,
+        temporality: Temporality::Cumulative,
+    };
+    let counter = Definition::new(ds)?;
+    f.register(&counter).await?;
+    // Construct directly because the Gauge fixture intentionally validates its input kind.
+    let series = Series::new(
+        counter.clone(),
+        id("device")?,
+        id("resource")?,
+        Default::default(),
+    )?;
+    let stream = Stream::new(
+        counter.spec().scope.clone(),
+        id("sensor")?,
+        id("generation")?,
+    );
+    let mut input = Vec::new();
+    for (at, value) in [(1, 5), (6, 9), (11, 15)] {
+        input.push(Sample::new(SampleInput {
+            stream: stream.clone(),
+            series: series.clone(),
+            id: id(&format!("c{at}"))?,
+            sequence: at as u64,
+            observed_at: Timestamp::new(at)?,
+            interval: Some(window(0, at)?),
+            reading: Reading::Valid(Value::Number(Number::U64(value))),
+        })?);
+    }
+    let sp = ordered_spec(&input[0], CoveragePolicy::ObservedOnly, NonZeroU64::new(10))?;
+    f.write(&batch("counter", input)?).await?;
+    complete(
+        &f.store,
+        plan(
+            "counter-refresh",
+            MaintenanceAction::Recompute {
+                spec: sp.clone(),
+                window: window(0, 20)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    let wide = SummarySpec::new(
+        stream,
+        series,
+        NonZeroU64::new(20).ok_or(Error::InvalidInput)?,
+        CoveragePolicy::ObservedOnly,
+        NonZeroU64::new(10),
+    )?;
+    let page = ordered_read(&f.store, wide, window(0, 20)?, AggregateOp::Rate).await?;
+    assert!(
+        matches!(page.buckets[0].value,AggregateValue::Rate {increase:Sum::U128(10),duration_micros} if duration_micros.get()==10)
+    );
+    let mut ds = definition(TENANT)?.spec().clone();
+    ds.key = id("state")?;
+    ds.metric = Metric::Bool;
+    let state = Definition::new(ds)?;
+    f.register(&state).await?;
+    let a = ordered_sample(&state, "s15", 15, Value::Bool(true), None)?;
+    let sp = ordered_spec(
+        &a,
+        CoveragePolicy::HoldLast(NonZeroU64::new(10).ok_or(Error::InvalidInput)?),
+        None,
+    )?;
+    f.write(&batch("state", vec![a])?).await?;
+    complete(
+        &f.store,
+        plan(
+            "state-refresh",
+            MaintenanceAction::Recompute {
+                spec: sp.clone(),
+                window: window(20, 30)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        ordered_read(&f.store, sp.clone(), window(20, 30)?, AggregateOp::Coverage)
+            .await?
+            .buckets[0]
+            .covered_micros,
+        5
+    );
+    complete(
+        &f.store,
+        plan(
+            "state-cut",
+            MaintenanceAction::AdvanceCutoff {
+                selection: sp.selection(),
+                before: Timestamp::new(20)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "state-prune",
+            MaintenanceAction::Prune {
+                selection: sp.selection(),
+                raw_before: Timestamp::new(20)?,
+                summaries_before: Timestamp::new(20)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    f.write(&batch(
+        "state-late",
+        vec![ordered_sample(&state, "s26", 26, Value::Bool(false), None)?],
+    )?)
+    .await?;
+    let page = ordered_read(&f.store, sp.clone(), window(20, 30)?, AggregateOp::Coverage).await?;
+    assert_eq!(page.refreshed_through, None);
+    assert_eq!(page.buckets[0].covered_micros, 9);
+    complete(
+        &f.store,
+        plan(
+            "state-refreshed",
+            MaintenanceAction::Recompute {
+                spec: sp.clone(),
+                window: window(20, 30)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "state-delete",
+            MaintenanceAction::Delete {
+                selection: sp.selection(),
+                window: window(21, 23)?,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    let page = ordered_read(&f.store, sp.clone(), window(20, 30)?, AggregateOp::Coverage).await?;
+    assert_eq!(page.buckets[0].covered_micros, 5);
+    assert!(page.buckets[0].completeness.contains(&Completeness::Gaps));
+    complete(
+        &f.store,
+        plan(
+            "state-restore",
+            MaintenanceAction::Restore {
+                selection: sp.selection(),
+                window: window(21, 23)?,
+                deletion_fence: id("state-delete")?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        ordered_read(&f.store, sp, window(20, 30)?, AggregateOp::Coverage)
+            .await?
+            .buckets[0]
+            .covered_micros,
+        9
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn observed_only_transition_invalidates_across_empty_buckets() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-observed-only").await?;
+    let mut ds = definition(TENANT)?.spec().clone();
+    ds.metric = Metric::Bool;
+    let d = Definition::new(ds)?;
+    f.register(&d).await?;
+    let a = ordered_sample(&d, "a", 0, Value::Bool(false), None)?;
+    let sp = ordered_spec(&a, CoveragePolicy::ObservedOnly, None)?;
+    f.write(&batch(
+        "initial",
+        vec![a, ordered_sample(&d, "b", 25, Value::Bool(true), None)?],
+    )?)
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "refresh",
+            MaintenanceAction::Recompute {
+                spec: sp.clone(),
+                window: window(20, 30)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    assert!(
+        matches!(ordered_read(&f.store,sp.clone(),window(20,30)?,AggregateOp::Transitions).await?.buckets[0].value,AggregateValue::Transitions(ref v) if v.len()==1)
+    );
+    f.write(&batch(
+        "late",
+        vec![ordered_sample(&d, "late", 5, Value::Bool(true), None)?],
+    )?)
+    .await?;
+    let page = ordered_read(
+        &f.store,
+        sp.clone(),
+        window(20, 30)?,
+        AggregateOp::Transitions,
+    )
+    .await?;
+    assert_eq!(page.refreshed_through, None);
+    assert!(matches!(page.buckets[0].value,AggregateValue::Transitions(ref v) if v.is_empty()));
+    complete(
+        &f.store,
+        plan(
+            "refresh-late",
+            MaintenanceAction::Recompute {
+                spec: sp.clone(),
+                window: window(20, 30)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "cut",
+            MaintenanceAction::AdvanceCutoff {
+                selection: sp.selection(),
+                before: Timestamp::new(20)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "prune",
+            MaintenanceAction::Prune {
+                selection: sp.selection(),
+                raw_before: Timestamp::new(20)?,
+                summaries_before: Timestamp::new(20)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    f.write(&batch(
+        "later",
+        vec![ordered_sample(&d, "later", 26, Value::Bool(false), None)?],
+    )?)
+    .await?;
+    assert!(
+        matches!(ordered_read(&f.store,sp,window(20,30)?,AggregateOp::Transitions).await?.buckets[0].value,AggregateValue::Transitions(ref v) if v.len()==1)
+    );
+    Ok(())
+}

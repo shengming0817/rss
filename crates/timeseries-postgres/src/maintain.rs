@@ -64,7 +64,14 @@ async fn simple(
 ) -> Result<Step, Error> {
     match r.action() {
         MaintenanceAction::AdvanceCutoff { selection, before } => {
-            let fences = crate::lifecycle::fences(c, r.scope(), limits.max_points.get()).await?;
+            let fences = crate::lifecycle::fences(
+                c,
+                selection,
+                Interval::new(Timestamp::new(0)?, Timestamp::new(i64::MAX)?)?,
+                &["cutoff"],
+                limits.max_points.get(),
+            )
+            .await?;
             if fences.iter().any(|f| {
                 f.kind == "cutoff"
                     && crate::lifecycle::covers(selection, &f.selection)

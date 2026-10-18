@@ -51,10 +51,14 @@ pub(crate) struct Fence {
 }
 pub(crate) async fn fences(
     c: &mut PgConnection,
-    s: &Scope,
+    selection: &Selection,
+    window: Interval,
+    kinds: &[&str],
     limit: u32,
 ) -> Result<Vec<Fence>, Error> {
-    let rows=sqlx::query("SELECT id,kind,selection::text,lo,hi,restore_until,restored FROM rss_timeseries.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 ORDER BY id LIMIT $3").bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(i64::from(limit)+1).fetch_all(c).await.map_err(sql_error)?;
+    let scope = selection.scope();
+    let rows=sqlx::query("SELECT kind,selection::text,lo,hi,restore_until,restored FROM rss_timeseries.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 AND rss_timeseries.overlaps(selection,$3::text::jsonb) AND lo<$5 AND hi>$4 AND kind=ANY($6::text[]) AND (kind<>'delete' OR NOT restored) ORDER BY lo,hi,id LIMIT $7")
+    .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(json(selection)?).bind(window.start().micros()).bind(window.end().micros()).bind(kinds).bind(i64::from(limit)+1).fetch_all(c).await.map_err(sql_error)?;
     if rows.len() > limit as usize {
         return Err(Error::BudgetExceeded);
     }
@@ -141,7 +145,7 @@ pub(crate) async fn availability(
     limit: u32,
 ) -> Result<Availability, Error> {
     let mut excluded = Vec::new();
-    for f in fences(c, q.selection().scope(), limit).await? {
+    for f in fences(c, q.selection(), q.window(), &["pruned", "delete"], limit).await? {
         let reason = match f.kind.as_str() {
             "pruned" => UnavailableReason::Pruned,
             "delete" if !f.restored => UnavailableReason::Deleted,
