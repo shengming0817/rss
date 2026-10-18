@@ -278,14 +278,7 @@ pub(crate) async fn predecessor(
     spec: &SummarySpec,
     at: Timestamp,
 ) -> Result<Option<Sample>, Error> {
-    if matches!(
-        spec.series().definition().spec().metric,
-        Metric::Gauge { .. }
-            | Metric::Counter {
-                temporality: Temporality::Delta,
-                ..
-            }
-    ) {
+    if !needs_predecessor(spec) {
         return Ok(None);
     }
     let s = spec.stream();
@@ -301,6 +294,9 @@ pub(crate) async fn ensure_boundary(
     prior: Option<&Sample>,
     limits: &Limits,
 ) -> Result<(), Error> {
+    if !needs_predecessor(spec) {
+        return Ok(());
+    }
     let observed_only = matches!(
         spec.series().definition().spec().metric,
         Metric::Bool | Metric::State { .. }
@@ -330,4 +326,17 @@ pub(crate) async fn ensure_boundary(
         }
     }
     Ok(())
+}
+
+// Delta intervals contain their own increase; only cumulative/state semantics
+// depend on an earlier observation. Share this classification with both readers.
+fn needs_predecessor(spec: &SummarySpec) -> bool {
+    matches!(
+        spec.series().definition().spec().metric,
+        Metric::Counter {
+            temporality: Temporality::Cumulative,
+            ..
+        } | Metric::Bool
+            | Metric::State { .. }
+    )
 }

@@ -501,3 +501,71 @@ async fn observed_only_transition_invalidates_across_empty_buckets() -> anyhow::
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn delta_after_prune_needs_no_predecessor_for_reads_or_recompute() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-delta-prune").await?;
+    let mut definition_spec = definition(TENANT)?.spec().clone();
+    definition_spec.metric = Metric::Counter {
+        number: NumberKind::U64,
+        temporality: Temporality::Delta,
+    };
+    let d = Definition::new(definition_spec)?;
+    f.register(&d).await?;
+    let sample = ordered_sample(&d, "delta", 25, Value::Number(Number::U64(7)), Some(20))?;
+    let spec = ordered_spec(&sample, CoveragePolicy::ObservedOnly, NonZeroU64::new(10))?;
+    f.write(&batch("delta", vec![sample])?).await?;
+    complete(
+        &f.store,
+        plan(
+            "cutoff",
+            MaintenanceAction::AdvanceCutoff {
+                selection: spec.selection(),
+                before: Timestamp::new(20)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "prune",
+            MaintenanceAction::Prune {
+                selection: spec.selection(),
+                raw_before: Timestamp::new(20)?,
+                summaries_before: Timestamp::new(20)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    let page = ordered_read(&f.store, spec.clone(), window(20, 30)?, AggregateOp::Sum).await?;
+    assert!(matches!(
+        page.buckets[0].value,
+        AggregateValue::Sum(Sum::U128(7))
+    ));
+    assert_eq!(page.refreshed_through, None);
+    let page = ordered_read(&f.store, spec.clone(), window(20, 30)?, AggregateOp::Rate).await?;
+    assert!(
+        matches!(page.buckets[0].value,AggregateValue::Rate {increase:Sum::U128(7),duration_micros} if duration_micros.get()==5)
+    );
+    complete(
+        &f.store,
+        plan(
+            "refresh",
+            MaintenanceAction::Recompute {
+                spec: spec.clone(),
+                window: window(20, 30)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    let page = ordered_read(&f.store, spec, window(20, 30)?, AggregateOp::Rate).await?;
+    assert_eq!(page.refreshed_through, Some(Timestamp::new(30)?));
+    assert!(
+        matches!(page.buckets[0].value,AggregateValue::Rate {increase:Sum::U128(7),duration_micros} if duration_micros.get()==5)
+    );
+    Ok(())
+}
