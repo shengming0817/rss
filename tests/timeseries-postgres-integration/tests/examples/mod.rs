@@ -24,7 +24,8 @@ async fn run() -> anyhow::Result<()> {
     let input = testkit::example_process::pg_input(&pg, "ts_migrator", TENANT);
     match std::env::var("RSS_TIMESERIES_INSTALL") {
         Ok(binary) => {
-            testkit::example_process::run_binary(&binary, &input, Duration::from_secs(45)).await?
+            testkit::example_process::run_binary(&binary, &input, Duration::from_secs(45)).await?;
+            eprintln!("external-provider-consumer PASS {binary}");
         }
         Err(std::env::VarError::NotPresent) => {
             rss_examples::timeseries_pg::install(serde_json::from_value(input)?).await?
@@ -36,7 +37,8 @@ async fn run() -> anyhow::Result<()> {
     input["cursor_key"] = serde_json::to_value([17; 32])?;
     match std::env::var("RSS_TIMESERIES_EXAMPLE") {
         Ok(binary) => {
-            testkit::example_process::run_binary(&binary, &input, Duration::from_secs(45)).await?
+            testkit::example_process::run_binary(&binary, &input, Duration::from_secs(45)).await?;
+            eprintln!("external-provider-consumer PASS {binary}");
         }
         Err(std::env::VarError::NotPresent) => {
             rss_examples::timeseries_pg::run(serde_json::from_value(input)?).await?

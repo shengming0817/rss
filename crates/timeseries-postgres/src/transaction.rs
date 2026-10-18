@@ -66,8 +66,14 @@ impl<C: Clock> PgStore<C> {
             let ms=deadline.remaining(self.clock.now()).ok_or(Error::Deadline)?.as_millis().clamp(1,i32::MAX as u128);
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")
                 .bind(tenant.to_string()).bind(format!("{ms}ms")).execute(&mut *tx).await.map_err(sql_error)?;
+            check(&self.clock, deadline)?;
             started.store(true,Ordering::SeqCst);
             let result=operation(&mut tx,&self.clock).await;
+            // No budget remains for rollback ACK once the injected clock reaches cutoff.
+            // Quarantine instead of committing a staged mutation after its deadline.
+            if check(&self.clock, deadline).is_err() {
+                return if mutation { Ok(Outcome::Unknown) } else { Err(Error::Deadline) };
+            }
             let result=if fault==1 && result.is_ok() { Err(Error::Unavailable) } else { result };
             match result {
                 Ok(value) if mutation=> {
