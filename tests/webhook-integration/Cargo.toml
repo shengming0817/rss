@@ -1,0 +1,36 @@
+[package]
+name = "webhook-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+autotests = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["webhook", "protection"] }
+rss-transactional-messaging-webhook.workspace = true
+rss-transactional-messaging.workspace = true
+rss-transactional-messaging-runtime.workspace = true
+rss-transactional-messaging-postgres = { workspace = true, features = ["integration", "recovery"] }
+rss-transactional-messaging-recovery.workspace = true
+rss-request-context.workspace = true
+rss-contract.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process"] }
+tokio-rustls.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+ipnet.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "tls-rustls-ring", "uuid"] }
+hmac.workspace = true
+sha2.workspace = true
+base64.workspace = true
+anyhow.workspace = true
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"

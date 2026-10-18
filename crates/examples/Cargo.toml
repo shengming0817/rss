@@ -10,6 +10,7 @@ default-run = "rss-examples"
 workspace = true
 
 [features]
+webhook = ["execution-pg", "core", "rss-transactional-messaging/producer", "dep:rss-transactional-messaging-webhook", "dep:rss-transactional-messaging-postgres", "dep:rss-transactional-messaging-runtime", "rss-transactional-messaging-runtime/producer", "dep:rss-contract", "dep:ipnet"]
 default = []
 diagnostic = ["dep:rss-diag-context"]
 task-local = ["diagnostic", "rss-diag-context/task-local", "dep:tokio"]
@@ -60,6 +61,8 @@ recovery-archive = ["recovery-pg", "recovery-s3"]
 recovery-managed = ["recovery-archive", "rss-transactional-messaging-postgres/rss-runtime"]
 
 [dependencies]
+rss-transactional-messaging-webhook = { workspace = true, optional = true }
+ipnet = { workspace = true, optional = true }
 anyhow.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, optional = true }
 rss-transactional-messaging-amqp = { workspace = true, optional = true }
@@ -178,3 +181,8 @@ required-features = ["recovery-pg"]
 name = "recovery-archive"
 path = "src/bin/recovery-archive.rs"
 required-features = ["recovery-archive"]
+
+[[bin]]
+name = "webhook"
+path = "src/bin/webhook.rs"
+required-features = ["webhook"]

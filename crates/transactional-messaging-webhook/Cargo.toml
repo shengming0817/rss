@@ -1,0 +1,37 @@
+[package]
+name = "rss-transactional-messaging-webhook"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "Bounded, authorized HTTPS Standard Webhooks publication for RSS transactional messaging"
+
+[lints]
+workspace = true
+
+[dependencies]
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, features = ["producer"] }
+rss-request-context.workspace = true
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
+rss-contract.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "time", "macros"] }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+url.workspace = true
+ipnet.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt", "test-util"] }
