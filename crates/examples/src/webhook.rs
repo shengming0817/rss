@@ -80,8 +80,13 @@ impl ExecutionTimer for Timer {
     }
 }
 impl WallClock for Timer {
+    #[allow(clippy::disallowed_methods)] // reason: the consumer host supplies real UTC time at the injected clock boundary.
     fn unix_seconds(&self) -> i64 {
-        1700000000
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|value| i64::try_from(value.as_secs()).ok())
+            .unwrap_or(-1)
     }
 }
 pub struct Emitter;
