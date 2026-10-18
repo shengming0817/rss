@@ -27,7 +27,7 @@ async fn restart_after_real_process_interruption() -> anyhow::Result<()> {
         let ready=tokio::time::timeout(Duration::from_secs(20),async {
             loop {
                 if child.try_wait()?.is_some() {anyhow::bail!("child exited before boundary");}
-                let staged:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE application_name='timeseries-crash' AND state='idle in transaction' AND query LIKE 'SELECT digest,received_at,%FROM rss_timeseries.batches%')").fetch_one(&f.admin).await?;
+                let staged:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.application_name='timeseries-crash' AND a.state='idle in transaction' AND a.query LIKE 'SELECT digest,received_at,%FROM rss_timeseries.batches%' AND l.locktype='relation' AND l.relation='rss_timeseries.batches'::regclass AND l.mode='RowExclusiveLock' AND l.granted)").fetch_one(&f.admin).await?;
                 if (committed && marker.exists()) || (!committed && staged) {break;}
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -54,7 +54,10 @@ async fn restart_after_real_process_interruption() -> anyhow::Result<()> {
         assert_eq!(matches!(state, Lookup::Found(_)), committed);
         let outcome = f.write(&b).await?;
         assert_eq!(matches!(outcome, Outcome::Replay(_)), committed);
-        confirmed(outcome)?;
+        let receipt = confirmed(outcome)?;
+        // Before-commit interruption must leave neither raw rows nor dedup identities;
+        // after-commit replay must retain the original all-new admission counts.
+        assert_eq!((receipt.new_samples(), receipt.replayed_samples()), (1, 0));
     }
     assert_eq!(f.count().await?, 2);
     std::fs::remove_dir_all(root)?;
