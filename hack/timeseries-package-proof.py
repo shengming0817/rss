@@ -21,7 +21,7 @@ def main():
             directory, allowed, set(),
             {"testkit", "testcontainers", "sqlx", "rss-runtime", "rss-observation",
              "rss-transactional-messaging", "rss-timeseries-postgres", "rss-timeseries-clickhouse"},
-            required_features={"rss-timeseries": {"default"}}, required_dependencies=deps,
+            required_features={"rss-timeseries": {"default"}, "serde_json": {"float_roundtrip"}}, required_dependencies=deps,
         )
         cargo(["run", "--locked", "--bin", "timeseries"], directory)
         shutil.rmtree(directory / "target")

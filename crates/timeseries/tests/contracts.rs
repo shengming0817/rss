@@ -104,6 +104,11 @@ fn values_preserve_precision_and_reject_invalid_construction_and_decode() -> Tes
             .is_err()
     );
     assert_eq!(Timestamp::new(i64::MAX)?.micros(), i64::MAX);
+    Ok(())
+}
+
+#[test]
+fn invalid_values_cannot_enter_through_decode() -> TestResult {
     for value in ["", "\n", &"x".repeat(257)] {
         assert!(Id::new(value).is_err());
     }
@@ -559,5 +564,35 @@ fn canonical_v1_golden_and_duplicate_dimensions() -> TestResult {
         "\"dimensions\":{\"core\":\"1\",\"core\":\"2\"}",
     );
     assert!(Batch::decode(raw.as_bytes()).is_err());
+    Ok(())
+}
+
+#[test]
+fn finite_float_roundtrip_keeps_exact_bits() -> TestResult {
+    // This representable value was rounded down one ULP by the default JSON parser.
+    let exact = f64::from_bits(3705789329577597224);
+    let b = batch(vec![sample(
+        Metric::Gauge {
+            number: NumberKind::F64,
+        },
+        Reading::Valid(Value::Number(Number::F64(FiniteF64::new(exact)?))),
+        1,
+    )?])?;
+    assert_eq!(Batch::decode(&b.encode()?)?.digest()?, b.digest()?);
+    let mut bits = 17u64;
+    for _ in 0..4096 {
+        bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let v = f64::from_bits(bits);
+        if !v.is_finite() {
+            continue;
+        }
+        let value = FiniteF64::new(v)?;
+        let decoded: FiniteF64 = serde_json::from_slice(&serde_json::to_vec(&value)?)?;
+        assert_eq!(
+            decoded.get().to_bits(),
+            value.get().to_bits(),
+            "bits={bits}"
+        );
+    }
     Ok(())
 }

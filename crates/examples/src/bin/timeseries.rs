@@ -69,6 +69,30 @@ fn run() -> anyhow::Result<()> {
     anyhow::ensure!(
         AggregateOp::Sum.validate(&definition.spec().metric) == Err(Error::Unsupported)
     );
+    // Exercise the parser feature in isolated consumers, without workspace feature unification.
+    let mut float_definition = definition.spec().clone();
+    float_definition.key = Id::new("acme.finite_value")?;
+    float_definition.metric = Metric::Gauge {
+        number: NumberKind::F64,
+    };
+    let mut float_input = sample.input().clone();
+    float_input.series = Series::new(
+        Definition::new(float_definition)?,
+        Id::new("subject")?,
+        Id::new("resource")?,
+        BTreeMap::new(),
+    )?;
+    float_input.reading = Reading::Valid(Value::Number(Number::F64(FiniteF64::new(
+        f64::from_bits(3705789329577597224),
+    )?)));
+    let float_sample = Sample::new(float_input)?;
+    let float_batch = Batch::new(
+        float_sample.input().stream.clone(),
+        Id::new("float-batch")?,
+        vec![float_sample],
+    )?;
+    let restored = Batch::decode(&float_batch.encode()?)?;
+    anyhow::ensure!(restored == float_batch && restored.digest()? == float_batch.digest()?);
     Ok(())
 }
 #[test]
