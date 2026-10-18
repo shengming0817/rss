@@ -93,7 +93,8 @@ refresh progresses separately. ClickHouse requires an explicit reliable admissio
 recovery configuration; dedup tokens or background merges alone cannot supply content
 conflict detection, replay outside a window, or correct prior aggregate contributions.
 Adapters declare their atomicity and replay horizon and reject unsupported operations.
-This core does not assert those backends are implemented or validated yet.
+`rss-timeseries-postgres` implements atomic admission and raw history/latest; aggregation,
+maintenance, TimescaleDB and ClickHouse are separate capabilities.
 
 Maintenance steps are bounded host calls for recomputation, layered pruning, deletion
 or explicit fenced restoration. Fixed plan identity and bound continuation prevent
@@ -106,4 +107,5 @@ schema, transactions, scheduling and recovery execution belong to their owners.
 Public contract tests and the timeseries-core example prove T1 semantics. Independent
 source/artifact consumers execute that same example with an isolated dependency graph.
 No memory fake stands in for adapter durability, concurrency, restart or transaction
-T2 evidence. Database providers are subsequent work items #2810–#2813.
+T2 evidence. PostgreSQL raw storage is provided by `rss-timeseries-postgres` (#2810); remaining
+provider capabilities belong to #2811–#2813.

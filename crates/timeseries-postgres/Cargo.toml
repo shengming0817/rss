@@ -1,0 +1,30 @@
+[package]
+name = "rss-timeseries-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Atomic PostgreSQL time series storage and bounded queries"
+publish = ["crates-io"]
+[dependencies]
+rss-timeseries.workspace = true
+rss-request-context.workspace = true
+rss-contract.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+futures = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["time"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+hmac.workspace = true
+sha2.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+[features]
+default = []
+integration = []
+[dev-dependencies]
+anyhow.workspace = true
+[lints]
+workspace = true

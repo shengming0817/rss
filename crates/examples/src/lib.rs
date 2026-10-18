@@ -47,3 +47,6 @@ pub mod recovery_archive;
 
 #[cfg(feature = "webhook")]
 pub mod webhook;
+
+#[cfg(feature = "timeseries-pg")]
+pub mod timeseries_pg;

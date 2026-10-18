@@ -504,13 +504,39 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
     assert!(Authorized::<Batch>::verify(&Deny, b.clone()).is_err());
     let authorized = Authorized::<Batch>::verify(&Product, b.clone())?;
     assert_eq!(authorized.request().digest()?, b.digest()?);
-    let receipt = Receipt::from_durable(&b, ts(10)?, 1, 0, ts(100)?)?;
+    let snapshot = ReceiptSnapshot {
+        identity: ReceiptQuery {
+            stream: b.stream().clone(),
+            batch_id: b.id().clone(),
+            digest: b.digest()?,
+        },
+        received_at: ts(10)?,
+        new_samples: 1,
+        replayed_samples: 0,
+        replay_until: ts(100)?,
+    };
+    let receipt = Receipt::from_durable(snapshot.clone())?;
     assert_eq!(receipt.identity().digest, b.digest()?);
     assert_eq!(receipt.received_at(), ts(10)?);
     assert_eq!(receipt.new_samples() + receipt.replayed_samples(), 1);
     assert_eq!(receipt.replay_until(), ts(100)?);
-    assert!(Receipt::from_durable(&b, ts(10)?, 2, 0, ts(100)?).is_err());
-    assert!(Receipt::from_durable(&b, ts(10)?, 1, 0, ts(10)?).is_err());
+    for (new_samples, replayed_samples) in [(0, 0), (4097, 0), (u32::MAX, 1)] {
+        assert!(
+            Receipt::from_durable(ReceiptSnapshot {
+                new_samples,
+                replayed_samples,
+                ..snapshot.clone()
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        Receipt::from_durable(ReceiptSnapshot {
+            replay_until: ts(10)?,
+            ..snapshot
+        })
+        .is_err()
+    );
     assert_eq!(b.digest()?, batch(vec![gauge(1)?])?.digest()?);
     let q = query(QueryMode::History)?;
     let m = MaintenanceRequest::new(

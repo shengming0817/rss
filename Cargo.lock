@@ -3529,6 +3529,7 @@ dependencies = [
  "rss-saga",
  "rss-saga-postgres",
  "rss-timeseries",
+ "rss-timeseries-postgres",
  "rss-trace-context",
  "rss-transactional-messaging",
  "rss-transactional-messaging-amqp",
@@ -3807,6 +3808,25 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror",
+]
+
+[[package]]
+name = "rss-timeseries-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "futures",
+ "hmac 0.12.1",
+ "rss-contract",
+ "rss-request-context",
+ "rss-timeseries",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -5013,6 +5033,22 @@ checksum = "dcef1a61bdb119096e153208ec5cbec23944ce8bca13be5c7f60c634f7403935"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "timeseries-postgres-integration"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "rss-contract",
+ "rss-examples",
+ "rss-request-context",
+ "rss-timeseries",
+ "rss-timeseries-postgres",
+ "serde_json",
+ "sqlx",
+ "testkit",
+ "tokio",
 ]
 
 [[package]]
