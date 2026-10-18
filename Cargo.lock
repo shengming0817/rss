@@ -3505,6 +3505,7 @@ dependencies = [
  "anyhow",
  "aws-sdk-s3",
  "aws-smithy-http-client",
+ "ipnet",
  "opentelemetry",
  "opentelemetry_sdk",
  "ring",
@@ -3535,6 +3536,7 @@ dependencies = [
  "rss-transactional-messaging-recovery-s3",
  "rss-transactional-messaging-runtime",
  "rss-transactional-messaging-testkit",
+ "rss-transactional-messaging-webhook",
  "rumqttc-v5-next",
  "rustls",
  "rustls-pki-types",
@@ -3950,6 +3952,31 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "rss-transactional-messaging-webhook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "hmac 0.12.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ipnet",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rustls",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -5536,6 +5563,32 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webhook-integration"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "hmac 0.12.1",
+ "ipnet",
+ "rcgen",
+ "rss-contract",
+ "rss-examples",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "rss-transactional-messaging-recovery",
+ "rss-transactional-messaging-runtime",
+ "rss-transactional-messaging-webhook",
+ "rustls",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "testkit",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

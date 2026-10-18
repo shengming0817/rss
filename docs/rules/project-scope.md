@@ -35,6 +35,11 @@ storage lineage / tenant epoch 持久化 fencing，并约束正常消息、恢�
 产品拥有事件含义、查询授权、密钥托管与轮转、保留/hold 和生产迁移。该准入不恢复 audit/identity 产品域，
 不承诺历史审计数据导入、透明日志平台或 WORM；实现、独立消费与实际发布分别提供证据。
 
+Webhook 出站 adapter 已接纳：`rss-transactional-messaging-webhook` 拥有单目标 HTTPS、
+Standard Webhooks 签名、宿主授权地址限制的实际执行及 HTTP 接收结果分类；复用事务消息 Outbox、
+relay、期限和 recovery。产品拥有订阅/fanout、当前租户与资源授权、目标版本、DNS、密钥托管和生产运行。
+不恢复订阅平台、通用 connector 或独立 Webhook 持久化/重试引擎。
+
 ## 产品拥有
 
 - 消息 DR 的证据 authority、恢复点和成员选择、数据库/broker restore、跨进程 pause/drain/resume 与部署准入。

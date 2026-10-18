@@ -194,3 +194,10 @@ The five proof entrances (including Axum) share bounded archive validation, envi
 resolved graphs and command logs. `--scenario` is for development selection; final acceptance runs
 all scenarios. These instructions are not execution receipts: issue/PR evidence binds the exact
 revision, package versions, archive digests and actual results.
+
+## Webhook
+
+`webhook` feature / binary demonstrates PG Outbox → existing relay → signed HTTPS.
+The `webhook-integration` fixture owns PG, HTTPS and independent receipt/signature assertions.
+Run `python3 hack/webhook-package-proof.py --source` or supply `--artifacts <bundle> --revision <SHA>`
+for the same independent consumer. Fixture credentials travel over stdin, not process arguments.
