@@ -3528,6 +3528,7 @@ dependencies = [
  "rss-runtime",
  "rss-saga",
  "rss-saga-postgres",
+ "rss-timeseries",
  "rss-trace-context",
  "rss-transactional-messaging",
  "rss-transactional-messaging-amqp",
@@ -3793,6 +3794,19 @@ dependencies = [
  "serde_json",
  "sqlx",
  "uuid",
+]
+
+[[package]]
+name = "rss-timeseries"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rss-contract",
+ "rss-request-context",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
 ]
 
 [[package]]

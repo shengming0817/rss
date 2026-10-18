@@ -1,0 +1,23 @@
+[package]
+name = "rss-timeseries"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Typed time series definitions, immutable samples and bounded storage ports"
+publish = ["crates-io"]
+[dependencies]
+rss-request-context.workspace = true
+rss-contract.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+[features]
+default = []
+[dev-dependencies]
+anyhow.workspace = true
+[lints]
+workspace = true
