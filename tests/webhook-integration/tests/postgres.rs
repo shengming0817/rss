@@ -459,3 +459,66 @@ async fn expiry_and_redrive(
     recovery.close().await;
     Ok(())
 }
+
+struct RecoveringClock(Arc<std::sync::atomic::AtomicI64>);
+impl rss_transactional_messaging_webhook::WallClock for RecoveringClock {
+    fn unix_seconds(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+#[tokio::test]
+async fn transient_clock_failure_retries_original_publication_after_recovery() -> anyhow::Result<()>
+{
+    tokio::time::timeout(Duration::from_secs(30), clock_recovery()).await?
+}
+#[allow(clippy::cognitive_complexity)] // reason: ordered clock fault and durable retry assertions share one real PG fixture.
+async fn clock_recovery() -> anyhow::Result<()> {
+    use rss_transactional_messaging::transport::{
+        PublishFailureReason, PublishFailureStage, PublishOutcome,
+    };
+    use rss_transactional_messaging_webhook::WebhookPublisher;
+    let database = Database::new().await?;
+    let mut receiver = Receiver::new(response(204)).await?;
+    let seconds = Arc::new(std::sync::atomic::AtomicI64::new(-1));
+    let publisher = WebhookPublisher::new(
+        receiver.endpoint.clone(),
+        Timer,
+        RecoveringClock(seconds.clone()),
+        rss_examples::webhook::limits()?,
+    );
+    let pending = message("clock-recovery")?;
+    let outcome = publisher.publish(pending.envelope(), deadline()).await;
+    assert!(
+        matches!(&outcome,PublishOutcome::DefinitelyNotPublished(f) if f.kind().is_retryable() && f.stage()==PublishFailureStage::Encode && f.reason()==PublishFailureReason::InvalidMessage)
+    );
+    assert!(matches!(outcome.into_settlement(), OutboxSettlement::Retry));
+    receiver.assert_no_request()?;
+    database.append("clock-recovery").await?;
+    database.relay(&publisher).await?;
+    assert_eq!(database.status("clock-recovery").await?, "pending");
+    receiver.assert_no_request()?;
+    let before:String=sqlx::query_scalar("SELECT automatic_retry_deadline::text FROM rss_transactional_messaging.outbox WHERE message_id='clock-recovery'").fetch_one(&database.owner).await?;
+    seconds.store(1700000001, std::sync::atomic::Ordering::SeqCst);
+    database.ready("clock-recovery").await?;
+    database.relay(&publisher).await?;
+    let received = receiver.received().await?;
+    received.verify(&receiver.endpoint.secret)?;
+    assert_eq!(received.body, pending.envelope().payload().as_slice());
+    assert_eq!(
+        received.headers.get("webhook-id").map(String::as_str),
+        Some("clock-recovery")
+    );
+    assert_eq!(
+        received
+            .headers
+            .get("webhook-timestamp")
+            .map(String::as_str),
+        Some("1700000001")
+    );
+    assert_eq!(database.status("clock-recovery").await?, "published");
+    let after:String=sqlx::query_scalar("SELECT automatic_retry_deadline::text FROM rss_transactional_messaging.outbox WHERE message_id='clock-recovery'").fetch_one(&database.owner).await?;
+    assert_eq!(before, after);
+    receiver.stop().await?;
+    database.close().await;
+    Ok(())
+}

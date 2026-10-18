@@ -143,7 +143,12 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
                 Reason::TransportUnavailable,
             );
         };
-        let Ok(request) = self.request(message, &target) else {
+        let seconds = self.wall_clock.unix_seconds();
+        if seconds < 0 {
+            // The attempt timestamp is temporarily unrepresentable; authored facts remain valid.
+            return definite(Kind::Transient, Stage::Encode, Reason::InvalidMessage);
+        }
+        let Ok(request) = self.request(message, &target, seconds) else {
             return definite(Kind::Permanent, Stage::Encode, Reason::InvalidMessage);
         };
         // Synchronous preparation may consume the remaining budget; do not start sending late.
@@ -176,12 +181,12 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
         &self,
         message: &MessageEnvelope<Vec<u8>>,
         target: &AuthorizedTarget,
+        seconds: i64,
     ) -> Result<Request<Full<Bytes>>, crate::Error> {
-        let (timestamp, signature) = target.keys.sign(
-            message.id().as_str(),
-            self.wall_clock.unix_seconds(),
-            message.payload(),
-        )?;
+        let (timestamp, signature) =
+            target
+                .keys
+                .sign(message.id().as_str(), seconds, message.payload())?;
         let mut signature =
             hyper::header::HeaderValue::from_str(&signature).map_err(|_| crate::Error::Signing)?;
         signature.set_sensitive(true);

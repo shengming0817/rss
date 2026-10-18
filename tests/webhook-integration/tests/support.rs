@@ -136,6 +136,16 @@ impl Receiver {
             rss_examples::webhook::limits()?,
         ))
     }
+    pub fn assert_no_request(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(
+                self.records.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "unexpected HTTP request"
+        );
+        Ok(())
+    }
     pub async fn received(&mut self) -> anyhow::Result<Received> {
         tokio::time::timeout(Duration::from_secs(3), self.records.recv())
             .await?
