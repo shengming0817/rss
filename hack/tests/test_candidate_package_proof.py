@@ -131,6 +131,37 @@ class Entrances(unittest.TestCase):
                     self.assertEqual(result.returncode, 2, result.stderr)
 
 
+class TimeseriesScenarios(unittest.TestCase):
+    def test_pg_selection_executes_provider_and_core_stays_isolated(self):
+        spec = importlib.util.spec_from_file_location("timeseries_proof", HACK / "timeseries-package-proof.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for scenario in ("core", "pg"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+                stack.enter_context(patch.object(sys, "argv", ["timeseries", "--source", "--scenario", scenario]))
+                selection = stack.enter_context(patch.object(module, "example_dependencies", return_value={scenario: (set(), {})}))
+                stack.enter_context(patch.object(module, "prepare_sources", return_value=(Path(temp), {})))
+                stack.enter_context(patch.object(module, "consumer"))
+                graph = stack.enter_context(patch.object(module, "record_graph"))
+                cargo = stack.enter_context(patch.object(module, "cargo"))
+                provider = stack.enter_context(patch.object(module, "provider_consumer"))
+                stack.enter_context(patch.object(module.shutil, "rmtree"))
+                module.main()
+                self.assertEqual(list(selection.call_args.args[0]), [scenario])
+                forbidden = graph.call_args.args[3]
+                if scenario == "core":
+                    self.assertIn("rss-timeseries-postgres", forbidden)
+                    self.assertNotIn("raw_value", graph.call_args.kwargs["required_features"]["serde_json"])
+                    provider.assert_not_called()
+                    self.assertEqual(cargo.call_args.args[0], ["run", "--locked", "--bin", "timeseries"])
+                else:
+                    self.assertNotIn("rss-timeseries-postgres", forbidden)
+                    self.assertEqual(graph.call_args.kwargs["required_features"]["serde_json"], {"default", "std", "float_roundtrip", "raw_value"})
+                    self.assertEqual(graph.call_args.kwargs["required_features"]["rss-timeseries-postgres"], {"default"})
+                    self.assertEqual(provider.call_args.args[1:4], ("timeseries-postgres-integration", "suite", "examples::example_consumer"))
+                    self.assertEqual(set(provider.call_args.args[4].values()), {"timeseries-install", "timeseries-pg"})
+
+
 class FeatureForwarding(unittest.TestCase):
     def test_removed_forwarding_fails_each_entry_before_build_or_provider(self):
         """Resolve mutated consumer manifests with real Cargo; never edit the workspace."""

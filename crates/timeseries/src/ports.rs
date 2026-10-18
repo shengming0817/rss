@@ -79,34 +79,35 @@ pub struct Receipt {
     replayed_samples: u32,
     replay_until: Timestamp,
 }
+/// Validated reconstruction input from a trusted durable provider, not persistence proof.
+#[derive(Clone, Debug)]
+pub struct ReceiptSnapshot {
+    pub identity: ReceiptQuery,
+    pub received_at: Timestamp,
+    pub new_samples: u32,
+    pub replayed_samples: u32,
+    pub replay_until: Timestamp,
+}
 impl Receipt {
-    /// Trusted provider boundary after confirmed durable admission. Verifies
-    /// structure, not the truth of persistence. Original receipt never changes.
-    pub fn from_durable(
-        batch: &Batch,
-        received_at: Timestamp,
-        new_samples: u32,
-        replayed_samples: u32,
-        replay_until: Timestamp,
-    ) -> Result<Self, Error> {
-        if new_samples
-            .checked_add(replayed_samples)
-            .map(|n| n as usize)
-            != Some(batch.samples().len())
-            || replay_until <= received_at
+    /// Reconstruct an immutable receipt without retaining the entire producer batch.
+    /// Providers additionally verify the total against the admitted batch before commit.
+    pub fn from_durable(snapshot: ReceiptSnapshot) -> Result<Self, Error> {
+        let total = snapshot
+            .new_samples
+            .checked_add(snapshot.replayed_samples)
+            .ok_or(Error::Invariant)?;
+        if total == 0
+            || total as usize > Batch::MAX_SAMPLES
+            || snapshot.replay_until <= snapshot.received_at
         {
             return Err(Error::Invariant);
         }
         Ok(Self {
-            identity: ReceiptQuery {
-                stream: batch.stream().clone(),
-                batch_id: batch.id().clone(),
-                digest: batch.digest()?,
-            },
-            received_at,
-            new_samples,
-            replayed_samples,
-            replay_until,
+            identity: snapshot.identity,
+            received_at: snapshot.received_at,
+            new_samples: snapshot.new_samples,
+            replayed_samples: snapshot.replayed_samples,
+            replay_until: snapshot.replay_until,
         })
     }
     pub const fn identity(&self) -> &ReceiptQuery {

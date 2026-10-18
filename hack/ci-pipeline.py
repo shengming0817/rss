@@ -426,7 +426,21 @@ def checks(plan):
 
 
 def docs(plan):
-    return run(['cargo', 'test', '--doc', '--locked', '--all-features', *packages(plan), '--no-fail-fast']) if active(plan) else 0
+    if not active(plan):
+        return 0
+    # Cargo metadata owns target eligibility; integration-only packages have no doctests.
+    # ref: rust-lang/cargo src/cargo/ops/cargo_test.rs@rust-1.96.0 (run_doc_tests)
+    facts = json.loads(run(['cargo', 'metadata', '--locked', '--no-deps', '--all-features', '--format-version', '1'], capture=True))
+    members = {p['name']: p for p in facts['packages'] if p['id'] in facts['workspace_members']}
+    selected = set(members) if plan['full'] else set(plan['packages'])
+    if not selected.issubset(members):
+        raise ValueError('doctest selection contains unknown workspace packages')
+    eligible = sorted(name for name in selected if any(t['doctest'] for t in members[name]['targets']))
+    if not eligible:
+        print('ci: doctests skipped (selected packages have no enabled doctest targets)')
+        return 0
+    arguments = [arg for name in eligible for arg in ('-p', name)]
+    return run(['cargo', 'test', '--doc', '--locked', '--all-features', *arguments, '--no-fail-fast'])
 
 
 def attempt(operation, *args):

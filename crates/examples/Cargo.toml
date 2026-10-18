@@ -10,6 +10,7 @@ default-run = "rss-examples"
 workspace = true
 
 [features]
+timeseries-pg = ["timeseries-core", "execution-pg", "dep:rss-timeseries-postgres"]
 timeseries-core = ["dep:rss-timeseries", "dep:rss-request-context"]
 webhook = ["execution-pg", "core", "rss-transactional-messaging/producer", "dep:rss-transactional-messaging-webhook", "dep:rss-transactional-messaging-postgres", "dep:rss-transactional-messaging-runtime", "rss-transactional-messaging-runtime/producer", "dep:rss-contract", "dep:ipnet"]
 default = []
@@ -62,6 +63,7 @@ recovery-archive = ["recovery-pg", "recovery-s3"]
 recovery-managed = ["recovery-archive", "rss-transactional-messaging-postgres/rss-runtime"]
 
 [dependencies]
+rss-timeseries-postgres = { workspace = true, optional = true }
 rss-timeseries = { workspace = true, optional = true }
 rss-transactional-messaging-webhook = { workspace = true, optional = true }
 ipnet = { workspace = true, optional = true }
@@ -193,3 +195,12 @@ required-features = ["webhook"]
 name = "timeseries"
 path = "src/bin/timeseries.rs"
 required-features = ["timeseries-core"]
+
+[[bin]]
+name = "timeseries-pg"
+path = "src/bin/timeseries-pg.rs"
+required-features = ["timeseries-pg"]
+[[bin]]
+name = "timeseries-install"
+path = "src/bin/timeseries-install.rs"
+required-features = ["timeseries-pg"]
