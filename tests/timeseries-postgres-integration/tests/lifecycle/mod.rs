@@ -189,7 +189,7 @@ async fn layered_pruning_expiry_and_closed_stream_reclamation() -> anyhow::Resul
     short.replay_micros = NonZeroU64::new(1).ok_or(Error::InvalidInput)?;
     let store = PgStore::new(
         rss_timeseries_postgres::StorageProfile::PostgreSQL,
-        f.pool.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         short,
         CursorKey::new([17; 32]),
@@ -506,7 +506,7 @@ async fn current_schema_protects_lifecycle_objects() -> anyhow::Result<()> {
     assert!(
         PgStore::new(
             rss_timeseries_postgres::StorageProfile::PostgreSQL,
-            f.pool.clone(),
+            rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
             Timer,
             limits()?,
             CursorKey::new([17; 32]),
@@ -643,7 +643,7 @@ async fn maintenance_survives_real_before_and_after_commit_process_death() -> an
         ready??;
         let reopened = PgStore::new(
             rss_timeseries_postgres::StorageProfile::PostgreSQL,
-            f.pool.clone(),
+            rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
             Timer,
             limits()?,
             CursorKey::new([17; 32]),
@@ -696,7 +696,7 @@ async fn maintenance_child() -> anyhow::Result<()> {
         .await?;
     let store = PgStore::new(
         rss_timeseries_postgres::StorageProfile::PostgreSQL,
-        pool,
+        rss_timeseries_postgres::StoreConnections::Runtime(pool),
         Timer,
         limits()?,
         CursorKey::new([17; 32]),
@@ -740,7 +740,7 @@ async fn repeated_prunes_compact_frontiers_and_unrelated_deletes_do_not_exhaust_
     low.max_points = NonZeroU32::new(2).ok_or(Error::InvalidInput)?;
     let store = PgStore::new(
         rss_timeseries_postgres::StorageProfile::PostgreSQL,
-        f.pool.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         low,
         CursorKey::new([17; 32]),

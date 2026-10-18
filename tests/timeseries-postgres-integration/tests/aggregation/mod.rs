@@ -89,7 +89,7 @@ async fn durable_rollup_late_invalidation_and_resumable_fold() -> anyhow::Result
     ));
     let fresh = PgStore::new(
         rss_timeseries_postgres::StorageProfile::PostgreSQL,
-        f.pool.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         limits()?,
         CursorKey::new([17; 32]),

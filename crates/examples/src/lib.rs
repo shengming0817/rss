@@ -50,3 +50,6 @@ pub mod webhook;
 
 #[cfg(feature = "timeseries-pg")]
 pub mod timeseries_pg;
+
+#[cfg(feature = "timeseries-timescaledb")]
+pub mod timeseries_timescale;

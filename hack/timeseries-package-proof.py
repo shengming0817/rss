@@ -5,7 +5,7 @@ from package_proof import (
     cargo, consumer, example_dependencies, prepare_sources, proof_arguments, record_graph, provider_consumer,
 )
 
-SCENARIOS = {"core": ["timeseries-core"], "pg": ["timeseries-pg"]}
+SCENARIOS = {"core": ["timeseries-core"], "pg": ["timeseries-pg"], "timescale-shared": ["timeseries-timescaledb"], "timescale-native": ["timeseries-timescaledb"]}
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
         if name == "core":
             forbidden |= {"sqlx", "rss-timeseries-postgres"}
         else:
-            required["rss-timeseries-postgres"] = {"default"}
+            required["rss-timeseries-postgres"] = {"default"} | ({"timescaledb"} if name.startswith("timescale-") else set())
             required["serde_json"].add("raw_value")
         record_graph(
             directory, allowed, set(),
@@ -31,9 +31,13 @@ def main():
         if name == "core":
             cargo(["run", "--locked", "--bin", "timeseries"], directory)
         else:
-            cargo(["build", "--locked", "--bin", "timeseries-pg", "--bin", "timeseries-install"], directory)
-            provider_consumer(directory, "timeseries-postgres-integration", "suite", "examples::example_consumer", {
-                "RSS_TIMESERIES_INSTALL": "timeseries-install", "RSS_TIMESERIES_EXAMPLE": "timeseries-pg",
+            native = name.startswith("timescale-")
+            install = "timeseries-timescale-install" if native else "timeseries-install"
+            run = "timeseries-timescale" if native else "timeseries-pg"
+            target = {"pg": "example_consumer", "timescale-shared": "timescale_shared_consumer", "timescale-native": "timescale_native_consumer"}[name]
+            cargo(["build", "--locked", "--bin", run, "--bin", install], directory)
+            provider_consumer(directory, "timeseries-postgres-integration", "suite", f"examples::{target}", {
+                "RSS_TIMESERIES_INSTALL": install, "RSS_TIMESERIES_EXAMPLE": run,
             })
         shutil.rmtree(directory / "target")
         print(f"BEHAVIOR PASS timeseries/{name}", flush=True)

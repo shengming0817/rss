@@ -10,6 +10,7 @@ default-run = "rss-examples"
 workspace = true
 
 [features]
+timeseries-timescaledb = ["timeseries-pg", "rss-timeseries-postgres/timescaledb"]
 timeseries-pg = ["timeseries-core", "execution-pg", "dep:rss-timeseries-postgres"]
 timeseries-core = ["dep:rss-timeseries", "dep:rss-request-context"]
 webhook = ["execution-pg", "core", "rss-transactional-messaging/producer", "dep:rss-transactional-messaging-webhook", "dep:rss-transactional-messaging-postgres", "dep:rss-transactional-messaging-runtime", "rss-transactional-messaging-runtime/producer", "dep:rss-contract", "dep:ipnet"]
@@ -204,3 +205,18 @@ required-features = ["timeseries-pg"]
 name = "timeseries-install"
 path = "src/bin/timeseries-install.rs"
 required-features = ["timeseries-pg"]
+
+[[bin]]
+name = "timeseries-schema"
+path = "src/bin/timeseries-schema.rs"
+required-features = ["timeseries-pg"]
+
+[[bin]]
+name = "timeseries-timescale"
+path = "src/bin/timeseries-timescale.rs"
+required-features = ["timeseries-timescaledb"]
+
+[[bin]]
+name = "timeseries-timescale-install"
+path = "src/bin/timeseries-timescale-install.rs"
+required-features = ["timeseries-timescaledb"]

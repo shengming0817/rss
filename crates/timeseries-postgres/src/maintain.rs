@@ -7,6 +7,8 @@ use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
+#[cfg(feature = "timescaledb")]
+mod native;
 mod prune;
 mod recompute;
 const DOMAIN: &[u8] = b"rss.timeseries.maintenance.v2";
@@ -15,6 +17,10 @@ struct State {
     ordinal: u64,
     fold: Option<recompute::Fold>,
     raw_limit: Option<i64>,
+    #[cfg(feature = "timescaledb")]
+    native: Option<native::Fold>,
+    #[cfg(feature = "timescaledb")]
+    cleanup: Option<native::Cleanup>,
 }
 enum Step {
     More(u32),
@@ -148,9 +154,28 @@ impl<C: Clock> Maintainer for PgStore<C> {
         deadline: Deadline,
     ) -> Result<Outcome<MaintenanceProgress>, Error> {
         let r = request.request().clone();
-        if r.budget().rows > self.limits.max_points {
+        if r.budget().rows > self.limits.max_points
+            || r.budget().buckets > self.limits.max_points
+            || r.budget().rows.get() > i32::MAX as u32
+        {
             return Err(Error::BudgetExceeded);
         }
+        #[cfg(feature = "timescaledb")]
+        let native_selected = native::selected(&self.profile, &r);
+        #[cfg(feature = "timescaledb")]
+        let native_resolutions = match &self.profile {
+            crate::StorageProfile::TimescaleDedicatedTenant(config) => config.resolutions.clone(),
+            _ => Vec::new(), // reason: ordinary stores have no native cache to clean.
+        };
+        #[cfg(feature = "timescaledb")]
+        let refreshed = if native_selected {
+            match native::refresh(self, &r, after, deadline).await? {
+                Outcome::Accepted(value) | Outcome::Replay(value) => value,
+                Outcome::Unknown => return Ok(Outcome::Unknown),
+            }
+        } else {
+            None
+        }; // reason: non-native profiles and metric kinds use the core fold.
         let key = self.key.clone();
         let instance = self.instance.clone();
         let limits = self.limits.clone();
@@ -190,11 +215,42 @@ impl<C: Clock> Maintainer for PgStore<C> {
                     }
                     let result = match r.action() {
                         MaintenanceAction::Recompute { spec, window } => {
+                            #[cfg(feature = "timescaledb")]
+                            if native_selected {
+                                native::step(
+                                    c,
+                                    &r,
+                                    &mut state,
+                                    revision,
+                                    &limits,
+                                    refreshed.as_ref(),
+                                )
+                                .await?
+                            } else {
+                                recompute::step(c, &r, spec, *window, &mut state, revision, &limits)
+                                    .await?
+                            }
+                            #[cfg(not(feature = "timescaledb"))]
                             recompute::step(c, &r, spec, *window, &mut state, revision, &limits)
                                 .await?
                         }
                         MaintenanceAction::Prune { .. } => {
-                            prune::step(c, &r, &mut state, now, &limits).await?
+                            let result = prune::step(c, &r, &mut state, now, &limits).await?;
+                            #[cfg(feature = "timescaledb")]
+                            if native_selected && matches!(result, Step::Done(_)) {
+                                native::cleanup(
+                                    c,
+                                    &r,
+                                    &mut state,
+                                    &native_resolutions,
+                                    refreshed.as_ref(),
+                                )
+                                .await?
+                            } else {
+                                result
+                            }
+                            #[cfg(not(feature = "timescaledb"))]
+                            result
                         }
                         MaintenanceAction::ExpireReceipts { stream, before } => {
                             prune::expire(c, &r, stream, *before, now).await?

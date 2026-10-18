@@ -1,56 +1,3 @@
--- External dedicated NOLOGIN NOSUPERUSER NOBYPASSRLS owner executes this once.
-CREATE SCHEMA rss_timeseries;
-DO $$ BEGIN EXECUTE format('COMMENT ON SCHEMA rss_timeseries IS %L', 'rss-timeseries-postgres:3:' || gen_random_uuid()::text); END $$;
-CREATE TABLE rss_timeseries.definition_heads (
- tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, key text COLLATE "C" NOT NULL,
- version numeric(20,0), PRIMARY KEY (tenant_id,namespace,key),
- CHECK (version BETWEEN 1 AND 18446744073709551615)
-);
-CREATE TABLE rss_timeseries.definitions (
- tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, key text COLLATE "C" NOT NULL,
- version numeric(20,0) NOT NULL CHECK (version BETWEEN 1 AND 18446744073709551615),
- raw bytea NOT NULL, digest bytea NOT NULL CHECK (octet_length(digest)=32), retired boolean NOT NULL DEFAULT false,
- PRIMARY KEY (tenant_id,namespace,key,version),
- FOREIGN KEY (tenant_id,namespace,key) REFERENCES rss_timeseries.definition_heads
-);
-CREATE TABLE rss_timeseries.streams (
- tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
- source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
- closed boolean NOT NULL DEFAULT false, reclaimed boolean NOT NULL DEFAULT false,
- PRIMARY KEY (tenant_id,namespace,source,generation)
-);
-CREATE TABLE rss_timeseries.batches (
- tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
- source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL, batch_id text COLLATE "C" NOT NULL,
- digest bytea NOT NULL CHECK (octet_length(digest)=32), received_at bigint NOT NULL CHECK (received_at>=0),
- new_samples integer NOT NULL CHECK (new_samples>=0), replayed_samples integer NOT NULL CHECK (replayed_samples>=0),
- replay_until bigint NOT NULL CHECK (replay_until>received_at),
- expired boolean NOT NULL DEFAULT false,
- CHECK (new_samples+replayed_samples BETWEEN 1 AND 4096),
- PRIMARY KEY (tenant_id,namespace,source,generation,batch_id),
- FOREIGN KEY (tenant_id,namespace,source,generation) REFERENCES rss_timeseries.streams
-);
-CREATE TABLE rss_timeseries.sample_identities (
- tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
- source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL, sample_id text COLLATE "C" NOT NULL,
- digest bytea NOT NULL CHECK (octet_length(digest)=32), observed_at bigint NOT NULL CHECK (observed_at BETWEEN 0 AND 9223372036854775806),
- received_at bigint NOT NULL CHECK (received_at>=0),
- PRIMARY KEY (tenant_id,namespace,source,generation,sample_id),
- UNIQUE (tenant_id,namespace,source,generation,sample_id,observed_at),
- FOREIGN KEY (tenant_id,namespace,source,generation) REFERENCES rss_timeseries.streams
-);
-CREATE TABLE rss_timeseries.samples (
- tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
- source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL, sample_id text COLLATE "C" NOT NULL,
- observed_at bigint NOT NULL, sequence numeric(20,0) NOT NULL CHECK (sequence BETWEEN 0 AND 18446744073709551615),
- series_digest bytea NOT NULL CHECK (octet_length(series_digest)=32),
- key text COLLATE "C" NOT NULL, version numeric(20,0) NOT NULL,
- subject text COLLATE "C" NOT NULL, resource text COLLATE "C" NOT NULL,
- raw bytea NOT NULL CHECK (octet_length(raw) BETWEEN 1 AND 4194304), received_at bigint NOT NULL CHECK (received_at>=0),
- PRIMARY KEY (tenant_id,namespace,source,generation,sample_id,observed_at),
- FOREIGN KEY (tenant_id,namespace,source,generation,sample_id,observed_at) REFERENCES rss_timeseries.sample_identities(tenant_id,namespace,source,generation,sample_id,observed_at),
- FOREIGN KEY (tenant_id,namespace,key,version) REFERENCES rss_timeseries.definitions
-) PARTITION BY RANGE (observed_at);
 CREATE INDEX samples_history ON rss_timeseries.samples(tenant_id,namespace,series_digest,source,generation,observed_at,sequence,sample_id);
 CREATE INDEX samples_resource ON rss_timeseries.samples(tenant_id,namespace,subject,resource,key,observed_at);
 DO $$ DECLARE n text; BEGIN
@@ -87,15 +34,6 @@ END $$;
 -- Semantic validation is the trusted Rust provider's responsibility. SQL owns immutable identities,
 -- RLS, exact-definition references and the transaction. No client receives these credentials.
 -- Owner-only explicit bounded partition provisioning. No data-moving fallback/default partition.
-CREATE FUNCTION rss_timeseries.create_partition(lo bigint,hi bigint) RETURNS void
-LANGUAGE plpgsql SET search_path=pg_catalog,rss_timeseries AS $$ DECLARE name text:='samples_'||lo::text||'_'||hi::text; BEGIN
- IF lo<0 OR hi<=lo THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='partition bounds'; END IF;
- EXECUTE format('CREATE TABLE rss_timeseries.%I PARTITION OF rss_timeseries.samples FOR VALUES FROM (%s) TO (%s)',name,lo,hi);
- EXECUTE format('ALTER TABLE rss_timeseries.%I ENABLE ROW LEVEL SECURITY',name);
- EXECUTE format('ALTER TABLE rss_timeseries.%I FORCE ROW LEVEL SECURITY',name);
- EXECUTE format('CREATE POLICY tenant ON rss_timeseries.%I USING (tenant_id=nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id=nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',name);
- EXECUTE format('REVOKE ALL ON rss_timeseries.%I FROM PUBLIC',name);
-END $$;
 CREATE TABLE rss_timeseries.namespaces (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
  PRIMARY KEY(tenant_id,namespace)

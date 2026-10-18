@@ -24,6 +24,7 @@ zeroize.workspace = true
 [features]
 default = []
 integration = []
+timescaledb = []
 [dev-dependencies]
 anyhow.workspace = true
 [lints]

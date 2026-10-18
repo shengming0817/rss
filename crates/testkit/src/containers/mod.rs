@@ -272,7 +272,9 @@ mod rabbitmq;
 mod redis;
 
 pub use kafka::{KafkaTlsFixture, KafkaTlsServerIdentity, exclusive_kafka_tls, shared_kafka_tls};
-pub use postgres::{PgConnParams, PgTlsFixture, PgTlsServerIdentity, postgres_tls};
+pub use postgres::{
+    PgConnParams, PgTlsFixture, PgTlsServerIdentity, postgres_tls, timescaledb_tls,
+};
 pub use rabbitmq::{
     RabbitFixture, RabbitTlsFixture, exclusive_rabbitmq, rabbitmq_tls, shared_rabbitmq,
 };

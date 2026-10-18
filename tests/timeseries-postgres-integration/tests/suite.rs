@@ -1,6 +1,6 @@
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::*;
-use rss_timeseries_postgres::{CursorKey, Fault, Limits, MIGRATION_SQL, PgStore};
+use rss_timeseries_postgres::{CursorKey, Fault, Limits, PgStore};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
@@ -140,6 +140,8 @@ fn confirmed<T>(v: Outcome<T>) -> anyhow::Result<T> {
 const ROLES: &str = "CREATE ROLE ts_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE ts_runtime LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; CREATE ROLE ts_migrator LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; GRANT ts_owner TO ts_migrator; GRANT CREATE ON DATABASE rss_test TO ts_owner;";
 const GRANTS: &str = "GRANT USAGE ON SCHEMA rss_timeseries TO ts_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_timeseries TO ts_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_timeseries TO ts_runtime; REVOKE EXECUTE ON FUNCTION rss_timeseries.create_partition(bigint,bigint) FROM ts_runtime;";
 struct Fixture {
+    profile: rss_timeseries_postgres::StorageProfile,
+    maintenance: Option<PgPool>,
     admin: PgPool,
     pool: PgPool,
     store: PgStore<Timer>,
@@ -148,15 +150,22 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(name: &str) -> anyhow::Result<Self> {
+        Self::on_profile(name, rss_timeseries_postgres::StorageProfile::PostgreSQL).await
+    }
+    async fn on_profile(
+        name: &str,
+        profile: rss_timeseries_postgres::StorageProfile,
+    ) -> anyhow::Result<Self> {
         let network = testkit::bridge_network(name).await?;
-        let pg = testkit::postgres_tls(
-            testkit::NetworkAttachment {
-                network: network.name(),
-                dns_name: name,
-            },
-            testkit::PgTlsServerIdentity::MatchingHost,
-        )
-        .await?;
+        let attachment = testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: name,
+        };
+        let pg = if matches!(profile, rss_timeseries_postgres::StorageProfile::PostgreSQL) {
+            testkit::postgres_tls(attachment, testkit::PgTlsServerIdentity::MatchingHost).await?
+        } else {
+            testkit::timescaledb_tls(attachment, testkit::PgTlsServerIdentity::MatchingHost).await?
+        };
         let p = pg.params();
         let base = PgConnectOptions::new()
             .host(&p.host)
@@ -168,19 +177,44 @@ impl Fixture {
             .max_connections(4)
             .connect_with(base.clone().username(&p.username).password(&p.password))
             .await?;
-        install_schema(&admin).await?;
+        install_schema(&admin, &profile).await?;
         let pool = PgPoolOptions::new()
             .max_connections(6)
-            .connect_with(base.username("ts_runtime").password("fixture-only"))
+            .connect_with(base.clone().username("ts_runtime").password("fixture-only"))
             .await?;
+        let maintenance = if matches!(
+            profile,
+            rss_timeseries_postgres::StorageProfile::TimescaleDedicatedTenant(_)
+        ) {
+            Some(
+                PgPoolOptions::new()
+                    .max_connections(2)
+                    .after_connect(|c, _| {
+                        Box::pin(async move {
+                            sqlx::query("SET ROLE ts_owner").execute(c).await?;
+                            Ok(())
+                        })
+                    })
+                    .connect_with(base.username("ts_migrator").password("fixture-only"))
+                    .await?,
+            )
+        } else {
+            None
+        };
         let catalog: String = sqlx::query_scalar(include_str!(
             "../../../crates/timeseries-postgres/src/catalog.sql"
         ))
         .fetch_one(&pool)
         .await?;
         let store = PgStore::new(
-            rss_timeseries_postgres::StorageProfile::PostgreSQL,
-            pool.clone(),
+            profile.clone(),
+            match &maintenance {
+                Some(owner) => rss_timeseries_postgres::StoreConnections::Native {
+                    runtime: pool.clone(),
+                    maintenance: owner.clone(),
+                },
+                None => rss_timeseries_postgres::StoreConnections::Runtime(pool.clone()),
+            },
             Timer,
             limits()?,
             CursorKey::new([17; 32]),
@@ -189,6 +223,8 @@ impl Fixture {
         .await
         .map_err(|e| anyhow::anyhow!("store admission: {e:?}; catalog={catalog}"))?;
         Ok(Self {
+            profile,
+            maintenance,
             admin,
             pool,
             store,
@@ -232,13 +268,39 @@ impl Fixture {
     }
 }
 
-async fn install_schema(admin: &PgPool) -> anyhow::Result<()> {
+async fn install_schema(
+    admin: &PgPool,
+    profile: &rss_timeseries_postgres::StorageProfile,
+) -> anyhow::Result<()> {
     sqlx::raw_sql(ROLES).execute(admin).await?;
+    if !matches!(profile, rss_timeseries_postgres::StorageProfile::PostgreSQL) {
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS timescaledb")
+            .execute(admin)
+            .await?;
+    }
     let mut c = admin.acquire().await?;
     sqlx::raw_sql("SET ROLE ts_owner").execute(&mut *c).await?;
-    sqlx::raw_sql(MIGRATION_SQL).execute(&mut *c).await?;
-    sqlx::raw_sql("SELECT rss_timeseries.create_partition(0,100); SELECT rss_timeseries.create_partition(100,9223372036854775807); RESET ROLE;").execute(&mut *c).await?;
-    sqlx::raw_sql(GRANTS).execute(&mut *c).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(profile.installation_sql()?.as_str()))
+        .execute(&mut *c)
+        .await?;
+    if matches!(profile, rss_timeseries_postgres::StorageProfile::PostgreSQL) {
+        sqlx::raw_sql("SELECT rss_timeseries.create_partition(0,100); SELECT rss_timeseries.create_partition(100,9223372036854775807); RESET ROLE;").execute(&mut *c).await?;
+        sqlx::raw_sql(GRANTS).execute(&mut *c).await?;
+    } else {
+        sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_timeseries TO ts_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_timeseries TO ts_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_timeseries TO ts_runtime; REVOKE EXECUTE ON FUNCTION rss_timeseries.integer_now() FROM ts_runtime;").execute(&mut *c).await?;
+        if matches!(
+            profile,
+            rss_timeseries_postgres::StorageProfile::TimescaleDedicatedTenant(_)
+        ) {
+            sqlx::raw_sql(
+                "REVOKE EXECUTE ON FUNCTION rss_timeseries.project_gauge() FROM ts_runtime;",
+            )
+            .execute(&mut *c)
+            .await?;
+        }
+    }
     drop(c);
     Ok(())
 }
+
+mod timescale;

@@ -36,7 +36,7 @@ REVOKE EXECUTE ON FUNCTION rss_timeseries.create_partition(bigint,bigint)
 Runtime can read and execute the restricted mutation functions, but cannot directly
 INSERT/UPDATE/DELETE/TRUNCATE or provision partitions. All tables, including children,
 force RLS. Functions fix their search path; PUBLIC has no component permissions.
-`PgStore::new(profile, pool, clock, limits, cursor_key, deadline)` checks the PostgreSQL 16
+`PgStore::new(profile, connections, clock, limits, cursor_key, deadline)` checks the PostgreSQL 16
 catalog, effective reachable-role permissions, functions and child partition policies.
 DDL/role changes require drain and re-admission. Unknown schema or unsafe privileges
 fail closed; schema comments alone do not prove admission. The database engine,
@@ -141,8 +141,8 @@ ref: PostgreSQL 16 declarative partitioning and row security
 
 ## Bounded aggregation and maintenance
 
-Register a summary range with Recompute using an explicit `SummarySpec`. Each call
-processes at most the request item budget and persists the current fold/checkpoint;
+Register a summary range with Recompute using an explicit `SummarySpec`. Each core-fold call
+processes at most `MaintenanceBudget.rows` input rows and persists the current fold/checkpoint;
 no scheduler or per-step journal is created. Input revisions restart interrupted folds
 after concurrent changes. A completed bucket is published atomically. New samples
 invalidate affected buckets (including the Counter/state lookahead); replays do not.
@@ -176,3 +176,86 @@ budgets; repeated pruning merges the retained frontier. Summary-range scans and
 relevant fence output obey host point/byte/time budgets and fail explicitly when
 those limits are insufficient. Maintenance Blocked reasons are actionable prerequisites,
 not success or automatic policy changes.
+
+
+## Explicit TimescaleDB profiles
+
+Enable the additive `timescaledb` feature, then choose a `StorageProfile`. All stores
+share the same writer, receipt, transaction, query and lifecycle engine. Installation
+uses `profile.installation_sql()`; the host runs it once as the schema owner after an
+administrator installs the extension. No existing deployment migration is supported.
+The `timeseries-schema` example emits inspectable SQL for a minimal explicit profile.
+
+| Profile | Isolation | Raw storage | Aggregation |
+| --- | --- | --- | --- |
+| PostgreSQL | shared FORCE RLS | native partitions | core fold |
+| TimescaleSharedRls | shared FORCE RLS | rowstore hypertable | core fold |
+| TimescaleDedicatedTenant | fixed tenant database/role/pools | hypertable, explicit columnstore conversion | native I64/U64 Gauge at declared resolutions; core for other cases |
+
+The supported extension is exactly **TimescaleDB 2.30.2**, on PostgreSQL 16.6–16.x.
+The fixture pins `timescale/timescaledb:2.30.2-pg16` to manifest digest
+`sha256:6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f`
+(PG 16.15 in the inspected image). SQLx remains the only client; its exact version is
+owned by Cargo.lock (currently 0.9.0). Other extension versions are rejected pending
+explicit validation. Component schema upgrades require a future explicit implementation;
+there is no automatic ALTER EXTENSION, repair, old reader or profile switch.
+
+`StoreConnections::Runtime` is required for PG/shared profiles. Dedicated requires
+`StoreConnections::Native` with separate runtime and maintenance pools. The maintenance
+pool must use the trusted NOLOGIN schema owner via an explicitly authorized login role;
+construction verifies both pools point to the same installation. Closing the store closes
+both adopted pools. Products own pool routing and per-database credentials. The raw
+hypertable has no RLS in this profile, so database isolation is mandatory: immutable
+fixed-tenant CHECK constraints, restricted mutation functions and the Rust tenant gate
+reject other tenants. Ordinary metadata tables retain RLS. Never expose either pool to
+untrusted callers or use these credentials as a SQL sandbox.
+
+For Timescale runtime grants, use the same SELECT/EXECUTE grants as above, but revoke
+`rss_timeseries.integer_now()` instead of the absent `create_partition`. Dedicated also
+revokes `rss_timeseries.project_gauge()`. No runtime gets table writes, schema CREATE,
+owner membership, or maintenance-pool credentials. Chunk creation belongs to the
+hypertable owner. Extension objects, schema fingerprints, chunk permissions, native
+views and columnstore settings are checked during admission; drain and re-admit after
+role or DDL changes. Missing extension/capabilities and unsupported combinations fail
+closed. Shared RLS does not support native CAgg or columnstore in this pinned version.
+
+Dedicated installation declares 1–32 distinct positive microsecond resolutions.
+Integer Gauge native aggregates retain exact numeric sum/count/min/max and missing
+quality, imported through the core's validated `GaugeStatistics` boundary. F64 keeps
+canonical ordered arithmetic; Counter/state keep the existing boundary-aware fold.
+The native feature does not change those metric semantics or authorize float coercion.
+
+Native Recompute uses the existing plan/checkpoint/token and canonical summaries:
+update source visibility under the namespace lock, refresh a whole bucket outside a
+transaction block, then verify revision and phase before publication. Native SQL output
+is never returned directly. Each step updates at most `MaintenanceBudget.rows` source
+rows or refreshes at most one bucket (within `MaintenanceBudget.buckets`); bucket scans
+are bounded by statement/lock timeout and the caller deadline, not a row-count claim.
+Timescale's internal commits do not prove component publication. Cancellation or lost
+acknowledgment leaves the phase retryable and returns Unknown when effects are possible.
+
+Delete/Restore fences hide results immediately; pending source projection and refresh
+cannot expose stale cached summaries. Prune saves retained canonical summaries before
+raw removal. Recompute rejects pruned input. The same Prune plan subsequently cleans
+native materialization caches with bounded bucket refreshes; that cleanup **never imports
+or overwrites canonical retained summaries**. Thus native buffers do not indefinitely
+retain pruned contributions, while retained query results survive raw retirement.
+
+`convert_raw_chunks(window, max_chunks, StorageFormat, deadline)` is host-owned physical
+administration, available only with dedicated owner credentials. It converts at most
+32 complete raw chunks in an explicit interval and is idempotent on repetition. Unknown
+may mean only a subset converted. Conversion does not alter logical retention or
+resource authorization; it must not be exposed as an end-user maintenance endpoint.
+CAgg materializations remain rowstore. No background refresh/compression/retention job
+is installed, and no whole-chunk deletion bypasses the component's row-level lifecycle.
+
+The hypertable base is Apache-2 functionality; native continuous aggregates and
+columnstore use Timescale License (TSL) code. The tested image is Community, not an
+Apache-only build. Products own deployment/distribution license compliance and must
+review the pinned upstream LICENSE and `tsl/LICENSE-TIMESCALE`; this adapter does not
+promise unrestricted DBaaS use. Source and fixed artifact consumers cover core, PG-only,
+Timescale shared and Timescale dedicated separately; actual publication remains separate.
+
+ref: timescale/timescaledb b0977bf2d3a5014ee870247be09bc19d3e9f7a5f
+ref: tsl/src/continuous_aggs/common.c, tsl/src/continuous_aggs/refresh.c,
+tsl/src/compression/create.c, src/compat/compat.h and LICENSE at 2.30.2

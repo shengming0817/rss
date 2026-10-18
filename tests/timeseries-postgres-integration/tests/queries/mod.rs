@@ -88,7 +88,7 @@ async fn history_latest_live_pages_and_budgets() -> anyhow::Result<()> {
     assert!(second.next.is_none());
     let fresh = PgStore::new(
         rss_timeseries_postgres::StorageProfile::PostgreSQL,
-        f.pool.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         limits()?,
         CursorKey::new([17; 32]),
@@ -114,7 +114,7 @@ async fn history_latest_live_pages_and_budgets() -> anyhow::Result<()> {
     low.max_bytes = NonZeroU32::MIN;
     let small = PgStore::new(
         rss_timeseries_postgres::StorageProfile::PostgreSQL,
-        f.pool.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         low,
         CursorKey::new([17; 32]),
@@ -149,7 +149,7 @@ async fn original_receipt_survives_minimum_horizon() -> anyhow::Result<()> {
     caps.replay_micros = NonZeroU64::MIN;
     let store = PgStore::new(
         rss_timeseries_postgres::StorageProfile::PostgreSQL,
-        f.pool.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         caps,
         CursorKey::new([17; 32]),
