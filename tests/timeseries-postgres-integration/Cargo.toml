@@ -7,9 +7,9 @@ publish = false
 [lints]
 workspace = true
 [dev-dependencies]
-rss-examples = { path = "../../crates/examples", features = ["timeseries-pg"] }
+rss-examples = { path = "../../crates/examples", features = ["timeseries-timescaledb"] }
 rss-timeseries.workspace = true
-rss-timeseries-postgres = { workspace = true, features = ["integration"] }
+rss-timeseries-postgres = { workspace = true, features = ["integration", "timescaledb"] }
 rss-request-context.workspace = true
 rss-contract.workspace = true
 testkit = { path = "../../crates/testkit", features = ["containers"] }

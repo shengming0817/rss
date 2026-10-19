@@ -140,7 +140,43 @@ enum Statistics {
         transitions: Vec<Transition>,
     },
 }
+/// Exact integer Gauge statistics reconstructed by a trusted provider. This verifies
+/// structural/numeric consistency, not the provider's durable publication claim.
+#[derive(Clone, Debug)]
+pub struct GaugeStatistics {
+    pub sum: Sum,
+    pub count: u64,
+    pub min: Option<Number>,
+    pub max: Option<Number>,
+    pub gaps: bool,
+}
 impl Summary {
+    pub fn from_integer_gauge(
+        spec: &SummarySpec,
+        window: Interval,
+        stats: GaugeStatistics,
+    ) -> Result<Self, Error> {
+        spec.validate()?;
+        let Metric::Gauge { number } = spec.series().definition().spec().metric else {
+            return Err(Error::Unsupported);
+        };
+        if window.width_micros() == 0 {
+            return Err(Error::InvalidInput);
+        }
+        let data = Statistics::Numeric(numeric::Numeric::from_integer_statistics(number, &stats)?);
+        let mut defects = BTreeSet::new();
+        if stats.gaps {
+            defects.insert(Completeness::Gaps);
+        }
+        Ok(Self {
+            window,
+            semantics: spec.semantics()?,
+            valid: stats.count,
+            defects,
+            data,
+        })
+    }
+
     /// Input is unique and ordered by the canonical observation tuple. It may include
     /// one predecessor for Counter/state boundary semantics. Providers enforce scan budgets.
     pub fn compute(

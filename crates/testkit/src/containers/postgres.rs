@@ -70,13 +70,40 @@ pub async fn postgres_tls(
     attachment: NetworkAttachment<'_>,
     identity: PgTlsServerIdentity,
 ) -> Result<PgTlsFixture> {
+    postgres_image(
+        attachment,
+        identity,
+        GenericImage::new("postgres", "16-alpine"),
+    )
+    .await
+}
+/// Fixed TimescaleDB 2.30.2 / PG16 provider fixture, with the same TLS boundary.
+pub async fn timescaledb_tls(
+    attachment: NetworkAttachment<'_>,
+    identity: PgTlsServerIdentity,
+) -> Result<PgTlsFixture> {
+    postgres_image(
+        attachment,
+        identity,
+        GenericImage::new(
+            "timescale/timescaledb",
+            "2.30.2-pg16@sha256:6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f",
+        ),
+    )
+    .await
+}
+async fn postgres_image(
+    attachment: NetworkAttachment<'_>,
+    identity: PgTlsServerIdentity,
+    image: GenericImage,
+) -> Result<PgTlsFixture> {
     let material = super::tls::tls_material_for_host(
         attachment.dns_name,
         matches!(identity, PgTlsServerIdentity::MatchingHost),
     )?;
     let startup = b"#!/bin/sh\nset -eu\nchown postgres:postgres /rss-tls/server-key.pem\nchmod 600 /rss-tls/server-key.pem\nexec /usr/local/bin/docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/rss-tls/server.pem -c ssl_key_file=/rss-tls/server-key.pem -c ssl_min_protocol_version=TLSv1.2\n";
     let require_tls = b"#!/bin/sh\nset -eu\nsed -i -E 's/^host([[:space:]])/hostssl\\1/' \"$PGDATA/pg_hba.conf\"\n";
-    let image = GenericImage::new("postgres", "16-alpine")
+    let image = image
         .with_exposed_port(PG_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",

@@ -535,7 +535,10 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
             window: q.window(),
             restore_until: ts(30)?,
         },
-        budget()?.max_points,
+        MaintenanceBudget {
+            rows: budget()?.max_points,
+            buckets: budget()?.max_points,
+        },
     )?;
     let other = MaintenanceRequest::new(
         id("plan")?,
@@ -544,7 +547,10 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
             window: q.window(),
             deletion_fence: id("fence")?,
         },
-        budget()?.max_points,
+        MaintenanceBudget {
+            rows: budget()?.max_points,
+            buckets: budget()?.max_points,
+        },
     )?;
     let cursor = Continuation::new(m.binding()?, rss_contract::PageCursor::parse("YQ")?);
     assert!(cursor.verify(other.binding()?).is_err());
@@ -557,7 +563,10 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
                 window: Interval::new(ts(1)?, ts(1)?)?,
                 restore_until: ts(30)?
             },
-            budget()?.max_points
+            MaintenanceBudget {
+                rows: budget()?.max_points,
+                buckets: budget()?.max_points
+            }
         )
         .is_err()
     );
@@ -635,7 +644,10 @@ fn every_admitted_observation_has_a_representable_query_upper_bound() -> TestRes
             window,
             restore_until: ts(i64::MAX)?,
         },
-        budget()?.max_points,
+        MaintenanceBudget {
+            rows: budget()?.max_points,
+            buckets: budget()?.max_points,
+        },
     )?;
     let mut rejected = last.input().clone();
     rejected.observed_at = ts(i64::MAX)?;
@@ -645,5 +657,94 @@ fn every_admitted_observation_has_a_representable_query_upper_bound() -> TestRes
     let encoded = String::from_utf8(batch(vec![last])?.encode()?)?;
     let malformed = encoded.replace("9223372036854775806", "9223372036854775807");
     assert!(Batch::decode(malformed.as_bytes()).is_err());
+    Ok(())
+}
+
+#[test]
+fn native_integer_statistics_preserve_exactness_and_reject_inconsistent_snapshots() -> TestResult {
+    let sample = gauge(1)?;
+    let spec = SummarySpec::new(
+        stream()?,
+        sample.input().series.clone(),
+        NonZeroU64::new(10).ok_or(Error::InvalidInput)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let window = Interval::new(ts(0)?, ts(10)?)?;
+    let stats = GaugeStatistics {
+        sum: Sum::U128(u128::from(u64::MAX) * 2),
+        count: 2,
+        min: Some(Number::U64(u64::MAX)),
+        max: Some(Number::U64(u64::MAX)),
+        gaps: true,
+    };
+    let summary = Summary::from_integer_gauge(&spec, window, stats.clone())?;
+    assert!(
+        matches!(summary.project(AggregateOp::Mean)?.value,AggregateValue::Mean{sum:Sum::U128(v),count} if v==u128::from(u64::MAX)*2 && count.get()==2)
+    );
+    assert!(
+        summary
+            .project(AggregateOp::Count)?
+            .completeness
+            .contains(&Completeness::Gaps)
+    );
+    let mut invalid = stats.clone();
+    invalid.count = 0;
+    assert!(Summary::from_integer_gauge(&spec, window, invalid).is_err());
+    let mut invalid = stats.clone();
+    invalid.sum = Sum::U128(1);
+    assert!(Summary::from_integer_gauge(&spec, window, invalid).is_err());
+    let mut invalid = stats;
+    invalid.min = Some(Number::I64(1));
+    assert!(Summary::from_integer_gauge(&spec, window, invalid).is_err());
+    let empty = Summary::from_integer_gauge(
+        &spec,
+        window,
+        GaugeStatistics {
+            sum: Sum::U128(0),
+            count: 0,
+            min: None,
+            max: None,
+            gaps: false,
+        },
+    )?;
+    assert!(matches!(
+        empty.project(AggregateOp::Mean)?.value,
+        AggregateValue::Missing
+    ));
+    Ok(())
+}
+
+#[test]
+fn maintenance_binding_includes_distinct_row_and_bucket_budgets() -> TestResult {
+    let action = MaintenanceAction::CloseStream { stream: stream()? };
+    let one = NonZeroU32::new(1).ok_or(Error::InvalidInput)?;
+    let two = NonZeroU32::new(2).ok_or(Error::InvalidInput)?;
+    let a = MaintenanceRequest::new(
+        id("bounded")?,
+        action.clone(),
+        MaintenanceBudget {
+            rows: one,
+            buckets: one,
+        },
+    )?;
+    let b = MaintenanceRequest::new(
+        id("bounded")?,
+        action.clone(),
+        MaintenanceBudget {
+            rows: one,
+            buckets: two,
+        },
+    )?;
+    let c = MaintenanceRequest::new(
+        id("bounded")?,
+        action,
+        MaintenanceBudget {
+            rows: two,
+            buckets: one,
+        },
+    )?;
+    assert_ne!(a.binding()?, b.binding()?);
+    assert_ne!(a.binding()?, c.binding()?);
     Ok(())
 }

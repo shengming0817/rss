@@ -1,7 +1,7 @@
 //! Minimal public provider consumer. Authentication and deployment remain host-owned.
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::*;
-use rss_timeseries_postgres::{CursorKey, Limits, MIGRATION_SQL, PgStore};
+use rss_timeseries_postgres::{CursorKey, Limits, PgStore};
 use std::{
     num::{NonZeroU32, NonZeroU64},
     time::{Duration, Instant},
@@ -53,7 +53,13 @@ pub async fn install(input: crate::pg::Input) -> anyhow::Result<()> {
     let pool = input.pool().await?;
     let mut c = pool.acquire().await?;
     sqlx::raw_sql("SET ROLE ts_owner").execute(&mut *c).await?;
-    sqlx::raw_sql(MIGRATION_SQL).execute(&mut *c).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL
+            .installation_sql()?
+            .as_str(),
+    ))
+    .execute(&mut *c)
+    .await?;
     // The fixture explicitly chooses its admission interval; products choose their own partitions.
     sqlx::raw_sql("SELECT rss_timeseries.create_partition(0,100); SELECT rss_timeseries.create_partition(100,1000000); RESET ROLE").execute(&mut *c).await?;
     drop(c);
@@ -61,6 +67,18 @@ pub async fn install(input: crate::pg::Input) -> anyhow::Result<()> {
     Ok(())
 }
 pub async fn run(input: Input) -> anyhow::Result<()> {
+    run_on(
+        input,
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        None,
+    )
+    .await
+}
+pub(crate) async fn run_on(
+    input: Input,
+    profile: rss_timeseries_postgres::StorageProfile,
+    maintenance: Option<sqlx::PgPool>,
+) -> anyhow::Result<()> {
     let tenant = TenantId::parse(&input.pg.tenant)?;
     let operator = Operator(tenant);
     let scope = Scope::new(tenant, Id::new("example")?);
@@ -89,7 +107,15 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         cursor_micros: NonZeroU64::new(60_000_000).ok_or(Error::InvalidInput)?,
     };
     let store = PgStore::new(
-        pool.clone(),
+        profile.clone(),
+        match &maintenance {
+            #[cfg(feature = "timeseries-timescaledb")]
+            Some(owner) => rss_timeseries_postgres::StoreConnections::Native {
+                runtime: pool.clone(),
+                maintenance: owner.clone(),
+            },
+            _ => rss_timeseries_postgres::StoreConnections::Runtime(pool.clone()),
+        },
         Timer,
         limits.clone(),
         CursorKey::new(input.cursor_key),
@@ -134,7 +160,15 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         "batch did not replay"
     );
     let reopened = PgStore::new(
-        pool.clone(),
+        profile.clone(),
+        match &maintenance {
+            #[cfg(feature = "timeseries-timescaledb")]
+            Some(owner) => rss_timeseries_postgres::StoreConnections::Native {
+                runtime: pool.clone(),
+                maintenance: owner.clone(),
+            },
+            _ => rss_timeseries_postgres::StoreConnections::Runtime(pool.clone()),
+        },
         Timer,
         limits,
         CursorKey::new(input.cursor_key),
@@ -177,7 +211,15 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         result.rows.len() == 1 && result.rows[0].sample == sample && result.next.is_none(),
         "query failed exact value preservation"
     );
-    lifecycle(&reopened, &operator, &sample, &receipt).await?;
+    lifecycle(
+        &reopened,
+        &operator,
+        &sample,
+        &receipt,
+        &pool,
+        maintenance.is_some(),
+    )
+    .await?;
     store.close(budget()?).await?;
     Ok(())
 }
@@ -193,7 +235,10 @@ async fn maintain(
         MaintenanceRequest::new(
             Id::new(id)?,
             action,
-            NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+            MaintenanceBudget {
+                rows: NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+                buckets: NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+            },
         )?,
     )?;
     let mut next = None;
@@ -214,6 +259,8 @@ async fn lifecycle(
     operator: &Operator,
     sample: &Sample,
     receipt: &Receipt,
+    pool: &sqlx::PgPool,
+    native: bool,
 ) -> anyhow::Result<()> {
     let spec = SummarySpec::new(
         sample.input().stream.clone(),
@@ -233,6 +280,16 @@ async fn lifecycle(
         },
     )
     .await?;
+    if native {
+        let total: String =
+            sqlx::query_scalar("SELECT total::text FROM rss_timeseries.gauge_100 WHERE bucket=100")
+                .fetch_one(pool)
+                .await?;
+        anyhow::ensure!(
+            total == u64::MAX.to_string(),
+            "native materialization did not preserve the exact sample"
+        );
+    }
     maintain(
         reopened,
         operator,

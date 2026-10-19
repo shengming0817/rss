@@ -17,7 +17,12 @@ pub(crate) async fn lock(c: &mut PgConnection, s: &Scope) -> Result<i64, Error> 
         .map_err(sql_error)
 }
 pub(crate) async fn read_lock(c: &mut PgConnection, s: &Scope) -> Result<(), Error> {
-    sqlx::query("SELECT rss_timeseries.read_namespace($1::text::uuid,$2)").bind(s.tenant().to_string()).bind(s.namespace().as_str()).fetch_optional(c).await.map_err(sql_error)?;
+    sqlx::query("SELECT rss_timeseries.read_namespace($1::text::uuid,$2)")
+        .bind(s.tenant().to_string())
+        .bind(s.namespace().as_str())
+        .fetch_optional(c)
+        .await
+        .map_err(sql_error)?;
     Ok(())
 }
 pub(crate) async fn absent_receipt(

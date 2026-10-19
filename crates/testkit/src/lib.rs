@@ -17,7 +17,7 @@ pub use containers::{
     NetworkAttachment, PgConnParams, PgTlsFixture, PgTlsServerIdentity, RabbitFixture,
     RabbitTlsFixture, RedisFixture, S3ArchiveFixture, bridge_network, exclusive_kafka_tls,
     exclusive_mqtt_tls, exclusive_rabbitmq, launch, managed_redis, postgres_tls, rabbitmq_tls,
-    s3_tls_archive, shared_kafka_tls, shared_mqtt_tls, shared_rabbitmq,
+    s3_tls_archive, shared_kafka_tls, shared_mqtt_tls, shared_rabbitmq, timescaledb_tls,
 };
 
 /// A bounded readiness probe exhausted its total deadline.

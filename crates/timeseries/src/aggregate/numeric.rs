@@ -96,3 +96,37 @@ impl Numeric {
         })
     }
 }
+
+impl Numeric {
+    pub(super) fn from_integer_statistics(
+        kind: NumberKind,
+        stats: &GaugeStatistics,
+    ) -> Result<Self, Error> {
+        let valid = match (kind, stats.sum, stats.min, stats.max) {
+            (NumberKind::I64, Sum::I128(sum), Some(Number::I64(lo)), Some(Number::I64(hi))) => {
+                stats.count > 0
+                    && lo <= hi
+                    && sum >= i128::from(lo) * i128::from(stats.count)
+                    && sum <= i128::from(hi) * i128::from(stats.count)
+            }
+            (NumberKind::U64, Sum::U128(sum), Some(Number::U64(lo)), Some(Number::U64(hi))) => {
+                stats.count > 0
+                    && lo <= hi
+                    && sum >= u128::from(lo) * u128::from(stats.count)
+                    && sum <= u128::from(hi) * u128::from(stats.count)
+            }
+            (NumberKind::I64, Sum::I128(0), None, None)
+            | (NumberKind::U64, Sum::U128(0), None, None) => stats.count == 0,
+            _ => false,
+        };
+        if !valid {
+            return Err(Error::Invariant);
+        }
+        Ok(Self {
+            sum: stats.sum,
+            count: stats.count,
+            min: stats.min,
+            max: stats.max,
+        })
+    }
+}

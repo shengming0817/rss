@@ -211,7 +211,10 @@ fn independent_adapter_implements_all_ports_without_a_runtime() -> anyhow::Resul
             spec,
             window: query.window(),
         },
-        n,
+        MaintenanceBudget {
+            rows: n,
+            buckets: n,
+        },
     )?;
     reject(store.step(
         &Authorized::<MaintenanceRequest>::verify(&Operator, maintenance)?,

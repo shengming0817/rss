@@ -188,7 +188,8 @@ async fn layered_pruning_expiry_and_closed_stream_reclamation() -> anyhow::Resul
     let mut short = limits()?;
     short.replay_micros = NonZeroU64::new(1).ok_or(Error::InvalidInput)?;
     let store = PgStore::new(
-        f.pool.clone(),
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         short,
         CursorKey::new([17; 32]),
@@ -454,29 +455,11 @@ async fn restore_and_receipt_guarantees_block_physical_cleanup() -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn v1_upgrade_requires_current_schema_and_protects_new_objects() -> anyhow::Result<()> {
-    let f = Fixture::new_inner("ts-upgrade", true).await?;
-    let old_sample = sample(&definition(TENANT)?, "v1", 50, 7)?;
-    let old = batch("v1", vec![old_sample.clone()])?;
-    let old_page = raw_page(&f, &definition(TENANT)?).await?;
-    assert!(old_page.rows.iter().any(|r| r.sample == old_sample));
-    let old_receipt = f
-        .store
-        .receipt(
-            &Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(&old)?)?,
-            deadline()?,
-        )
-        .await?;
-    assert!(
-        matches!(old_receipt,Lookup::Found(ref receipt) if receipt.identity().digest==old.digest()? && receipt.received_at()==Timestamp::new(10)?)
-    );
-    assert!(matches!(f.write(&old).await?, Outcome::Replay(_)));
-    let replay = confirmed(f.write(&batch("v1-new-batch", vec![old_sample])?).await?)?;
-    assert_eq!((replay.new_samples(), replay.replayed_samples()), (0, 1));
-
+async fn current_schema_protects_lifecycle_objects() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-current-schema").await?;
     let d = definition(TENANT)?;
     f.register(&d).await?;
-    f.write(&batch("upgraded", vec![sample(&d, "upgraded", 1, 1)?])?)
+    f.write(&batch("current", vec![sample(&d, "current", 1, 1)?])?)
         .await?;
     let selection = spec(&d, 10)?.selection();
     complete(
@@ -522,7 +505,8 @@ async fn v1_upgrade_requires_current_schema_and_protects_new_objects() -> anyhow
         .await?;
     assert!(
         PgStore::new(
-            f.pool.clone(),
+            rss_timeseries_postgres::StorageProfile::PostgreSQL,
+            rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
             Timer,
             limits()?,
             CursorKey::new([17; 32]),
@@ -658,7 +642,8 @@ async fn maintenance_survives_real_before_and_after_commit_process_death() -> an
         child.wait().await?;
         ready??;
         let reopened = PgStore::new(
-            f.pool.clone(),
+            rss_timeseries_postgres::StorageProfile::PostgreSQL,
+            rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
             Timer,
             limits()?,
             CursorKey::new([17; 32]),
@@ -710,7 +695,8 @@ async fn maintenance_child() -> anyhow::Result<()> {
         )
         .await?;
     let store = PgStore::new(
-        pool,
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(pool),
         Timer,
         limits()?,
         CursorKey::new([17; 32]),
@@ -753,7 +739,8 @@ async fn repeated_prunes_compact_frontiers_and_unrelated_deletes_do_not_exhaust_
     let mut low = limits()?;
     low.max_points = NonZeroU32::new(2).ok_or(Error::InvalidInput)?;
     let store = PgStore::new(
-        f.pool.clone(),
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         low,
         CursorKey::new([17; 32]),

@@ -56,6 +56,7 @@ impl<C: Clock> PgStore<C> {
         operation: impl for<'a> FnOnce(&'a mut PgConnection, &'a C) -> BoxFuture<'a, Result<T, Error>>
         + Send,
     ) -> Result<Outcome<T>, Error> {
+        self.profile.check_tenant(tenant)?;
         let started = AtomicBool::new(false);
         let remaining = deadline
             .remaining(self.clock.now())

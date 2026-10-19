@@ -6,7 +6,11 @@ mod definition;
 mod lifecycle;
 mod maintain;
 mod probe;
+mod profile;
+pub use profile::{StorageProfile, StoreConnections};
 mod read;
+#[cfg(feature = "timescaledb")]
+pub mod timescale;
 mod transaction;
 mod write;
 pub use cursor::CursorKey;
@@ -17,13 +21,10 @@ use std::num::{NonZeroU32, NonZeroU64};
 #[cfg(feature = "integration")]
 pub use transaction::Fault;
 /// External schema owner executes this once. Runtime construction never executes DDL.
-pub const MIGRATION_SQL: &str = concat!(
-    include_str!("../migrations/0001_create_timeseries.sql"),
-    "\n",
-    include_str!("../migrations/0002_add_lifecycle.sql")
-);
-/// One-way V1 upgrade, executed by the host with old writers drained.
-pub const UPGRADE_V2_SQL: &str = include_str!("../migrations/0002_add_lifecycle.sql");
+pub(crate) const TABLES_SQL: &str = include_str!("../migrations/tables.sql");
+pub(crate) const SAMPLES_SQL: &str = include_str!("../migrations/samples.sql");
+pub(crate) const FUNCTIONS_SQL: &str = include_str!("../migrations/functions.sql");
+pub(crate) const PARTITIONS_SQL: &str = include_str!("../migrations/partitions.sql");
 /// Positive host caps; request point/series budgets may be lower. Bytes bound encoded output,
 /// not exact process memory. A finite replay minimum is persisted on every new batch.
 #[derive(Clone, Debug)]
@@ -37,6 +38,8 @@ pub struct Limits {
 /// Dedicated pool adopted by this adapter; closing it affects all pool clones.
 pub struct PgStore<C> {
     pool: PgPool,
+    profile: StorageProfile,
+    maintenance: Option<PgPool>,
     clock: C,
     limits: Limits,
     key: CursorKey,
@@ -48,7 +51,8 @@ pub struct PgStore<C> {
 impl<C: Clock> PgStore<C> {
     /// Validate deployment before serving requests. Roles/DDL changes require drain and re-admission.
     pub async fn new(
-        pool: PgPool,
+        profile: StorageProfile,
+        connections: StoreConnections,
         clock: C,
         limits: Limits,
         key: CursorKey,
@@ -59,16 +63,20 @@ impl<C: Clock> PgStore<C> {
         {
             return Err(Error::InvalidInput);
         }
+        let (pool, maintenance) = connections.into_pools();
         let remaining = deadline.remaining(clock.now()).ok_or(Error::Deadline)?;
-        let instance = tokio::time::timeout(remaining, probe::validate(&pool))
-            .await
-            .map_err(|_| Error::Deadline)??;
+        let instance =
+            tokio::time::timeout(remaining, profile.validate(&pool, maintenance.as_ref()))
+                .await
+                .map_err(|_| Error::Deadline)??;
         let guarantees = Guarantees {
             atomicity: Atomicity::AtomicBatch,
             replay_micros: limits.replay_micros,
         };
         Ok(Self {
             pool,
+            profile,
+            maintenance,
             clock,
             limits,
             key,
@@ -80,7 +88,13 @@ impl<C: Clock> PgStore<C> {
     }
     /// Stop pool admission, then wait for borrowers within the original absolute deadline.
     pub async fn close(&self, deadline: Deadline) -> Result<(), Error> {
-        let close = self.pool.close();
+        let close = async {
+            if let Some(maintenance) = &self.maintenance {
+                futures::future::join(self.pool.close(), maintenance.close()).await;
+            } else {
+                self.pool.close().await;
+            }
+        };
         tokio::time::timeout(
             deadline
                 .remaining(self.clock.now())

@@ -43,7 +43,8 @@ async fn atomic_replay_conflict_retirement_and_recovery() -> anyhow::Result<()> 
     f.store.inject_next_fault(Fault::CommitAckLost);
     assert!(matches!(f.write(&next).await?, Outcome::Unknown));
     let fresh = PgStore::new(
-        f.pool.clone(),
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         limits()?,
         CursorKey::new([17; 32]),

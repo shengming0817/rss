@@ -1,0 +1,1 @@
+SELECT md5(string_agg(pg_get_functiondef(p.oid),E'\n' ORDER BY p.proname)) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='rss_timeseries' AND p.proname IN ('integer_now','project_gauge','sync_gauge')

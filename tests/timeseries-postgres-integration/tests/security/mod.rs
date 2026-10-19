@@ -76,7 +76,8 @@ async fn tenant_permissions_partitions_and_drift() -> anyhow::Result<()> {
     assert_eq!(count, 0);
     assert!(
         PgStore::new(
-            f.pool.clone(),
+            rss_timeseries_postgres::StorageProfile::PostgreSQL,
+            rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
             Timer,
             limits()?,
             CursorKey::new([17; 32]),
@@ -111,7 +112,8 @@ async fn tenant_permissions_partitions_and_drift() -> anyhow::Result<()> {
         sqlx::raw_sql(bad).execute(&f.admin).await?;
         assert!(
             PgStore::new(
-                f.pool.clone(),
+                rss_timeseries_postgres::StorageProfile::PostgreSQL,
+                rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
                 Timer,
                 limits()?,
                 CursorKey::new([17; 32]),
@@ -123,7 +125,8 @@ async fn tenant_permissions_partitions_and_drift() -> anyhow::Result<()> {
         sqlx::raw_sql(undo).execute(&f.admin).await?;
     }
     PgStore::new(
-        f.pool.clone(),
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         Timer,
         limits()?,
         CursorKey::new([17; 32]),
@@ -180,7 +183,8 @@ async fn injected_deadline_is_checked_before_commit() -> anyhow::Result<()> {
     f.register(&d).await?;
     let offset = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let store = PgStore::new(
-        f.pool.clone(),
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
         ShiftClock(offset.clone()),
         limits()?,
         CursorKey::new([17; 32]),

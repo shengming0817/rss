@@ -136,7 +136,7 @@ class TimeseriesScenarios(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("timeseries_proof", HACK / "timeseries-package-proof.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        for scenario in ("core", "pg"):
+        for scenario in ("core", "pg", "timescale-shared", "timescale-native"):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
                 stack.enter_context(patch.object(sys, "argv", ["timeseries", "--source", "--scenario", scenario]))
                 selection = stack.enter_context(patch.object(module, "example_dependencies", return_value={scenario: (set(), {})}))
@@ -157,9 +157,11 @@ class TimeseriesScenarios(unittest.TestCase):
                 else:
                     self.assertNotIn("rss-timeseries-postgres", forbidden)
                     self.assertEqual(graph.call_args.kwargs["required_features"]["serde_json"], {"default", "std", "float_roundtrip", "raw_value"})
-                    self.assertEqual(graph.call_args.kwargs["required_features"]["rss-timeseries-postgres"], {"default"})
-                    self.assertEqual(provider.call_args.args[1:4], ("timeseries-postgres-integration", "suite", "examples::example_consumer"))
-                    self.assertEqual(set(provider.call_args.args[4].values()), {"timeseries-install", "timeseries-pg"})
+                    native = scenario.startswith("timescale-")
+                    self.assertEqual(graph.call_args.kwargs["required_features"]["rss-timeseries-postgres"], {"default", "timescaledb"} if native else {"default"})
+                    target = {"pg": "example_consumer", "timescale-shared": "timescale_shared_consumer", "timescale-native": "timescale_native_consumer"}[scenario]
+                    self.assertEqual(provider.call_args.args[1:4], ("timeseries-postgres-integration", "suite", f"examples::{target}"))
+                    self.assertEqual(set(provider.call_args.args[4].values()), {"timeseries-timescale-install", "timeseries-timescale"} if native else {"timeseries-install", "timeseries-pg"})
 
 
 class FeatureForwarding(unittest.TestCase):

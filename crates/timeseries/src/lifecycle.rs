@@ -99,21 +99,29 @@ fn positive(window: Interval) -> Result<(), Error> {
         Ok(())
     }
 }
+/// Explicit per-step work ceilings. Rows bound source/projection mutations; buckets
+/// bound native materialization work, whose scan is bounded by the caller deadline.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaintenanceBudget {
+    pub rows: NonZeroU32,
+    pub buckets: NonZeroU32,
+}
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceRequest {
     id: Id,
     action: MaintenanceAction,
-    max_items: NonZeroU32,
+    budget: MaintenanceBudget,
 }
 impl MaintenanceRequest {
-    pub fn new(id: Id, action: MaintenanceAction, max_items: NonZeroU32) -> Result<Self, Error> {
+    pub fn new(
+        id: Id,
+        action: MaintenanceAction,
+        budget: MaintenanceBudget,
+    ) -> Result<Self, Error> {
         action.validate()?;
-        Ok(Self {
-            id,
-            action,
-            max_items,
-        })
+        Ok(Self { id, action, budget })
     }
     pub const fn id(&self) -> &Id {
         &self.id
@@ -121,8 +129,8 @@ impl MaintenanceRequest {
     pub const fn action(&self) -> &MaintenanceAction {
         &self.action
     }
-    pub const fn max_items(&self) -> NonZeroU32 {
-        self.max_items
+    pub const fn budget(&self) -> MaintenanceBudget {
+        self.budget
     }
     pub fn scope(&self) -> &Scope {
         self.action.scope()

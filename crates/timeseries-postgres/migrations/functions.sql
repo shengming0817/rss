@@ -1,12 +1,43 @@
--- One-way owner-executed upgrade. Drain old writers before applying.
-ALTER TABLE rss_timeseries.streams ADD COLUMN closed boolean NOT NULL DEFAULT false;
-ALTER TABLE rss_timeseries.streams ADD COLUMN reclaimed boolean NOT NULL DEFAULT false;
-ALTER TABLE rss_timeseries.batches ADD COLUMN expired boolean NOT NULL DEFAULT false;
+CREATE INDEX samples_history ON rss_timeseries.samples(tenant_id,namespace,series_digest,source,generation,observed_at,sequence,sample_id);
+CREATE INDEX samples_resource ON rss_timeseries.samples(tenant_id,namespace,subject,resource,key,observed_at);
+DO $$ DECLARE n text; BEGIN
+ FOREACH n IN ARRAY ARRAY['definition_heads','definitions','streams','batches','sample_identities','samples'] LOOP
+  EXECUTE format('ALTER TABLE rss_timeseries.%I ENABLE ROW LEVEL SECURITY',n);
+  EXECUTE format('ALTER TABLE rss_timeseries.%I FORCE ROW LEVEL SECURITY',n);
+  EXECUTE format('CREATE POLICY tenant ON rss_timeseries.%I USING (tenant_id=nullif(current_setting(''rss.tenant_id'',true),'''')::uuid) WITH CHECK (tenant_id=nullif(current_setting(''rss.tenant_id'',true),'''')::uuid)',n);
+ END LOOP;
+END $$;
+CREATE FUNCTION rss_timeseries.lock_key(t uuid,n text,k text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
+ IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='tenant'; END IF;
+ INSERT INTO rss_timeseries.definition_heads(tenant_id,namespace,key) VALUES(t,n,k) ON CONFLICT DO NOTHING;
+ PERFORM 1 FROM rss_timeseries.definition_heads WHERE tenant_id=t AND namespace=n AND key=k FOR UPDATE;
+END $$;
+CREATE FUNCTION rss_timeseries.lock_definition(t uuid,n text,k text,v numeric) RETURNS SETOF rss_timeseries.definitions
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
+ IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='tenant'; END IF;
+ RETURN QUERY SELECT * FROM rss_timeseries.definitions WHERE tenant_id=t AND namespace=n AND key=k AND version=v FOR SHARE;
+END $$;
+CREATE FUNCTION rss_timeseries.put_definition(t uuid,n text,k text,v numeric,b bytea,d bytea,retire boolean) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ DECLARE prior rss_timeseries.definitions; BEGIN
+ PERFORM rss_timeseries.lock_key(t,n,k);
+ SELECT * INTO prior FROM rss_timeseries.definitions WHERE tenant_id=t AND namespace=n AND key=k AND version=v FOR UPDATE;
+ IF FOUND THEN
+  IF prior.digest<>d OR prior.raw<>b THEN RAISE EXCEPTION USING ERRCODE='TS001',MESSAGE='definition conflict'; END IF;
+  IF retire THEN UPDATE rss_timeseries.definitions SET retired=true WHERE tenant_id=t AND namespace=n AND key=k AND version=v; END IF;
+ ELSE
+  IF retire THEN RAISE EXCEPTION USING ERRCODE='TS002',MESSAGE='definition missing'; END IF;
+  INSERT INTO rss_timeseries.definitions VALUES(t,n,k,v,b,d,false);
+  UPDATE rss_timeseries.definition_heads SET version=v WHERE tenant_id=t AND namespace=n AND key=k;
+ END IF;
+END $$;
+-- Semantic validation is the trusted Rust provider's responsibility. SQL owns immutable identities,
+-- RLS, exact-definition references and the transaction. No client receives these credentials.
+-- Owner-only explicit bounded partition provisioning. No data-moving fallback/default partition.
 CREATE TABLE rss_timeseries.namespaces (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
  PRIMARY KEY(tenant_id,namespace)
 );
-INSERT INTO rss_timeseries.namespaces(tenant_id,namespace) SELECT DISTINCT tenant_id,namespace FROM rss_timeseries.streams;
 CREATE TABLE rss_timeseries.fences (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
  kind text NOT NULL CHECK(kind IN ('cutoff','delete','pruned')), selection jsonb NOT NULL,
@@ -52,7 +83,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='tenant'; END IF;
  PERFORM 1 FROM rss_timeseries.namespaces WHERE tenant_id=t AND namespace=n FOR SHARE;
 END $$;
-CREATE OR REPLACE FUNCTION rss_timeseries.lock_stream(t uuid,n text,s text,g text) RETURNS void
+CREATE FUNCTION rss_timeseries.lock_stream(t uuid,n text,s text,g text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
  INSERT INTO rss_timeseries.streams(tenant_id,namespace,source,generation) VALUES(t,n,s,g) ON CONFLICT DO NOTHING;
@@ -125,7 +156,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  PERFORM rss_timeseries.lock_stream(t,n,s,g);
  UPDATE rss_timeseries.streams SET closed=true WHERE tenant_id=t AND namespace=n AND source=s AND generation=g;
 END $$;
-CREATE OR REPLACE FUNCTION rss_timeseries.put_sample(b bytea,d bytea,sd bytea,received bigint) RETURNS boolean
+CREATE FUNCTION rss_timeseries.put_sample(b bytea,d bytea,sd bytea,received bigint) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
 DECLARE j jsonb:=convert_from(b,'UTF8')::jsonb; t uuid:=(j#>>'{stream,scope,tenant}')::uuid;
  n text:=j#>>'{stream,scope,namespace}'; s text:=j#>>'{stream,source}'; g text:=j#>>'{stream,generation}';
@@ -149,7 +180,7 @@ BEGIN
  PERFORM rss_timeseries.invalidate(t,n,jsonb_build_object('selection','exact','stream',j->'stream','series',j->'series'),(j->>'observedAt')::bigint,(j->>'observedAt')::bigint+1);
  RETURN true;
 END $$;
-CREATE OR REPLACE FUNCTION rss_timeseries.put_batch(t uuid,n text,s text,g text,i text,d bytea,received bigint,added integer,replayed integer,until_time bigint) RETURNS void
+CREATE FUNCTION rss_timeseries.put_batch(t uuid,n text,s text,g text,i text,d bytea,received bigint,added integer,replayed integer,until_time bigint) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_stream(t,n,s,g);
  INSERT INTO rss_timeseries.batches VALUES(t,n,s,g,i,d,received,added,replayed,until_time,false);
@@ -190,7 +221,3 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
 END $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_timeseries FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_timeseries FROM PUBLIC;
-DO $$ DECLARE old text; BEGIN
- SELECT obj_description(oid,'pg_namespace') INTO old FROM pg_namespace WHERE nspname='rss_timeseries';
- EXECUTE format('COMMENT ON SCHEMA rss_timeseries IS %L',replace(old,'rss-timeseries-postgres:1:','rss-timeseries-postgres:2:'));
-END $$;
