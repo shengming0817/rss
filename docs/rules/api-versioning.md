@@ -3,16 +3,13 @@
 本文拥有 Release API、wire breaking、deprecation 与 definition retention。精确 package/contract inventory 由 manifest、
 release catalog、schema 与 Cargo facts 派生，文档不复制。
 
-## 产品当前开发基线
+## 不向后兼容
 
-尚无部署的 rss-mdm、rss-mdm-agent 自有格式及 rss-web 消费按 #2835/#2836 只维护当前基线；
-直接替换当前结构和消费者，不引入旧 DTO/别名、双读双写、降级、旧库迁移或历史版本矩阵。
-本节不豁免 RSS、Identity、第三方协议及已有受保护承诺；它们继续遵循下文规则。
-
-- 当前格式的恢复、幂等、未决任务、签名和隔离仍须正确；旧开发数据保留，不自动清库、改旧库版本号或重新注册。
-- 普通扩展 key 变化不单独提高 API/IPC/DB/AI 格式版本；schema hash、Git rev 和制品摘要标识内容，不自动代表破坏性变更。
-- 格式调整不归零业务 revision/generation/sequence、任务身份或资源版本，不改上游协议及软件包版本；签名、幂等和确认快照仍绑定实际内容。
-- 模型、读写、必要 SQL、生成/打包、格式调整、测试和规则在所属实施项内完成，不另拆版本或同步收尾任务。
+- 未部署且无对外兼容承诺的自有产品直接替换旧实现并同步消费者，不保留旧字段/DTO、别名、双读双写、降级或历史迁移。
+- 普通扩展 key 增减不升级公共协议或数据库格式；schema hash、Git rev 和制品摘要变化不自动代表格式变化。
+- 业务 revision/generation/sequence、任务身份和资源版本独立于格式版本，不随格式重置。
+- 删除旧格式支持不删除当前格式的恢复、幂等、签名和隔离校验，也不授权清理已有数据或改写旧库版本号。
+- 已发布或冻结的公共契约、第三方协议仍按其兼容承诺处理。
 
 ## 两个兼容轴
 
