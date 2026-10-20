@@ -9,7 +9,4 @@ allowed-tools: [Read, Glob, Grep, Bash, Agent]
 
 See .claude/skills/pr-review/SKILL.md
 
-按 `docs/rules/api-versioning.md` 和 `docs/rules/ai-robust.md` 核对产品当前基线及字段分类；
-普通扩展不是兼容层，不能仅因 key 变化提出全闭合、全局升版或重复全量验证要求。
-
 **完成后对根因进行开源对标，给出修复方向**

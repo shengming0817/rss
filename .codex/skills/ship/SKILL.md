@@ -8,6 +8,3 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 > **子 agent 约束（覆盖下文）**：探索与内置 review 子 agent 使用 `gpt-6.1-sol`（effort medium）；实施、测试与 findings 修复一律由主 agent 执行，不启动子 agent。
 
 See .claude/skills/ship/SKILL.md
-
-当前产品基线与字段分类遵循 `docs/rules/api-versioning.md`、`docs/rules/ai-robust.md`；
-模型、读写、生成、验证和规则按所属实施项闭环，不另设版本/兼容门禁。
