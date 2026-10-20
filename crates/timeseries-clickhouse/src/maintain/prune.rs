@@ -34,6 +34,9 @@ async fn safe_limit<C: Clock>(
     }) {
         return Ok(Err(MaintenanceBlock::RestoreWindow));
     }
+    if raw_before.micros() == 0 {
+        return Ok(Ok(0));
+    }
     let rows=sqlx::query("SELECT spec,lo,hi FROM rss_ts_ch.ranges WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 LIMIT $4")
         .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(summaries_before.micros()).bind(i64::from(store.limits.max_points.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
     if rows.len() > store.limits.max_points.get() as usize {

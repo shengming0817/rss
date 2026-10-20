@@ -56,7 +56,9 @@ pub(crate) async fn validate(
             return Err(Error::Invariant);
         }
     }
+    crate::control_probe::validate(pool).await?;
     catalog(ch).await?;
+    service_grants(ch).await?;
     reader(ch, tenant).await?;
     let guard = ch
         .writer
@@ -102,6 +104,15 @@ async fn catalog(ch: &Connections) -> Result<(), Error> {
         {
             return Err(Error::Invariant);
         }
+        if actual.1 == "PostgreSQL" {
+            let expected = format!(
+                "PostgreSQL(rss_ts_ch_guard,table='{}',schema='rss_ts_ch')",
+                actual.0
+            );
+            if compact(&actual.4) != expected {
+                return Err(Error::Invariant);
+            }
+        }
         if actual.1.ends_with("MergeTree") {
             let settings = actual
                 .4
@@ -145,16 +156,16 @@ async fn reader(ch: &Connections, tenant: TenantId) -> Result<(), Error> {
     if roles != vec![0] {
         return Err(Error::Unauthorized);
     }
-    let policies=ch.maintenance.query("SELECT table,select_filter FROM system.row_policies WHERE database='rss_ts_ch' AND has(apply_to_list,?) ORDER BY table").bind(&ch.users[0]).fetch_all::<(String,String)>().await.map_err(|_|Error::Unauthorized)?;
+    let policies=ch.maintenance.query("SELECT table,select_filter,is_restrictive FROM system.row_policies WHERE database='rss_ts_ch' AND (apply_to_all OR has(apply_to_list,?)) AND NOT has(apply_to_except,?) ORDER BY table,name").bind(&ch.users[0]).bind(&ch.users[0]).fetch_all::<(String,String,u8)>().await.map_err(|_|Error::Unauthorized)?;
     let condition = format!("tenant='{}'", tenant);
     let policies = policies
         .into_iter()
-        .map(|(t, s)| (t, compact(&s)))
+        .map(|(t, s, restrictive)| (t, compact(&s), restrictive))
         .collect::<Vec<_>>();
     if policies
         != vec![
-            ("raw".into(), condition.clone()),
-            ("summaries".into(), condition),
+            ("raw".into(), condition.clone(), 0),
+            ("summaries".into(), condition, 0),
         ]
     {
         return Err(Error::Unauthorized);
@@ -174,6 +185,77 @@ async fn reader(ch: &Connections, tenant: TenantId) -> Result<(), Error> {
         .to_vec();
     if grants != expected {
         return Err(Error::Unauthorized);
+    }
+    Ok(())
+}
+
+async fn service_grants(ch: &Connections) -> Result<(), Error> {
+    for (index, user) in ch.users.iter().enumerate().skip(1) {
+        let roles = ch
+            .maintenance
+            .query("SELECT count() FROM system.role_grants WHERE user_name=?")
+            .bind(user)
+            .fetch_all::<u64>()
+            .await
+            .map_err(|_| Error::Unauthorized)?;
+        if roles != vec![0] {
+            return Err(Error::Unauthorized);
+        }
+        let grants=ch.maintenance.query("SELECT toString(access_type),ifNull(database,''),ifNull(table,''),ifNull(column,''),grant_option,is_partial_revoke FROM system.grants WHERE user_name=?").bind(user).fetch_all::<(String,String,String,String,u8,u8)>().await.map_err(|_|Error::Unauthorized)?;
+        let mut capabilities = BTreeSet::new();
+        for (access, db, table, column, grant, revoke) in grants {
+            if !column.is_empty() || grant != 0 || revoke != 0 {
+                return Err(Error::Unauthorized);
+            }
+            let valid = if index == 1 {
+                db == "rss_ts_ch"
+                    && ((access == "SELECT"
+                        && matches!(
+                            table.as_str(),
+                            "installation" | "active_attempts" | "guard_identity"
+                        ))
+                        || (access == "INSERT" && matches!(table.as_str(), "raw" | "summaries")))
+            } else {
+                (db == "rss_ts_ch"
+                    && ((access == "SELECT"
+                        && matches!(table.as_str(), "installation" | "raw" | "summaries"))
+                        || (access == "ALTER DELETE"
+                            && matches!(table.as_str(), "raw" | "summaries"))))
+                    || (access == "SELECT" && db == "system" && table.is_empty())
+                    || (db.is_empty()
+                        && table.is_empty()
+                        && (access == "KILL QUERY" || access.starts_with("SHOW ")))
+            };
+            if !valid {
+                return Err(Error::Unauthorized);
+            }
+            capabilities.insert((access, db, table));
+        }
+        let required = if index == 1 {
+            vec![
+                ("SELECT", "rss_ts_ch", "installation"),
+                ("SELECT", "rss_ts_ch", "active_attempts"),
+                ("SELECT", "rss_ts_ch", "guard_identity"),
+                ("INSERT", "rss_ts_ch", "raw"),
+                ("INSERT", "rss_ts_ch", "summaries"),
+            ]
+        } else {
+            vec![
+                ("SELECT", "rss_ts_ch", "installation"),
+                ("SELECT", "rss_ts_ch", "raw"),
+                ("SELECT", "rss_ts_ch", "summaries"),
+                ("ALTER DELETE", "rss_ts_ch", "raw"),
+                ("ALTER DELETE", "rss_ts_ch", "summaries"),
+                ("SELECT", "system", ""),
+                ("KILL QUERY", "", ""),
+            ]
+        };
+        if required
+            .iter()
+            .any(|(a, d, t)| !capabilities.contains(&(a.to_string(), d.to_string(), t.to_string())))
+        {
+            return Err(Error::Unauthorized);
+        }
     }
     Ok(())
 }

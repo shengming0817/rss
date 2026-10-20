@@ -176,10 +176,14 @@ impl<C: Clock> ChStore<C> {
             .with_setting("query_id", &attempt.query)
             .with_setting(
                 "insert_deduplication_token",
-                format!(
-                    "{}:{}:{}:{}",
-                    self.instance, attempt.target, attempt.revision, attempt.digest
-                ),
+                if attempt.target == "summaries" {
+                    format!("{}:summaries:{}", self.instance, attempt.id)
+                } else {
+                    format!(
+                        "{}:raw:{}:{}",
+                        self.instance, attempt.revision, attempt.digest
+                    )
+                },
             )
             .with_setting("max_execution_time", remaining.as_secs_f64().to_string())
             .with_setting("input_format_json_read_numbers_as_strings", "0")
@@ -190,6 +194,9 @@ impl<C: Clock> ChStore<C> {
             .send(bytes::Bytes::from(payload))
             .await
             .map_err(|_| Error::Unavailable)?;
+        if self.fault(4) {
+            std::future::pending::<()>().await;
+        }
         insert.end().await.map_err(|_| Error::Unavailable)
     }
     /// Revocation must already be committed. A zero-result kill is safe only because

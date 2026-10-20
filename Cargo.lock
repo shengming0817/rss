@@ -5170,16 +5170,26 @@ name = "timeseries-clickhouse-integration"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rcgen",
  "rss-contract",
  "rss-examples",
  "rss-request-context",
  "rss-timeseries",
  "rss-timeseries-clickhouse",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sqlx",
  "testkit",
  "tokio",
+ "tokio-rustls",
+ "url",
 ]
 
 [[package]]

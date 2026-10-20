@@ -22,6 +22,7 @@ pub enum Fault {
     AfterPrepare = 1,
     AfterInsert = 2,
     AfterPublish = 3,
+    BeforeInsertEnd = 4,
 }
 impl<C: Clock> ChStore<C> {
     #[cfg(feature = "integration")]
@@ -29,7 +30,7 @@ impl<C: Clock> ChStore<C> {
         self.fault
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     }
-    fn fault(&self, stage: u8) -> bool {
+    pub(crate) fn fault(&self, stage: u8) -> bool {
         #[cfg(feature = "integration")]
         {
             self.fault

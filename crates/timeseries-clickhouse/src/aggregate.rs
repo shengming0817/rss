@@ -194,25 +194,41 @@ impl<C: Clock> ChStore<C> {
         deadline: Deadline,
     ) -> Result<Option<Summary>, Error> {
         let scope = spec.stream().scope();
-        let refs=sqlx::query("SELECT object_id::text,lo,hi FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5 AND NOT dirty ORDER BY lo,hi DESC LIMIT $6")
+        let refs=sqlx::query("SELECT object_id::text,lo,hi FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5 AND NOT dirty ORDER BY lo DESC,hi DESC LIMIT $6")
             .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(spec.semantics()?.as_bytes().as_slice()).bind(window.start().micros()).bind(window.end().micros()).bind(i64::from(self.limits.max_points.get())+1).fetch_all(c).await.map_err(sql_error)?;
         if refs.len() > self.limits.max_points.get() as usize {
             return Err(Error::BudgetExceeded);
         }
+        // The bounded reference graph is acyclic (hi > lo). Solve coverage backwards
+        // before reading values, so a long dead-end bucket cannot hide a valid shorter chain.
+        let mut path = std::collections::BTreeMap::new();
+        path.insert(
+            window.end().micros(),
+            (window.end().micros(), String::new()),
+        );
+        for r in refs {
+            let lo: i64 = r.try_get("lo").map_err(sql_error)?;
+            let hi: i64 = r.try_get("hi").map_err(sql_error)?;
+            if hi <= lo {
+                return Err(Error::Invariant);
+            }
+            if path.contains_key(&hi) {
+                path.entry(lo)
+                    .or_insert((hi, r.try_get::<String, _>("object_id").map_err(sql_error)?));
+            }
+        }
         let mut at = window.start().micros();
+        if !path.contains_key(&at) {
+            return Ok(None);
+        }
         let mut value: Option<Summary> = None;
         let mut size = 0usize;
-        for r in refs {
-            if r.try_get::<i64, _>("lo").map_err(sql_error)? != at {
-                continue;
+        while at < window.end().micros() {
+            let (hi, id) = path.get(&at).ok_or(Error::Invariant)?;
+            let summary = self.summary_value(id, scope, deadline).await?;
+            if summary.window.start().micros() != at || summary.window.end().micros() != *hi {
+                return Err(Error::Invariant);
             }
-            let summary = self
-                .summary_value(
-                    &r.try_get::<String, _>("object_id").map_err(sql_error)?,
-                    scope,
-                    deadline,
-                )
-                .await?;
             size = size
                 .checked_add(bytes(&summary)?.len())
                 .ok_or(Error::BudgetExceeded)?;
@@ -223,12 +239,9 @@ impl<C: Clock> ChStore<C> {
                 None => summary,
                 Some(old) => old.merge(summary, self.limits.max_points.get() as usize)?,
             });
-            at = r.try_get("hi").map_err(sql_error)?;
-            if at == window.end().micros() {
-                return Ok(value);
-            }
+            at = *hi;
         }
-        Ok(None)
+        Ok(value)
     }
 }
 fn cost(bucket: &AggregateBucket) -> usize {

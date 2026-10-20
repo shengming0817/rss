@@ -1,3 +1,4 @@
+mod transport;
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::*;
 use rss_timeseries_clickhouse::{ChStore, Connections, Credentials, CursorKey, Fault, Limits};
@@ -888,7 +889,7 @@ mod crash {
         drop(stdin);
         let ready = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                if marker.exists() {
+                if f.ch.sql("SELECT count() FROM system.processes WHERE query LIKE 'INSERT INTO rss_ts_ch.raw%'").await?.trim()!="0" {
                     break;
                 }
                 if child.try_wait()?.is_some() {
@@ -964,7 +965,7 @@ mod crash {
             deadline()?,
         )
         .await?;
-        store.inject_next_fault(Fault::AfterInsert);
+        store.inject_next_fault(Fault::BeforeInsertEnd);
         let b = batch("crash", vec![sample(&definition(TENANT)?, "crash", 10, 1)?])?;
         assert!(matches!(
             store
@@ -979,4 +980,277 @@ mod crash {
         std::future::pending::<()>().await;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn rejects_broad_policies_guard_drift_and_service_escalation() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-acl").await?;
+    for (grant, revoke) in [
+        (
+            "CREATE ROW POLICY broad ON rss_ts_ch.raw USING 1 TO ALL",
+            "DROP ROW POLICY broad ON rss_ts_ch.raw",
+        ),
+        (
+            "GRANT ALTER DELETE ON rss_ts_ch.raw TO ch_writer",
+            "REVOKE ALTER DELETE ON rss_ts_ch.raw FROM ch_writer",
+        ),
+        (
+            "GRANT INSERT ON rss_ts_ch.raw TO ch_maint",
+            "REVOKE INSERT ON rss_ts_ch.raw FROM ch_maint",
+        ),
+    ] {
+        f.ch.sql(grant).await?;
+        assert!(
+            Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader")
+                .await
+                .is_err()
+        );
+        f.ch.sql(revoke).await?;
+    }
+    for (grant, revoke) in [
+        (
+            "ALTER POLICY tenant ON rss_ts_ch.batches USING(true) WITH CHECK(true)",
+            "ALTER POLICY tenant ON rss_ts_ch.batches USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid)",
+        ),
+        (
+            "CREATE POLICY broad ON rss_ts_ch.batches TO ch_runtime USING(true) WITH CHECK(true)",
+            "DROP POLICY broad ON rss_ts_ch.batches",
+        ),
+        (
+            "ALTER ROLE ch_guard SUPERUSER",
+            "ALTER ROLE ch_guard NOSUPERUSER",
+        ),
+        (
+            "GRANT SELECT ON rss_ts_ch.batches TO ch_guard",
+            "REVOKE SELECT ON rss_ts_ch.batches FROM ch_guard",
+        ),
+    ] {
+        // Audited closed fixture statements; no producer input enters DDL.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(grant))
+            .execute(&f.admin)
+            .await?;
+        assert!(
+            Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader")
+                .await
+                .is_err()
+        );
+        sqlx::raw_sql(sqlx::AssertSqlSafe(revoke))
+            .execute(&f.admin)
+            .await?;
+    }
+    Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader").await?;
+    sqlx::raw_sql("CREATE TABLE rss_ts_ch.cached_attempts AS SELECT * FROM rss_ts_ch.active_attempts; GRANT SELECT ON rss_ts_ch.cached_attempts TO ch_guard").execute(&f.admin).await?;
+    f.ch.sql("DROP TABLE rss_ts_ch.active_attempts; CREATE TABLE rss_ts_ch.active_attempts (tenant String,namespace String,attempt String,query_id String,target String,digest String,revision Int64,installation String) ENGINE=PostgreSQL(rss_ts_ch_guard, table='cached_attempts',schema='rss_ts_ch')").await?;
+    assert!(
+        Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader")
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn receipt_expiry_reclaim_and_terminal_fences() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-expire").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch("b", vec![sample(&d, "one", 10, 2)?])?;
+    confirmed(f.write(&b).await?)?;
+    let before = Timestamp::new(i64::MAX)?;
+    assert!(matches!(
+        f.maintain(
+            "early",
+            MaintenanceAction::ExpireReceipts {
+                stream: b.stream().clone(),
+                before
+            }
+        )
+        .await?,
+        MaintenanceProgress::Blocked {
+            reason: MaintenanceBlock::ReplayGuarantee
+        }
+    ));
+    // Advance only the fixture-owned durable acceptance clock to avoid wall-time sleeps.
+    sqlx::query("UPDATE rss_ts_ch.batches SET received_at=1,replay_until=2")
+        .execute(&f.admin)
+        .await?;
+    f.maintain(
+        "expire",
+        MaintenanceAction::ExpireReceipts {
+            stream: b.stream().clone(),
+            before,
+        },
+    )
+    .await?;
+    let rq = Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(&b)?)?;
+    assert!(matches!(
+        f.store.receipt(&rq, deadline()?).await?,
+        Lookup::Expired
+    ));
+    assert!(matches!(
+        f.maintain(
+            "reclaim-open",
+            MaintenanceAction::Reclaim {
+                stream: b.stream().clone()
+            }
+        )
+        .await?,
+        MaintenanceProgress::Blocked {
+            reason: MaintenanceBlock::StreamOpen
+        }
+    ));
+    f.maintain(
+        "close",
+        MaintenanceAction::CloseStream {
+            stream: b.stream().clone(),
+        },
+    )
+    .await?;
+    assert!(matches!(
+        f.maintain(
+            "reclaim-retained",
+            MaintenanceAction::Reclaim {
+                stream: b.stream().clone()
+            }
+        )
+        .await?,
+        MaintenanceProgress::Blocked {
+            reason: MaintenanceBlock::RetainedData
+        }
+    ));
+    let selection = query(&d, QueryMode::History, 10)?.selection().clone();
+    f.maintain(
+        "cutoff",
+        MaintenanceAction::AdvanceCutoff {
+            selection: selection.clone(),
+            before: Timestamp::new(100)?,
+        },
+    )
+    .await?;
+    f.maintain(
+        "prune",
+        MaintenanceAction::Prune {
+            selection,
+            raw_before: Timestamp::new(100)?,
+            summaries_before: Timestamp::new(100)?,
+        },
+    )
+    .await?;
+    assert!(matches!(
+        f.maintain(
+            "reclaim",
+            MaintenanceAction::Reclaim {
+                stream: b.stream().clone()
+            }
+        )
+        .await?,
+        MaintenanceProgress::Complete { .. }
+    ));
+    assert!(matches!(
+        f.store.receipt(&rq, deadline()?).await?,
+        Lookup::Expired
+    ));
+    assert!(matches!(
+        f.store
+            .write(
+                &Authorized::<Batch>::verify(&authority(TENANT)?, b)?,
+                deadline()?
+            )
+            .await,
+        Err(Error::HistoryExpired)
+    ));
+    Ok(())
+}
+#[tokio::test]
+async fn repeated_recompute_mixed_resolutions_and_summary_only_prune() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-summary").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch(
+        "b",
+        vec![sample(&d, "one", 10, 2)?, sample(&d, "two", 210, 3)?],
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let spec = |resolution| {
+        SummarySpec::new(
+            b.stream().clone(),
+            b.samples()[0].input().series.clone(),
+            NonZeroU64::new(resolution).ok_or(Error::InvalidInput)?,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )
+    };
+    let window = |end| Interval::new(Timestamp::new(0)?, Timestamp::new(end)?);
+    f.maintain(
+        "hundred",
+        MaintenanceAction::Recompute {
+            spec: spec(100)?,
+            window: window(100)?,
+        },
+    )
+    .await?;
+    f.maintain(
+        "hundred-again",
+        MaintenanceAction::Recompute {
+            spec: spec(100)?,
+            window: window(100)?,
+        },
+    )
+    .await?;
+    f.maintain(
+        "sixty",
+        MaintenanceAction::Recompute {
+            spec: spec(60)?,
+            window: window(300)?,
+        },
+    )
+    .await?;
+    // No raw interval exists; retaining part of a registered range must not construct -1.
+    f.maintain(
+        "summary-only",
+        MaintenanceAction::Prune {
+            selection: spec(60)?.selection(),
+            raw_before: Timestamp::new(0)?,
+            summaries_before: Timestamp::new(0)?,
+        },
+    )
+    .await?;
+    f.maintain(
+        "cutoff",
+        MaintenanceAction::AdvanceCutoff {
+            selection: spec(60)?.selection(),
+            before: Timestamp::new(300)?,
+        },
+    )
+    .await?;
+    f.maintain(
+        "prune",
+        MaintenanceAction::Prune {
+            selection: spec(60)?.selection(),
+            raw_before: Timestamp::new(300)?,
+            summaries_before: Timestamp::new(0)?,
+        },
+    )
+    .await?;
+    let q = AggregateQuery::new(
+        spec(300)?,
+        window(300)?,
+        QueryBudget {
+            max_points: NonZeroU32::new(10).ok_or(Error::InvalidInput)?,
+            max_series: NonZeroU32::new(1).ok_or(Error::InvalidInput)?,
+        },
+        AggregateOp::Sum,
+    )?;
+    let page = f
+        .store
+        .aggregate(
+            &Authorized::<AggregateQuery>::verify(&authority(TENANT)?, q)?,
+            None,
+            deadline()?,
+        )
+        .await?;
+    assert!(matches!(
+        page.buckets[0].value,
+        AggregateValue::Sum(Sum::U128(5))
+    ));
+    Ok(())
 }

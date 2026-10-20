@@ -3,6 +3,7 @@
 mod aggregate;
 mod config;
 mod control;
+mod control_probe;
 mod cursor;
 mod definition;
 mod install;
