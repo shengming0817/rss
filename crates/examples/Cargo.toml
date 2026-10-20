@@ -10,6 +10,7 @@ default-run = "rss-examples"
 workspace = true
 
 [features]
+timeseries-clickhouse = ["timeseries-core", "execution-pg", "dep:rss-timeseries-clickhouse"]
 timeseries-timescaledb = ["timeseries-pg", "rss-timeseries-postgres/timescaledb"]
 timeseries-pg = ["timeseries-core", "execution-pg", "dep:rss-timeseries-postgres"]
 timeseries-core = ["dep:rss-timeseries", "dep:rss-request-context"]
@@ -64,6 +65,7 @@ recovery-archive = ["recovery-pg", "recovery-s3"]
 recovery-managed = ["recovery-archive", "rss-transactional-messaging-postgres/rss-runtime"]
 
 [dependencies]
+rss-timeseries-clickhouse = { workspace = true, optional = true }
 rss-timeseries-postgres = { workspace = true, optional = true }
 rss-timeseries = { workspace = true, optional = true }
 rss-transactional-messaging-webhook = { workspace = true, optional = true }
@@ -220,3 +222,12 @@ required-features = ["timeseries-timescaledb"]
 name = "timeseries-timescale-install"
 path = "src/bin/timeseries-timescale-install.rs"
 required-features = ["timeseries-timescaledb"]
+
+[[bin]]
+name = "timeseries-clickhouse"
+path = "src/bin/timeseries-clickhouse.rs"
+required-features = ["timeseries-clickhouse"]
+[[bin]]
+name = "timeseries-clickhouse-schema"
+path = "src/bin/timeseries-clickhouse-schema.rs"
+required-features = ["timeseries-clickhouse"]

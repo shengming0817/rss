@@ -5,7 +5,7 @@ from package_proof import (
     cargo, consumer, example_dependencies, prepare_sources, proof_arguments, record_graph, provider_consumer,
 )
 
-SCENARIOS = {"core": ["timeseries-core"], "pg": ["timeseries-pg"], "timescale-shared": ["timeseries-timescaledb"], "timescale-native": ["timeseries-timescaledb"]}
+SCENARIOS = {"clickhouse": ["timeseries-clickhouse"],"core": ["timeseries-core"], "pg": ["timeseries-pg"], "timescale-shared": ["timeseries-timescaledb"], "timescale-native": ["timeseries-timescaledb"]}
 
 
 def main():
@@ -17,9 +17,14 @@ def main():
     for name, (features, deps) in selected.items():
         directory = root / name
         consumer(directory, features, deps, allowed)
-        forbidden = {"testkit", "testcontainers", "rss-runtime", "rss-observation", "rss-transactional-messaging", "rss-timeseries-clickhouse"}
+        forbidden = {"testkit", "testcontainers", "rss-runtime", "rss-observation", "rss-transactional-messaging"}
         required = {"rss-timeseries": {"default"}, "serde_json": {"default", "std", "float_roundtrip"}}
-        if name == "core":
+        if name != "clickhouse":
+            forbidden.add("rss-timeseries-clickhouse")
+        if name == "clickhouse":
+            forbidden.add("rss-timeseries-postgres")
+            required["rss-timeseries-clickhouse"] = {"default"}
+        elif name == "core":
             forbidden |= {"sqlx", "rss-timeseries-postgres"}
         else:
             required["rss-timeseries-postgres"] = {"default"} | ({"timescaledb"} if name.startswith("timescale-") else set())
@@ -28,7 +33,12 @@ def main():
             directory, allowed, set(),
             forbidden, required_features=required, required_dependencies=deps,
         )
-        if name == "core":
+        if name == "clickhouse":
+            cargo(["build", "--locked", "--bin", "timeseries-clickhouse", "--bin", "timeseries-clickhouse-schema"], directory)
+            provider_consumer(directory, "timeseries-clickhouse-integration", "suite", "examples::example_consumer", {
+                "RSS_CH_EXAMPLE": "timeseries-clickhouse", "RSS_CH_SCHEMA": "timeseries-clickhouse-schema",
+            })
+        elif name == "core":
             cargo(["run", "--locked", "--bin", "timeseries"], directory)
         else:
             native = name.startswith("timescale-")

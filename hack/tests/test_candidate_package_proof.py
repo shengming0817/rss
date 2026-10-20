@@ -136,7 +136,7 @@ class TimeseriesScenarios(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("timeseries_proof", HACK / "timeseries-package-proof.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        for scenario in ("core", "pg", "timescale-shared", "timescale-native"):
+        for scenario in ("core", "pg", "timescale-shared", "timescale-native", "clickhouse"):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
                 stack.enter_context(patch.object(sys, "argv", ["timeseries", "--source", "--scenario", scenario]))
                 selection = stack.enter_context(patch.object(module, "example_dependencies", return_value={scenario: (set(), {})}))
@@ -149,7 +149,13 @@ class TimeseriesScenarios(unittest.TestCase):
                 module.main()
                 self.assertEqual(list(selection.call_args.args[0]), [scenario])
                 forbidden = graph.call_args.args[3]
-                if scenario == "core":
+                if scenario == "clickhouse":
+                    self.assertIn("rss-timeseries-postgres", forbidden)
+                    self.assertNotIn("rss-timeseries-clickhouse", forbidden)
+                    self.assertEqual(graph.call_args.kwargs["required_features"]["rss-timeseries-clickhouse"], {"default"})
+                    self.assertEqual(provider.call_args.args[1:4], ("timeseries-clickhouse-integration", "suite", "examples::example_consumer"))
+                    self.assertEqual(set(provider.call_args.args[4].values()), {"timeseries-clickhouse", "timeseries-clickhouse-schema"})
+                elif scenario == "core":
                     self.assertIn("rss-timeseries-postgres", forbidden)
                     self.assertNotIn("raw_value", graph.call_args.kwargs["required_features"]["serde_json"])
                     provider.assert_not_called()

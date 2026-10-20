@@ -1,0 +1,21 @@
+[package]
+name = "timeseries-clickhouse-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+[lints]
+workspace = true
+[dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["timeseries-clickhouse"] }
+rss-timeseries.workspace = true
+rss-timeseries-clickhouse = { workspace = true, features = ["integration"] }
+rss-request-context.workspace = true
+rss-contract.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+anyhow.workspace = true
+serde_json.workspace = true
+
+serde.workspace = true
