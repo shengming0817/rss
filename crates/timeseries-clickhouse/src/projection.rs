@@ -106,9 +106,9 @@ pub(crate) async fn permit(
     })
 }
 impl<C: Clock> ChStore<C> {
-    pub(crate) fn ch_query<'a>(
+    pub(crate) fn ch_query(
         &self,
-        client: &'a clickhouse::Client,
+        client: &clickhouse::Client,
         sql: &str,
         deadline: Deadline,
     ) -> Result<clickhouse::query::Query, Error> {
@@ -188,16 +188,23 @@ impl<C: Clock> ChStore<C> {
             .with_setting("max_execution_time", remaining.as_secs_f64().to_string())
             .with_setting("input_format_json_read_numbers_as_strings", "0")
             .with_setting("max_insert_threads", "1")
+            .with_setting("max_insert_block_size", "4096")
+            .with_setting("min_insert_block_size_rows", "4096")
+            .with_setting("min_insert_block_size_bytes", "0")
+            .with_setting("input_format_parallel_parsing", "0")
             .with_setting("max_threads", "1")
             .with_timeouts(Some(remaining), Some(remaining));
         insert
             .send(bytes::Bytes::from(payload))
             .await
-            .map_err(|_| Error::Unavailable)?;
+            .map_err(|e| provider_error("insert-send", e))?;
         if self.fault(4) {
             std::future::pending::<()>().await;
         }
-        insert.end().await.map_err(|_| Error::Unavailable)
+        insert
+            .end()
+            .await
+            .map_err(|e| provider_error("insert-end", e))
     }
     /// Revocation must already be committed. A zero-result kill is safe only because
     /// late arrivals must start a new PG guard read and cannot acquire that permit.
@@ -214,23 +221,66 @@ impl<C: Clock> ChStore<C> {
             "KILL QUERY WHERE user={} AND query_id IN ({ids}) SYNC",
             literal(&self.ch.users[1])
         );
-        #[derive(Deserialize, clickhouse::Row)]
-        struct Killed {
-            kill_status: String,
-            query_id: String,
-            user: String,
-            query: String,
-        }
-        let mut cursor = self
-            .ch_query(&self.ch.maintenance, &sql, deadline)?
-            .fetch::<Killed>()
-            .map_err(|_| Error::Unavailable)?;
-        while let Some(row) = cursor.next().await.map_err(|_| Error::Unavailable)? {
-            let _ = (&row.query_id, &row.user, &row.query);
-            if row.kill_status != "finished" {
-                return Err(Error::Unavailable);
-            }
+        // KILL on an already finished query can return no result header at all.
+        // Consume its complete HTTP response, then independently verify termination;
+        // a successful HTTP status or a sent cancellation alone is not sufficient.
+        self.ch_query(&self.ch.maintenance, &sql, deadline)?
+            .execute()
+            .await
+            .map_err(|e| provider_error("drain-kill", e))?;
+        let remaining = self
+            .ch_query(
+                &self.ch.maintenance,
+                &format!(
+                    "SELECT count() FROM system.processes WHERE user={} AND query_id IN ({ids})",
+                    literal(&self.ch.users[1])
+                ),
+                deadline,
+            )?
+            .fetch_all::<u64>()
+            .await
+            .map_err(|e| provider_error("drain-check", e))?;
+        if remaining != vec![0] {
+            return Err(Error::Unavailable);
         }
         Ok(())
     }
+}
+
+pub(crate) fn provider_error(stage: &str, error: clickhouse::error::Error) -> Error {
+    #[cfg(feature = "integration")]
+    {
+        let (kind, code) = match &error {
+            clickhouse::error::Error::BadResponse(s) => (
+                "server",
+                s.strip_prefix("Code: ")
+                    .and_then(|s| s.split('.').next())
+                    .and_then(|s| s.parse::<u32>().ok()),
+            ),
+            clickhouse::error::Error::SchemaMismatch(_) => ("schema", None),
+            clickhouse::error::Error::Network(_) => ("network", None),
+            _ => ("decode", None),
+        };
+        eprintln!("ClickHouse {stage}: {kind} code={code:?}");
+        if let clickhouse::error::Error::BadResponse(s) = &error {
+            for cap in [
+                "CREATE TEMPORARY TABLE",
+                "POSTGRES",
+                "NAMED COLLECTION",
+                "SELECT",
+                "INSERT",
+                "rss_ts_ch.raw",
+                "rss_ts_ch.active_attempts",
+                "system.settings",
+                "input",
+            ] {
+                if s.contains(cap) {
+                    eprintln!("ClickHouse diagnostic category: {cap}");
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "integration"))]
+    let _ = (stage, error);
+    Error::Unavailable
 }

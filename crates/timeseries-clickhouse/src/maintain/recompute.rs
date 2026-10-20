@@ -23,13 +23,15 @@ pub(super) async fn step<C: Clock>(
     store: &ChStore<C>,
     c: &mut PgConnection,
     r: &MaintenanceRequest,
-    spec: &SummarySpec,
-    window: Interval,
     state: &mut State,
     revision: i64,
     boundary: i64,
     deadline: Deadline,
 ) -> Result<Step, Error> {
+    let MaintenanceAction::Recompute { spec, window } = r.action() else {
+        return Err(Error::Invariant);
+    };
+    let window = *window;
     if spec.bucket(window.start())?.start() != window.start()
         || spec
             .bucket(Timestamp::new(window.end().micros() - 1)?)?
@@ -38,48 +40,8 @@ pub(super) async fn step<C: Clock>(
     {
         return Err(Error::InvalidInput);
     }
-    if let Some(p) = state.publish.take() {
-        if p.revision != revision {
-            sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE id=$1::text::uuid")
-                .bind(&p.attempt)
-                .execute(&mut *c)
-                .await
-                .map_err(sql_error)?;
-            state.fold = None;
-            return Ok(Step::More(0));
-        }
-        let a = projection::Attempt {
-            id: p.attempt.clone(),
-            query: p.query.clone(),
-            digest: p.digest.clone(),
-            revision: p.row.revision,
-            target: "summaries",
-        };
-        store
-            .insert(&a, std::slice::from_ref(&p.row), deadline)
-            .await?;
-        let summary = store
-            .summary_value(&p.row.object_id, r.scope(), deadline)
-            .await?;
-        if bytes(&summary)? != p.row.payload.as_bytes() {
-            return Err(Error::Invariant);
-        }
-        sqlx::query("INSERT INTO rss_ts_ch.summaries(tenant_id,namespace,spec_digest,semantics,spec,lo,hi,object_id) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7,$8::text::uuid) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET object_id=excluded.object_id,hi=excluded.hi,dirty=false")
-            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(spec.semantics()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(p.row.lo).bind(p.row.hi).bind(&p.row.object_id).execute(&mut *c).await.map_err(sql_error)?;
-        sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE id=$1::text::uuid")
-            .bind(&p.attempt)
-            .execute(&mut *c)
-            .await
-            .map_err(sql_error)?;
-        let fold = state.fold.as_mut().ok_or(Error::Invariant)?;
-        fold.at = Timestamp::new(p.row.hi)?;
-        fold.last = None;
-        fold.builder = None;
-        return Ok(if fold.at >= window.end() {
-            Step::Done(1)
-        } else {
-            Step::More(1)
-        });
+    if state.publish.is_some() {
+        return publish(store, c, r, state, revision, deadline).await;
     }
     let fences = control::fences(c, r.scope(), store.limits.max_points.get()).await?;
     if fences.iter().any(|f| {
@@ -171,4 +133,60 @@ pub(super) async fn step<C: Clock>(
         });
     }
     Ok(Step::More(processed))
+}
+
+async fn publish<C: Clock>(
+    store: &ChStore<C>,
+    c: &mut PgConnection,
+    r: &MaintenanceRequest,
+    state: &mut State,
+    revision: i64,
+    deadline: Deadline,
+) -> Result<Step, Error> {
+    let MaintenanceAction::Recompute { spec, window } = r.action() else {
+        return Err(Error::Invariant);
+    };
+    let p = state.publish.take().ok_or(Error::Invariant)?;
+
+    if p.revision != revision {
+        sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE id=$1::text::uuid")
+            .bind(&p.attempt)
+            .execute(&mut *c)
+            .await
+            .map_err(sql_error)?;
+        state.fold = None;
+        return Ok(Step::More(0));
+    }
+    let a = projection::Attempt {
+        id: p.attempt.clone(),
+        query: p.query.clone(),
+        digest: p.digest.clone(),
+        revision: p.row.revision,
+        target: "summaries",
+    };
+    store
+        .insert(&a, std::slice::from_ref(&p.row), deadline)
+        .await?;
+    let summary = store
+        .summary_value(&p.row.object_id, r.scope(), deadline)
+        .await?;
+    if bytes(&summary)? != p.row.payload.as_bytes() {
+        return Err(Error::Invariant);
+    }
+    sqlx::query("INSERT INTO rss_ts_ch.summaries(tenant_id,namespace,spec_digest,semantics,spec,lo,hi,object_id) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7,$8::text::uuid) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET object_id=excluded.object_id,hi=excluded.hi,dirty=false")
+            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(spec.semantics()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(p.row.lo).bind(p.row.hi).bind(&p.row.object_id).execute(&mut *c).await.map_err(sql_error)?;
+    sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE id=$1::text::uuid")
+        .bind(&p.attempt)
+        .execute(&mut *c)
+        .await
+        .map_err(sql_error)?;
+    let fold = state.fold.as_mut().ok_or(Error::Invariant)?;
+    fold.at = Timestamp::new(p.row.hi)?;
+    fold.last = None;
+    fold.builder = None;
+    Ok(if fold.at >= window.end() {
+        Step::Done(1)
+    } else {
+        Step::More(1)
+    })
 }

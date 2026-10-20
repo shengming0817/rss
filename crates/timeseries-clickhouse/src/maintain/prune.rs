@@ -10,13 +10,19 @@ async fn safe_limit<C: Clock>(
     store: &ChStore<C>,
     c: &mut PgConnection,
     r: &MaintenanceRequest,
-    sel: &Selection,
-    raw_before: Timestamp,
-    summaries_before: Timestamp,
     boundary: i64,
     time: i64,
     deadline: Deadline,
 ) -> Result<Result<i64, MaintenanceBlock>, Error> {
+    let MaintenanceAction::Prune {
+        selection: sel,
+        raw_before,
+        summaries_before,
+    } = r.action()
+    else {
+        return Err(Error::Invariant);
+    };
+    let (raw_before, summaries_before) = (*raw_before, *summaries_before);
     let fences = control::fences(c, r.scope(), store.limits.max_points.get()).await?;
     if raw_before.micros() > 0
         && !fences.iter().any(|f| {
@@ -58,13 +64,11 @@ async fn safe_limit<C: Clock>(
             spec.series().definition().spec().metric,
             Metric::Bool | Metric::State { .. }
         ) && spec.coverage() == CoveragePolicy::ObservedOnly
-        {
-            if let Some(prior) = store
+            && let Some(prior) = store
                 .predecessor(&spec, raw_before, boundary, &fences, deadline)
                 .await?
-            {
-                limit = limit.min(prior.input().observed_at.micros());
-            }
+        {
+            limit = limit.min(prior.input().observed_at.micros());
         }
         let lo = row
             .try_get::<i64, _>("lo")
@@ -94,25 +98,13 @@ pub(super) async fn step<C: Clock>(
 ) -> Result<Step, Error> {
     let MaintenanceAction::Prune {
         selection: sel,
-        raw_before,
+        raw_before: _,
         summaries_before,
     } = r.action()
     else {
         return Err(Error::Invariant);
     };
-    let limit = match safe_limit(
-        store,
-        c,
-        r,
-        sel,
-        *raw_before,
-        *summaries_before,
-        boundary,
-        time,
-        deadline,
-    )
-    .await?
-    {
+    let limit = match safe_limit(store, c, r, boundary, time, deadline).await? {
         Ok(v) => v,
         Err(reason) => return Ok(Step::Blocked(reason)),
     };

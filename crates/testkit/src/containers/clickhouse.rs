@@ -85,6 +85,7 @@ pub async fn clickhouse_tls(
     .with_exposed_port(8443.tcp())
     .with_wait_for(WaitFor::message_on_stderr("Ready for connections"));
     let request = copied_tls_image(image, &material)
+        .with_env_var("HOME", "/var/lib/clickhouse")
         .with_env_var("PGSSLMODE", "verify-full")
         .with_env_var("PGSSLROOTCERT", "/rss-tls/pg-ca.pem")
         .with_copy_to("/rss-tls/pg-ca.pem", pg_ca.as_bytes().to_vec())

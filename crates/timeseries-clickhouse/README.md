@@ -38,7 +38,8 @@ Provision a separate `ch_guard` login with only schema USAGE and SELECT on
 in the ClickHouse server configuration and specifies the PG primary host, port,
 database and credential. Configure libpq `PGSSLMODE=verify-full` and
 `PGSSLROOTCERT` on that server. No replica, dictionary or cached guard is supported.
-The live guard checks PG primary/TLS posture and the installation identity. A guard
+The ClickHouse service account must have a readable home directory for libpq's
+optional client-certificate lookup. The live guard checks PG primary/TLS posture and the installation identity. A guard
 failure does not authorize insertion. Products own coordinated backup/restore of
 both databases; independently rolled-back control state is not a supported recovery.
 
@@ -46,8 +47,9 @@ Read the PG installation UUID and pass it to `installation_sql`. Execute its ret
 statements as the ClickHouse installer. One fixed HTTPS origin hosts `rss_ts_ch`.
 Provision per-tenant SELECT-only users for raw/summaries and installation metadata,
 with exact tenant row policies on both data tables and no inherited roles. The writer
-has installation/guard SELECT and raw/summary INSERT. Maintenance has metadata/data
-SELECT, scoped ALTER DELETE, SHOW ACCESS and KILL QUERY; it cannot install schema or
+has installation/guard SELECT, raw/summary INSERT and CREATE TEMPORARY TABLE for
+ClickHouse's `input()` function. It has no permanent schema DDL authority. Maintenance has metadata/data
+SELECT, scoped ALTER DELETE/SHOW COLUMNS, SHOW ACCESS and KILL QUERY; it cannot install schema or
 change policies. Reader/writer/maintenance credentials are separate constructor inputs.
 All clients verify the explicit CA and server identity. Drain and reconstruct stores
 after external role, DDL or server configuration changes.

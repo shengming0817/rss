@@ -174,13 +174,11 @@ impl<C: Clock> ChStore<C> {
             let revision = tx.revision;
             let boundary = tx.published;
             let step = match r.action() {
-                MaintenanceAction::Recompute { spec, window } => {
+                MaintenanceAction::Recompute { .. } => {
                     recompute::step(
                         self,
                         tx.connection(),
                         r,
-                        spec,
-                        *window,
                         &mut state,
                         revision,
                         boundary,

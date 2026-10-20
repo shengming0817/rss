@@ -168,7 +168,35 @@ impl Fixture {
             .max_connections(4)
             .connect_with(base.clone().username(&p.username).password(&p.password))
             .await?;
-        sqlx::raw_sql(ROLES).execute(&admin).await?;
+        let instance = Self::install_control(&admin).await?;
+        let ch = testkit::clickhouse_tls(
+            testkit::NetworkAttachment {
+                network: network.name(),
+                dns_name: name,
+            },
+            &pg_name,
+            pg.ca_pem(),
+        )
+        .await?;
+        Self::install_data(&ch, &instance).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(6)
+            .connect_with(base.username("ch_runtime").password("fixture-only"))
+            .await?;
+        let store = Self::connect(&ch, pool.clone(), TENANT, "ch_reader")
+            .await
+            .map_err(|e| e.context("fixture constructor"))?;
+        Ok(Self {
+            admin,
+            pool,
+            store,
+            ch,
+            pg,
+            _network: network,
+        })
+    }
+    async fn install_control(admin: &PgPool) -> anyhow::Result<String> {
+        sqlx::raw_sql(ROLES).execute(admin).await?;
         let mut owner = admin.acquire().await?;
         sqlx::query("SET ROLE ch_owner")
             .execute(&mut *owner)
@@ -185,37 +213,19 @@ impl Fixture {
         sqlx::query("RESET ROLE").execute(&mut *owner).await?;
         drop(owner);
         let instance: String = sqlx::query_scalar("SELECT id::text FROM rss_ts_ch.installation")
-            .fetch_one(&admin)
+            .fetch_one(admin)
             .await?;
-        let ch = testkit::clickhouse_tls(
-            testkit::NetworkAttachment {
-                network: network.name(),
-                dns_name: name,
-            },
-            &pg_name,
-            pg.ca_pem(),
-        )
-        .await?;
-        for sql in schema(&instance).await?.clickhouse {
+        Ok(instance)
+    }
+    async fn install_data(ch: &testkit::ClickHouseFixture, instance: &str) -> anyhow::Result<()> {
+        for sql in schema(instance).await?.clickhouse {
             ch.sql(&sql).await?;
         }
-        ch.sql("CREATE USER ch_reader IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_other IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_writer IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_maint IDENTIFIED WITH sha256_password BY 'fixture-only'; GRANT SELECT ON rss_ts_ch.installation TO ch_reader,ch_other,ch_writer,ch_maint; GRANT SELECT ON rss_ts_ch.raw TO ch_reader,ch_other,ch_maint; GRANT SELECT ON rss_ts_ch.summaries TO ch_reader,ch_other,ch_maint; GRANT SELECT ON rss_ts_ch.active_attempts TO ch_writer; GRANT SELECT ON rss_ts_ch.guard_identity TO ch_writer; GRANT INSERT ON rss_ts_ch.raw TO ch_writer; GRANT INSERT ON rss_ts_ch.summaries TO ch_writer; GRANT ALTER DELETE ON rss_ts_ch.raw TO ch_maint; GRANT ALTER DELETE ON rss_ts_ch.summaries TO ch_maint; GRANT SELECT ON system.* TO ch_maint; GRANT SHOW ACCESS ON *.* TO ch_maint; GRANT KILL QUERY ON *.* TO ch_maint;").await?;
+        ch.sql("CREATE USER ch_reader IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_other IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_writer IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_maint IDENTIFIED WITH sha256_password BY 'fixture-only'; GRANT SELECT ON rss_ts_ch.installation TO ch_reader,ch_other,ch_writer,ch_maint; GRANT SELECT ON rss_ts_ch.raw TO ch_reader,ch_other,ch_maint; GRANT SELECT ON rss_ts_ch.summaries TO ch_reader,ch_other,ch_maint; GRANT SELECT ON rss_ts_ch.active_attempts TO ch_writer; GRANT SELECT ON rss_ts_ch.guard_identity TO ch_writer; GRANT INSERT ON rss_ts_ch.raw TO ch_writer; GRANT INSERT ON rss_ts_ch.summaries TO ch_writer; GRANT CREATE TEMPORARY TABLE ON *.* TO ch_writer; GRANT ALTER DELETE ON rss_ts_ch.raw TO ch_maint; GRANT ALTER DELETE ON rss_ts_ch.summaries TO ch_maint; GRANT SELECT ON system.* TO ch_maint; GRANT SHOW ACCESS ON *.* TO ch_maint; GRANT SHOW COLUMNS ON rss_ts_ch.* TO ch_maint; GRANT KILL QUERY ON *.* TO ch_maint;").await?;
         for table in ["raw", "summaries"] {
             ch.sql(&format!("CREATE ROW POLICY tenant_{table} ON rss_ts_ch.{table} USING tenant='{TENANT}' TO ch_reader; CREATE ROW POLICY other_{table} ON rss_ts_ch.{table} USING tenant='{OTHER}' TO ch_other; CREATE ROW POLICY maintain_{table} ON rss_ts_ch.{table} USING 1 TO ch_maint,default;")).await?;
         }
-        let pool = PgPoolOptions::new()
-            .max_connections(6)
-            .connect_with(base.username("ch_runtime").password("fixture-only"))
-            .await?;
-        let store = Self::connect(&ch, pool.clone(), TENANT, "ch_reader").await?;
-        Ok(Self {
-            admin,
-            pool,
-            store,
-            ch,
-            pg,
-            _network: network,
-        })
+        Ok(())
     }
     async fn connect(
         ch: &testkit::ClickHouseFixture,
@@ -866,11 +876,19 @@ async fn typed_values_and_custom_dimensions_roundtrip() -> anyhow::Result<()> {
 }
 mod crash {
     use super::*;
+    fn crash_definition() -> anyhow::Result<Definition> {
+        let mut spec = definition(TENANT)?.spec().clone();
+        spec.dimensions.allowed = (0..64)
+            .map(|n| Id::new(format!("k{n:02}")))
+            .collect::<Result<_, _>>()?;
+        spec.dimensions.max_count = 64;
+        Ok(Definition::new(spec)?)
+    }
     #[tokio::test]
     async fn process_death_after_partial_publication_recovers() -> anyhow::Result<()> {
         use tokio::io::AsyncWriteExt;
         let f = Fixture::new("ch-crash").await?;
-        let d = definition(TENANT)?;
+        let d = crash_definition()?;
         f.register(&d).await?;
         let root = std::env::temp_dir().join(format!("rss-ch-crash-{}", std::process::id()));
         std::fs::create_dir_all(&root)?;
@@ -914,9 +932,9 @@ mod crash {
             result
                 .ok_or_else(|| anyhow::anyhow!("recovered receipt"))?
                 .new_samples(),
-            1
+            24
         );
-        assert_eq!(f.read(&d).await?.rows.len(), 1);
+        assert_eq!(f.read(&d).await?.rows.len(), 24);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -966,7 +984,18 @@ mod crash {
         )
         .await?;
         store.inject_next_fault(Fault::BeforeInsertEnd);
-        let b = batch("crash", vec![sample(&definition(TENANT)?, "crash", 10, 1)?])?;
+        let d = crash_definition()?;
+        let dimensions = (0..64)
+            .map(|n| Ok((Id::new(format!("k{n:02}"))?, Id::new("x".repeat(256))?)))
+            .collect::<Result<std::collections::BTreeMap<_, _>, Error>>()?;
+        let series = Series::new(d.clone(), id("device")?, id("resource")?, dimensions)?;
+        let mut samples = Vec::new();
+        for n in 0..24 {
+            let mut input = sample(&d, &format!("crash.{n}"), 10, n)?.input().clone();
+            input.series = series.clone();
+            samples.push(Sample::new(input)?);
+        }
+        let b = batch("crash", samples)?;
         assert!(matches!(
             store
                 .write(

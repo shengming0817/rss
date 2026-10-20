@@ -225,7 +225,7 @@ impl<C: Clock> ChStore<C> {
         deadline: Deadline,
     ) -> Result<(), Error> {
         let rows=self.ch_query(&self.ch.reader,"SELECT sample_id,digest,received_at FROM rss_ts_ch.raw FINAL WHERE tenant=? AND namespace=? AND revision=? ORDER BY sample_id",deadline)?
-            .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).fetch_all::<(String,String,i64)>().await.map_err(|_|Error::Unavailable)?;
+            .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).fetch_all::<(String,String,i64)>().await.map_err(|e|projection::provider_error("projection-verification",e))?;
         let mut expected = p
             .rows
             .iter()
@@ -300,7 +300,13 @@ impl<C: Clock> ChStore<C> {
         .await;
         match projected {
             Ok(v) => Ok(v),
-            Err(_) => Ok(Outcome::Unknown),
+            Err(error) => {
+                #[cfg(feature = "integration")]
+                eprintln!("projection stage failed: {error}");
+                #[cfg(not(feature = "integration"))]
+                let _ = error;
+                Ok(Outcome::Unknown)
+            }
         }
     }
     pub async fn progress(

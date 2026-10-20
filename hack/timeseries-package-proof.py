@@ -24,6 +24,7 @@ def main():
         if name == "clickhouse":
             forbidden.add("rss-timeseries-postgres")
             required["rss-timeseries-clickhouse"] = {"default"}
+            required["serde_json"].add("raw_value")
         elif name == "core":
             forbidden |= {"sqlx", "rss-timeseries-postgres"}
         else:
