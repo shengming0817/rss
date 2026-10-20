@@ -168,7 +168,11 @@ impl Fixture {
             .max_connections(4)
             .connect_with(base.clone().username(&p.username).password(&p.password))
             .await?;
-        let instance = Self::install_control(&admin).await?;
+        let instance: String = sqlx::query_scalar("SELECT gen_random_uuid()::text")
+            .fetch_one(&admin)
+            .await?;
+        let installation = schema(&instance).await?;
+        Self::install_control(&admin, &installation.control, &instance).await?;
         let ch = testkit::clickhouse_tls(
             testkit::NetworkAttachment {
                 network: network.name(),
@@ -178,7 +182,7 @@ impl Fixture {
             pg.ca_pem(),
         )
         .await?;
-        Self::install_data(&ch, &instance).await?;
+        Self::install_data(&ch, &installation.clickhouse).await?;
         let pool = PgPoolOptions::new()
             .max_connections(6)
             .connect_with(base.username("ch_runtime").password("fixture-only"))
@@ -195,31 +199,31 @@ impl Fixture {
             _network: network,
         })
     }
-    async fn install_control(admin: &PgPool) -> anyhow::Result<String> {
+    async fn install_control(admin: &PgPool, control: &str, instance: &str) -> anyhow::Result<()> {
         sqlx::raw_sql(ROLES).execute(admin).await?;
         let mut owner = admin.acquire().await?;
         sqlx::query("SET ROLE ch_owner")
             .execute(&mut *owner)
             .await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(
-            schema("00000000-0000-0000-0000-000000000000")
-                .await?
-                .control
-                .as_str(),
-        ))
-        .execute(&mut *owner)
-        .await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(control))
+            .execute(&mut *owner)
+            .await?;
+        // External fresh-install owner binds both stores before granting runtime access.
+        sqlx::query("UPDATE rss_ts_ch.installation SET id=$1::text::uuid")
+            .bind(instance)
+            .execute(&mut *owner)
+            .await?;
         sqlx::raw_sql(GRANTS).execute(&mut *owner).await?;
         sqlx::query("RESET ROLE").execute(&mut *owner).await?;
         drop(owner);
-        let instance: String = sqlx::query_scalar("SELECT id::text FROM rss_ts_ch.installation")
-            .fetch_one(admin)
-            .await?;
-        Ok(instance)
+        Ok(())
     }
-    async fn install_data(ch: &testkit::ClickHouseFixture, instance: &str) -> anyhow::Result<()> {
-        for sql in schema(instance).await?.clickhouse {
-            ch.sql(&sql).await?;
+    async fn install_data(
+        ch: &testkit::ClickHouseFixture,
+        statements: &[String],
+    ) -> anyhow::Result<()> {
+        for sql in statements {
+            ch.sql(sql).await?;
         }
         ch.sql("CREATE USER ch_reader IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_other IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_writer IDENTIFIED WITH sha256_password BY 'fixture-only'; CREATE USER ch_maint IDENTIFIED WITH sha256_password BY 'fixture-only'; GRANT SELECT ON rss_ts_ch.installation TO ch_reader,ch_other,ch_writer,ch_maint; GRANT SELECT ON rss_ts_ch.raw TO ch_reader,ch_other,ch_maint; GRANT SELECT ON rss_ts_ch.summaries TO ch_reader,ch_other,ch_maint; GRANT SELECT ON rss_ts_ch.active_attempts TO ch_writer; GRANT SELECT ON rss_ts_ch.guard_identity TO ch_writer; GRANT INSERT ON rss_ts_ch.raw TO ch_writer; GRANT INSERT ON rss_ts_ch.summaries TO ch_writer; GRANT CREATE TEMPORARY TABLE ON *.* TO ch_writer; GRANT ALTER DELETE ON rss_ts_ch.raw TO ch_maint; GRANT ALTER DELETE ON rss_ts_ch.summaries TO ch_maint; GRANT SELECT ON system.* TO ch_maint; GRANT SHOW ACCESS ON *.* TO ch_maint; GRANT SHOW COLUMNS ON rss_ts_ch.* TO ch_maint; GRANT KILL QUERY ON *.* TO ch_maint;").await?;
         for table in ["raw", "summaries"] {
