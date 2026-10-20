@@ -277,7 +277,8 @@ async fn service_grants(ch: &Connections) -> Result<(), Error> {
                         && (access == "KILL QUERY"
                             || matches!(
                                 access.as_str(),
-                                "SHOW USERS"
+                                "SHOW ACCESS"
+                                    | "SHOW USERS"
                                     | "SHOW ROLES"
                                     | "SHOW ROW POLICIES"
                                     | "SHOW QUOTAS"

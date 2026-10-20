@@ -77,7 +77,7 @@ pub async fn clickhouse_tls(
 <named_collections><rss_ts_ch_guard><host>{pg_host}</host><port>5432</port><database>rss_test</database><user>ch_guard</user><password>fixture-only</password></rss_ts_ch_guard></named_collections>
 </clickhouse>"#
     );
-    let users = r#"<clickhouse><users><default><networks replace="replace"><ip>127.0.0.1</ip><ip>::1</ip></networks><access_management>1</access_management><named_collection_control>1</named_collection_control><show_named_collections>1</show_named_collections></default></users></clickhouse>"#;
+    let users = r#"<clickhouse><users><default><networks replace="replace"><ip>127.0.0.1</ip><ip>::1</ip></networks><access_management>1</access_management><named_collection_control>1</named_collection_control><show_named_collections>1</show_named_collections><show_named_collections_secrets>1</show_named_collections_secrets></default></users></clickhouse>"#;
     let image = GenericImage::new(
         "clickhouse/clickhouse-server",
         "25.8.12.129@sha256:356f0bbb1c4bade74ca32637e944d8f42109d18f13c51f991ba334f0f0749d20",

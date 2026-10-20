@@ -48,7 +48,20 @@ async fn monotone_frontiers_stay_bounded_and_preserve_replay() -> anyhow::Result
                 MaintenanceProgress::Complete { .. }
             ));
         }
-        assert!(f.read(&d).await?.rows.is_empty());
+        assert!(
+            f.store
+                .query(
+                    &Authorized::<Query>::verify(
+                        &authority(TENANT)?,
+                        query(&d, QueryMode::History, 2)?
+                    )?,
+                    None,
+                    deadline()?
+                )
+                .await?
+                .rows
+                .is_empty()
+        );
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.fences")
             .fetch_one(&f.admin)
             .await?;
@@ -65,11 +78,11 @@ async fn monotone_frontiers_stay_bounded_and_preserve_replay() -> anyhow::Result
         .await?,
         MaintenanceProgress::Complete { .. }
     ));
-    assert!(matches!(
+    assert!(
         f.write(&batch("old", vec![sample(&d, "old", 49, 1)?])?)
-            .await,
-        Err(_)
-    ));
+            .await
+            .is_err()
+    );
     // A third independent frontier fails atomically and cannot poison the namespace.
     let other = Selection::Resource {
         scope: d.spec().scope.clone(),
@@ -92,7 +105,21 @@ async fn monotone_frontiers_stay_bounded_and_preserve_replay() -> anyhow::Result
         f.write(&batch("new", vec![sample(&d, "new", 60, 1)?])?)
             .await?,
     )?;
-    assert_eq!(f.read(&d).await?.rows.len(), 1);
+    assert_eq!(
+        f.store
+            .query(
+                &Authorized::<Query>::verify(
+                    &authority(TENANT)?,
+                    query(&d, QueryMode::History, 2)?
+                )?,
+                None,
+                deadline()?
+            )
+            .await?
+            .rows
+            .len(),
+        1
+    );
     Ok(())
 }
 

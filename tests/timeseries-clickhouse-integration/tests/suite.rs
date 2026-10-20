@@ -1043,8 +1043,8 @@ async fn rejects_broad_policies_guard_drift_and_service_escalation() -> anyhow::
             "REVOKE INSERT ON rss_ts_ch.raw FROM ch_maint",
         ),
         (
-            "GRANT SHOW NAMED COLLECTIONS, SHOW NAMED COLLECTIONS SECRETS ON *.* TO ch_maint",
-            "REVOKE SHOW NAMED COLLECTIONS, SHOW NAMED COLLECTIONS SECRETS ON *.* FROM ch_maint",
+            "GRANT SHOW NAMED COLLECTIONS, SHOW NAMED COLLECTIONS SECRETS ON * TO ch_maint",
+            "REVOKE SHOW NAMED COLLECTIONS, SHOW NAMED COLLECTIONS SECRETS ON * FROM ch_maint",
         ),
     ] {
         f.ch.sql(grant).await?;

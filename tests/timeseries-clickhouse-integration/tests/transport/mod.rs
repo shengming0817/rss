@@ -390,7 +390,7 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
         // ref: ClickHouse InsertDependenciesBuilder.cpp@v25.8.12.129-lts
         sqlx::raw_sql("CREATE FUNCTION rss_ts_ch.test_sink_wait() RETURNS integer LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_advisory_xact_lock(2814); RETURN 1; END $$; CREATE VIEW rss_ts_ch.test_sink_gate AS SELECT rss_ts_ch.test_sink_wait() AS ready; GRANT SELECT ON rss_ts_ch.test_sink_gate TO ch_guard;").execute(&f.admin).await?;
         f.ch.sql("CREATE TABLE default.test_sink_gate (ready Int32) ENGINE=PostgreSQL(rss_ts_ch_guard, table='test_sink_gate',schema='rss_ts_ch')").await?;
-        f.ch.sql(&format!("CREATE MATERIALIZED VIEW default.test_sink DEFINER=default SQL SECURITY DEFINER ENGINE=Null AS SELECT r.revision FROM rss_ts_ch.{target} AS r CROSS JOIN default.test_sink_gate AS g WHERE g.ready=1")).await?;
+        f.ch.sql(&format!("CREATE MATERIALIZED VIEW default.test_sink ENGINE=Null DEFINER=default SQL SECURITY DEFINER AS SELECT r.revision FROM rss_ts_ch.{target} AS r CROSS JOIN default.test_sink_gate AS g WHERE g.ready=1")).await?;
         let mut blocker = f.admin.acquire().await?;
         sqlx::query("SELECT pg_advisory_lock(2814)")
             .execute(&mut *blocker)
