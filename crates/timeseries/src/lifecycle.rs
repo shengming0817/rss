@@ -141,6 +141,8 @@ impl MaintenanceRequest {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum MaintenanceBlock {
+    /// A durably prepared write must be recovered before this lifecycle transition.
+    PendingWrite,
     Cutoff,
     DirtySummary,
     RestoreWindow,

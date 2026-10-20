@@ -266,8 +266,10 @@ mod runtime;
 mod tls;
 use tls::*;
 
+mod clickhouse;
 mod kafka;
 mod postgres;
+pub use clickhouse::{ClickHouseFixture, clickhouse_tls};
 mod rabbitmq;
 mod redis;
 

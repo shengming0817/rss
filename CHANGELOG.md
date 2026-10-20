@@ -6,6 +6,19 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Recoverable ClickHouse time series (#2813)
+
+- Add `rss-timeseries-clickhouse` with independent PostgreSQL admission/control and
+  tenant-isolated ClickHouse raw/summary storage. A batch becomes queryable only after
+  complete projection verification and acknowledged publication.
+- Use one write/recovery path, explicit server-side PG attempt authorization, and
+  revoked-query draining before cleanup. Transport deduplication never replaces
+  domain conflict detection or logical query deduplication.
+- Add bounded query, summary recomputation and lifecycle interfaces, a dedicated
+  TLS provider fixture and isolated source/candidate package consumer scenario.
+- Add `MaintenanceBlock::PendingWrite`; maintenance cannot skip unresolved admission.
+  The new adapter supports fresh installations of its single pinned profile only.
+
 ### Projection startup budget (#2423)
 
 - Replace `rss_projection_postgres::PgStore::new(pool)` with `new(pool, &control)`.

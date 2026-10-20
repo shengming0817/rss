@@ -1,0 +1,31 @@
+[package]
+name = "timeseries-clickhouse-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+[lints]
+workspace = true
+[dev-dependencies]
+rss-examples = { path = "../../crates/examples", features = ["timeseries-clickhouse"] }
+rss-timeseries.workspace = true
+rss-timeseries-clickhouse = { workspace = true, features = ["integration"] }
+rss-request-context.workspace = true
+rss-contract.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+anyhow.workspace = true
+serde_json.workspace = true
+
+serde.workspace = true
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+http-body-util.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+url.workspace = true
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring"] }

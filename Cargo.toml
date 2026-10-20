@@ -5,7 +5,9 @@ resolver = "2"
 members = [
   "crates/timeseries",
   "crates/timeseries-postgres",
+  "crates/timeseries-clickhouse",
   "tests/timeseries-postgres-integration",
+  "tests/timeseries-clickhouse-integration",
   "tests/webhook-integration",
   "crates/transactional-messaging-webhook",
   "crates/examples",
@@ -59,6 +61,7 @@ members = [
 # #2315: maintainer confirmed no published or external frozen Rust API commitments.
 compatibility-adoption = { baseline-rev = "fde9829ab01be3839465c18a7f04de10e152ab00", issue = 2315 }
 packages = [
+  { package = "rss-timeseries-clickhouse", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2813 } },
   { package = "rss-timeseries-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2810 } },
   { package = "rss-timeseries", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2809 } },
   { package = "rss-transactional-messaging-webhook", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2804 } },
@@ -105,6 +108,8 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+clickhouse = { version = "=0.15.3", default-features = false, features = ["rustls-tls-ring", "rustls-tls-webpki-roots"] }
+rss-timeseries-clickhouse = { path = "crates/timeseries-clickhouse", version = "0.1.0" }
 rss-timeseries-postgres = { path = "crates/timeseries-postgres", version = "0.1.0" }
 rss-timeseries = { path = "crates/timeseries", version = "0.1.0" }
 rss-transactional-messaging-webhook = { path = "crates/transactional-messaging-webhook", version = "0.1.0" }
