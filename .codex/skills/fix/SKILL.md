@@ -8,3 +8,6 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 > **子 agent 约束（覆盖下文）**：全程不启动任何子 agent，由主 agent 自行完成定位、分析与修复。
 
 See .claude/skills/fix/SKILL.md
+
+当前产品基线与字段分类以 `docs/rules/api-versioning.md`、`docs/rules/ai-robust.md` 为准；
+本包装不增加兼容、全字段闭合或全局升版要求，不改变 RSS/Identity 的受保护承诺。

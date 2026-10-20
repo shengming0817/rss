@@ -14,6 +14,30 @@
 | 一致性状态转换 | commit/rollback/unknown、idempotency、settlement、checkpoint、fencing | typed state、transaction conformance、fault/recovery proof |
 | Library runtime lifecycle | 资源所有权、取消与有界清理 | 所有权约束、状态边界与行为验证 |
 
+## 产品字段与约束边界
+
+MDM/Agent 及 Web 消费改动按实际用途分类；版本与历史支持范围只由
+[产品当前开发基线](api-versioning.md#产品当前开发基线)决定。
+
+| 类别 | 判定与 owner | 约束方式 |
+|---|---|---|
+| 核心契约 | 身份、授权、执行内容、状态推进、去重、完整性与恢复所需事实 | 明确类型/字段与实际校验；必要关系、唯一性、权限和 SQL 约束保留 |
+| 模块业务数据 | 采集器、动作、规则、软件执行器或 provider 实际解释的参数/属性 | 所属模块的类型、字典、recipe 或参数定义校验；公共通信层不枚举全部业务 key |
+| 普通扩展 | 不直接授予权限或推进状态的属性、展示、厂商补充及诊断细节 | 复用已有 map、rows、output 或 attributes/presentation/details 等有界对象，消费者按需解释 |
+
+- 先判定用途，再选择 enforcement；不能因字段可写成 Rust 类型就要求它成为公共必填字段或闭合枚举。
+  新增公共必填字段须指出实际消费者维持的核心不变量；字段名为 metadata 不代表其内容无控制语义。
+- 核心外层保持明确校验；扩展对象约束大小、深度、节点与 key 长度，未知 key 在编解码、存储、恢复和
+  编辑回读中保留，不覆盖核心字段，不自动成为权限、成功状态或可信资产。原始证据的敏感访问边界保留。
+- 动态参数由实际动作 owner 校验后形成明确执行输入；UI 提示和扩展属性不替代业务校验。
+  新采集属性不扩大批准的读取范围，字段字典/映射决定哪些值进入查询、分组或合规判断。
+- 新增 SQL 列须说明关系、约束、查询或索引需求；普通属性优先使用既有文档容器，不为每个 key 增列或
+  增加 CHECK 枚举。公共 schema/生成器不重新封死扩展 key；生成一致性仍由原声明 owner 证明。
+- 不以普通 key 增减单独要求全局 bump、全量重跑、中央字段注册表、平行 schema 权威或独立 ADR。
+  模型、读写、必要 SQL、生成物、对应格式调整、fixture、测试与规则随所属实施项完成。
+  测试绑定核心不变量和扩展保真等实际行为；按影响验证，完整检查先收集全部失败再集中修复，
+  随后精确复验，风险未变时不重复整套验证。
+
 ## 强度
 
 | 级别 | 定义 | 典型载体 |
@@ -22,7 +46,7 @@
 | **Medium** | 违规可表达，由确定性机器检查或真实 conformance 阻断 | clippy、cargo-deny、type-aware test、provider conformance |
 | **Soft** | 面向设计与 review 的说明 | 文档、注释、命名与 review guidance |
 
-关键约束采用 Hard 或 Medium；可由类型和依赖图表达的约束采用 Hard。
+关键约束采用 Hard 或 Medium；其中可由类型和依赖图表达的核心不变量采用 Hard。
 
 Hard admission 是 fail-closed 的语义判定：必须能从 Cargo production target、build script 或 production
 类型边界派生唯一 owner 与真实 consumer。trybuild/compile-fail 是 external consumer 支持证据，不能声明 Hard；
@@ -84,8 +108,9 @@ enforcement carrier，不参与 verify/ci verdict。
 - Medium：说明 canonical target、诊断对象和确定性机器载体；存在低成本 Hard 路径时说明上移方案。
 - Soft：不立项为 enforcement。
 
-可由 Cargo 图、可见性、private field、newtype、sealed trait、typestate、schema/codegen 或必填构造参数表达的
-约束采用 Hard；其余约束采用覆盖目标失效模式的最低充分 Medium carrier。
+已确认的核心不变量可由 Cargo 图、可见性、private field、newtype、sealed trait、typestate、schema/codegen
+或必填构造参数表达时采用 Hard；其余关键约束采用覆盖目标失效模式的最低充分 Medium carrier。
+普通产品字段不因可类型化而自动升级为公共强契约，按上文分类处理。
 
 Funnel 类约束分别说明上游和下游强度；callsite 约束同时说明其上游构造边界。
 

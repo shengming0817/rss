@@ -51,6 +51,11 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 按 `CLAUDE.md` 与相关 `docs/rules/` 生成计划。展示计划作为进度信息；无新的实质歧义时直接进入阶段 3。
 
+产品字段变化先按 `docs/rules/ai-robust.md` 分类，版本责任按 `docs/rules/api-versioning.md` 判定。
+MDM/Agent 当前基线直接替换当前消费者，普通扩展不是兼容层；模型、读写、必要 SQL、生成/打包、
+对应格式调整、fixture、测试和规则归同一实施项，不按技术层拆成反复交接的 issue。
+公共库及已有外部承诺不受产品当前基线豁免；不因普通 key 变化要求全局升版或无关整套验证。
+
 ---
 
 ## 阶段 3：Worktree

@@ -5,7 +5,7 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。本�
 
 - [项目范围](docs/rules/project-scope.md)：能力准入、仓内外边界与处置状态。
 - [架构与依赖](docs/rules/dependency-policy.md)：crate 划分、依赖方向与复杂度取舍。
-- [版本规则](docs/rules/api-versioning.md)：公共 API、wire 兼容与退出。
+- [版本规则](docs/rules/api-versioning.md)：公共 API、wire 兼容与退出，以及 MDM/Agent 的当前开发基线。
 - [验证范围](docs/rules/verification-scope.md)：验证深度、消费组合与发布收尾。
 - [AI-robust](docs/rules/ai-robust.md)：约束强度与证据要求。
 - [Rust 规范](docs/rules/rust-standards.md)与[错误处理](docs/rules/error-handling.md)：语言与错误边界。
@@ -22,6 +22,8 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。本�
 - 被 `.gitignore` 忽略的文件禁止 `git add -f`
 - 需求判断 / 方案设计 / review 默认考虑 MDM / 零信任治理与安全边界，不按隐含单租户 / 无设备场景推进
 - 任务拆分只创建实施 issues，不创建独立 ADR issues；所有 ADR 决策保留在对应实施 issue 或父 issue 中。
+- MDM/Agent 及 Web 消费改动先按 [字段分类](docs/rules/ai-robust.md#产品字段与约束边界)区分核心契约、
+  模块业务数据与普通扩展；模型、读写、必要 SQL、生成物、测试和规则在所属实施项内闭环。
 
 ## 临时项目规则：历史能力提取来源
 

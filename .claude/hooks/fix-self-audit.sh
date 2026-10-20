@@ -43,7 +43,7 @@ jq -nc '{
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
-    permissionDecisionReason: "本次 fix 方案是否符合四原则（彻底 / 不向后兼容 / 优雅简洁 / AI-HARD）？据此复核后重新发起同一动作即放行（每个 /fix 一次）。"
+    permissionDecisionReason: "本次 fix 是否彻底、按边界替换、优雅简洁并按风险约束？按共享规则 docs/rules/api-versioning.md 与 docs/rules/ai-robust.md 核对当前产品基线、受保护承诺和三类字段；普通扩展不是兼容层，不自动要求全闭合、全局升版或重复全量验证。据此复核后重新发起同一动作即放行（每个 /fix 一次）。"
   }
 }'
 touch "$state"

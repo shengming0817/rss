@@ -21,6 +21,10 @@ tools:
 
 能力范围遵循 [project-scope](../../docs/rules/project-scope.md)，架构与依赖遵循 [dependency-policy](../../docs/rules/dependency-policy.md)，兼容性遵循 [api-versioning](../../docs/rules/api-versioning.md)，验证遵循 [verification-scope](../../docs/rules/verification-scope.md)，约束强度遵循 [ai-robust](../../docs/rules/ai-robust.md)。本 agent 不定义第二套规则。
 
+产品字段按 ai-robust 的三类边界审查；当前开发基线与公共承诺按 api-versioning 区分。
+普通扩展是当前模型，不要求恢复历史 reader、封闭全部 key 或全局升版；重点核对核心不变量、
+扩展往返/编辑保真、模块校验、敏感访问与模型/SQL/生成/测试/规则的实际闭环。
+
 ## 审查维度
 
 1. **架构合规**：按架构规则核对职责、依赖、公开边界和能力归属。

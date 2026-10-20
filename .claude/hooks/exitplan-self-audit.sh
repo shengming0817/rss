@@ -22,7 +22,7 @@ jq -nc '{
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
-    permissionDecisionReason: "本计划是否符合四原则（彻底 / 不向后兼容 / 优雅简洁 / AI-HARD）？据此复核后重新退出 plan mode 即放行（每会话一次）。"
+    permissionDecisionReason: "本计划是否彻底、按边界替换、优雅简洁并按风险约束？按共享规则 docs/rules/api-versioning.md 与 docs/rules/ai-robust.md 核对当前产品基线、受保护承诺和三类字段；普通扩展不是兼容层，模型/SQL/生成/验证/规则随所属实施项闭环，不自动要求全局升版。据此复核后重新退出 plan mode 即放行（每会话一次）。"
   }
 }'
 touch "$state"

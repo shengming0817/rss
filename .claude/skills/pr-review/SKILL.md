@@ -76,6 +76,11 @@ ACTUAL_SHA=$(git -C "$WORKTREE" rev-parse HEAD)
 `.github/project-template/PROJECT.md` §3（P/Cx 评级单源）。
 rules 已瘦身，pr-review 阶段全量读取，避免本审查流程因条件过滤漏加载规则。
 
+产品字段 finding 先按 `ai-robust.md` 区分核心契约、模块业务数据和普通扩展，并按
+`api-versioning.md` 区分产品当前基线与受保护承诺。普通扩展不是兼容层；不得仅因新增 key
+提出字段全闭合、全局 bump、历史 reader 或重复全量验证要求。核对核心约束、扩展保真与实际消费者，
+以及模型/SQL/生成/测试/规则是否在所属实施项一并闭环。
+
 ---
 
 ## 阶段 3.5：分级表
