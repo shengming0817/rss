@@ -3,6 +3,14 @@
 本文拥有 Release API、wire breaking、deprecation 与 definition retention。精确 package/contract inventory 由 manifest、
 release catalog、schema 与 Cargo facts 派生，文档不复制。
 
+## 不向后兼容
+
+- 未部署且无对外兼容承诺的自有产品直接替换旧实现并同步消费者，不保留旧字段/DTO、别名、双读双写、降级或历史迁移。
+- 普通扩展 key 增减不升级公共协议或数据库格式；schema hash、Git rev 和制品摘要变化不自动代表格式变化。
+- 业务 revision/generation/sequence、任务身份和资源版本独立于格式版本，不随格式重置。
+- 删除旧格式支持不删除当前格式的恢复、幂等、签名和隔离校验，也不授权清理已有数据或改写旧库版本号。
+- 已发布或冻结的公共契约、第三方协议仍按其兼容承诺处理。
+
 ## 两个兼容轴
 
 - 轴 A：Rust Release API/SemVer。

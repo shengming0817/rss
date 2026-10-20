@@ -22,7 +22,7 @@ jq -nc '{
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
-    permissionDecisionReason: "本计划是否符合四原则（彻底 / 不向后兼容 / 优雅简洁 / AI-HARD）？据此复核后重新退出 plan mode 即放行（每会话一次）。"
+    permissionDecisionReason: "本计划是否符合四原则（彻底 / 不向后兼容 / 优雅简洁 / 按风险约束）？据此复核后重新退出 plan mode 即放行（每会话一次）。"
   }
 }'
 touch "$state"

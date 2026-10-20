@@ -43,7 +43,7 @@ jq -nc '{
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
-    permissionDecisionReason: "本次 fix 方案是否符合四原则（彻底 / 不向后兼容 / 优雅简洁 / AI-HARD）？据此复核后重新发起同一动作即放行（每个 /fix 一次）。"
+    permissionDecisionReason: "本次 fix 方案是否符合四原则（彻底 / 不向后兼容 / 优雅简洁 / 按风险约束）？据此复核后重新发起同一动作即放行（每个 /fix 一次）。"
   }
 }'
 touch "$state"
