@@ -179,8 +179,10 @@ async fn serve(
         .find(|(key, _)| key == "query")
         .map(|(_, v)| v.into_owned())
         .unwrap_or_default();
-    let is_insert = sql.starts_with("INSERT INTO rss_ts_ch.raw")
-        || data.starts_with(b"INSERT INTO rss_ts_ch.raw");
+    let is_insert = ["raw", "summaries"].iter().any(|table| {
+        let prefix = format!("INSERT INTO rss_ts_ch.{table}");
+        sql.starts_with(&prefix) || data.starts_with(prefix.as_bytes())
+    });
     let mode = if is_insert {
         state.mode.swap(0, Ordering::SeqCst)
     } else {
@@ -272,6 +274,7 @@ async fn revoke_drains_a_real_query_with_an_old_guard_snapshot() -> anyhow::Resu
     let f = Fixture::new("ch-drain").await?;
     let d = definition(TENANT)?;
     f.register(&d).await?;
+    let replacement = replacement_writer(&f).await?;
     // Fixture-only deterministic pause inside the real PostgreSQLSource statement.
     // Its MVCC snapshot predates revocation, so guard rereading alone cannot save it.
     sqlx::raw_sql("CREATE FUNCTION rss_ts_ch.test_guard_wait() RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_advisory_xact_lock(2813); RETURN true; END $$; CREATE OR REPLACE VIEW rss_ts_ch.active_attempts WITH (security_barrier=true) AS SELECT a.tenant_id::text AS tenant,a.namespace,a.id::text AS attempt,a.query_id::text AS query_id,a.target,a.digest,a.revision,i.id::text AS installation FROM rss_ts_ch.attempts a CROSS JOIN rss_ts_ch.installation i WHERE a.allowed AND NOT pg_is_in_recovery() AND (SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()) AND rss_ts_ch.test_guard_wait(); ALTER VIEW rss_ts_ch.active_attempts OWNER TO ch_owner;").execute(&f.admin).await?;
@@ -297,7 +300,7 @@ async fn revoke_drains_a_real_query_with_an_old_guard_snapshot() -> anyhow::Resu
             "0"
         );
         let auth = authority(TENANT)?;
-        let recovery = f.store.recover(
+        let recovery = replacement.recover(
             &d.spec().scope,
             &auth,
             Deadline::from_timeout(&Timer, Duration::from_secs(30))?,
@@ -343,5 +346,174 @@ async fn revoke_drains_a_real_query_with_an_old_guard_snapshot() -> anyhow::Resu
         .trim(),
         "0"
     );
+    Ok(())
+}
+
+async fn replacement_writer(f: &Fixture) -> anyhow::Result<ChStore<Timer>> {
+    f.ch.sql("CREATE USER ch_writer_next IDENTIFIED WITH sha256_password BY 'fixture-only'; GRANT SELECT ON rss_ts_ch.installation TO ch_writer_next; GRANT SELECT ON rss_ts_ch.active_attempts TO ch_writer_next; GRANT SELECT ON rss_ts_ch.guard_identity TO ch_writer_next; GRANT INSERT ON rss_ts_ch.raw TO ch_writer_next; GRANT INSERT ON rss_ts_ch.summaries TO ch_writer_next; GRANT CREATE TEMPORARY TABLE ON *.* TO ch_writer_next;").await?;
+    Fixture::connect_options(
+        &f.ch,
+        f.pool.clone(),
+        TENANT,
+        "ch_reader",
+        "ch_writer_next",
+        limits()?,
+    )
+    .await
+}
+async fn wait_sink(f: &Fixture) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_locks WHERE locktype='advisory' AND objid=2814 AND NOT granted)").fetch_one(&f.admin).await?;
+            if waiting { return Ok::<_, anyhow::Error>(()); }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await?
+}
+
+#[tokio::test]
+async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> anyhow::Result<()> {
+    for target in ["raw", "summaries"] {
+        let mut f = Fixture::new(&format!("ch-sink-{target}")).await?;
+        let d = definition(TENANT)?;
+        f.register(&d).await?;
+        let proxy = Proxy::new(&f.ch).await?;
+        let writer = proxy.store(f.pool.clone()).await?;
+        f.store = replacement_writer(&f).await?;
+        let b = batch("sink", vec![sample(&d, "sink", 10, 3)?])?;
+        if target == "summaries" {
+            confirmed(f.write(&b).await?)?;
+        }
+        // A dependent materialized-view sink receives a real INSERT block, after
+        // the production guard join yielded rows. Its PostgreSQL source is the
+        // deterministic gate, not a timing guess based on system.processes.
+        // ref: ClickHouse InsertDependenciesBuilder.cpp@v25.8.12.129-lts
+        sqlx::raw_sql("CREATE FUNCTION rss_ts_ch.test_sink_wait() RETURNS integer LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_advisory_xact_lock(2814); RETURN 1; END $$; CREATE VIEW rss_ts_ch.test_sink_gate AS SELECT rss_ts_ch.test_sink_wait() AS ready; GRANT SELECT ON rss_ts_ch.test_sink_gate TO ch_guard;").execute(&f.admin).await?;
+        f.ch.sql("CREATE TABLE default.test_sink_gate (ready Int32) ENGINE=PostgreSQL(rss_ts_ch_guard, table='test_sink_gate',schema='rss_ts_ch')").await?;
+        f.ch.sql(&format!("CREATE MATERIALIZED VIEW default.test_sink DEFINER=default SQL SECURITY DEFINER ENGINE=Null AS SELECT r.revision FROM rss_ts_ch.{target} AS r CROSS JOIN default.test_sink_gate AS g WHERE g.ready=1")).await?;
+        let mut blocker = f.admin.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock(2814)")
+            .execute(&mut *blocker)
+            .await?;
+        let spec = SummarySpec::new(
+            b.stream().clone(),
+            b.samples()[0].input().series.clone(),
+            NonZeroU64::new(100).ok_or(Error::InvalidInput)?,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )?;
+        let request = Authorized::<MaintenanceRequest>::verify(
+            &authority(TENANT)?,
+            MaintenanceRequest::new(
+                id("sink-sum")?,
+                MaintenanceAction::Recompute {
+                    spec,
+                    window: Interval::new(Timestamp::new(0)?, Timestamp::new(100)?)?,
+                },
+                MaintenanceBudget {
+                    rows: NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+                    buckets: NonZeroU32::new(1).ok_or(Error::InvalidInput)?,
+                },
+            )?,
+        )?;
+        let write = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+        proxy.arm(3);
+        {
+            let insert = async {
+                if target == "raw" {
+                    writer.write(&write, deadline()?).await?;
+                } else {
+                    let mut next = None;
+                    for _ in 0..10 {
+                        match confirmed(writer.step(&request, next.as_ref(), deadline()?).await?)? {
+                            MaintenanceProgress::More { next: n, .. } => next = Some(n),
+                            _ => break,
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            };
+            tokio::select! {
+                result = insert => { result?; anyhow::bail!("insert completed before dependent sink gate"); }
+                result = wait_sink(&f) => result?,
+            }
+            // Dropping the client operation releases PG locks. The proxy still
+            // awaits the real server response; the old writer remains in the sink.
+        }
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if f.ch
+                        .sql("SELECT count() FROM system.processes WHERE query LIKE 'KILL QUERY%'")
+                        .await?
+                        .trim()
+                        != "0"
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            sqlx::query("SELECT pg_advisory_unlock(2814)")
+                .execute(&mut *blocker)
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let cleanup = async {
+            if target == "raw" {
+                confirmed(
+                    f.store
+                        .recover(&d.spec().scope, &authority(TENANT)?, deadline()?)
+                        .await?,
+                )?;
+                f.maintain(
+                    "sink-cut",
+                    MaintenanceAction::AdvanceCutoff {
+                        selection: query(&d, QueryMode::History, 10)?.selection().clone(),
+                        before: Timestamp::new(100)?,
+                    },
+                )
+                .await?;
+            }
+            let progress = f
+                .maintain(
+                    "sink-prune",
+                    MaintenanceAction::Prune {
+                        selection: query(&d, QueryMode::History, 10)?.selection().clone(),
+                        raw_before: Timestamp::new(if target == "raw" { 100 } else { 0 })?,
+                        summaries_before: Timestamp::new(100)?,
+                    },
+                )
+                .await?;
+            assert!(matches!(progress, MaintenanceProgress::Complete { .. }));
+            Ok::<_, anyhow::Error>(())
+        };
+        let (cleaned, released) = tokio::join!(cleanup, release);
+        released?;
+        cleaned?;
+        assert_eq!(
+            f.ch.sql(
+                "SELECT count() FROM system.processes WHERE query LIKE 'INSERT INTO rss_ts_ch.%'"
+            )
+            .await?
+            .trim(),
+            "0"
+        );
+        assert_eq!(
+            f.ch.sql(&format!("SELECT count() FROM rss_ts_ch.{target}"))
+                .await?
+                .trim(),
+            "0"
+        );
+        proxy.replay().await?;
+        assert_eq!(
+            f.ch.sql(&format!("SELECT count() FROM rss_ts_ch.{target}"))
+                .await?
+                .trim(),
+            "0"
+        );
+    }
     Ok(())
 }

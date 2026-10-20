@@ -14,11 +14,7 @@ pub(crate) async fn invalidate(
     at: i64,
     max: u32,
 ) -> Result<(), Error> {
-    let rows=sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND NOT dirty LIMIT $4")
-        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(at).bind(i64::from(max)+1).fetch_all(&mut *c).await.map_err(sql_error)?;
-    if rows.len() > max as usize {
-        return Err(Error::BudgetExceeded);
-    }
+    let rows = invalidation_targets(c, s, selection, at, max).await?;
     for row in rows {
         let spec: SummarySpec = decode(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)?;
         if overlaps(selection, &spec.selection()) {
@@ -27,6 +23,23 @@ pub(crate) async fn invalidate(
         }
     }
     bump(c, s).await
+}
+/// Filter the durable spec before applying the result budget. Both prepare and
+/// publish use this owner; a pending batch excludes maintenance publications.
+pub(crate) async fn invalidation_targets(
+    c: &mut PgConnection,
+    s: &Scope,
+    selection: &Selection,
+    at: i64,
+    max: u32,
+) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
+    let selection = String::from_utf8(bytes(selection)?).map_err(|_| Error::Invariant)?;
+    let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND NOT dirty AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
+        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(at).bind(i64::from(max)+1).bind(selection).fetch_all(c).await.map_err(sql_error)?;
+    if rows.len() > max as usize {
+        return Err(Error::BudgetExceeded);
+    }
+    Ok(rows)
 }
 pub(crate) async fn bump(c: &mut PgConnection, s: &Scope) -> Result<(), Error> {
     sqlx::query("UPDATE rss_ts_ch.namespaces SET revision=revision+1 WHERE tenant_id=$1::text::uuid AND namespace=$2")
@@ -82,9 +95,24 @@ pub(crate) async fn put_fence(
     selection: &Selection,
     window: Interval,
     until: Option<i64>,
+    max: u32,
 ) -> Result<(), Error> {
+    // Namespace mutation lock serializes frontier replacement. Delete fences keep
+    // their identity for Restore; monotone frontiers keep only uncovered bounds.
+    if matches!(kind, "cutoff" | "pruned") {
+        let selection = String::from_utf8(bytes(selection)?).map_err(|_| Error::Invariant)?;
+        let covered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 AND kind=$3 AND selection=$4::text::jsonb AND lo<=$5 AND hi>=$6)")
+            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(kind).bind(&selection).bind(window.start().micros()).bind(window.end().micros()).fetch_one(&mut *c).await.map_err(sql_error)?;
+        if covered {
+            return Ok(()); // reason: plans retain each operation's replay identity.
+        }
+        sqlx::query("DELETE FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 AND kind=$3 AND selection=$4::text::jsonb AND lo>=$5 AND hi<=$6")
+            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(kind).bind(&selection).bind(window.start().micros()).bind(window.end().micros()).execute(&mut *c).await.map_err(sql_error)?;
+    }
     sqlx::query("INSERT INTO rss_ts_ch.fences(tenant_id,namespace,id,kind,selection,lo,hi,restore_until) VALUES($1::text::uuid,$2,$3,$4,$5::text::jsonb,$6,$7,$8)")
         .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(r.id().as_str()).bind(kind).bind(String::from_utf8(bytes(selection)?).map_err(|_|Error::Invariant)?).bind(window.start().micros()).bind(window.end().micros()).bind(until).execute(&mut *c).await.map_err(sql_error)?;
+    // Reject new distinct frontiers atomically, before poisoning future reads.
+    fences(c, r.scope(), max).await?;
     bump(c, r.scope()).await
 }
 pub(crate) fn availability(query: &Query, fences: &[Fence]) -> Result<Availability, Error> {

@@ -77,6 +77,7 @@ async fn simple(
                 selection,
                 Interval::new(Timestamp::new(0)?, *before)?,
                 None,
+                max,
             )
             .await?;
         }
@@ -95,6 +96,7 @@ async fn simple(
                 selection,
                 *window,
                 Some(restore_until.micros()),
+                max,
             )
             .await?;
             control::invalidate(c, r.scope(), selection, window.start().micros(), max).await?;

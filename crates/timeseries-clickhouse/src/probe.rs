@@ -22,7 +22,7 @@ pub(crate) async fn validate(
     if !safe {
         return Err(Error::Invariant);
     }
-    let safe:bool=sqlx::query_scalar("SELECT NOT has_schema_privilege(current_user,'rss_ts_ch','CREATE') AND NOT has_table_privilege(current_user,'rss_ts_ch.installation','INSERT,UPDATE,DELETE,TRUNCATE') AND NOT has_table_privilege(current_user,'rss_ts_ch.active_attempts','SELECT') AND NOT EXISTS(SELECT FROM pg_roles r WHERE r.oid=(SELECT nspowner FROM pg_namespace WHERE nspname='rss_ts_ch') AND (r.rolcanlogin OR r.rolsuper OR r.rolbypassrls))")
+    let safe:bool=sqlx::query_scalar("SELECT NOT has_schema_privilege(current_user,'rss_ts_ch','CREATE') AND NOT has_table_privilege(current_user,'rss_ts_ch.installation','INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AND NOT has_any_column_privilege(current_user,'rss_ts_ch.installation','INSERT,UPDATE,REFERENCES') AND NOT has_any_column_privilege(current_user,'rss_ts_ch.active_attempts','SELECT') AND NOT EXISTS(SELECT FROM pg_roles r WHERE r.oid=(SELECT nspowner FROM pg_namespace WHERE nspname='rss_ts_ch') AND (r.rolcanlogin OR r.rolsuper OR r.rolbypassrls))")
         .fetch_one(pool).await.map_err(sql_error)?;
     if !safe {
         return Err(Error::Unauthorized);
@@ -274,7 +274,15 @@ async fn service_grants(ch: &Connections) -> Result<(), Error> {
                     || (access == "SELECT" && db == "system" && table.is_empty())
                     || (db.is_empty()
                         && table.is_empty()
-                        && (access == "KILL QUERY" || access.starts_with("SHOW ")))
+                        && (access == "KILL QUERY"
+                            || matches!(
+                                access.as_str(),
+                                "SHOW USERS"
+                                    | "SHOW ROLES"
+                                    | "SHOW ROW POLICIES"
+                                    | "SHOW QUOTAS"
+                                    | "SHOW SETTINGS PROFILES"
+                            )))
             };
             if !valid {
                 return Err(Error::Unauthorized);

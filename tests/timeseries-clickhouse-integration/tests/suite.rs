@@ -1,3 +1,4 @@
+mod regressions;
 mod transport;
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::*;
@@ -237,12 +238,22 @@ impl Fixture {
         tenant: &str,
         reader: &str,
     ) -> anyhow::Result<ChStore<Timer>> {
+        Self::connect_options(ch, pool, tenant, reader, "ch_writer", limits()?).await
+    }
+    async fn connect_options(
+        ch: &testkit::ClickHouseFixture,
+        pool: PgPool,
+        tenant: &str,
+        reader: &str,
+        writer: &str,
+        limits: Limits,
+    ) -> anyhow::Result<ChStore<Timer>> {
         let c = |name: &str| Credentials::new(name.into(), "fixture-only".into());
         let connections = Connections::new(
             ch.endpoint(),
             ch.ca_pem().as_bytes(),
             c(reader)?,
-            c("ch_writer")?,
+            c(writer)?,
             c("ch_maint")?,
         )?;
         Ok(ChStore::new(
@@ -250,7 +261,7 @@ impl Fixture {
             pool,
             connections,
             Timer,
-            limits()?,
+            limits,
             CursorKey::new([42; 32]),
             deadline()?,
         )
@@ -1031,6 +1042,10 @@ async fn rejects_broad_policies_guard_drift_and_service_escalation() -> anyhow::
             "GRANT INSERT ON rss_ts_ch.raw TO ch_maint",
             "REVOKE INSERT ON rss_ts_ch.raw FROM ch_maint",
         ),
+        (
+            "GRANT SHOW NAMED COLLECTIONS, SHOW NAMED COLLECTIONS SECRETS ON *.* TO ch_maint",
+            "REVOKE SHOW NAMED COLLECTIONS, SHOW NAMED COLLECTIONS SECRETS ON *.* FROM ch_maint",
+        ),
     ] {
         f.ch.sql(grant).await?;
         assert!(
@@ -1056,6 +1071,50 @@ async fn rejects_broad_policies_guard_drift_and_service_escalation() -> anyhow::
         (
             "GRANT SELECT ON rss_ts_ch.batches TO ch_guard",
             "REVOKE SELECT ON rss_ts_ch.batches FROM ch_guard",
+        ),
+        (
+            "GRANT SELECT(payload) ON rss_ts_ch.batches TO ch_guard",
+            "REVOKE SELECT(payload) ON rss_ts_ch.batches FROM ch_guard",
+        ),
+        (
+            "GRANT INSERT(payload) ON rss_ts_ch.batches TO ch_guard",
+            "REVOKE INSERT(payload) ON rss_ts_ch.batches FROM ch_guard",
+        ),
+        (
+            "GRANT UPDATE(payload) ON rss_ts_ch.batches TO ch_guard",
+            "REVOKE UPDATE(payload) ON rss_ts_ch.batches FROM ch_guard",
+        ),
+        (
+            "GRANT REFERENCES(payload) ON rss_ts_ch.batches TO ch_guard",
+            "REVOKE REFERENCES(payload) ON rss_ts_ch.batches FROM ch_guard",
+        ),
+        (
+            "GRANT INSERT(attempt) ON rss_ts_ch.active_attempts TO ch_guard",
+            "REVOKE INSERT(attempt) ON rss_ts_ch.active_attempts FROM ch_guard",
+        ),
+        (
+            "GRANT UPDATE(attempt) ON rss_ts_ch.active_attempts TO ch_guard",
+            "REVOKE UPDATE(attempt) ON rss_ts_ch.active_attempts FROM ch_guard",
+        ),
+        (
+            "GRANT REFERENCES(attempt) ON rss_ts_ch.active_attempts TO ch_guard",
+            "REVOKE REFERENCES(attempt) ON rss_ts_ch.active_attempts FROM ch_guard",
+        ),
+        (
+            "GRANT INSERT(id) ON rss_ts_ch.installation TO ch_runtime",
+            "REVOKE INSERT(id) ON rss_ts_ch.installation FROM ch_runtime",
+        ),
+        (
+            "GRANT UPDATE(id) ON rss_ts_ch.installation TO ch_runtime",
+            "REVOKE UPDATE(id) ON rss_ts_ch.installation FROM ch_runtime",
+        ),
+        (
+            "GRANT REFERENCES(id) ON rss_ts_ch.installation TO ch_runtime",
+            "REVOKE REFERENCES(id) ON rss_ts_ch.installation FROM ch_runtime",
+        ),
+        (
+            "GRANT SELECT(attempt) ON rss_ts_ch.active_attempts TO ch_runtime",
+            "REVOKE SELECT(attempt) ON rss_ts_ch.active_attempts FROM ch_runtime",
         ),
     ] {
         // Audited closed fixture statements; no producer input enters DDL.

@@ -131,6 +131,18 @@ impl<C: Clock> ChStore<C> {
         let mut rows = Vec::new();
         for sample in b.samples() {
             if self.admit_sample(c, sample, &fences, received).await? {
+                let selection = Selection::Exact {
+                    stream: sample.input().stream.clone(),
+                    series: sample.input().series.clone(),
+                };
+                control::invalidation_targets(
+                    c,
+                    scope,
+                    &selection,
+                    sample.input().observed_at.micros(),
+                    self.limits.max_points.get(),
+                )
+                .await?;
                 rows.push(Raw::new(sample, received, revision)?);
             }
         }

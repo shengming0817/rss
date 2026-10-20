@@ -117,6 +117,7 @@ pub(super) async fn step<C: Clock>(
                 sel,
                 Interval::new(Timestamp::new(0)?, Timestamp::new(limit)?)?,
                 None,
+                store.limits.max_points.get(),
             )
             .await?;
         }

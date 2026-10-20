@@ -217,10 +217,7 @@ impl<C: Clock> ChStore<C> {
             .map(|id| literal(id))
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!(
-            "KILL QUERY WHERE user={} AND query_id IN ({ids}) SYNC",
-            literal(&self.ch.users[1])
-        );
+        let sql = format!("KILL QUERY WHERE query_id IN ({ids}) SYNC");
         // KILL on an already finished query can return no result header at all.
         // Consume its complete HTTP response, then independently verify termination;
         // a successful HTTP status or a sent cancellation alone is not sufficient.
@@ -231,10 +228,7 @@ impl<C: Clock> ChStore<C> {
         let remaining = self
             .ch_query(
                 &self.ch.maintenance,
-                &format!(
-                    "SELECT count() FROM system.processes WHERE user={} AND query_id IN ({ids})",
-                    literal(&self.ch.users[1])
-                ),
+                &format!("SELECT count() FROM system.processes WHERE query_id IN ({ids})"),
                 deadline,
             )?
             .fetch_all::<u64>()
