@@ -1,4 +1,4 @@
--- Stable PostgreSQL 16 storage-contract projection. Role OIDs and grants are checked separately.
+-- Stable PostgreSQL 17 storage-contract projection. Role OIDs and grants are checked separately.
 WITH relations AS (
  SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='rss_ts_ch' AND c.relkind IN ('r','p','v') AND NOT c.relispartition

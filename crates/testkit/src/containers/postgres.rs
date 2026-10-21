@@ -56,7 +56,7 @@ impl PgTlsFixture {
     }
 }
 
-/// Starts PostgreSQL 16 with TLS required for every TCP client.
+/// Starts PostgreSQL 17 with TLS required for every TCP client.
 #[derive(Clone, Copy)]
 pub enum PgTlsServerIdentity {
     /// SANs match fixture loopback and bridge addresses.
@@ -65,7 +65,7 @@ pub enum PgTlsServerIdentity {
     UnmatchedHost,
 }
 
-/// Starts PostgreSQL 16 with TLS required and an explicit test server-identity posture.
+/// Starts PostgreSQL 17 with TLS required and an explicit test server-identity posture.
 pub async fn postgres_tls(
     attachment: NetworkAttachment<'_>,
     identity: PgTlsServerIdentity,
@@ -73,11 +73,14 @@ pub async fn postgres_tls(
     postgres_image(
         attachment,
         identity,
-        GenericImage::new("postgres", "16-alpine"),
+        GenericImage::new(
+            "postgres",
+            "17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929",
+        ),
     )
     .await
 }
-/// Fixed TimescaleDB 2.30.2 / PG16 provider fixture, with the same TLS boundary.
+/// Fixed TimescaleDB 2.30.2 / PG17 provider fixture, with the same TLS boundary.
 pub async fn timescaledb_tls(
     attachment: NetworkAttachment<'_>,
     identity: PgTlsServerIdentity,
@@ -87,7 +90,7 @@ pub async fn timescaledb_tls(
         identity,
         GenericImage::new(
             "timescale/timescaledb",
-            "2.30.2-pg16@sha256:6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f",
+            "2.30.2-pg17@sha256:b346edcdb51a1fd6020e3965e0bd1c9f3406fa6d5fbce1e28f4852587ef934e2",
         ),
     )
     .await

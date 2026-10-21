@@ -1,6 +1,6 @@
 # rss-timeseries-postgres
 
-PostgreSQL 16 atomic time series admission, durable receipts, definition snapshots and
+PostgreSQL 17 atomic time series admission, durable receipts, definition snapshots and
 bounded raw history/latest, aggregation and lifecycle operations. TimescaleDB is not required. Products own
 metric meaning, authentication, resource authority, source/generation activation,
 TLS/credentials, migrations, partitions and retention policy.
@@ -36,7 +36,7 @@ REVOKE EXECUTE ON FUNCTION rss_timeseries.create_partition(bigint,bigint)
 Runtime can read and execute the restricted mutation functions, but cannot directly
 INSERT/UPDATE/DELETE/TRUNCATE or provision partitions. All tables, including children,
 force RLS. Functions fix their search path; PUBLIC has no component permissions.
-`PgStore::new(profile, connections, clock, limits, cursor_key, deadline)` checks the PostgreSQL 16
+`PgStore::new(profile, connections, clock, limits, cursor_key, deadline)` checks the PostgreSQL 17
 catalog, effective reachable-role permissions, functions and child partition policies.
 DDL/role changes require drain and re-admission. Unknown schema or unsafe privileges
 fail closed; schema comments alone do not prove admission. The database engine,
@@ -128,7 +128,7 @@ provider still owns the truth of durable admission.
 
 ## Proof and examples
 
-`timeseries-postgres-integration` uses real PostgreSQL 16 TLS, separate owner/runtime
+`timeseries-postgres-integration` uses real PostgreSQL 17 TLS, separate owner/runtime
 roles, concurrent writers, cross-partition conflicts, retirement, real process kills,
 commit acknowledgment loss, connection quarantine, permission drift and bounded queries.
 `crates/examples` provides `timeseries-install` and `timeseries-pg`; fixture input arrives
@@ -137,7 +137,7 @@ runs isolated core/PG consumers with explicit `--source` or exact `--artifacts D
 --revision SHA`, optionally `--scenario core|pg`. Artifact proof is not actual publication.
 
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
-ref: PostgreSQL 16 declarative partitioning and row security
+ref: PostgreSQL 17 declarative partitioning and row security
 
 ## Bounded aggregation and maintenance
 
@@ -199,10 +199,10 @@ The `timeseries-schema` example emits inspectable SQL for a minimal explicit pro
 | TimescaleSharedRls | shared FORCE RLS | rowstore hypertable | core fold |
 | TimescaleDedicatedTenant | fixed tenant database/role/pools | hypertable, explicit columnstore conversion | native I64/U64 Gauge at declared resolutions; core for other cases |
 
-The supported extension is exactly **TimescaleDB 2.30.2**, on PostgreSQL 16.6–16.x.
-The fixture pins `timescale/timescaledb:2.30.2-pg16` to manifest digest
-`sha256:6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f`
-(PG 16.15 in the inspected image). SQLx remains the only client; its exact version is
+The supported extension is exactly **TimescaleDB 2.30.2**, on PostgreSQL 17.6–17.x.
+The fixture pins `timescale/timescaledb:2.30.2-pg17` to manifest digest
+`sha256:b346edcdb51a1fd6020e3965e0bd1c9f3406fa6d5fbce1e28f4852587ef934e2`
+SQLx remains the only client; its exact version is
 owned by Cargo.lock (currently 0.9.0). Other extension versions are rejected pending
 explicit validation. Component schema upgrades require a future explicit implementation;
 there is no automatic ALTER EXTENSION, repair, old reader or profile switch.

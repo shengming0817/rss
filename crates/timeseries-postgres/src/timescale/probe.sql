@@ -24,7 +24,7 @@ WITH RECURSIVE reachable AS (
  UNION ALL SELECT a.grantee,a.is_grantable FROM funcs p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
 )
 SELECT session_user=current_user
- AND current_setting('server_version_num')::integer BETWEEN 160006 AND 169999
+ AND current_setting('server_version_num')::integer BETWEEN 170006 AND 179999
  AND has_schema_privilege(current_user,'rss_timeseries','USAGE')
  AND (SELECT count(*)=12 FROM relations WHERE relkind='r')
  AND (SELECT count(*)=cardinality($3::bigint[]) FROM relations WHERE relkind='v')

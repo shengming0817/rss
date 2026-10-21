@@ -12,7 +12,7 @@ pub(crate) async fn validate(
     if !matches!(pool.connect_options().get_ssl_mode(), PgSslMode::VerifyFull) {
         return Err(Error::Unauthorized);
     }
-    let safe:bool=sqlx::query_scalar("SELECT current_setting('server_version_num')::int BETWEEN 160000 AND 169999 AND NOT pg_is_in_recovery() AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcreaterole AND NOT r.rolcreatedb AND NOT r.rolreplication AND (SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()) FROM pg_roles r WHERE r.rolname=current_user")
+    let safe:bool=sqlx::query_scalar("SELECT current_setting('server_version_num')::int BETWEEN 170006 AND 179999 AND NOT pg_is_in_recovery() AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcreaterole AND NOT r.rolcreatedb AND NOT r.rolreplication AND (SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()) FROM pg_roles r WHERE r.rolname=current_user")
         .fetch_one(pool).await.map_err(sql_error)?;
     if !safe {
         return Err(Error::Unauthorized);
