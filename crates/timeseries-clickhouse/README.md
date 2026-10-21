@@ -4,7 +4,7 @@ Recoverable, tenant-bound ClickHouse storage with PostgreSQL admission. This pac
 is being implemented for #2813; verification and release evidence belong to its PR.
 
 The only deployment profile is ClickHouse 25.8.12.129, one node and one fixed HTTPS
-origin, shared tables with tenant-specific read-only credentials, PostgreSQL 16 control
+origin, shared tables with tenant-specific read-only credentials, PostgreSQL 17 control
 storage and synchronous inserts. ClickHouse must reach the PostgreSQL primary over
 verified TLS using a dedicated account that can read only the payload-free active
 attempt view. Installation and credential provisioning are external owner operations.

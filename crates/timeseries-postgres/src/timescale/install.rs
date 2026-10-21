@@ -7,7 +7,7 @@ fn base(config: &Hypertable, profile: &str, tenant: &str, resolutions: &str) -> 
 DO $$ BEGIN
  IF NOT EXISTS(SELECT FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='timescaledb' AND e.extversion='{EXTENSION_VERSION}' AND n.nspname='public')
  THEN RAISE EXCEPTION USING ERRCODE='0A000',MESSAGE='unsupported TimescaleDB extension'; END IF;
- IF current_setting('server_version_num')::integer NOT BETWEEN 160006 AND 169999 THEN RAISE EXCEPTION USING ERRCODE='0A000',MESSAGE='unsupported PostgreSQL'; END IF;
+ IF current_setting('server_version_num')::integer NOT BETWEEN 170006 AND 179999 THEN RAISE EXCEPTION USING ERRCODE='0A000',MESSAGE='unsupported PostgreSQL'; END IF;
 END $$;
 CREATE TABLE rss_timeseries.deployment (
  singleton boolean PRIMARY KEY CHECK(singleton),

@@ -1,7 +1,7 @@
 use crate::transaction::sql_error;
 use rss_timeseries::Error;
 use sqlx::{Connection, PgPool};
-// PostgreSQL 16 catalog projection; functions, columns, constraints, indexes and policies.
+// PostgreSQL 17 catalog projection; functions, columns, constraints, indexes and policies.
 const CATALOG: &str = "52e4b3887022335814771d52dd6ba471";
 pub(crate) async fn validate(pool: &PgPool) -> Result<String, Error> {
     let mut lease = pool.acquire().await.map_err(sql_error)?;

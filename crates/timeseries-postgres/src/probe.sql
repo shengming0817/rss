@@ -11,7 +11,8 @@ WITH reachable AS (
  UNION ALL SELECT a.grantee,a.is_grantable FROM relations c JOIN pg_attribute p ON p.attrelid=c.oid CROSS JOIN LATERAL aclexplode(p.attacl) a
  UNION ALL SELECT a.grantee,a.is_grantable FROM funcs p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
 )
-SELECT session_user=current_user
+SELECT current_setting('server_version_num')::integer BETWEEN 170006 AND 179999
+ AND session_user=current_user
  AND has_schema_privilege(current_user,'rss_timeseries','USAGE')
  AND (SELECT count(*)=11 FROM relations WHERE NOT relispartition)
  AND (SELECT bool_and(relpersistence='p' AND relrowsecurity AND relforcerowsecurity AND relkind IN ('r','p')) FROM relations)

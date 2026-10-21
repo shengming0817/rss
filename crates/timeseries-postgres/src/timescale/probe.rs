@@ -3,7 +3,7 @@ use crate::{StorageProfile, transaction::sql_error};
 use rss_timeseries::Error;
 use sqlx::{Connection, PgConnection, PgPool, Row};
 
-// Fixed PostgreSQL 16 common schema fingerprint, populated from the canonical T2 catalog.
+// Fixed PostgreSQL 17 common schema fingerprint, populated from the canonical T2 catalog.
 const COMMON_CATALOG: &str = "0cc0899f0d0209220075419d9b13dcf8";
 pub(crate) async fn validate(
     pool: &PgPool,

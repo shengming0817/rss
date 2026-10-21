@@ -1,5 +1,5 @@
 -- Fresh-only installation by a dedicated NOLOGIN NOSUPERUSER NOBYPASSRLS owner.
--- ref: PostgreSQL 16 row security; ClickHouse PostgreSQLSource.cpp@v25.8.12.129-lts.
+-- ref: PostgreSQL 17 row security; ClickHouse PostgreSQLSource.cpp@v25.8.12.129-lts.
 CREATE SCHEMA rss_ts_ch;
 CREATE TABLE rss_ts_ch.installation (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
