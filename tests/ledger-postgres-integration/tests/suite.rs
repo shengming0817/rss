@@ -125,6 +125,7 @@ async fn run() -> anyhow::Result<()> {
     scenarios::adversarial(&store, &pool, &owner, &control).await?;
     messaging::run(&store, &owner, &fixture).await?;
     borrowed::run(&store, &pool, &owner, &control).await?;
+    readonly(&store, &pool, &owner, &control).await?;
     admission(&store, &control).await?;
     owner.close().await;
     drop(fixture);
@@ -181,3 +182,61 @@ async fn admission(store: &PgLedger, control: &Control<'_, Clock>) -> anyhow::Re
 }
 
 mod examples;
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep the reader/writer/SET-role privilege transitions and their database assertions together in one fixture."
+)]
+async fn readonly(
+    store: &PgLedger,
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    committed(
+        store
+            .append(&request("readonly", "existing", b"readable")?, control)
+            .await,
+    )?;
+    let mut c = pool.acquire().await?;
+    assert!(
+        validate_read_connection(&mut c, control).await.is_err(),
+        "writer cannot be admitted as reader"
+    );
+    sqlx::raw_sql("REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger FROM ledger_runtime")
+        .execute(owner)
+        .await?;
+    validate_read_connection(&mut c, control).await?;
+    assert!(validate_connection(&mut c, control).await.is_err());
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *tx)
+        .await?;
+    let ledger = LedgerId::new(TenantId::parse(TENANT)?, ChainId::parse("readonly")?);
+    let window = read_window_in_transaction(
+        &mut tx,
+        &auth()?,
+        &ledger,
+        Sequence::new(0),
+        ReadLimit::new(1, 4096)?,
+        control,
+    )
+    .await?;
+    assert_eq!(window.entries().len(), 1);
+    assert_eq!(window.entries()[0].payload(), b"readable");
+    assert!(
+        lock_head_in_transaction(&mut tx, &auth()?, &ledger, control)
+            .await
+            .is_err()
+    );
+    tx.rollback().await?;
+    sqlx::raw_sql("CREATE ROLE ledger_indirect NOLOGIN; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger TO ledger_indirect; GRANT ledger_indirect TO ledger_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
+    assert!(
+        validate_read_connection(&mut c, control).await.is_err(),
+        "SET-role append authority must reject reader admission"
+    );
+    sqlx::raw_sql("REVOKE ledger_indirect FROM ledger_runtime; REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger FROM ledger_indirect; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger TO ledger_runtime").execute(owner).await?;
+    validate_connection(&mut c, control).await?;
+    Ok(())
+}

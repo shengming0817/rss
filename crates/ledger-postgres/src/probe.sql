@@ -20,7 +20,7 @@ WITH reachable AS (
 (6,'permissions',NOT EXISTS(SELECT FROM reachable r JOIN pg_namespace n ON n.nspname='rss_ledger' WHERE n.nspowner=r.oid OR has_schema_privilege(r.oid,n.oid,'CREATE'))),
 (7,'permissions',NOT EXISTS(SELECT FROM relations c CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE a.grantee=0 OR (a.privilege_type='MAINTAIN' AND EXISTS(SELECT FROM reachable r WHERE r.oid=a.grantee OR pg_has_role(r.oid,a.grantee,'USAGE'))))),
 (8,'permissions',NOT EXISTS(SELECT FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a WHERE n.nspname='rss_ledger' AND a.grantee=0)),
-(9,'functions',(SELECT count(*)=2 AND bool_and(prosecdef AND proconfig=ARRAY['search_path=pg_catalog, rss_ledger'] AND has_function_privilege(oid,'EXECUTE') AND prorettype='void'::regtype AND pronargs IN (4,9)) FROM funcs)),
+(9,'functions',(SELECT count(*)=2 AND bool_and(prosecdef AND proconfig=ARRAY['search_path=pg_catalog, rss_ledger'] AND prorettype='void'::regtype AND pronargs IN (4,9)) FROM funcs)),
 (10,'role',NOT EXISTS(SELECT FROM funcs p JOIN pg_roles r ON r.oid=p.proowner WHERE r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcanlogin OR r.rolcreaterole OR r.oid IN (SELECT oid FROM reachable))),
 (11,'permissions',NOT EXISTS(SELECT FROM funcs p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0)),
 (12,'rls',(SELECT count(*)=2 AND bool_and(polname='tenant_scope' AND polcmd='*' AND polpermissive AND polroles=ARRAY[0::oid] AND pg_get_expr(polqual,polrelid)=pg_get_expr(polwithcheck,polrelid) AND pg_get_expr(polqual,polrelid)='(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)') FROM pg_policy WHERE polrelid IN (SELECT oid FROM relations))),
@@ -63,4 +63,8 @@ WITH reachable AS (
 (20,'permissions',NOT EXISTS(SELECT FROM pg_attribute a JOIN relations c ON c.oid=a.attrelid CROSS JOIN LATERAL aclexplode(a.attacl) acl WHERE a.attnum>0 AND acl.grantee=0)),
 (21,'rls',(SELECT bool_and(relrowsecurity AND relforcerowsecurity) FROM relations)),
 (22,'permissions',NOT EXISTS(SELECT FROM acl a CROSS JOIN reachable r WHERE a.is_grantable AND (a.grantee=r.oid OR pg_has_role(r.oid,a.grantee,'USAGE'))) AND NOT EXISTS(SELECT FROM pg_auth_members m JOIN reachable r ON m.member=r.oid WHERE m.admin_option))
+,
+(23,'permissions',CASE WHEN $1::boolean
+ THEN NOT EXISTS(SELECT FROM funcs WHERE NOT has_function_privilege(oid,'EXECUTE'))
+ ELSE NOT EXISTS(SELECT FROM funcs p CROSS JOIN reachable r WHERE has_function_privilege(r.oid,p.oid,'EXECUTE')) END)
 ) SELECT reason FROM checks WHERE valid IS DISTINCT FROM true ORDER BY priority LIMIT 1

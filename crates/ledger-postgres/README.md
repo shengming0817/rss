@@ -192,3 +192,5 @@ termination: after in-flight cancellation, quarantine the connection unless roll
 acknowledged within the owner's bounded cleanup. SQLSTATE 57014 is reported as
 `Cancelled(Operation)` because PostgreSQL uses it for both statement timeout and explicit
 query cancellation; the adapter does not claim to distinguish those causes.
+
+Read-only consumers call `validate_read_connection` on their actual connection before borrowing `read_window_in_transaction`. This checks the same Ledger structure and rejects append-function authority, including every reachable SET-role. It does not construct an append-capable `PgLedger` or manage the host connection.

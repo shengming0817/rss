@@ -19,8 +19,23 @@ pub async fn validate_connection<T: Timer>(
     control.run(inspect(connection)).await
 }
 
+/// Validate a strictly read-only Ledger credential on the actual borrowed connection.
+/// The role and every role it can SET must lack append-function authority; full schema,
+/// forced RLS and read privileges are verified with the same structural admission as writers.
+/// The host owns budgets, connection lifetime and re-admission after controlled changes.
+pub async fn validate_read_connection<T: Timer>(
+    connection: &mut PgConnection,
+    control: &Control<'_, T>,
+) -> Result<(), Error> {
+    control.run(inspect_profile(connection, false)).await
+}
+
 pub(crate) async fn inspect(connection: &mut PgConnection) -> Result<(), Error> {
+    inspect_profile(connection, true).await
+}
+async fn inspect_profile(connection: &mut PgConnection, append: bool) -> Result<(), Error> {
     let violation: Option<String> = sqlx::query_scalar(include_str!("probe.sql"))
+        .bind(append)
         .fetch_optional(&mut *connection)
         .await
         .map_err(sql_error)?;
