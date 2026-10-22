@@ -345,6 +345,16 @@ impl PgRuntime {
         binding: ExecutionBinding,
         profile: Profile,
     ) -> Result<Self, PgError> {
+        // Admission includes several catalog probes; do not multiply their inline state in
+        // hosts composing multiple runtimes or running sequential admission damage scenarios.
+        Box::pin(Self::open_profile(config, timer, binding, profile)).await
+    }
+    async fn open_profile<C: ExecutionTimer + 'static>(
+        config: PgConfig,
+        timer: C,
+        binding: ExecutionBinding,
+        profile: Profile,
+    ) -> Result<Self, PgError> {
         config.validate()?;
         let timer = PgTimer(Arc::new(timer));
         let cutoff = Deadline::from_timeout(&timer, config.acquire_timeout)
