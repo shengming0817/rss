@@ -103,12 +103,17 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>> 
             message,
             intent,
             deadline,
+            None,
         )
         .await
     }
 }
 
-async fn execute_transaction<
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One provider-owned transaction combines its fixed receipt and optional local source settlement."
+)]
+pub(crate) async fn execute_transaction<
     P: AsRef<[u8]> + Sync,
     H: PgConsumerEffect<P>,
     M: ConsumerRecoveryMode<P>,
@@ -120,6 +125,7 @@ async fn execute_transaction<
     message: &MessageEnvelope<P>,
     intent: ReceiptIntent,
     deadline: OperationDeadline,
+    source: Option<(&crate::PgOutboxStore<()>, &crate::PgOutboxClaim)>,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
     let timer = &runtime.timer;
     let cutoff = match Deadline::from_timeout(timer, deadline.timeout()) {
@@ -148,8 +154,15 @@ async fn execute_transaction<
         cutoff,
         runtime,
     );
-    let body = within(timer, cutoff, |_| {
-        effect_body(effect, mode, &mut tx, claim, message, &intent)
+    let body = within(timer, cutoff, |_| async {
+        let disposition = effect_body(effect, mode, &mut tx, claim, message, &intent).await?;
+        if let (Some(disposition), Some((store, source))) = (disposition, source) {
+            store
+                .settle_local_in(&mut tx, source, disposition)
+                .await
+                .map_err(PgConsumerEffectFailure::infrastructure)?;
+        }
+        Ok(disposition)
     })
     .await;
     let body = match body {

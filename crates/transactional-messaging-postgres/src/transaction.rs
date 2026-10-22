@@ -367,6 +367,7 @@ impl PgRuntime {
         let probe_result: Result<(), PgError> = async {
             crate::fence::probe(&runtime, profile, cutoff).await?;
             runtime.check_relay_role(cutoff).await?;
+            crate::consumer_profile::verify_scope(&runtime, cutoff).await?;
             #[cfg(feature = "recovery")]
             if profile == Profile::Dr {
                 return Ok(());

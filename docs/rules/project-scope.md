@@ -55,6 +55,11 @@ PG 持有控制事实与临时恢复内容，不保留第二份长期时序数�
 后端 adapter 拥有并发隔离、持久化/可见性与恢复证明；核心不承诺统一跨后端事务，
 不恢复 Inventory、通用采集平台或消息平台。能力准入与实际发布分别提供证据。
 
+同库消息投影由 `rss-transactional-messaging-postgres` 持有：静态 effect、Inbox 回执和源
+Outbox 终态在同一实际 PostgreSQL 事务中结算，复用租约、fencing、隔离和恢复；固定消费
+domain/group 的数据库权限归该 provider。宿主持有 effect 含义、来源真实性和 worker 生命周期，
+不引入跨数据库原子提交或通用审计平台。
+
 ## 产品拥有
 
 - 消息 DR 的证据 authority、恢复点和成员选择、数据库/broker restore、跨进程 pause/drain/resume 与部署准入。

@@ -25,7 +25,7 @@ WITH required(name, privileges) AS (
  ('recovery_operations','resolution','text'),('recovery_operations','evidence_message_id','text'))
 SELECT NOT EXISTS (SELECT 1 FROM checks WHERE valid IS NOT TRUE)
  AND NOT EXISTS (SELECT 1 FROM required_columns e LEFT JOIN information_schema.columns a ON a.table_schema='rss_transactional_messaging' AND a.table_name=e.relation AND a.column_name=e.name WHERE (e.relation <> 'recovery_operations' OR $1) AND (a.column_name IS NULL OR a.data_type <> e.type OR a.is_nullable <> CASE WHEN e.name IN ('replay_message_id','resolution','evidence_message_id','capsule') THEN 'YES' ELSE 'NO' END))
- AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid IN ('rss_transactional_messaging.consumer_dead_letter'::regclass,'rss_transactional_messaging.recovery_operations'::regclass) AND (p.polname <> 'recovery_tenant' OR p.polroles <> ARRAY[0]::oid[] OR NOT p.polpermissive OR p.polcmd <> '*'))
+ AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid IN ('rss_transactional_messaging.consumer_dead_letter'::regclass,'rss_transactional_messaging.recovery_operations'::regclass) AND p.polname<>'dead_letter_consumer_scope' AND (p.polname <> 'recovery_tenant' OR p.polroles <> ARRAY[0]::oid[] OR NOT p.polpermissive OR p.polcmd <> '*'))
  AND (SELECT count(*) = 2 FROM pg_policy WHERE polrelid IN ('rss_transactional_messaging.consumer_dead_letter'::regclass,'rss_transactional_messaging.recovery_operations'::regclass) AND polname='recovery_tenant' AND pg_get_expr(polqual,polrelid) = '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)' AND pg_get_expr(polwithcheck,polrelid) = '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)')
  AND NOT EXISTS (
  SELECT 1 FROM (VALUES
@@ -64,3 +64,5 @@ SELECT NOT EXISTS (SELECT 1 FROM checks WHERE valid IS NOT TRUE)
  AND NOT has_table_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','UPDATE')
  AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='rss_transactional_messaging.consumer_dead_letter'::regclass AND attnum>0 AND NOT attisdropped AND attname<>'recovery_version' AND has_column_privilege(current_user,attrelid,attnum,'UPDATE'))
  AND (NOT $1 OR has_column_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','recovery_version','UPDATE'))
+
+ AND EXISTS(SELECT FROM pg_policy WHERE polrelid='rss_transactional_messaging.consumer_dead_letter'::regclass AND polname='dead_letter_consumer_scope' AND NOT polpermissive AND polcmd='*' AND polroles=ARRAY[0]::oid[] AND pg_get_expr(polqual,polrelid)='rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)' AND pg_get_expr(polwithcheck,polrelid)='rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)')

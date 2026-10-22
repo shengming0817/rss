@@ -28,11 +28,13 @@ write_functions(signature,result) AS (VALUES
  ('rss_transactional_messaging.prepare_outbox_partitions(jsonb)','void'::regtype),
  ('rss_transactional_messaging.append_outbox(bytea,jsonb)','text'::regtype)),
 tenant_predicate(value) AS (VALUES ($predicate$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$predicate$)),
-expected_policies(relation, name, roles, predicate) AS (
- SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
- UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
- UNION ALL SELECT 'rss_transactional_messaging.outbox_partitions'::regclass, 'outbox_partition_tenant', ARRAY[0]::oid[], value FROM tenant_predicate
- UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_relay', ARRAY[oid], 'true' FROM relay_role
+expected_policies(relation, name, roles, predicate, permissive) AS (
+ SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_tenant', ARRAY[0]::oid[], value, true FROM tenant_predicate
+ UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_tenant', ARRAY[0]::oid[], value, true FROM tenant_predicate
+ UNION ALL SELECT 'rss_transactional_messaging.outbox_partitions'::regclass, 'outbox_partition_tenant', ARRAY[0]::oid[], value, true FROM tenant_predicate
+ UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_relay', ARRAY[oid], 'true', true FROM relay_role
+ UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_consumer_scope', ARRAY[0]::oid[], 'rss_transactional_messaging.consumer_domain_allowed(domain)', false
+ UNION ALL SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_consumer_scope', ARRAY[0]::oid[], 'rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)', false
 ), actual_policies AS (
  SELECT * FROM pg_policy WHERE polrelid IN ('rss_transactional_messaging.inbox'::regclass, 'rss_transactional_messaging.outbox'::regclass, 'rss_transactional_messaging.outbox_partitions'::regclass)
 ), expected_constraints(relation, name, definition) AS (VALUES
@@ -142,7 +144,7 @@ expected_policies(relation, name, roles, predicate) AS (
  ('columns', (SELECT count(*)=4 FROM pg_attribute a WHERE a.attrelid IN ('rss_transactional_messaging.outbox_partitions'::regclass,'rss_transactional_messaging.outbox'::regclass)
   AND a.attname IN ('domain','partition_key') AND a.attcollation='pg_catalog."C"'::regcollation)),
  ('rls_policy', (NOT EXISTS (SELECT 1 FROM expected_policies e FULL JOIN actual_policies p ON p.polrelid = e.relation AND p.polname = e.name
-    WHERE e.name IS NULL OR p.oid IS NULL OR NOT p.polpermissive OR p.polcmd <> '*'
+    WHERE e.name IS NULL OR p.oid IS NULL OR p.polpermissive IS DISTINCT FROM e.permissive OR p.polcmd <> '*'
       OR p.polroles IS DISTINCT FROM e.roles
       OR pg_get_expr(p.polqual, p.polrelid) IS DISTINCT FROM e.predicate
       OR pg_get_expr(p.polwithcheck, p.polrelid) IS DISTINCT FROM e.predicate))),

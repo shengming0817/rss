@@ -498,7 +498,37 @@ missing decoder functions, changed ownership/search paths or leaked decoder EXEC
 new crate, second fingerprint algorithm or compatibility writer is installed.
 
 
-### Relay/consumer-only role
+### Same-database local projection
+
+With `recovery`, `PgLocalProjection` consumes a fixed source domain and group on the
+`PgRecoveryCapture` runtime. `project_one` claims at most one partition head, validates each exact route/contract with the mandatory host validator,
+renews both leases while running the effect, and commits the effect, Inbox receipt and source
+Outbox terminal state together. The effect uses `PgConsumerEffect`; it borrows the original
+transaction and never commits. No broker publisher receipt or second successful settlement is
+manufactured. Other databases and independently supplied claims are not accepted by this API.
+
+The external migrator calls `grant_local_projection(connection, login, domain, group)` for a
+dedicated LOGIN and grants protected dead-letter capture plus the effect's narrowly required
+tables/functions. Connect that login with `PgRuntime::connect_consumer`, construct the capture,
+then await `PgLocalProjection::new`. Producer permissions, including SET-accessible grants,
+are rejected. The source domain and Inbox group are enforced by restrictive policies using
+`session_user`, including inside relay definers and after `SET ROLE`. The migrator owns the
+scope table; runtime roles cannot edit it. Unscoped broker consumers retain their independent
+consumer profile. Scope changes require stopping the worker and admitting a new composition.
+
+`Committed` contains a private-construction receipt for the acknowledged terminal transaction.
+Rejected effects are rolled back to the consumer savepoint before protected rejection evidence,
+Inbox rejection and Outbox dead-letter state commit together. Invalid ingress retains its source
+as a dead letter without executing an effect. Confirmed failures schedule the existing bounded
+Outbox backoff; uncertain transactions retain their claims for durable recovery. `Uncertain`
+returns an opaque original identity for `resolve`, which reads both terminal facts in one
+snapshot. An absent fact is not rollback evidence or permission to execute the effect again.
+
+Hosts own bounded concurrency, cancellation, notification hints, `next_wakeup` waiting and
+periodic recovery scans. No worker is spawned by this adapter. Dead letters remain visible via
+`has_dead_letters` and the existing recovery owner; delivery expiry never silently deletes them.
+
+### Broker relay/consumer grants
 
 Use `PgRuntime::connect_consumer` for a worker that relays existing Outbox rows and settles Inbox
 but must not author messages. The migration owner calls `grant_consumer(connection, role)` to

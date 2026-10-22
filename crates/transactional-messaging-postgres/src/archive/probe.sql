@@ -23,8 +23,8 @@ SELECT (SELECT valid FROM roles)
  AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='rss_transactional_messaging' AND table_name='consumer_dead_letter' AND column_name='capsule' AND is_nullable='YES')
 
  AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole) AND (pg_has_role(current_user,r.oid,'USAGE') OR pg_has_role(current_user,r.oid,'SET')))
- AND (SELECT count(*)=3 FROM pg_policy p JOIN relations r ON p.polrelid=to_regclass('rss_transactional_messaging.'||r.name))
- AND NOT EXISTS(SELECT 1 FROM relations r LEFT JOIN pg_policy p ON p.polrelid=to_regclass('rss_transactional_messaging.'||r.name)
+ AND (SELECT count(*)=3 FROM pg_policy p JOIN relations r ON p.polrelid=to_regclass('rss_transactional_messaging.'||r.name) WHERE p.polname<>'dead_letter_consumer_scope')
+ AND NOT EXISTS(SELECT 1 FROM relations r LEFT JOIN pg_policy p ON p.polrelid=to_regclass('rss_transactional_messaging.'||r.name) AND p.polname<>'dead_letter_consumer_scope'
  WHERE p.oid IS NULL OR p.polname<>CASE WHEN r.name='consumer_dead_letter' THEN 'recovery_tenant' ELSE 'archive_tenant' END OR NOT p.polpermissive OR p.polcmd<>'*' OR p.polroles<>ARRAY[0]::oid[]
  OR pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)'
  OR pg_get_expr(p.polwithcheck,p.polrelid) IS DISTINCT FROM '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)')
