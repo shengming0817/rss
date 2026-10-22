@@ -523,13 +523,16 @@ are rejected. The source domain and Inbox group are enforced by restrictive poli
 scope table; runtime roles cannot edit it. Unscoped broker consumers retain their independent
 consumer profile. Scope changes require stopping the worker and admitting a new composition.
 
-`Committed` contains a private-construction receipt for the acknowledged terminal transaction.
-Rejected effects are rolled back to the consumer savepoint before protected rejection evidence,
-Inbox rejection and Outbox dead-letter state commit together. Invalid ingress retains its source
-as a dead letter without executing an effect. Confirmed failures schedule the existing bounded
-Outbox backoff; uncertain transactions retain their claims for durable recovery. `Uncertain`
-returns an opaque original identity for `resolve`, which reads both terminal facts in one
-snapshot. An absent fact is not rollback evidence or permission to execute the effect again.
+`PgProjectionOutcome::Attempt` contains a component-issued pair. Consume `into_parts()` and
+fold the canonical `TransactionOutcome`: its committed branch retains the provider proof and
+terminal settlement, and rollback-failed remains distinct from commit-unknown. The accompanying
+opaque original identity is available to resolve either uncertain state. Rejected effects are
+rolled back to the consumer savepoint before protected rejection evidence, Inbox rejection and
+Outbox dead-letter state commit together. Invalid ingress retains its source as a dead letter
+without executing an effect. Confirmed failures schedule the existing bounded Outbox backoff;
+uncertain transactions retain their claims for durable recovery. `resolve` reads both terminal
+facts in one snapshot and returns a private receipt only when they agree. An absent fact is not
+rollback evidence or permission to execute the effect again.
 
 The shared runtime must have at least two pool connections. A runtime-wide permit bound reserves
 one connection for renewal across all local projection handles; acquire a permit before claiming

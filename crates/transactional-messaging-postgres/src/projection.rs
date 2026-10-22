@@ -1,5 +1,6 @@
 //! Same-database delivery: the effect, Inbox and source Outbox share one commit.
 //! ref: sqlx sqlx-core/src/transaction.rs@v0.8.6 (one connection/commit owner).
+use crate::consumer::PgConsumerTxCommitProof;
 use crate::{
     PgConsumerEffect, PgConsumerEffectFailure, PgError, PgInboxClaim, PgInboxStore, PgOutboxClaim,
     PgOutboxStore, PgRecoveryCapture, PgRuntime, PgTransaction,
@@ -13,8 +14,8 @@ use rss_transactional_messaging::{
     outbox::{OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement},
     policy::{DeliveryBudget, LeaseRenewalPolicy, OperationDeadline, within},
     transaction::{
-        EnvelopeValidationFailure, FailureClass, IngressValidator, TerminalDisposition,
-        verify_ingress,
+        EnvelopeValidationFailure, FailureClass, IngressValidator, ReceiptIntent,
+        TerminalDisposition, TransactionOutcome, verify_ingress,
     },
 };
 use sqlx::Row;
@@ -41,31 +42,35 @@ pub struct PgProjectionRecovery {
     domain: MessagingDomain,
 }
 
-/// Closed failure categories, independent of unknown transaction outcomes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PgProjectionFailure {
-    /// The transaction did not start.
-    NotStarted(FailureClass),
-    /// The transaction owner acknowledged rollback.
-    RolledBack(FailureClass),
-    /// The attempt lost its lease or execution fence.
-    Fenced,
-    /// The source's automatic delivery window expired and it was isolated.
-    DeliveryExpired,
+/// One provider attempt, retaining the canonical six-state result and original recovery identity.
+/// Only the component can create this pair. The identity never grants permission to retry effects.
+pub struct PgProjectionAttempt {
+    outcome: TransactionOutcome<PgConsumerTxCommitProof>,
+    recovery: PgProjectionRecovery,
+}
+impl PgProjectionAttempt {
+    /// Consume the canonical result without dropping its proof or merging uncertain states.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        TransactionOutcome<PgConsumerTxCommitProof>,
+        PgProjectionRecovery,
+    ) {
+        (self.outcome, self.recovery)
+    }
 }
 
-/// Result of one bounded local delivery; uncertainty must not be reported as rollback.
+/// Scheduling result of one bounded local delivery. Transaction semantics remain core-owned.
 pub enum PgProjectionOutcome {
     /// No source partition head was claimable.
     Empty,
     /// Another live Inbox owner prevents this attempt.
     InProgress,
-    /// Both terminal facts and the effect are durable.
-    Committed(PgProjectionReceipt),
-    /// No commit was acknowledged; the original durable lease/retry state controls redelivery.
-    Deferred(PgProjectionFailure),
-    /// Resolve this identity before interpreting the attempt; never reconstruct its payload.
-    Uncertain(PgProjectionRecovery),
+    /// A consumer transaction ran; inspect every canonical outcome before using recovery.
+    Attempt(Box<PgProjectionAttempt>),
+    /// The source's automatic delivery window expired and it was isolated without an effect.
+    DeliveryExpired,
     /// Invalid ingress was retained in the source Outbox as a dead letter, without running effect.
     Rejected(EnvelopeValidationFailure),
 }
@@ -193,9 +198,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                 )
                 .await
                 .map_err(pg)?;
-            return Ok(PgProjectionOutcome::Deferred(
-                PgProjectionFailure::DeliveryExpired,
-            ));
+            return Ok(PgProjectionOutcome::DeliveryExpired);
         }
         let message = PgOutboxStore::<()>::message(&source).envelope();
         let subscription = SubscriptionIdentity::new(
@@ -237,12 +240,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                     .validate_terminal(receipt)
                     .map_err(|_| PgError::invariant())?;
                 return self
-                    .finish_existing(
-                        &source,
-                        binding.identity(),
-                        binding.receipt_intent().fingerprint(),
-                        cutoff,
-                    )
+                    .finish_existing(&source, binding.receipt_intent(), cutoff)
                     .await;
             }
         };
@@ -271,45 +269,12 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             Some((&self.outbox, &source)),
         )
         .await;
-        let (outcome, retry) = outcome.fold(
-            |committed| {
-                (
-                    PgProjectionOutcome::Committed(PgProjectionReceipt {
-                        disposition: committed.into_parts().1.disposition(),
-                    }),
-                    false,
-                )
-            },
-            |class| {
-                (
-                    PgProjectionOutcome::Deferred(PgProjectionFailure::NotStarted(class)),
-                    true,
-                )
-            },
-            |class| {
-                (
-                    PgProjectionOutcome::Deferred(PgProjectionFailure::RolledBack(class)),
-                    true,
-                )
-            },
-            || {
-                (
-                    PgProjectionOutcome::Uncertain(recovery_copy(&recovery)),
-                    false,
-                )
-            },
-            || {
-                (
-                    PgProjectionOutcome::Uncertain(recovery_copy(&recovery)),
-                    false,
-                )
-            },
-            || {
-                (
-                    PgProjectionOutcome::Deferred(PgProjectionFailure::Fenced),
-                    false,
-                )
-            },
+        use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
+        // The canonical status is inspected only for safe cleanup, never substituted for the
+        // original outcome. All three categories here prove not-started or acknowledged rollback.
+        let retry = matches!(
+            outcome.status(),
+            Status::HandlerTransient | Status::RejectedPermanent | Status::InfrastructureTransient
         );
         if retry {
             // Confirmed rollback permits retry; expired authority is left to durable recovery.
@@ -320,16 +285,19 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                     .await,
             )?;
         }
-        Ok(outcome)
+        Ok(PgProjectionOutcome::Attempt(Box::new(
+            PgProjectionAttempt { outcome, recovery },
+        )))
     }
 
     async fn finish_existing(
         &self,
         source: &PgOutboxClaim,
-        identity: &ConsumerIdentity,
-        fingerprint: MessageFingerprint,
+        intent: ReceiptIntent,
         cutoff: Deadline,
     ) -> Result<PgProjectionOutcome, PgError> {
+        let identity = intent.consumer();
+        let fingerprint = intent.fingerprint();
         #[cfg(feature = "integration")]
         self.inject_projection_fault()?;
         let attempt = self.runtime.local_tx_with_context(identity.tenant_id(), remaining(self, cutoff),
@@ -350,18 +318,17 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             fingerprint,
             domain: self.domain.clone(),
         };
-        attempt.fold(
-            |disposition| {
-                Ok(PgProjectionOutcome::Committed(PgProjectionReceipt {
-                    disposition,
-                }))
-            },
-            Err,
-            Err,
-            |_| Ok(PgProjectionOutcome::Uncertain(recovery_copy(&recovery))),
-            |_| Ok(PgProjectionOutcome::Uncertain(recovery_copy(&recovery))),
-            |_| Ok(PgProjectionOutcome::Deferred(PgProjectionFailure::Fenced)),
-        )
+        let outcome = attempt.fold(
+            |disposition| crate::consumer::acknowledged_commit(intent, disposition),
+            |_| TransactionOutcome::not_started(FailureClass::Infrastructure),
+            |_| TransactionOutcome::rolled_back(FailureClass::Infrastructure),
+            |_| TransactionOutcome::rollback_failed(),
+            |_| TransactionOutcome::commit_unknown(),
+            |_| TransactionOutcome::fenced(),
+        );
+        Ok(PgProjectionOutcome::Attempt(Box::new(
+            PgProjectionAttempt { outcome, recovery },
+        )))
     }
 
     /// Read both terminal facts in one SQL snapshot. `None` is not proof of rollback and never
@@ -404,15 +371,6 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     }
 }
 
-fn recovery_copy(value: &PgProjectionRecovery) -> PgProjectionRecovery {
-    PgProjectionRecovery {
-        source: value.source.clone(),
-        runtime: value.runtime.clone(),
-        identity: value.identity.clone(),
-        fingerprint: value.fingerprint,
-        domain: value.domain.clone(),
-    }
-}
 fn pg(error: MessagingError) -> PgError {
     PgError::classified(error.kind(), error)
 }

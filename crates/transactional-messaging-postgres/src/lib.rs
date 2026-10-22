@@ -16,7 +16,7 @@ mod projection;
 mod transaction;
 #[cfg(feature = "recovery")]
 pub use projection::{
-    PgLocalProjection, PgProjectionFailure, PgProjectionOutcome, PgProjectionReceipt,
+    PgLocalProjection, PgProjectionAttempt, PgProjectionOutcome, PgProjectionReceipt,
     PgProjectionRecovery,
 };
 

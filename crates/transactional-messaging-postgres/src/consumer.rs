@@ -211,7 +211,7 @@ async fn finish(
         )
         .await
         {
-            Ok(()) => intent.committed(PgConsumerTxCommitProof { _private: () }, disposition),
+            Ok(()) => acknowledged_commit(intent, disposition),
             _ => TransactionOutcome::commit_unknown(),
         },
         other => {
@@ -235,6 +235,14 @@ async fn finish(
             }
         }
     }
+}
+
+/// Called only in the commit-ACK branch of the provider-owned consumer/source transaction.
+pub(crate) fn acknowledged_commit(
+    intent: ReceiptIntent,
+    disposition: TerminalDisposition,
+) -> TransactionOutcome<PgConsumerTxCommitProof> {
+    intent.committed(PgConsumerTxCommitProof { _private: () }, disposition)
 }
 
 async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>>(

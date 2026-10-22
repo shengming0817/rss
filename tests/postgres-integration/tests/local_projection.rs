@@ -3,6 +3,7 @@
 mod fence_fixture;
 #[path = "../../fixtures/message_recovery.rs"]
 mod support;
+use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
 use rss_transactional_messaging::{
     inbox::ConsumerGroup,
     message::*,
@@ -39,6 +40,31 @@ fn committed<T>(attempt: LocalTxAttempt<T, PgError>) -> anyhow::Result<T> {
         |e| Err(e.into()),
     )
 }
+fn projection_attempt(value: PgProjectionOutcome) -> anyhow::Result<PgProjectionAttempt> {
+    match value {
+        PgProjectionOutcome::Attempt(attempt) => Ok(*attempt),
+        _ => anyhow::bail!("expected consumer transaction attempt"),
+    }
+}
+fn attempt_status(value: PgProjectionOutcome) -> anyhow::Result<Status> {
+    Ok(projection_attempt(value)?.into_parts().0.status())
+}
+fn committed_projection(value: PgProjectionOutcome) -> anyhow::Result<TerminalSettlement> {
+    projection_attempt(value)?.into_parts().0.fold(
+        |committed| Ok(committed.into_parts().1),
+        |_| Err(anyhow::anyhow!("not started")),
+        |_| Err(anyhow::anyhow!("rolled back")),
+        || Err(anyhow::anyhow!("rollback failed")),
+        || Err(anyhow::anyhow!("commit unknown")),
+        || Err(anyhow::anyhow!("fenced")),
+    )
+}
+fn uncertain_projection(value: PgProjectionOutcome) -> anyhow::Result<PgProjectionRecovery> {
+    let (outcome, recovery) = projection_attempt(value)?.into_parts();
+    assert_eq!(outcome.status(), Status::CommitUnknown);
+    Ok(recovery)
+}
+
 fn message(id: &str, domain: &str) -> anyhow::Result<MessageEnvelope<Vec<u8>>> {
     let original = support::message(id);
     let authored = AuthoredMessageMetadata::new(
@@ -297,6 +323,7 @@ async fn run() -> anyhow::Result<()> {
     Box::pin(rejected_and_failed(&f)).await?;
     Box::pin(redrive_unknown(&f)).await?;
     Box::pin(unknown_commit(&f)).await?;
+    Box::pin(unknown_rollback(&f)).await?;
     Box::pin(renewal_and_expiry(&f)).await?;
     Box::pin(cancellation_and_restart(&f)).await?;
     Box::pin(pool_capacity(&f)).await?;
@@ -308,6 +335,10 @@ async fn run() -> anyhow::Result<()> {
     f.owner.close().await;
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep the in-flight visibility, canonical commit proof and duplicate assertions in one sequence."
+)]
 async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
     f.append("atomic-success", "orders").await?;
     let gate = Gate::default();
@@ -332,9 +363,7 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
         PgProjectionOutcome::Empty
     ));
     gate.resume.notify_one();
-    let PgProjectionOutcome::Committed(receipt) = task.await?? else {
-        anyhow::bail!("expected committed local projection")
-    };
+    let receipt = committed_projection(task.await??)?;
     assert_eq!(receipt.disposition(), TerminalDisposition::Succeeded);
     assert_eq!(
         f.state("atomic-success").await?,
@@ -391,10 +420,7 @@ async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
         })
         .await?;
     p.inject_next_projection_fault(PgTransactionFault::CommitPending)?;
-    let PgProjectionOutcome::Uncertain(pending) = p.project_one(&Validator, deadline()).await?
-    else {
-        anyhow::bail!("historical receipt settlement must remain unknown")
-    };
+    let pending = uncertain_projection(p.project_one(&Validator, deadline()).await?)?;
     assert_eq!(
         f.state("atomic-rejected").await?,
         (0, 0, Some("rejected_permanent".into()), "publishing".into())
@@ -404,10 +430,7 @@ async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
         "publishing with a historical receipt is not corruption or completed settlement"
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-rejected' AND status='publishing'").execute(&f.owner).await?;
-    let PgProjectionOutcome::Committed(receipt) = p.project_one(&Validator, deadline()).await?
-    else {
-        anyhow::bail!("durable reclaimed receipt must settle")
-    };
+    let receipt = committed_projection(p.project_one(&Validator, deadline()).await?)?;
     assert_eq!(
         receipt.disposition(),
         TerminalDisposition::Rejected(RejectKind::Permanent)
@@ -443,10 +466,7 @@ async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    let PgProjectionOutcome::Committed(receipt) = p.project_one(&Validator, deadline()).await?
-    else {
-        anyhow::bail!("rejection not committed")
-    };
+    let receipt = committed_projection(p.project_one(&Validator, deadline()).await?)?;
     assert_eq!(
         receipt.disposition(),
         TerminalDisposition::Rejected(RejectKind::Permanent)
@@ -470,16 +490,39 @@ async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
             fail: true,
         })
         .await?;
-    assert!(matches!(
-        p.project_one(&Validator, deadline()).await?,
-        PgProjectionOutcome::Deferred(_)
-    ));
+    assert_eq!(
+        attempt_status(p.project_one(&Validator, deadline()).await?)?,
+        Status::HandlerTransient
+    );
     assert_eq!(
         f.state("atomic-failed").await?,
         (0, 0, None, "pending".into())
     );
     // Keep later cases independent while retaining this failed source's original bytes.
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()+interval '1 day' WHERE message_id='atomic-failed'").execute(&f.owner).await?;
+    Ok(())
+}
+async fn unknown_rollback(f: &Fixture) -> anyhow::Result<()> {
+    f.append("atomic-rollback-unknown", "orders").await?;
+    let p = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: true,
+        })
+        .await?;
+    p.inject_next_projection_fault(PgTransactionFault::RollbackFailedAfterAck)?;
+    let (outcome, recovery) =
+        projection_attempt(p.project_one(&Validator, deadline()).await?)?.into_parts();
+    // The owner cannot infer rollback from this fixture's suppressed acknowledgement.
+    assert_eq!(outcome.status(), Status::RollbackFailed);
+    assert_eq!(
+        f.state("atomic-rollback-unknown").await?,
+        (0, 0, None, "publishing".into())
+    );
+    assert!(p.resolve(&recovery, deadline()).await?.is_none());
+    // Keep later cases independent; neither the API nor the worker releases this unknown claim.
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()+interval '1 day' WHERE message_id='atomic-rollback-unknown'").execute(&f.owner).await?;
     Ok(())
 }
 async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
@@ -492,10 +535,7 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
         })
         .await?;
     p.inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck)?;
-    let PgProjectionOutcome::Uncertain(pending) = p.project_one(&Validator, deadline()).await?
-    else {
-        anyhow::bail!("commit ACK loss must remain unknown")
-    };
+    let pending = uncertain_projection(p.project_one(&Validator, deadline()).await?)?;
     assert_eq!(
         f.state("atomic-unknown").await?,
         (1, 1, Some("succeeded".into()), "published".into())
@@ -536,7 +576,10 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
         PgProjectionOutcome::Empty
     ));
     gate.resume.notify_one();
-    assert!(matches!(task.await??, PgProjectionOutcome::Committed(_)));
+    assert_eq!(
+        committed_projection(task.await??)?.disposition(),
+        TerminalDisposition::Succeeded
+    );
     assert_eq!(
         f.state("atomic-renewal").await?,
         (1, 1, Some("succeeded".into()), "published".into())
@@ -561,7 +604,10 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     gate.resume.notify_one();
     tokio::time::sleep(Duration::from_millis(2500)).await;
     blocker.commit().await?;
-    assert!(matches!(task.await??, PgProjectionOutcome::Deferred(_)));
+    assert_eq!(
+        attempt_status(task.await??)?,
+        Status::InfrastructureTransient
+    );
     assert_eq!(
         f.state("atomic-expired").await?,
         (0, 0, None, "publishing".into())
@@ -728,10 +774,10 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
         deadline(),
     )
     .await?;
-    assert!(matches!(
-        restarted.project_one(&Validator, deadline()).await?,
-        PgProjectionOutcome::Committed(_)
-    ));
+    assert_eq!(
+        committed_projection(restarted.project_one(&Validator, deadline()).await?)?.disposition(),
+        TerminalDisposition::Succeeded
+    );
     assert_eq!(
         f.state("atomic-cancelled").await?,
         (1, 1, Some("succeeded".into()), "published".into())
@@ -809,8 +855,14 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
         "capacity waiting must precede durable claiming"
     );
     gate.resume.notify_one();
-    assert!(matches!(first.await??, PgProjectionOutcome::Committed(_)));
-    assert!(matches!(second.await??, PgProjectionOutcome::Committed(_)));
+    assert_eq!(
+        committed_projection(first.await??)?.disposition(),
+        TerminalDisposition::Succeeded
+    );
+    assert_eq!(
+        committed_projection(second.await??)?.disposition(),
+        TerminalDisposition::Succeeded
+    );
     runtime.close().await;
     Ok(())
 }
@@ -838,10 +890,7 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
         })
         .await?;
     p.inject_next_projection_fault(PgTransactionFault::CommitPending)?;
-    let PgProjectionOutcome::Uncertain(pending) = p.project_one(&Validator, deadline()).await?
-    else {
-        anyhow::bail!("expected unconfirmed DR settlement")
-    };
+    let pending = uncertain_projection(p.project_one(&Validator, deadline()).await?)?;
     assert_eq!(
         f.state("atomic-success").await?,
         (1, 1, Some("succeeded".into()), "published".into())
@@ -851,10 +900,10 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
         "historical source and Inbox success cannot prove a new DR member completed"
     );
     sqlx::query("UPDATE rss_transactional_messaging.dr_members SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-success' AND status='publishing'").execute(&f.owner).await?;
-    assert!(matches!(
-        p.project_one(&Validator, deadline()).await?,
-        PgProjectionOutcome::Committed(_)
-    ));
+    assert_eq!(
+        committed_projection(p.project_one(&Validator, deadline()).await?)?.disposition(),
+        TerminalDisposition::Succeeded
+    );
     assert!(p.resolve(&pending, deadline()).await?.is_some());
 
     let p = f
@@ -865,10 +914,7 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
         })
         .await?;
     p.inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck)?;
-    let PgProjectionOutcome::Uncertain(pending) = p.project_one(&Validator, deadline()).await?
-    else {
-        anyhow::bail!("expected DR rejection ACK loss")
-    };
+    let pending = uncertain_projection(p.project_one(&Validator, deadline()).await?)?;
     assert_eq!(
         f.state("dr-rejected").await?,
         (0, 0, Some("rejected_permanent".into()), "published".into())
