@@ -395,7 +395,9 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                     if status != expected { return Ok(None); }
                 } else {
                     let expected = match receipt.disposition() { TerminalDisposition::Succeeded => "published", TerminalDisposition::Rejected(_) => "dead_letter" };
-                    if row.try_get::<String,_>("status")? != expected { return Err(PgError::invariant()); }
+                    let status: String = row.try_get("status")?;
+                    if matches!(status.as_str(), "pending" | "publishing") { return Ok(None); }
+                    if status != expected { return Err(PgError::invariant()); }
                 }
                 Ok(Some(PgProjectionReceipt { disposition: receipt.disposition() }))
             })).await)

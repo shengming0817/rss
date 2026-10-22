@@ -66,6 +66,15 @@ impl IngressValidator<Vec<u8>> for Validator {
         Ok(c.verified())
     }
 }
+struct RejectIngress;
+impl IngressValidator<Vec<u8>> for RejectIngress {
+    fn validate(
+        &self,
+        _: IngressChallenge<'_, Vec<u8>>,
+    ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+        Err(EnvelopeValidationFailure::UnsupportedContract)
+    }
+}
 #[derive(Clone, Default)]
 struct Gate {
     entered: Arc<Notify>,
@@ -194,7 +203,7 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_projection_atomicity_scope_and_recovery() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(180), run()).await??;
+    tokio::time::timeout(Duration::from_secs(180), Box::pin(run())).await??;
     Ok(())
 }
 #[allow(
@@ -239,7 +248,7 @@ async fn run() -> anyhow::Result<()> {
         grant_consumer(&mut tx, "projection_other").await?;
         tx.commit().await?;
     }
-    sqlx::raw_sql("GRANT projection_other TO projection_worker; GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO projection_worker; CREATE TABLE public.effect_a(id text PRIMARY KEY); CREATE TABLE public.effect_b(id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect_a,public.effect_b TO projection_worker;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT projection_other TO projection_worker; GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO projection_worker,projection_other; CREATE TABLE public.effect_a(id text PRIMARY KEY); CREATE TABLE public.effect_b(id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect_a,public.effect_b TO projection_worker;").execute(&owner).await?;
     fence_fixture::provision(&owner).await?;
     let config = |user| -> anyhow::Result<PgConfig> {
         Ok(PgConfig::new(
@@ -283,14 +292,16 @@ async fn run() -> anyhow::Result<()> {
         worker,
         config: worker_config,
     };
-    success_and_duplicate(&f).await?;
-    rejected_and_failed(&f).await?;
-    unknown_commit(&f).await?;
-    renewal_and_expiry(&f).await?;
-    cancellation_and_restart(&f).await?;
-    pool_capacity(&f).await?;
-    scoped_permissions(&f).await?;
-    dr_recovery(&f).await?;
+    Box::pin(success_and_duplicate(&f)).await?;
+    Box::pin(ingress_rejection(&f)).await?;
+    Box::pin(rejected_and_failed(&f)).await?;
+    Box::pin(redrive_unknown(&f)).await?;
+    Box::pin(unknown_commit(&f)).await?;
+    Box::pin(renewal_and_expiry(&f)).await?;
+    Box::pin(cancellation_and_restart(&f)).await?;
+    Box::pin(pool_capacity(&f)).await?;
+    Box::pin(scoped_permissions(&f)).await?;
+    Box::pin(dr_recovery(&f)).await?;
     f.worker.close().await;
     f.producer.close().await;
     f.raw_worker.close().await;
@@ -333,6 +344,90 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
         projection.project_one(&Validator, deadline()).await?,
         PgProjectionOutcome::Empty
     ));
+    Ok(())
+}
+
+async fn ingress_rejection(f: &Fixture) -> anyhow::Result<()> {
+    let p = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: true,
+        })
+        .await?;
+    assert!(!p.has_dead_letters(deadline()).await?);
+    f.append("ingress-denied", "orders").await?;
+    assert!(matches!(
+        p.project_one(&RejectIngress, deadline()).await?,
+        PgProjectionOutcome::Rejected(EnvelopeValidationFailure::UnsupportedContract)
+    ));
+    assert_eq!(
+        f.state("ingress-denied").await?,
+        (0, 0, None, "dead_letter".into())
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_transactional_messaging.inbox WHERE message_id='ingress-denied'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(count, 0, "ingress rejection must precede Inbox claiming");
+    assert!(p.has_dead_letters(deadline()).await?);
+    Ok(())
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep redrive, lost commit acknowledgement, durable readback and conflicting-terminal assertions together."
+)]
+async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
+    // Preseed the confirmed Redrive state; recovery mutation authorization has its own T2 owner.
+    let changed=sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='pending',retry_after=clock_timestamp(),recovery_version=recovery_version+1 WHERE message_id='atomic-rejected' AND status='dead_letter'").execute(&f.owner).await?.rows_affected();
+    assert_eq!(changed, 1);
+    let p = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: true,
+        })
+        .await?;
+    p.inject_next_projection_fault(PgTransactionFault::CommitPending)?;
+    let PgProjectionOutcome::Uncertain(pending) = p.project_one(&Validator, deadline()).await?
+    else {
+        anyhow::bail!("historical receipt settlement must remain unknown")
+    };
+    assert_eq!(
+        f.state("atomic-rejected").await?,
+        (0, 0, Some("rejected_permanent".into()), "publishing".into())
+    );
+    assert!(
+        p.resolve(&pending, deadline()).await?.is_none(),
+        "publishing with a historical receipt is not corruption or completed settlement"
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-rejected' AND status='publishing'").execute(&f.owner).await?;
+    let PgProjectionOutcome::Committed(receipt) = p.project_one(&Validator, deadline()).await?
+    else {
+        anyhow::bail!("durable reclaimed receipt must settle")
+    };
+    assert_eq!(
+        receipt.disposition(),
+        TerminalDisposition::Rejected(RejectKind::Permanent)
+    );
+    assert!(p.resolve(&pending, deadline()).await?.is_some());
+    assert_eq!(
+        f.state("atomic-rejected").await?,
+        (
+            0,
+            0,
+            Some("rejected_permanent".into()),
+            "dead_letter".into()
+        )
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id='atomic-rejected'").execute(&f.owner).await?;
+    assert!(
+        p.resolve(&pending, deadline()).await.is_err(),
+        "contradictory terminal facts remain an integrity error"
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='dead_letter' WHERE message_id='atomic-rejected'").execute(&f.owner).await?;
     Ok(())
 }
 #[allow(
@@ -478,6 +573,10 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     clippy::cognitive_complexity,
     reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
 )]
+#[allow(
+    clippy::expect_used,
+    reason = "A forbidden real PG operation succeeding must fail this negative test immediately."
+)]
 async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     f.append("foreign-domain", "other").await?;
     let foreign: (i64,String,i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,'other',1,5000)")
@@ -514,7 +613,48 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("ROLLBACK TO SAVEPOINT forbidden_inbox")
         .execute(&mut *tx)
         .await?;
+    // Keep the source domain valid and vary only consumer_group, with table ACLs admitted.
+    let granted: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'rss_transactional_messaging.inbox','INSERT') AND has_table_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','INSERT')")
+        .fetch_one(&mut *tx).await?;
+    assert!(granted);
+    sqlx::query("SAVEPOINT wrong_group")
+        .execute(&mut *tx)
+        .await?;
+    let error = sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until) VALUES($1::uuid,'atomic-success','wrong-group','foreign',gen_random_uuid(),clock_timestamp()+interval '5 seconds')")
+        .bind(tenant().to_string()).execute(&mut *tx).await.expect_err("same-domain wrong group must fail RLS");
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    sqlx::query("ROLLBACK TO SAVEPOINT wrong_group")
+        .execute(&mut *tx)
+        .await?;
+    let error = sqlx::query("INSERT INTO rss_transactional_messaging.consumer_dead_letter(tenant_id,id,message_id,consumer_group,contract,contract_version,schema_digest,fingerprint,capsule,reason) SELECT tenant_id,gen_random_uuid(),message_id,'wrong-group','orders.created','1','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',fingerprint,decode('01','hex'),'rejected_permanent' FROM rss_transactional_messaging.outbox WHERE message_id='atomic-success'")
+        .execute(&mut *tx).await.expect_err("same-domain wrong dead-letter group must fail RLS");
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    sqlx::query("ROLLBACK TO SAVEPOINT wrong_group")
+        .execute(&mut *tx)
+        .await?;
     tx.rollback().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE rss_transactional_messaging.consumer_scope ENABLE ROW LEVEL SECURITY",
+    )
+    .execute(&f.owner)
+    .await?;
+    assert!(
+        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+            .await
+            .is_err(),
+        "hidden scope bindings must fail admission"
+    );
+    sqlx::raw_sql(
+        "ALTER TABLE rss_transactional_messaging.consumer_scope DISABLE ROW LEVEL SECURITY",
+    )
+    .execute(&f.owner)
+    .await?;
     assert!(
         PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
             .await
