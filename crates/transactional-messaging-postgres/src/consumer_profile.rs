@@ -13,6 +13,7 @@ pub(crate) async fn verify_scope(
             .bind(bodies[1])
             .bind(bodies[3])
             .bind(bodies[5])
+            .bind(bodies[7])
             .fetch_one(&runtime.pool)
             .await
     })

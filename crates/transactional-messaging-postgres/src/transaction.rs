@@ -278,6 +278,8 @@ pub struct PgRuntime {
     pub(crate) pool: PgPool,
     pub(crate) binding: ExecutionBinding,
     pub(crate) timer: PgTimer,
+    #[cfg(feature = "recovery")]
+    pub(crate) projection_slots: tokio::sync::Semaphore,
     #[cfg(feature = "integration")]
     fault: std::sync::atomic::AtomicU8,
 }
@@ -361,6 +363,10 @@ impl PgRuntime {
             pool,
             binding,
             timer,
+            #[cfg(feature = "recovery")]
+            projection_slots: tokio::sync::Semaphore::new(
+                config.max_connections.saturating_sub(1) as usize
+            ),
             #[cfg(feature = "integration")]
             fault: std::sync::atomic::AtomicU8::new(0),
         };

@@ -161,8 +161,13 @@ impl Fixture {
         &self,
         effect: Effect,
     ) -> anyhow::Result<Arc<PgLocalProjection<Effect, Key>>> {
-        let capture =
-            PgRecoveryCapture::new(self.worker.clone(), Arc::new(Key(1)), deadline()).await?;
+        Self::projection_on(self.worker.clone(), effect).await
+    }
+    async fn projection_on(
+        runtime: Arc<PgRuntime>,
+        effect: Effect,
+    ) -> anyhow::Result<Arc<PgLocalProjection<Effect, Key>>> {
+        let capture = PgRecoveryCapture::new(runtime, Arc::new(Key(1)), deadline()).await?;
         Ok(Arc::new(
             PgLocalProjection::new(
                 capture,
@@ -279,7 +284,9 @@ async fn run() -> anyhow::Result<()> {
     unknown_commit(&f).await?;
     renewal_and_expiry(&f).await?;
     cancellation_and_restart(&f).await?;
+    pool_capacity(&f).await?;
     scoped_permissions(&f).await?;
+    dr_recovery(&f).await?;
     f.worker.close().await;
     f.producer.close().await;
     f.raw_worker.close().await;
@@ -362,7 +369,7 @@ async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert!(matches!(
         p.project_one(&Validator, deadline()).await?,
-        PgProjectionOutcome::Deferred
+        PgProjectionOutcome::Deferred(_)
     ));
     assert_eq!(
         f.state("atomic-failed").await?,
@@ -447,7 +454,7 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     gate.resume.notify_one();
     tokio::time::sleep(Duration::from_millis(2500)).await;
     blocker.commit().await?;
-    assert!(matches!(task.await??, PgProjectionOutcome::Deferred));
+    assert!(matches!(task.await??, PgProjectionOutcome::Deferred(_)));
     assert_eq!(
         f.state("atomic-expired").await?,
         (0, 0, None, "publishing".into())
@@ -508,6 +515,7 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
             .is_err(),
         "weakened restrictive policy must fail admission"
     );
+    sqlx::raw_sql("ALTER POLICY outbox_consumer_scope ON rss_transactional_messaging.outbox USING(rss_transactional_messaging.consumer_domain_allowed(domain))").execute(&f.owner).await?;
     Ok(())
 }
 
@@ -568,5 +576,147 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
         (1, 1, Some("succeeded".into()), "published".into())
     );
     runtime.close().await;
+    Ok(())
+}
+
+async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
+    let one = Arc::new(
+        PgRuntime::connect_consumer(
+            f.config.clone().with_pool_limits(0, 1),
+            Timer::new(),
+            fence_fixture::binding(),
+        )
+        .await?,
+    );
+    assert!(
+        Fixture::projection_on(
+            one.clone(),
+            Effect {
+                gate: None,
+                reject: false,
+                fail: false
+            }
+        )
+        .await
+        .is_err(),
+        "a one-connection pool cannot renew while holding an effect connection"
+    );
+    one.close().await;
+    let runtime = Arc::new(
+        PgRuntime::connect_consumer(
+            f.config.clone().with_pool_limits(0, 2),
+            Timer::new(),
+            fence_fixture::binding(),
+        )
+        .await?,
+    );
+    f.append("pool-first", "orders").await?;
+    f.append("pool-second", "orders").await?;
+    let gate = Gate::default();
+    let a = Fixture::projection_on(
+        runtime.clone(),
+        Effect {
+            gate: Some(gate.clone()),
+            reject: false,
+            fail: false,
+        },
+    )
+    .await?;
+    let b = Fixture::projection_on(
+        runtime.clone(),
+        Effect {
+            gate: None,
+            reject: false,
+            fail: false,
+        },
+    )
+    .await?;
+    let first = tokio::spawn({
+        let a = a.clone();
+        async move { a.project_one(&Validator, deadline()).await }
+    });
+    gate.entered.notified().await;
+    let second = tokio::spawn(async move { b.project_one(&Validator, deadline()).await });
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(
+        f.state("pool-second").await?,
+        (0, 0, None, "pending".into()),
+        "capacity waiting must precede durable claiming"
+    );
+    gate.resume.notify_one();
+    assert!(matches!(first.await??, PgProjectionOutcome::Committed(_)));
+    assert!(matches!(second.await??, PgProjectionOutcome::Committed(_)));
+    runtime.close().await;
+    Ok(())
+}
+
+async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
+    // Preseed legal DR state: the tested boundary is settlement/readback, not plan authorization.
+    // One member has historical local success; the other was published before local consumption.
+    f.append("dr-rejected", "orders").await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE message_id='dr-rejected'").execute(&f.owner).await?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.dr_plans(tenant_id,operation_id,request_digest,lineage,epoch,kind,evidence) VALUES($1::uuid,'00000000-0000-0000-0000-000000002891',$2,$3,1,'broker','{}')")
+        .bind(tenant().to_string()).bind([7u8;32].as_slice()).bind([2u8;16].as_slice()).execute(&f.owner).await?;
+    for (ordinal, id) in [(0, "atomic-success"), (1, "dr-rejected")] {
+        sqlx::query("INSERT INTO rss_transactional_messaging.dr_members(tenant_id,operation_id,ordinal,message_id,consumer_group,fingerprint,outbox_seq,status) SELECT tenant_id,'00000000-0000-0000-0000-000000002891',$2,message_id,'',fingerprint,seq,'pending' FROM rss_transactional_messaging.outbox WHERE message_id=$1")
+            .bind(id).bind(ordinal).execute(&f.owner).await?;
+    }
+    let p = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: false,
+        })
+        .await?;
+    p.inject_next_projection_fault(PgTransactionFault::CommitPending)?;
+    let PgProjectionOutcome::Uncertain(pending) = p.project_one(&Validator, deadline()).await?
+    else {
+        anyhow::bail!("expected unconfirmed DR settlement")
+    };
+    assert_eq!(
+        f.state("atomic-success").await?,
+        (1, 1, Some("succeeded".into()), "published".into())
+    );
+    assert!(
+        p.resolve(&pending, deadline()).await?.is_none(),
+        "historical source and Inbox success cannot prove a new DR member completed"
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.dr_members SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-success' AND status='publishing'").execute(&f.owner).await?;
+    assert!(matches!(
+        p.project_one(&Validator, deadline()).await?,
+        PgProjectionOutcome::Committed(_)
+    ));
+    assert!(p.resolve(&pending, deadline()).await?.is_some());
+
+    let p = f
+        .projection(Effect {
+            gate: None,
+            reject: true,
+            fail: false,
+        })
+        .await?;
+    p.inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck)?;
+    let PgProjectionOutcome::Uncertain(pending) = p.project_one(&Validator, deadline()).await?
+    else {
+        anyhow::bail!("expected DR rejection ACK loss")
+    };
+    assert_eq!(
+        f.state("dr-rejected").await?,
+        (0, 0, Some("rejected_permanent".into()), "published".into())
+    );
+    let receipt = p
+        .resolve(&pending, deadline())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("DR rejection receipt missing"))?;
+    assert_eq!(
+        receipt.disposition(),
+        TerminalDisposition::Rejected(RejectKind::Permanent)
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT status FROM rss_transactional_messaging.dr_members WHERE message_id='dr-rejected'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(state, "blocked");
     Ok(())
 }

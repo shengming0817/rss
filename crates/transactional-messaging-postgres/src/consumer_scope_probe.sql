@@ -1,20 +1,22 @@
 -- Function bodies come from the single installation artifact, not a second SQL implementation.
-WITH functions(signature,body) AS (VALUES
- ('rss_transactional_messaging.consumer_domain_allowed(text)',$1::text),
- ('rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text)',$2::text),
- ('rss_transactional_messaging.projection_scope_matches(text,text)',$3::text)
+WITH functions(signature,body,result,retset) AS (VALUES
+ ('rss_transactional_messaging.consumer_domain_allowed(text)',$1::text,'boolean'::regtype,false),
+ ('rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text)',$2::text,'boolean'::regtype,false),
+ ('rss_transactional_messaging.projection_scope_matches(text,text)',$3::text,'boolean'::regtype,false),
+ ('rss_transactional_messaging.local_projection_dr_status(uuid,bigint,uuid)',$4::text,'record'::regtype,true)
 ), scope_table AS (SELECT * FROM pg_class WHERE oid=to_regclass('rss_transactional_messaging.consumer_scope'))
-SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT pg_has_role(current_user,relowner,'MEMBER'))
+SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity AND NOT relforcerowsecurity AND NOT pg_has_role(current_user,relowner,'MEMBER'))
  AND NOT EXISTS(SELECT FROM pg_roles r CROSS JOIN scope_table t WHERE
   (r.rolname='rss_tmsg_relay' OR pg_has_role(current_user,r.oid,'SET') OR pg_has_role(current_user,r.oid,'USAGE'))
   AND (has_table_privilege(r.oid,t.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    OR has_any_column_privilege(r.oid,t.oid,'INSERT,UPDATE,REFERENCES')))
  AND NOT EXISTS(SELECT FROM functions f LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
   WHERE p.oid IS NULL OR p.prosrc IS DISTINCT FROM f.body OR NOT p.prosecdef OR p.provolatile<>'s'
-   OR p.prorettype<>'boolean'::regtype OR p.proretset OR p.proowner<>'rss_tmsg_relay'::regrole
+   OR p.prorettype<>f.result OR p.proretset<>f.retset OR p.proowner<>'rss_tmsg_relay'::regrole
    OR p.prolang<>(SELECT oid FROM pg_language WHERE lanname='sql')
    OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
-   OR NOT has_function_privilege(current_user,p.oid,'EXECUTE'))
+   OR (NOT f.retset AND NOT has_function_privilege(current_user,p.oid,'EXECUTE'))
+   OR (f.retset AND EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) WHERE grantee=0 AND privilege_type='EXECUTE')))
  AND EXISTS(SELECT FROM pg_constraint WHERE conrelid='rss_transactional_messaging.consumer_scope'::regclass
   AND contype='p' AND NOT condeferrable AND convalidated AND pg_get_constraintdef(oid)='PRIMARY KEY (login_role)')
  AND NOT EXISTS(SELECT FROM (VALUES('login_role','name'),('domain','text'),('consumer_group','text')) e(name,type)

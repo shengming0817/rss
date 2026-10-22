@@ -13,7 +13,8 @@ use rss_transactional_messaging::{
     outbox::{OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement},
     policy::{DeliveryBudget, LeaseRenewalPolicy, OperationDeadline, within},
     transaction::{
-        EnvelopeValidationFailure, IngressValidator, TerminalDisposition, verify_ingress,
+        EnvelopeValidationFailure, FailureClass, IngressValidator, TerminalDisposition,
+        verify_ingress,
     },
 };
 use sqlx::Row;
@@ -33,10 +34,24 @@ impl PgProjectionReceipt {
 
 /// Original identity retained after an unconfirmed transaction. It grants no retry authority.
 pub struct PgProjectionRecovery {
+    source: crate::outbox::LocalSourceIdentity,
     runtime: Arc<PgRuntime>,
     identity: ConsumerIdentity,
     fingerprint: MessageFingerprint,
     domain: MessagingDomain,
+}
+
+/// Closed failure categories, independent of unknown transaction outcomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PgProjectionFailure {
+    /// The transaction did not start.
+    NotStarted(FailureClass),
+    /// The transaction owner acknowledged rollback.
+    RolledBack(FailureClass),
+    /// The attempt lost its lease or execution fence.
+    Fenced,
+    /// The source's automatic delivery window expired and it was isolated.
+    DeliveryExpired,
 }
 
 /// Result of one bounded local delivery; uncertainty must not be reported as rollback.
@@ -48,7 +63,7 @@ pub enum PgProjectionOutcome {
     /// Both terminal facts and the effect are durable.
     Committed(PgProjectionReceipt),
     /// No commit was acknowledged; the original durable lease/retry state controls redelivery.
-    Deferred,
+    Deferred(PgProjectionFailure),
     /// Resolve this identity before interpreting the attempt; never reconstruct its payload.
     Uncertain(PgProjectionRecovery),
     /// Invalid ingress was retained in the source Outbox as a dead letter, without running effect.
@@ -85,10 +100,13 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             return Err(PgError::InvalidLeaseDuration);
         }
         let runtime = capture.runtime.clone();
+        if runtime.pool.options().get_max_connections() < 2 {
+            return Err(PgError::invariant());
+        }
         let cutoff = Deadline::from_timeout(&runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
         let valid = within(&runtime.timer, cutoff, |_| async {
-            sqlx::query_scalar::<_,bool>("SELECT rss_transactional_messaging.projection_scope_matches($1,$2) AND NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND (has_function_privilege(r.oid,'rss_transactional_messaging.append_outbox(bytea,jsonb)','EXECUTE') OR has_function_privilege(r.oid,'rss_transactional_messaging.prepare_outbox_partitions(jsonb)','EXECUTE')))")
+            sqlx::query_scalar::<_,bool>("SELECT rss_transactional_messaging.projection_scope_matches($1,$2) AND has_function_privilege(current_user,'rss_transactional_messaging.local_projection_dr_status(uuid,bigint,uuid)','EXECUTE') AND NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND (has_function_privilege(r.oid,'rss_transactional_messaging.append_outbox(bytea,jsonb)','EXECUTE') OR has_function_privilege(r.oid,'rss_transactional_messaging.prepare_outbox_partitions(jsonb)','EXECUTE')))")
                 .bind(domain.as_str()).bind(group.as_str()).fetch_one(&runtime.pool).await
         }).await??;
         if !valid {
@@ -120,6 +138,13 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         *self.fault.lock().map_err(|_| PgError::invariant())? = Some(fault);
         Ok(())
     }
+    #[cfg(feature = "integration")]
+    fn inject_projection_fault(&self) -> Result<(), PgError> {
+        if let Some(fault) = self.fault.lock().map_err(|_| PgError::invariant())?.take() {
+            self.runtime.inject_next_transaction_fault(fault);
+        }
+        Ok(())
+    }
 
     /// Durable scheduling hint; notifications remain optional and callers own bounded waiting.
     pub async fn next_wakeup(
@@ -143,6 +168,11 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     ) -> Result<PgProjectionOutcome, PgError> {
         let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
+        let _slot = within(&self.runtime.timer, cutoff, |_| {
+            self.runtime.projection_slots.acquire()
+        })
+        .await?
+        .map_err(|_| PgError::invariant())?;
         let mut claims = self
             .outbox
             .claim_partition_heads(NonZeroUsize::MIN, remaining(self, cutoff))
@@ -163,7 +193,9 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                 )
                 .await
                 .map_err(pg)?;
-            return Ok(PgProjectionOutcome::Deferred);
+            return Ok(PgProjectionOutcome::Deferred(
+                PgProjectionFailure::DeliveryExpired,
+            ));
         }
         let message = PgOutboxStore::<()>::message(&source).envelope();
         let subscription = SubscriptionIdentity::new(
@@ -215,6 +247,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             }
         };
         let recovery = PgProjectionRecovery {
+            source: source.local_identity(),
             runtime: self.runtime.clone(),
             identity: binding.identity().clone(),
             fingerprint: binding.receipt_intent().fingerprint(),
@@ -226,9 +259,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             inbox: &claim,
         };
         #[cfg(feature = "integration")]
-        if let Some(fault) = self.fault.lock().map_err(|_| PgError::invariant())?.take() {
-            self.runtime.inject_next_transaction_fault(fault);
-        }
+        self.inject_projection_fault()?;
         let outcome = crate::consumer::execute_transaction(
             &self.runtime,
             &effect,
@@ -249,12 +280,16 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                     false,
                 )
             },
-            |_| (PgProjectionOutcome::Deferred, true),
-            |_| (PgProjectionOutcome::Deferred, true),
-            || {
+            |class| {
                 (
-                    PgProjectionOutcome::Uncertain(recovery_copy(&recovery)),
-                    false,
+                    PgProjectionOutcome::Deferred(PgProjectionFailure::NotStarted(class)),
+                    true,
+                )
+            },
+            |class| {
+                (
+                    PgProjectionOutcome::Deferred(PgProjectionFailure::RolledBack(class)),
+                    true,
                 )
             },
             || {
@@ -263,7 +298,18 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                     false,
                 )
             },
-            || (PgProjectionOutcome::Deferred, false),
+            || {
+                (
+                    PgProjectionOutcome::Uncertain(recovery_copy(&recovery)),
+                    false,
+                )
+            },
+            || {
+                (
+                    PgProjectionOutcome::Deferred(PgProjectionFailure::Fenced),
+                    false,
+                )
+            },
         );
         if retry {
             // Confirmed rollback permits retry; expired authority is left to durable recovery.
@@ -284,6 +330,8 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         fingerprint: MessageFingerprint,
         cutoff: Deadline,
     ) -> Result<PgProjectionOutcome, PgError> {
+        #[cfg(feature = "integration")]
+        self.inject_projection_fault()?;
         let attempt = self.runtime.local_tx_with_context(identity.tenant_id(), remaining(self, cutoff),
             (self, source, identity, fingerprint), |(owner, source, identity, fingerprint), tx| Box::pin(async move {
                 let row = sqlx::query("SELECT contract,fingerprint,disposition FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
@@ -296,19 +344,24 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                 Ok(disposition)
             })).await;
         let recovery = PgProjectionRecovery {
+            source: source.local_identity(),
             runtime: self.runtime.clone(),
             identity: identity.clone(),
             fingerprint,
             domain: self.domain.clone(),
         };
-        Ok(attempt.fold(
-            |disposition| PgProjectionOutcome::Committed(PgProjectionReceipt { disposition }),
-            |_| PgProjectionOutcome::Deferred,
-            |_| PgProjectionOutcome::Deferred,
-            |_| PgProjectionOutcome::Uncertain(recovery_copy(&recovery)),
-            |_| PgProjectionOutcome::Uncertain(recovery_copy(&recovery)),
-            |_| PgProjectionOutcome::Deferred,
-        ))
+        attempt.fold(
+            |disposition| {
+                Ok(PgProjectionOutcome::Committed(PgProjectionReceipt {
+                    disposition,
+                }))
+            },
+            Err,
+            Err,
+            |_| Ok(PgProjectionOutcome::Uncertain(recovery_copy(&recovery))),
+            |_| Ok(PgProjectionOutcome::Uncertain(recovery_copy(&recovery))),
+            |_| Ok(PgProjectionOutcome::Deferred(PgProjectionFailure::Fenced)),
+        )
     }
 
     /// Read both terminal facts in one SQL snapshot. `None` is not proof of rollback and never
@@ -326,16 +379,24 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         }
         crate::transaction::settled(self.runtime.local_tx_with_context(pending.identity.tenant_id(), deadline, pending,
             |pending, tx| Box::pin(async move {
-                let row = sqlx::query("SELECT i.contract,i.fingerprint,i.disposition,o.domain,o.fingerprint AS source_fingerprint,o.status FROM rss_transactional_messaging.inbox i JOIN rss_transactional_messaging.outbox o USING(tenant_id,message_id) WHERE i.tenant_id=$1::uuid AND i.message_id=$2 AND i.consumer_group=$3")
-                    .bind(pending.identity.tenant_id().to_string()).bind(pending.identity.message_id().as_str()).bind(pending.identity.group().as_str())
+                let row = sqlx::query("SELECT i.contract,i.fingerprint,i.disposition,o.domain,o.fingerprint AS source_fingerprint,o.status,d.status AS dr_status,d.fingerprint AS dr_fingerprint FROM rss_transactional_messaging.inbox i JOIN rss_transactional_messaging.outbox o USING(tenant_id,message_id) LEFT JOIN LATERAL rss_transactional_messaging.local_projection_dr_status(o.tenant_id,o.seq,$4::uuid) d ON true WHERE o.seq=$5 AND i.tenant_id=$1::uuid AND i.message_id=$2 AND i.consumer_group=$3")
+                    .bind(pending.identity.tenant_id().to_string()).bind(pending.identity.message_id().as_str()).bind(pending.identity.group().as_str()).bind(&pending.source.dr_operation).bind(pending.source.seq)
                     .fetch_optional(&mut *tx.connection).await?;
                 let Some(row) = row else { return Ok(None); };
                 if row.try_get::<String,_>("domain")? != pending.domain.as_str()
                     || crate::inbox::fingerprint(row.try_get("source_fingerprint")?)? != pending.fingerprint { return Err(PgError::invariant()); }
                 let Some(receipt) = crate::inbox::receipt(&row, &pending.identity)? else { return Ok(None); };
                 if !receipt.matches(&pending.identity, pending.fingerprint) { return Err(PgError::invariant()); }
-                let expected = match receipt.disposition() { TerminalDisposition::Succeeded => "published", TerminalDisposition::Rejected(_) => "dead_letter" };
-                if row.try_get::<String,_>("status")? != expected { return Err(PgError::invariant()); }
+                if pending.source.dr_operation.is_some() {
+                    let status: Option<String> = row.try_get("dr_status")?;
+                    let Some(status) = status else { return Ok(None); };
+                    if crate::inbox::fingerprint(row.try_get("dr_fingerprint")?)? != pending.fingerprint { return Err(PgError::invariant()); }
+                    let expected = match receipt.disposition() { TerminalDisposition::Succeeded => "completed", TerminalDisposition::Rejected(_) => "blocked" };
+                    if status != expected { return Ok(None); }
+                } else {
+                    let expected = match receipt.disposition() { TerminalDisposition::Succeeded => "published", TerminalDisposition::Rejected(_) => "dead_letter" };
+                    if row.try_get::<String,_>("status")? != expected { return Err(PgError::invariant()); }
+                }
                 Ok(Some(PgProjectionReceipt { disposition: receipt.disposition() }))
             })).await)
     }
@@ -343,6 +404,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
 
 fn recovery_copy(value: &PgProjectionRecovery) -> PgProjectionRecovery {
     PgProjectionRecovery {
+        source: value.source.clone(),
         runtime: value.runtime.clone(),
         identity: value.identity.clone(),
         fingerprint: value.fingerprint,

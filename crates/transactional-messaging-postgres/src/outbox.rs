@@ -74,6 +74,21 @@ pub struct PgOutboxClaim {
     token: String,
     lease_us: Mutex<i64>,
 }
+#[derive(Clone)]
+#[cfg(feature = "recovery")]
+pub(crate) struct LocalSourceIdentity {
+    pub(crate) seq: i64,
+    pub(crate) dr_operation: Option<String>,
+}
+impl PgOutboxClaim {
+    #[cfg(feature = "recovery")]
+    pub(crate) fn local_identity(&self) -> LocalSourceIdentity {
+        LocalSourceIdentity {
+            seq: self.seq,
+            dr_operation: self.dr_operation.clone(),
+        }
+    }
+}
 /// Read-only scheduling hints for the store's admitted tenants and domain.
 ///
 /// Due candidates may be locked or claimed by another relay. Neither hint grants a claim or proves

@@ -31,6 +31,15 @@ SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
  SELECT EXISTS(SELECT FROM consumer_scope WHERE login_role=session_user AND domain=p_domain AND consumer_group=p_group)
 $f$;
 ALTER FUNCTION rss_transactional_messaging.projection_scope_matches(text,text) OWNER TO rss_tmsg_relay;
+CREATE FUNCTION rss_transactional_messaging.local_projection_dr_status(p_tenant uuid,p_seq bigint,p_operation uuid)
+RETURNS TABLE(status text,fingerprint bytea) LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
+ SELECT d.status,d.fingerprint FROM dr_members d JOIN outbox o ON o.tenant_id=d.tenant_id AND o.seq=d.outbox_seq
+ WHERE p_tenant=nullif(current_setting('rss.tenant_id',true),'')::uuid
+ AND d.tenant_id=p_tenant AND d.outbox_seq=p_seq AND d.operation_id=p_operation
+$f$;
+ALTER FUNCTION rss_transactional_messaging.local_projection_dr_status(uuid,bigint,uuid) OWNER TO rss_tmsg_relay;
+REVOKE ALL ON FUNCTION rss_transactional_messaging.local_projection_dr_status(uuid,bigint,uuid) FROM PUBLIC;
 -- These predicates disclose only the caller's own scope and are used by mandatory RLS policies.
 GRANT EXECUTE ON FUNCTION rss_transactional_messaging.consumer_domain_allowed(text),
  rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text),
