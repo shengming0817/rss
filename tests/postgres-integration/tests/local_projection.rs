@@ -578,6 +578,7 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     reason = "A forbidden real PG operation succeeding must fail this negative test immediately."
 )]
 async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
+    direct_scope_predicate(f).await?;
     f.append("foreign-domain", "other").await?;
     let foreign: (i64,String,i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,'other',1,5000)")
         .bind(tenant().to_string()).fetch_one(&f.owner).await?;
@@ -886,5 +887,29 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(state, "blocked");
+    Ok(())
+}
+
+async fn direct_scope_predicate(f: &Fixture) -> anyhow::Result<()> {
+    let mut tx = f.raw_worker.begin().await?;
+    for context in [
+        tenant().to_string(),
+        "22222222-2222-2222-2222-222222222222".into(),
+        String::new(),
+    ] {
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(&context)
+            .execute(&mut *tx)
+            .await?;
+        for message in ["atomic-success", "never-existed"] {
+            let permitted:bool=sqlx::query_scalar("SELECT rss_transactional_messaging.consumer_inbox_allowed($1::uuid,$2,'projection')")
+                .bind(tenant().to_string()).bind(message).fetch_one(&mut *tx).await?;
+            assert_eq!(
+                permitted,
+                context == tenant().to_string() && message == "atomic-success"
+            );
+        }
+    }
+    tx.rollback().await?;
     Ok(())
 }
