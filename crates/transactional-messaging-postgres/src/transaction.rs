@@ -819,6 +819,27 @@ impl PgTransaction<'_> {
         })
         .await?
     }
+    /// Reborrow caller context together with the connection under this transaction's cutoff.
+    /// Context may contain non-static references. Neither borrow nor lifecycle authority can
+    /// escape the callback; errors still belong to the enclosing transaction owner.
+    pub async fn with_connection_context<C: Send, T: Send, F>(
+        &mut self,
+        context: &mut C,
+        operation: F,
+    ) -> Result<T, PgError>
+    where
+        F: for<'a> FnOnce(&'a mut C, &'a mut PgConnection) -> BoxFuture<'a, Result<T, sqlx::Error>>
+            + Send,
+    {
+        self.check_scope()?;
+        stage(
+            self.timer,
+            self.cutoff,
+            LocalTxDeadlineStage::Operation,
+            operation(context, self.connection),
+        )
+        .await
+    }
     /// Borrow the connection for a bounded SQL operation. No lifecycle authority is transferred.
     pub async fn with_connection<T: Send, F>(&mut self, operation: F) -> Result<T, PgError>
     where

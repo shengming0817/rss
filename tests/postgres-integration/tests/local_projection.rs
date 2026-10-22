@@ -92,11 +92,11 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         message: &MessageEnvelope<Vec<u8>>,
         _: OperationDeadline,
     ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
-        let id = message.id().as_str().to_owned();
-        tx.with_connection(move |c| {
+        let mut id = message.id().as_str();
+        tx.with_connection_context(&mut id, |id, c| {
             Box::pin(async move {
                 sqlx::query("INSERT INTO public.effect_a VALUES($1)")
-                    .bind(id)
+                    .bind(*id)
                     .execute(c)
                     .await?;
                 Ok(())

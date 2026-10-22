@@ -4,8 +4,9 @@
 The core remains provider-neutral. Installation, role provisioning, business tables, deployment,
 database operations and operator authorization belong to the consumer. Explicit library recovery is described below.
 
-Trusted companion infrastructure borrows `PgTransaction` through `with_connection`; application
-handlers receive typed repositories. The borrow bounds reference lifetimes, not arbitrary SQL:
+Trusted companion infrastructure borrows `PgTransaction` through `with_connection`, or
+`with_connection_context` when the operation also reborrows non-static host context; application
+handlers receive typed repositories. Both methods retain the transaction’s existing deadline. The borrow bounds reference lifetimes, not arbitrary SQL:
 trusted code must not issue transaction-control SQL or change tenant settings.
 
 Every operation consumes one injected monotonic deadline. Unacknowledged transaction settlement
