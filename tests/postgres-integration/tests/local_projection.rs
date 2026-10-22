@@ -197,6 +197,10 @@ async fn local_projection_atomicity_scope_and_recovery() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(180), run()).await??;
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
+)]
 async fn run() -> anyhow::Result<()> {
     let network = testkit::bridge_network("local-projection").await?;
     let pg = testkit::postgres_tls(
@@ -331,6 +335,10 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
     ));
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
+)]
 async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
     f.append("atomic-rejected", "orders").await?;
     let p = f
@@ -408,6 +416,10 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
     ));
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
+)]
 async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     f.append("atomic-renewal", "orders").await?;
     let gate = Gate::default();
@@ -462,6 +474,10 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()+interval '1 day' WHERE message_id='atomic-expired'").execute(&f.owner).await?;
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
+)]
 async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     f.append("foreign-domain", "other").await?;
     let foreign: (i64,String,i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,'other',1,5000)")
@@ -519,6 +535,10 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
+)]
 async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
     f.append("atomic-cancelled", "orders").await?;
     let gate = Gate::default();
@@ -579,6 +599,10 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
+)]
 async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
     let one = Arc::new(
         PgRuntime::connect_consumer(
@@ -650,6 +674,10 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
+)]
 async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
     // Preseed legal DR state: the tested boundary is settlement/readback, not plan authorization.
     // One member has historical local success; the other was published before local consumption.

@@ -373,7 +373,8 @@ impl PgRuntime {
         let probe_result: Result<(), PgError> = async {
             crate::fence::probe(&runtime, profile, cutoff).await?;
             runtime.check_relay_role(cutoff).await?;
-            crate::consumer_profile::verify_scope(&runtime, cutoff).await?;
+            // Keep the additional catalog probe out of every caller's inline startup future.
+            Box::pin(crate::consumer_profile::verify_scope(&runtime, cutoff)).await?;
             #[cfg(feature = "recovery")]
             if profile == Profile::Dr {
                 return Ok(());
@@ -937,6 +938,8 @@ mod tests {
             )?,
             pool,
             timer: PgTimer(Arc::new(Frozen)),
+            #[cfg(feature = "recovery")]
+            projection_slots: tokio::sync::Semaphore::new(1),
             #[cfg(feature = "integration")]
             fault: std::sync::atomic::AtomicU8::new(0),
         };
