@@ -74,6 +74,21 @@ pub struct PgOutboxClaim {
     token: String,
     lease_us: Mutex<i64>,
 }
+#[derive(Clone)]
+#[cfg(feature = "recovery")]
+pub(crate) struct LocalSourceIdentity {
+    pub(crate) seq: i64,
+    pub(crate) dr_operation: Option<String>,
+}
+impl PgOutboxClaim {
+    #[cfg(feature = "recovery")]
+    pub(crate) fn local_identity(&self) -> LocalSourceIdentity {
+        LocalSourceIdentity {
+            seq: self.seq,
+            dr_operation: self.dr_operation.clone(),
+        }
+    }
+}
 /// Read-only scheduling hints for the store's admitted tenants and domain.
 ///
 /// Due candidates may be locked or claimed by another relay. Neither hint grants a claim or proves
@@ -232,7 +247,8 @@ impl<R> PgOutboxStore<R> {
         }
     }
     fn valid_claim(&self, claim: &PgOutboxClaim) -> bool {
-        self.writer.runtime.binding.storage() == claim.storage
+        self.writer.domain == *claim.message.envelope().metadata().domain()
+            && self.writer.runtime.binding.storage() == claim.storage
             && self
                 .writer
                 .runtime
@@ -297,6 +313,46 @@ impl<R> PgOutboxStore<R> {
                     delivery_remaining: Some(Duration::from_micros(delivery.unsigned_abs())),
                 })
             }
+        }
+    }
+}
+
+impl PgOutboxStore<()> {
+    /// Private composition: only the consumer transaction owner may stage a local terminal result.
+    pub(crate) async fn settle_local_in(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        claim: &PgOutboxClaim,
+        disposition: rss_transactional_messaging::transaction::TerminalDisposition,
+    ) -> Result<(), PgError> {
+        self.writer.validate_transaction(tx)?;
+        if !self.valid_claim(claim)
+            || tx.tenant_id() != claim.message.envelope().metadata().tenant_id()
+        {
+            return Err(PgError::lost());
+        }
+        let lease = claim.lease_us.lock().await;
+        let disposition = match disposition {
+            rss_transactional_messaging::transaction::TerminalDisposition::Succeeded => "published",
+            rss_transactional_messaging::transaction::TerminalDisposition::Rejected(_) => {
+                "dead_letter"
+            }
+        };
+        let result: String = sqlx::query_scalar(
+            "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
+        )
+        .bind(tx.tenant_id().to_string())
+        .bind(claim.seq)
+        .bind(&claim.token)
+        .bind(*lease)
+        .bind(disposition)
+        .bind(&claim.dr_operation)
+        .fetch_one(&mut *tx.connection)
+        .await?;
+        match result.as_str() {
+            "settled" => Ok(()),
+            "expired" | "lost_lease" => Err(PgError::lost()),
+            _ => Err(PgError::invariant()),
         }
     }
 }

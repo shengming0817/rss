@@ -72,3 +72,27 @@ fn producer_can_validate_companion_transaction_without_appending() {
     }
     let _ = validate;
 }
+
+// The context intentionally borrows a local value; requiring 'static would defeat the API.
+fn borrowed_context_query<'a>(
+    transaction: &'a mut PgTransaction<'_>,
+    mut input: &'a str,
+) -> BoxFuture<'a, Result<String, rss_transactional_messaging_postgres::PgError>> {
+    Box::pin(async move {
+        transaction
+            .with_connection_context(&mut input, |input, connection| {
+                Box::pin(async move {
+                    sqlx::query_scalar("SELECT $1::text")
+                        .bind(*input)
+                        .fetch_one(connection)
+                        .await
+                })
+            })
+            .await
+    })
+}
+
+#[test]
+fn trusted_extension_reborrows_nonstatic_context() {
+    let _ = borrowed_context_query;
+}

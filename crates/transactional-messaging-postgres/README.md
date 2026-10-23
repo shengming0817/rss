@@ -4,8 +4,9 @@
 The core remains provider-neutral. Installation, role provisioning, business tables, deployment,
 database operations and operator authorization belong to the consumer. Explicit library recovery is described below.
 
-Trusted companion infrastructure borrows `PgTransaction` through `with_connection`; application
-handlers receive typed repositories. The borrow bounds reference lifetimes, not arbitrary SQL:
+Trusted companion infrastructure borrows `PgTransaction` through `with_connection`, or
+`with_connection_context` when the operation also reborrows non-static host context; application
+handlers receive typed repositories. Both methods retain the transaction’s existing deadline. The borrow bounds reference lifetimes, not arbitrary SQL:
 trusted code must not issue transaction-control SQL or change tenant settings.
 
 Every operation consumes one injected monotonic deadline. Unacknowledged transaction settlement
@@ -16,7 +17,7 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 
 Use an external migrator to provision a `rss_tmsg_relay` role with
 `NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION` and no membership
-in any other role, then execute the complete `MIGRATION_SQL` (0001–0011). The migrator must be able to transfer
+in any other role, then execute the complete `MIGRATION_SQL` (0001–0012). The migrator must be able to transfer
 function ownership to that role. Do not run migrations through the application pool.
 
 Registry consumers obtain the same versioned SQL through
@@ -332,16 +333,22 @@ observation. It performs one mutation and never resets the total budget.
 
 ## Consumer archive schema and role cutover (#2302)
 
-Fresh installation uses `MIGRATION_SQL` (0001–0011). Upgrade exactly once from the installed boundary:
+Fresh installation uses `MIGRATION_SQL` (0001–0012). Upgrade exactly once from the installed boundary:
 
 | Installed through | Remaining SQL |
 |---|---|
-| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0011) |
-| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0011) |
-| 0004 or 0005 | Apply each remaining numbered migration in order, through 0011 |
-| 0006 | `DR_UPGRADE_SQL` (0007–0011) |
-| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0011; empty Outbox) |
-| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010–0011; empty Outbox) |
+| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0012) |
+| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0012) |
+| 0004 or 0005 | Apply each remaining numbered migration in order, through 0012 |
+| 0006 | `DR_UPGRADE_SQL` (0007–0012) |
+| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0012; empty Outbox) |
+| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010–0012; empty Outbox) |
+| 0010 | Apply 0011, then 0012 |
+| 0011 | Apply `0012_scope_local_projection.sql` |
+
+Stop old workers, apply the remaining schema, provision fixed LOGIN scopes where selected, and
+replace/admit runtimes before resuming traffic. Scope predicates are validated at startup for all
+profiles; a new runtime intentionally rejects an installation missing 0012.
 
 Do not rerun aggregate constants containing already applied DDL. Migration 0005 replaces
 `archive_fault` with `archive_fault(uuid,uuid,bytea,text)`; grant that signature after upgrading.
@@ -498,7 +505,43 @@ missing decoder functions, changed ownership/search paths or leaked decoder EXEC
 new crate, second fingerprint algorithm or compatibility writer is installed.
 
 
-### Relay/consumer-only role
+### Same-database local projection
+
+With `recovery`, `PgLocalProjection` consumes a fixed source domain and group on the
+`PgRecoveryCapture` runtime. `project_one` claims at most one partition head, validates each exact route/contract with the mandatory host validator,
+renews both leases while running the effect, and commits the effect, Inbox receipt and source
+Outbox terminal state together. The effect uses `PgConsumerEffect`; it borrows the original
+transaction and never commits. No broker publisher receipt or second successful settlement is
+manufactured. Other databases and independently supplied claims are not accepted by this API.
+
+The external migrator calls `grant_local_projection(connection, login, domain, group)` for a
+dedicated LOGIN and grants protected dead-letter capture plus the effect's narrowly required
+tables/functions. Connect that login with `PgRuntime::connect_consumer`, construct the capture,
+then await `PgLocalProjection::new`. Producer permissions, including SET-accessible grants,
+are rejected. The source domain and Inbox group are enforced by restrictive policies using
+`session_user`, including inside relay definers and after `SET ROLE`. The migrator owns the
+scope table; runtime roles cannot edit it. Unscoped broker consumers retain their independent
+consumer profile. Scope changes require stopping the worker and admitting a new composition.
+
+`PgProjectionOutcome::Attempt` contains a component-issued pair. Consume `into_parts()` and
+fold the canonical `TransactionOutcome`: its committed branch retains the provider proof and
+terminal settlement, and rollback-failed remains distinct from commit-unknown. The accompanying
+opaque original identity is available to resolve either uncertain state. Rejected effects are
+rolled back to the consumer savepoint before protected rejection evidence, Inbox rejection and
+Outbox dead-letter state commit together. Invalid ingress retains its source as a dead letter
+without executing an effect. Confirmed failures schedule the existing bounded Outbox backoff;
+uncertain transactions retain their claims for durable recovery. `resolve` reads both terminal
+facts in one snapshot and returns a private receipt only when they agree. An absent fact is not
+rollback evidence or permission to execute the effect again.
+
+The shared runtime must have at least two pool connections. A runtime-wide permit bound reserves
+one connection for renewal across all local projection handles; acquire a permit before claiming
+a source. Use a dedicated worker runtime rather than sharing long-lived unrelated transactions.
+Hosts own bounded concurrency, cancellation, notification hints, `next_wakeup` waiting and
+periodic recovery scans. No worker is spawned by this adapter. Dead letters remain visible via
+`has_dead_letters` and the existing recovery owner; delivery expiry never silently deletes them.
+
+### Broker relay/consumer grants
 
 Use `PgRuntime::connect_consumer` for a worker that relays existing Outbox rows and settles Inbox
 but must not author messages. The migration owner calls `grant_consumer(connection, role)` to

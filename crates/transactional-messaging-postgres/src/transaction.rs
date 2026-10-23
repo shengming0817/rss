@@ -278,6 +278,8 @@ pub struct PgRuntime {
     pub(crate) pool: PgPool,
     pub(crate) binding: ExecutionBinding,
     pub(crate) timer: PgTimer,
+    #[cfg(feature = "recovery")]
+    pub(crate) projection_slots: tokio::sync::Semaphore,
     #[cfg(feature = "integration")]
     fault: std::sync::atomic::AtomicU8,
 }
@@ -343,6 +345,16 @@ impl PgRuntime {
         binding: ExecutionBinding,
         profile: Profile,
     ) -> Result<Self, PgError> {
+        // Admission includes several catalog probes; do not multiply their inline state in
+        // hosts composing multiple runtimes or running sequential admission damage scenarios.
+        Box::pin(Self::open_profile(config, timer, binding, profile)).await
+    }
+    async fn open_profile<C: ExecutionTimer + 'static>(
+        config: PgConfig,
+        timer: C,
+        binding: ExecutionBinding,
+        profile: Profile,
+    ) -> Result<Self, PgError> {
         config.validate()?;
         let timer = PgTimer(Arc::new(timer));
         let cutoff = Deadline::from_timeout(&timer, config.acquire_timeout)
@@ -361,12 +373,18 @@ impl PgRuntime {
             pool,
             binding,
             timer,
+            #[cfg(feature = "recovery")]
+            projection_slots: tokio::sync::Semaphore::new(
+                config.max_connections.saturating_sub(1) as usize
+            ),
             #[cfg(feature = "integration")]
             fault: std::sync::atomic::AtomicU8::new(0),
         };
         let probe_result: Result<(), PgError> = async {
             crate::fence::probe(&runtime, profile, cutoff).await?;
             runtime.check_relay_role(cutoff).await?;
+            // Keep the additional catalog probe out of every caller's inline startup future.
+            Box::pin(crate::consumer_profile::verify_scope(&runtime, cutoff)).await?;
             #[cfg(feature = "recovery")]
             if profile == Profile::Dr {
                 return Ok(());
@@ -801,6 +819,27 @@ impl PgTransaction<'_> {
         })
         .await?
     }
+    /// Reborrow caller context together with the connection under this transaction's cutoff.
+    /// Context may contain non-static references. Neither borrow nor lifecycle authority can
+    /// escape the callback; errors still belong to the enclosing transaction owner.
+    pub async fn with_connection_context<C: Send, T: Send, F>(
+        &mut self,
+        context: &mut C,
+        operation: F,
+    ) -> Result<T, PgError>
+    where
+        F: for<'a> FnOnce(&'a mut C, &'a mut PgConnection) -> BoxFuture<'a, Result<T, sqlx::Error>>
+            + Send,
+    {
+        self.check_scope()?;
+        stage(
+            self.timer,
+            self.cutoff,
+            LocalTxDeadlineStage::Operation,
+            operation(context, self.connection),
+        )
+        .await
+    }
     /// Borrow the connection for a bounded SQL operation. No lifecycle authority is transferred.
     pub async fn with_connection<T: Send, F>(&mut self, operation: F) -> Result<T, PgError>
     where
@@ -930,6 +969,8 @@ mod tests {
             )?,
             pool,
             timer: PgTimer(Arc::new(Frozen)),
+            #[cfg(feature = "recovery")]
+            projection_slots: tokio::sync::Semaphore::new(1),
             #[cfg(feature = "integration")]
             fault: std::sync::atomic::AtomicU8::new(0),
         };
