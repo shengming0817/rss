@@ -15,7 +15,11 @@ impl PgConsumerEffect<Vec<u8>> for BatchEffect {
         _: OperationDeadline,
     ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
         self.entered.add_permits(1);
-        self.release.acquire().await.expect("fixture gate").forget();
+        self.release
+            .acquire()
+            .await
+            .map_err(PgConsumerEffectFailure::handler_transient)?
+            .forget();
         if message.id().as_str() == "batch-failure" {
             return Err(PgConsumerEffectFailure::handler_transient(
                 std::io::Error::other("fixture failure"),
@@ -80,6 +84,10 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     above_old_limit(f).await?;
     history_and_policy(f).await
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep the provider scenario and its ordered durable assertions together."
+)]
 async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
     append(
         f,
@@ -113,16 +121,12 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
         )
         .await?,
     );
+    let limit = NonZeroUsize::try_from(70usize)?;
     let task = tokio::spawn({
         let projection = projection.clone();
         async move {
             projection
-                .project_batch(
-                    &Validator,
-                    NonZeroUsize::new(70).unwrap(),
-                    deadline(),
-                    Duration::from_secs(5),
-                )
+                .project_batch(&Validator, limit, deadline(), Duration::from_secs(5))
                 .await
         }
     });
@@ -154,7 +158,7 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
     let results = projection
         .project_batch(
             &Validator,
-            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::try_from(8usize)?,
             deadline(),
             Duration::from_secs(5),
         )
@@ -192,7 +196,7 @@ async fn above_old_limit(f: &Fixture) -> anyhow::Result<()> {
         )?,
     )?;
     let batch = outbox
-        .claim_partition_heads(NonZeroUsize::new(70).unwrap(), deadline())
+        .claim_partition_heads(NonZeroUsize::try_from(70usize)?, deadline())
         .await?;
     assert_eq!(
         batch.len(),
@@ -206,6 +210,10 @@ async fn above_old_limit(f: &Fixture) -> anyhow::Result<()> {
     }
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep the provider scenario and its ordered durable assertions together."
+)]
 async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
     append(
         f,
@@ -225,7 +233,7 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
         ],
     )
     .await?;
-    // Explain the installed candidate definition itself under the real scoped login. SQL
+    // Explain the installed candidate definition as the claim function's effective role. SQL
     // functions with SET search_path otherwise hide their inner plan behind Function Scan.
     let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_candidates(uuid,text)'::regprocedure")
         .fetch_one(&f.owner).await?;
@@ -234,7 +242,10 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
         body.replace("p_tenant", "$1::uuid")
             .replace("p_domain", "$2")
     );
-    let mut connection = f.raw_worker.acquire().await?;
+    let mut connection = f.owner.acquire().await?;
+    sqlx::query("SET ROLE rss_tmsg_relay")
+        .execute(&mut *connection)
+        .await?;
     sqlx::query("SET search_path=pg_catalog,rss_transactional_messaging,pg_temp")
         .execute(&mut *connection)
         .await?;
@@ -261,6 +272,7 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
         "candidate query must not traverse the terminal history: {plan}"
     );
     println!("installed candidate plan: {plan}");
+    sqlx::query("RESET ROLE").execute(&mut *connection).await?;
     drop(connection);
     let projection = f
         .projection(Effect {
@@ -272,7 +284,7 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
     let items = projection
         .project_batch(
             &Validator,
-            NonZeroUsize::new(8).unwrap(),
+            NonZeroUsize::try_from(8usize)?,
             deadline(),
             Duration::from_secs(5),
         )
@@ -360,7 +372,7 @@ async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
     let batch = p
         .project_batch(
             &Validator,
-            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::try_from(3usize)?,
             deadline(),
             Duration::from_secs(5),
         )

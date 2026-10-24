@@ -335,39 +335,41 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             Some((&self.outbox, &source)),
         )
         .await;
+        self.release_after_rollback(outcome.status(), claim, source, cutoff)
+            .await;
+        Ok(PgProjectionOutcome::Attempt(Box::new(
+            PgProjectionAttempt { outcome, recovery },
+        )))
+    }
+
+    async fn release_after_rollback(
+        &self,
+        status: rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus,
+        claim: crate::PgInboxClaim,
+        source: PgOutboxClaim,
+        cutoff: Deadline,
+    ) {
         use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
         // The canonical status is inspected only for safe cleanup, never substituted for the
         // original outcome. All three categories here prove not-started or acknowledged rollback.
         let retry = matches!(
-            outcome.status(),
+            status,
             Status::HandlerTransient | Status::RejectedPermanent | Status::InfrastructureTransient
         );
-        if retry {
-            // Confirmed rollback permits retry; expired authority is left to durable recovery.
-            if let Err(error) =
-                ignore_lost(self.inbox.release(claim, remaining(self, cutoff)).await)
-            {
-                tracing::warn!(
-                    phase = "projection_inbox_release",
-                    kind = error.kind().as_label(),
-                    "projection cleanup failed; canonical outcome retained"
-                );
-            }
-            if let Err(error) = ignore_lost(
-                self.outbox
-                    .settle(source, OutboxSettlement::Retry, remaining(self, cutoff))
-                    .await,
-            ) {
-                tracing::warn!(
-                    phase = "projection_outbox_release",
-                    kind = error.kind().as_label(),
-                    "projection cleanup failed; canonical outcome retained"
-                );
-            }
+        if !retry {
+            return;
         }
-        Ok(PgProjectionOutcome::Attempt(Box::new(
-            PgProjectionAttempt { outcome, recovery },
-        )))
+        // Confirmed rollback permits retry; expired authority is left to durable recovery.
+        log_cleanup(
+            self.inbox.release(claim, remaining(self, cutoff)).await,
+            "projection_inbox_release",
+        );
+        log_cleanup(
+            self.outbox
+                .settle(source, OutboxSettlement::Retry, remaining(self, cutoff))
+                .await,
+            "projection_outbox_release",
+        );
     }
 
     async fn finish_existing(
@@ -453,6 +455,15 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
 
 fn pg(error: MessagingError) -> PgError {
     PgError::classified(error.kind(), error)
+}
+fn log_cleanup(result: Result<(), MessagingError>, phase: &'static str) {
+    if let Err(error) = ignore_lost(result) {
+        tracing::warn!(
+            phase,
+            kind = error.kind().as_label(),
+            "projection cleanup failed; canonical outcome retained"
+        );
+    }
 }
 fn ignore_lost(result: Result<(), MessagingError>) -> Result<(), PgError> {
     match result {

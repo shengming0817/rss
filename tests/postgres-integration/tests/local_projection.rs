@@ -352,7 +352,7 @@ async fn run() -> anyhow::Result<()> {
     let items = upgraded
         .project_batch(
             &Validator,
-            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::try_from(2usize)?,
             deadline(),
             Duration::from_secs(5),
         )
