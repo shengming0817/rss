@@ -508,7 +508,13 @@ new crate, second fingerprint algorithm or compatibility writer is installed.
 ### Same-database local projection
 
 With `recovery`, `PgLocalProjection` consumes a fixed source domain and group on the
-`PgRecoveryCapture` runtime. `project_one` claims at most one partition head, validates each exact route/contract with the mandatory host validator,
+`PgRecoveryCapture` runtime. `project_batch` reserves available runtime capacity, claims multiple
+partition heads in one provider call, and validates each exact route/contract with the mandatory host validator.
+Each admitted event runs concurrently in its own transaction. The claim deadline covers capacity
+waiting and acquisition; each event starts its own execution budget, shared by all of its substeps.
+The batch returns an identity-bearing result per event and never fails fast after claiming. Empty
+results mean no candidates. Cancelling the batch does not prove rollback or undo completed events.
+The provider
 renews both leases while running the effect, and commits the effect, Inbox receipt and source
 Outbox terminal state together. The effect uses `PgConsumerEffect`; it borrows the original
 transaction and never commits. No broker publisher receipt or second successful settlement is

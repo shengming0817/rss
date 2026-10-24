@@ -77,7 +77,7 @@ SELECT to_regclass('rss_transactional_messaging.storage_lineage') IS NOT NULL
  AND (has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(current_user,c.oid,'INSERT,UPDATE,REFERENCES'))))
  AND (NOT $1 OR NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
  WHERE n.nspname='rss_transactional_messaging' AND has_function_privilege(current_user,p.oid,'EXECUTE')
- AND p.oid NOT IN ('rss_transactional_messaging.check_execution()'::regprocedure,'rss_transactional_messaging.apply_dr(uuid,bytea,text,jsonb,jsonb,bigint)'::regprocedure,'rss_transactional_messaging.read_dr(uuid,bytea)'::regprocedure,'rss_transactional_messaging.consumer_domain_allowed(text)'::regprocedure,'rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text)'::regprocedure,'rss_transactional_messaging.projection_scope_matches(text,text)'::regprocedure)))
+ AND p.oid NOT IN ('rss_transactional_messaging.check_execution()'::regprocedure,'rss_transactional_messaging.apply_dr(uuid,bytea,text,jsonb,jsonb,bigint)'::regprocedure,'rss_transactional_messaging.read_dr(uuid,bytea)'::regprocedure,'rss_transactional_messaging.consumer_scope_domain()'::regprocedure,'rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text)'::regprocedure,'rss_transactional_messaging.projection_scope_matches(text,text)'::regprocedure)))
 
  AND NOT EXISTS(SELECT 1 FROM (VALUES ('dr_plans','target_operation','uuid'),('dr_plans','target_digest','bytea'),('dr_plans','evidence','jsonb'),('dr_members','block_reason','text')) e(relation,column_name,type_name)
  LEFT JOIN pg_attribute a ON a.attrelid=to_regclass('rss_transactional_messaging.'||e.relation) AND a.attname=e.column_name AND NOT a.attisdropped

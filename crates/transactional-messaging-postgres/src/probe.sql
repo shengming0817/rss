@@ -33,7 +33,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_tenant', ARRAY[0]::oid[], value, true FROM tenant_predicate
  UNION ALL SELECT 'rss_transactional_messaging.outbox_partitions'::regclass, 'outbox_partition_tenant', ARRAY[0]::oid[], value, true FROM tenant_predicate
  UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_relay', ARRAY[oid], 'true', true FROM relay_role
- UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_consumer_scope', ARRAY[0]::oid[], 'rss_transactional_messaging.consumer_domain_allowed(domain)', false
+ UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_consumer_scope', ARRAY[0]::oid[], '((domain = ( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain)) IS NOT FALSE)', false
  UNION ALL SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_consumer_scope', ARRAY[0]::oid[], 'rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)', false
 ), actual_policies AS (
  SELECT * FROM pg_policy WHERE polrelid IN ('rss_transactional_messaging.inbox'::regclass, 'rss_transactional_messaging.outbox'::regclass, 'rss_transactional_messaging.outbox_partitions'::regclass)

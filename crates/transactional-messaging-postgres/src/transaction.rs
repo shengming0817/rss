@@ -312,6 +312,16 @@ pub(crate) enum Profile {
 }
 
 impl PgRuntime {
+    /// Verify that a borrowed transaction is live and belongs to this exact runtime instance.
+    /// No connection, pool, or transferable admission token is exposed.
+    pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
+        tx.check_scope()?;
+        if !tx.belongs_to(self) {
+            return Err(PgError::invariant());
+        }
+        Ok(())
+    }
+
     /// Connect and validate only this package's schema and effective permissions.
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,

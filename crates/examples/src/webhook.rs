@@ -10,7 +10,7 @@ use rss_transactional_messaging::{
 use rss_transactional_messaging_postgres::{
     PgConfig, PgOutboxStore, PgPassword, PgPrivateCa, PgRuntime,
 };
-use rss_transactional_messaging_runtime::relay::{RelayBatchLimit, relay_once};
+use rss_transactional_messaging_runtime::relay::relay_once;
 use rss_transactional_messaging_webhook::*;
 use std::{
     num::NonZeroUsize,
@@ -173,14 +173,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     let publisher = WebhookPublisher::new(input.endpoint, Timer, Timer, limits()?);
-    let report = relay_once(
-        &*store,
-        &publisher,
-        &Timer,
-        &Emitter,
-        RelayBatchLimit::new(NonZeroUsize::MIN)?,
-    )
-    .await?;
+    let report = relay_once(&*store, &publisher, &Timer, &Emitter, NonZeroUsize::MIN).await?;
     anyhow::ensure!(report.claimed() == 1, "expected one claimed delivery");
     // The fixture independently asserts the received signature and durable published status.
     runtime.close().await;

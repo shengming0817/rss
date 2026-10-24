@@ -5,8 +5,11 @@ use crate::{
     PgConsumerEffect, PgConsumerEffectFailure, PgError, PgInboxClaim, PgInboxStore, PgOutboxClaim,
     PgOutboxStore, PgRecoveryCapture, PgRuntime, PgTransaction,
 };
+use futures::{StreamExt, stream::FuturesUnordered};
 use rss_data_protection::Aead;
+use rss_request_context::TenantId;
 use rss_request_context::{Deadline, ExecutionTimer};
+use rss_transactional_messaging::message::MessageId;
 use rss_transactional_messaging::{
     error::MessagingError,
     inbox::{ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
@@ -19,7 +22,7 @@ use rss_transactional_messaging::{
     },
 };
 use sqlx::Row;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 /// A local terminal result, minted only from acknowledged commit or matching durable facts.
 pub struct PgProjectionReceipt {
@@ -63,8 +66,6 @@ impl PgProjectionAttempt {
 
 /// Scheduling result of one bounded local delivery. Transaction semantics remain core-owned.
 pub enum PgProjectionOutcome {
-    /// No source partition head was claimable.
-    Empty,
     /// Another live Inbox owner prevents this attempt.
     InProgress,
     /// A consumer transaction ran; inspect every canonical outcome before using recovery.
@@ -73,6 +74,28 @@ pub enum PgProjectionOutcome {
     DeliveryExpired,
     /// Invalid ingress was retained in the source Outbox as a dead letter, without running effect.
     Rejected(EnvelopeValidationFailure),
+}
+
+/// Identity and independent result of one event in a claimed batch.
+/// A failed sibling never erases this event's acknowledged or uncertain transaction facts.
+pub struct PgProjectionItem {
+    tenant: TenantId,
+    message_id: MessageId,
+    outcome: Result<PgProjectionOutcome, PgError>,
+}
+impl PgProjectionItem {
+    /// Tenant of the original source event.
+    pub const fn tenant_id(&self) -> TenantId {
+        self.tenant
+    }
+    /// Stable source identity, including when execution failed before a consumer transaction.
+    pub fn message_id(&self) -> &MessageId {
+        &self.message_id
+    }
+    /// Consume the independent result and its canonical recovery identity, when an attempt ran.
+    pub fn into_outcome(self) -> Result<PgProjectionOutcome, PgError> {
+        self.outcome
+    }
 }
 
 /// Fixed-domain local projection with protected rejection capture and a single runtime owner.
@@ -164,29 +187,72 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         self.outbox.has_dead_letters(deadline).await
     }
 
-    /// Claim and project at most one partition head under one absolute deadline.
-    /// The host can call this concurrently with a fixed bound; no task is spawned internally.
-    pub async fn project_one<V: IngressValidator<Vec<u8>>>(
+    /// Claim once up to the currently available runtime capacity, then settle each event independently.
+    /// Claim waiting has its own deadline. Each event receives a fresh execution budget when it starts;
+    /// substeps share that event's absolute cutoff. Results are returned in completion order.
+    /// No tasks are spawned. Dropping this future does not prove rollback: durable leases and receipts
+    /// remain authoritative after cancellation. A single event failure never discards other results.
+    pub async fn project_batch<V: IngressValidator<Vec<u8>>>(
         &self,
         validator: &V,
-        deadline: OperationDeadline,
-    ) -> Result<PgProjectionOutcome, PgError> {
-        let cutoff = Deadline::from_timeout(&self.runtime.timer, deadline.timeout())
+        limit: NonZeroUsize,
+        claim_deadline: OperationDeadline,
+        execution_budget: Duration,
+    ) -> Result<Vec<PgProjectionItem>, PgError> {
+        if execution_budget.is_zero() {
+            return Err(PgError::invariant());
+        }
+        Deadline::from_timeout(&self.runtime.timer, execution_budget)
             .map_err(|_| PgError::invariant())?;
-        let _slot = within(&self.runtime.timer, cutoff, |_| {
+        let cutoff = Deadline::from_timeout(&self.runtime.timer, claim_deadline.timeout())
+            .map_err(|_| PgError::invariant())?;
+        let first = within(&self.runtime.timer, cutoff, |_| {
             self.runtime.projection_slots.acquire()
         })
         .await?
         .map_err(|_| PgError::invariant())?;
-        let mut claims = self
+        let mut permits = vec![first];
+        while permits.len() < limit.get() {
+            let Ok(permit) = self.runtime.projection_slots.try_acquire() else {
+                break;
+            };
+            permits.push(permit);
+        }
+        let capacity = NonZeroUsize::new(permits.len()).ok_or_else(PgError::invariant)?;
+        let claims = self
             .outbox
-            .claim_partition_heads(NonZeroUsize::MIN, remaining(self, cutoff))
+            .claim_partition_heads(capacity, remaining(self, cutoff))
             .await
-            .map_err(pg)?
-            .into_iter();
-        let Some(source) = claims.next() else {
-            return Ok(PgProjectionOutcome::Empty);
-        };
+            .map_err(pg)?;
+        permits.truncate(claims.len());
+        let pending = FuturesUnordered::new();
+        for (source, permit) in claims.into_iter().zip(permits) {
+            pending.push(async move {
+                let _permit = permit;
+                let message = PgOutboxStore::<()>::message(&source).envelope();
+                let tenant = message.metadata().tenant_id();
+                let message_id = message.id().clone();
+                let outcome = self
+                    .project_claimed(validator, source, execution_budget)
+                    .await;
+                PgProjectionItem {
+                    tenant,
+                    message_id,
+                    outcome,
+                }
+            });
+        }
+        Ok(pending.collect().await)
+    }
+
+    async fn project_claimed<V: IngressValidator<Vec<u8>>>(
+        &self,
+        validator: &V,
+        source: PgOutboxClaim,
+        budget: Duration,
+    ) -> Result<PgProjectionOutcome, PgError> {
+        let cutoff = Deadline::from_timeout(&self.runtime.timer, budget)
+            .map_err(|_| PgError::invariant())?;
         if matches!(self.outbox.lease_status(&source, remaining(self, cutoff)).await.map_err(pg)?,
             OutboxLeaseStatus::Held { delivery_remaining: Some(time), .. } if time.is_zero())
         {
@@ -278,12 +344,26 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         );
         if retry {
             // Confirmed rollback permits retry; expired authority is left to durable recovery.
-            ignore_lost(self.inbox.release(claim, remaining(self, cutoff)).await)?;
-            ignore_lost(
+            if let Err(error) =
+                ignore_lost(self.inbox.release(claim, remaining(self, cutoff)).await)
+            {
+                tracing::warn!(
+                    phase = "projection_inbox_release",
+                    kind = error.kind().as_label(),
+                    "projection cleanup failed; canonical outcome retained"
+                );
+            }
+            if let Err(error) = ignore_lost(
                 self.outbox
                     .settle(source, OutboxSettlement::Retry, remaining(self, cutoff))
                     .await,
-            )?;
+            ) {
+                tracing::warn!(
+                    phase = "projection_outbox_release",
+                    kind = error.kind().as_label(),
+                    "projection cleanup failed; canonical outcome retained"
+                );
+            }
         }
         Ok(PgProjectionOutcome::Attempt(Box::new(
             PgProjectionAttempt { outcome, recovery },

@@ -11,7 +11,7 @@ use rss_transactional_messaging::{
 use rss_transactional_messaging_postgres::{
     PgConfig, PgOutboxStore, PgPassword, PgPrivateCa, PgRuntime,
 };
-use rss_transactional_messaging_runtime::relay::{RelayBatchLimit, relay_once};
+use rss_transactional_messaging_runtime::relay::relay_once;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -156,7 +156,7 @@ impl Database {
             publisher,
             &self.timer,
             &Emitter,
-            RelayBatchLimit::new(NonZeroUsize::MIN)?,
+            NonZeroUsize::MIN,
         )
         .await?;
         assert_eq!(report.claimed(), 1);

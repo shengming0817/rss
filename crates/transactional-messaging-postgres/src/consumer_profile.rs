@@ -5,15 +5,20 @@ pub(crate) async fn verify_scope(
     runtime: &crate::PgRuntime,
     cutoff: rss_request_context::Deadline,
 ) -> Result<(), PgError> {
-    let bodies: Vec<_> = include_str!("../migrations/0012_scope_local_projection.sql")
-        .split("$f$")
-        .collect();
+    let scope = function_body(
+        include_str!("../migrations/0013_batch_projection_candidates.sql"),
+        "consumer_scope_domain",
+    )?;
+    let original = include_str!("../migrations/0012_scope_local_projection.sql");
+    let inbox = function_body(original, "consumer_inbox_allowed")?;
+    let matches = function_body(original, "projection_scope_matches")?;
+    let dr = function_body(original, "local_projection_dr_status")?;
     let valid = rss_transactional_messaging::policy::within(&runtime.timer, cutoff, |_| async {
         sqlx::query_scalar::<_, bool>(include_str!("consumer_scope_probe.sql"))
-            .bind(bodies[1])
-            .bind(bodies[3])
-            .bind(bodies[5])
-            .bind(bodies[7])
+            .bind(scope)
+            .bind(inbox)
+            .bind(matches)
+            .bind(dr)
             .fetch_one(&runtime.pool)
             .await
     })
@@ -66,4 +71,12 @@ pub async fn grant_consumer(
         .execute(connection)
         .await?;
     Ok(())
+}
+
+fn function_body<'a>(sql: &'a str, name: &str) -> Result<&'a str, PgError> {
+    sql.split_once(&format!("FUNCTION rss_transactional_messaging.{name}("))
+        .and_then(|(_, definition)| definition.split_once("AS $f$"))
+        .and_then(|(_, body)| body.split_once("$f$;"))
+        .map(|(body, _)| body)
+        .ok_or_else(PgError::invariant)
 }

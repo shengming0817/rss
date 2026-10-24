@@ -380,9 +380,6 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         let count = i32::try_from(limit.get()).map_err(|_| PgError::invariant().port())?;
-        if count > 64 {
-            return Err(PgError::invariant().port());
-        }
         let ttl = self.lease_ms;
         let mut admitted = false;
         let tenants = self.writer.runtime.binding.tenants();

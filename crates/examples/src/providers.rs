@@ -23,7 +23,7 @@ use rss_transactional_messaging_postgres::{
 };
 use rss_transactional_messaging_runtime::{
     consumer::{ConsumerExecution, ProcessingDisposition, consume_once},
-    relay::{RelayBatchLimit, relay_once},
+    relay::relay_once,
 };
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -406,7 +406,7 @@ async fn transfer(
         publisher,
         timer,
         &Observations,
-        RelayBatchLimit::new(NonZeroUsize::MIN)?,
+        NonZeroUsize::MIN,
     )
     .await?;
     assert_eq!(report.published(), 1);
@@ -449,7 +449,7 @@ async fn transfer(
             publisher,
             timer,
             &Observations,
-            RelayBatchLimit::new(NonZeroUsize::MIN)?
+            NonZeroUsize::MIN
         )
         .await?
         .claimed(),
