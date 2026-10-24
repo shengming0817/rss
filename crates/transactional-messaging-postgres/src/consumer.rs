@@ -104,6 +104,8 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>> 
             intent,
             deadline,
             None,
+            #[cfg(feature = "integration")]
+            None,
         )
         .await
     }
@@ -126,6 +128,7 @@ pub(crate) async fn execute_transaction<
     intent: ReceiptIntent,
     deadline: OperationDeadline,
     source: Option<(&crate::PgOutboxStore<()>, &crate::PgOutboxClaim)>,
+    #[cfg(feature = "integration")] injection: Option<crate::transaction::TransactionInjection>,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
     let timer = &runtime.timer;
     let cutoff = match Deadline::from_timeout(timer, deadline.timeout()) {
@@ -136,7 +139,10 @@ pub(crate) async fn execute_transaction<
         timer,
         cutoff,
         LocalTxDeadlineStage::Acquire,
-        runtime.acquire(),
+        runtime.acquire_for_transaction(
+            #[cfg(feature = "integration")]
+            injection,
+        ),
     )
     .await
     {

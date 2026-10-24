@@ -16,8 +16,8 @@ mod projection;
 mod transaction;
 #[cfg(feature = "recovery")]
 pub use projection::{
-    PgLocalProjection, PgProjectionAttempt, PgProjectionOutcome, PgProjectionReceipt,
-    PgProjectionRecovery,
+    PgLocalProjection, PgProjectionAttempt, PgProjectionItem, PgProjectionOutcome,
+    PgProjectionReceipt, PgProjectionRecovery,
 };
 
 pub use config::{PgConfig, PgPassword, PgPrivateCa, PgPrivateCaError};
@@ -50,7 +50,8 @@ pub const MIGRATION_SQL: &str = concat!(
     include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
     include_str!("../migrations/0010_verify_outbox_message_contract.sql"),
     include_str!("../migrations/0011_share_outbox_wakeup_candidates.sql"),
-    include_str!("../migrations/0012_scope_local_projection.sql")
+    include_str!("../migrations/0012_scope_local_projection.sql"),
+    include_str!("../migrations/0013_batch_projection_candidates.sql")
 );
 /// One-way upgrade from the original component schema; executed only by the external migrator.
 pub const RECOVERY_UPGRADE_SQL: &str = concat!(
@@ -68,7 +69,8 @@ pub const RECOVERY_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
     include_str!("../migrations/0010_verify_outbox_message_contract.sql"),
     include_str!("../migrations/0011_share_outbox_wakeup_candidates.sql"),
-    include_str!("../migrations/0012_scope_local_projection.sql")
+    include_str!("../migrations/0012_scope_local_projection.sql"),
+    include_str!("../migrations/0013_batch_projection_candidates.sql")
 );
 #[cfg(feature = "recovery")]
 mod recovery;
@@ -87,7 +89,8 @@ pub const ARCHIVE_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
     include_str!("../migrations/0010_verify_outbox_message_contract.sql"),
     include_str!("../migrations/0011_share_outbox_wakeup_candidates.sql"),
-    include_str!("../migrations/0012_scope_local_projection.sql")
+    include_str!("../migrations/0012_scope_local_projection.sql"),
+    include_str!("../migrations/0013_batch_projection_candidates.sql")
 );
 #[cfg(feature = "recovery")]
 mod archive;
@@ -101,7 +104,8 @@ pub const DR_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
     include_str!("../migrations/0010_verify_outbox_message_contract.sql"),
     include_str!("../migrations/0011_share_outbox_wakeup_candidates.sql"),
-    include_str!("../migrations/0012_scope_local_projection.sql")
+    include_str!("../migrations/0012_scope_local_projection.sql"),
+    include_str!("../migrations/0013_batch_projection_candidates.sql")
 );
 #[cfg(feature = "recovery")]
 mod dr;
@@ -114,12 +118,18 @@ pub const OUTBOX_PARTITION_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0009_allocate_outbox_partitions.sql"),
     include_str!("../migrations/0010_verify_outbox_message_contract.sql"),
     include_str!("../migrations/0011_share_outbox_wakeup_candidates.sql"),
-    include_str!("../migrations/0012_scope_local_projection.sql")
+    include_str!("../migrations/0012_scope_local_projection.sql"),
+    include_str!("../migrations/0013_batch_projection_candidates.sql")
 );
 
 /// Replace the unverified SQL writer with the core message byte contract; requires an empty Outbox.
 pub const OUTBOX_MESSAGE_UPGRADE_SQL: &str = concat!(
     include_str!("../migrations/0010_verify_outbox_message_contract.sql"),
     include_str!("../migrations/0011_share_outbox_wakeup_candidates.sql"),
-    include_str!("../migrations/0012_scope_local_projection.sql")
+    include_str!("../migrations/0012_scope_local_projection.sql"),
+    include_str!("../migrations/0013_batch_projection_candidates.sql")
 );
+
+/// One-way upgrade from the local-projection schema installed through migration 0012.
+pub const BATCH_PROJECTION_UPGRADE_SQL: &str =
+    include_str!("../migrations/0013_batch_projection_candidates.sql");

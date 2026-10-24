@@ -2,7 +2,7 @@
 
 PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` schema 和调用方配置好的 SQLx `PgPool`；不依赖消息数据库安装。
 
-`PgStore::new(pool, control)` 验证组件版本、必要结构、FORCE RLS、函数实现和运行角色。实际操作在租户事务内重新校验 canonical admission，构造后权限或 DDL 漂移会拒绝业务回调并隔离连接。空领取扫描先核对当前角色、ACL、FORCE RLS 和精确租户策略，再只读发现到期候选；没有候选时不检查完整函数体和结构。有候选才完整准入并重新领取。纯结构漂移可在空闲期延后发现，但不得越过实际领取或业务操作；通知和空结果均不授予执行权。它接管 pool 生命周期，`close(control)` 关闭该 pool 及其 clones 的 admission，并有界 drain；调用方先停止/join worker。连接的 TLS、凭据和认证由调用方配置。
+`PgStore::new(pool, control)` 一次验证组件版本、必要结构、FORCE RLS、函数实现和运行角色，并记录实际连接身份。业务操作只校验连接身份、绑定租户和 claim/lease/epoch，不重新扫描 catalog。受控 schema/ACL 变更必须先停流、排空、迁移，再重新构造 store；已准入对象不承诺即时发现带外 DDL 漂移。它接管 pool 生命周期，`close(control)` 关闭该 pool 及其 clones 并有界 drain；调用方先停止/join worker。TLS、凭据和认证由调用方配置。
 
 ## 安装与存储责任
 
@@ -44,9 +44,9 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 ## 可选消息组合
 
-开启 `transactional-messaging` 才引入消息 core/PG 依赖。`messaging::protect` 和 `messaging::wake_with` 接受现有 `PgRuntime` 与显式 context，回调取得同一个消息 `PgTransaction`。仅追加消息时，使用共享 runtime 与 domain 构造 `PgOutboxWriter`，在回调中通过 `OutboxWriter::append` 写入，无需 receipt 类型或投递预算。确实同时承担投递的消费者才组合使用 `PgOutboxStore<R>`。Reconcile 校验、业务 SQL、canonical Outbox 和调度状态同事务；消息 runtime 唯一拥有结算。它们返回 `LocalTxAttempt`，必须穷尽区分 committed、not-started、rolled-back、fenced、rollback-failed、commit-unknown。
+开启 `transactional-messaging` 才引入消息 core/PG 依赖。`PgMessagingStore::new(runtime, tenant, deadline)` 在实际消息 runtime 上完成一次完整准入；其 `protect` 和 `wake_with` 方法接受显式 context，回调取得同一个消息 `PgTransaction`。仅追加消息时，使用共享 runtime 与 domain 构造 `PgOutboxWriter`，在回调中通过 `OutboxWriter::append` 写入，无需 receipt 类型或投递预算。确实同时承担投递的消费者才组合使用 `PgOutboxStore<R>`。Reconcile 校验、业务 SQL、canonical Outbox 和调度状态同事务；消息 runtime 唯一拥有结算。它们返回 `LocalTxAttempt`，必须穷尽区分 committed、not-started、rolled-back、fenced、rollback-failed、commit-unknown。
 
-`messaging::protect_in` 借用调用方已经打开的 `PgTransaction`，供宿主先取得 Audit/Ledger 等上层锁，再锁 claim、执行业务并标记 Applied。它继承原连接和剩余预算，不改会话、不取得第二连接、不接管提交；成功只是 staged，错误必须交回原 owner 回滚。独立 `protect` 与该接口共用同一 claim 校验及写入实现。`messaging::wake_in` 对称地在已有事务内登记 wake 并执行回调，与独立 `wake_with` 共用准入和 wake SQL，适用于上层锁必须先于调度目标锁的原子业务提交。
+`PgMessagingStore::protect_in` 借用调用方已经打开的 `PgTransaction`，供宿主先取得 Audit/Ledger 等上层锁，再锁 claim、执行业务并标记 Applied。它首先验证事务属于构造时绑定的同一 runtime，并核对实际连接身份；随后继承原连接和剩余预算，不改会话、不取得第二连接、不接管提交；成功只是 staged，错误必须交回原 owner 回滚。独立 `protect` 与该接口共用同一 claim 校验及写入实现。`PgMessagingStore::wake_in` 对称地在已有事务内登记 wake 并执行回调，与独立 `wake_with` 共用准入和 wake SQL，适用于上层锁必须先于调度目标锁的原子业务提交。
 
 消息模式需安装原消息 schema，并向同一 runtime 角色授予本组件最小权限。与默认路径共用本组件 SQL 和 fencing；不复制 Outbox/Inbox，不修改消息引擎依赖方向。回调的 context 可以直接借用业务字段，和 transaction 一起重借；不要求为借用额外包装 Arc。
 

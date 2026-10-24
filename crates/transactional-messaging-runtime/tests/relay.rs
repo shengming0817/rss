@@ -32,9 +32,7 @@ use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
     Publisher,
 };
-use rss_transactional_messaging_runtime::relay::{
-    RelayBatchLimit, RelayConfig, RelayConfigError, RelayWorker, relay_once,
-};
+use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWorker, relay_once};
 use rss_transactional_messaging_testkit::memory::{
     FakeClock, MemoryPublisher as ScriptedPublisher,
 };
@@ -166,8 +164,8 @@ fn budget() -> DeliveryBudget {
     .expect("budget")
 }
 
-fn limit() -> RelayBatchLimit {
-    RelayBatchLimit::new(NonZeroUsize::MIN).expect("limit")
+fn limit() -> NonZeroUsize {
+    NonZeroUsize::MIN
 }
 
 fn message() -> PendingMessage<Vec<u8>> {
@@ -255,7 +253,7 @@ async fn relay_once_dispatches_claimed_batch_concurrently_with_hard_limit() {
                 publisher.as_ref(),
                 &FakeClock::new(),
                 &NoopEmitter,
-                RelayBatchLimit::new(NonZeroUsize::new(2).expect("limit")).expect("bounded"),
+                NonZeroUsize::new(2).expect("limit"),
             )
             .await
         }
@@ -295,7 +293,7 @@ async fn provider_cannot_return_more_claims_than_the_admitted_bound() {
         &publisher,
         &FakeClock::new(),
         &NoopEmitter,
-        RelayBatchLimit::new(NonZeroUsize::new(2).expect("limit")).expect("bounded"),
+        NonZeroUsize::new(2).expect("limit"),
     )
     .await
     .expect_err("provider over-return must fail closed");
@@ -340,14 +338,6 @@ async fn relay_deadline_overflow_emits_a_closed_failure_phase() {
             kind: MessagingErrorKind::Invariant,
         }
     ));
-}
-
-#[test]
-fn relay_limit_cannot_exceed_the_public_hard_bound() {
-    assert_eq!(
-        RelayBatchLimit::new(NonZeroUsize::new(65).expect("non-zero")),
-        Err(RelayConfigError::MaxInFlightExceeded)
-    );
 }
 
 struct AuditedStore {
@@ -460,7 +450,7 @@ async fn relay_drains_partial_failures_and_returns_first_error_in_claim_order() 
         &AuditedPublisher(Arc::clone(&events)),
         &FakeClock::new(),
         &RecordingEmitter(Arc::clone(&observations)),
-        RelayBatchLimit::new(NonZeroUsize::new(3).expect("non-zero")).expect("limit"),
+        NonZeroUsize::new(3).expect("non-zero"),
     )
     .await
     .expect_err("two settlements fail");

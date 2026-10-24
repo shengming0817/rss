@@ -5,7 +5,7 @@ use rss_transactional_messaging::{
     outbox::*,
     transport::PublishOutcome,
 };
-use rss_transactional_messaging_runtime::relay::{RelayBatchLimit, relay_once};
+use rss_transactional_messaging_runtime::relay::relay_once;
 use rss_transactional_messaging_testkit::memory::MemoryPublisher;
 struct Emitter;
 impl TransactionalMessagingEmitter for Emitter {
@@ -76,7 +76,7 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
             &publisher,
             &Timer::new(),
             &Emitter,
-            RelayBatchLimit::new(std::num::NonZeroUsize::MIN)?,
+            std::num::NonZeroUsize::MIN,
         )
         .await?;
         assert_eq!(report.claimed(), 1);

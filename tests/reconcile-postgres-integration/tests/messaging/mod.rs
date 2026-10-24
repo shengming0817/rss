@@ -79,6 +79,7 @@ pub async fn run(
         wake_failure(&runtime, owner, c, unknown).await?;
     }
     borrowed_scope_rejected(store, &runtime, c).await?;
+    foreign_runtime_rejected(&runtime, fixture, c).await?;
     runtime.close().await;
     Ok(())
 }
@@ -101,6 +102,14 @@ async fn scenario(
     c: &Control<'_, Clock>,
     borrowed: bool,
 ) -> anyhow::Result<()> {
+    let composition = rss_reconcile_postgres::PgMessagingStore::new(
+        runtime.clone(),
+        TenantId::parse(TENANT)?,
+        rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+            Duration::from_secs(5),
+        ),
+    )
+    .await?;
     let id = format!("message-{mode}-{borrowed}");
     let t = target(&id, TENANT)?;
     store.wake(&t, c).await?;
@@ -165,8 +174,15 @@ async fn scenario(
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                     c.remaining(),
                 ),
-                (&claim, &t, Some(callback), ledger_request, ledger::auth()?),
-                |(claim, target, callback, request, auth), tx| {
+                (
+                    &composition,
+                    &claim,
+                    &t,
+                    Some(callback),
+                    ledger_request,
+                    ledger::auth()?,
+                ),
+                |(composition, claim, target, callback, request, auth), tx| {
                     Box::pin(async move {
                         rss_ledger_postgres::lock_head_in(tx, auth.clone(), request.ledger())
                             .await
@@ -175,11 +191,9 @@ async fn scenario(
                             .take()
                             .ok_or_else(|| PgError::from(sqlx::Error::RowNotFound))?;
                         if borrowed_wake {
-                            rss_reconcile_postgres::messaging::wake_in(tx, target, (), callback)
-                                .await?;
+                            composition.wake_in(tx, target, (), callback).await?;
                         } else {
-                            rss_reconcile_postgres::messaging::protect_in(tx, claim, (), callback)
-                                .await?;
+                            composition.protect_in(tx, claim, (), callback).await?;
                         }
                         if outer_rollback {
                             return Err(PgError::from(sqlx::Error::RowNotFound));
@@ -190,9 +204,9 @@ async fn scenario(
             )
             .await
     } else if mode == "wake" {
-        rss_reconcile_postgres::messaging::wake_with(runtime, &t, c, (), callback).await
+        composition.wake_with(&t, c, (), callback).await
     } else {
-        rss_reconcile_postgres::messaging::protect(runtime, &claim, c, (), callback).await
+        composition.protect(&claim, c, (), callback).await
     };
     let status = result.fold(
         |()| "committed",
@@ -268,6 +282,14 @@ async fn wake_failure(
     c: &Control<'_, Clock>,
     unknown: bool,
 ) -> anyhow::Result<()> {
+    let composition = rss_reconcile_postgres::PgMessagingStore::new(
+        runtime.clone(),
+        TenantId::parse(TENANT)?,
+        rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+            Duration::from_secs(5),
+        ),
+    )
+    .await?;
     struct Audit {
         id: String,
     }
@@ -280,8 +302,8 @@ async fn wake_failure(
     if unknown {
         runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     }
-    let result =
-        rss_reconcile_postgres::messaging::wake_with(runtime, &t, c, &audit, move |audit, tx| {
+    let result = composition
+        .wake_with(&t, c, &audit, move |audit, tx| {
             Box::pin(async move {
                 let id = audit.id.clone();
                 let tenant = tx.tenant_id().to_string();
@@ -324,10 +346,18 @@ async fn wake_failure(
 
 async fn borrowed_scope_rejected(
     store: &PgStore,
-    runtime: &PgRuntime,
+    runtime: &Arc<PgRuntime>,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
+    let composition = rss_reconcile_postgres::PgMessagingStore::new(
+        runtime.clone(),
+        TenantId::parse(TENANT)?,
+        rss_transactional_messaging::policy::OperationDeadline::from_remaining(
+            Duration::from_secs(5),
+        ),
+    )
+    .await?;
     let target = target("borrowed-cross-tenant", TENANT)?;
     store.wake(&target, control).await?;
     let claim = claim(store, &target, Duration::from_secs(3), control).await?;
@@ -339,35 +369,27 @@ async fn borrowed_scope_rejected(
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                     control.remaining(),
                 ),
-                (&claim, &entered),
-                |(claim, entered), tx| {
+                (&composition, &claim, &entered),
+                |(composition, claim, entered), tx| {
                     Box::pin(async move {
                         if wake {
-                            return rss_reconcile_postgres::messaging::wake_in(
-                                tx,
-                                claim.target(),
-                                entered,
-                                |entered, _| {
+                            return composition
+                                .wake_in(tx, claim.target(), entered, |entered, _| {
                                     Box::pin(async move {
                                         entered.store(true, Ordering::SeqCst);
                                         Ok(())
                                     })
-                                },
-                            )
-                            .await;
+                                })
+                                .await;
                         }
-                        rss_reconcile_postgres::messaging::protect_in(
-                            tx,
-                            claim,
-                            entered,
-                            |entered, _| {
+                        composition
+                            .protect_in(tx, claim, entered, |entered, _| {
                                 Box::pin(async move {
                                     entered.store(true, Ordering::SeqCst);
                                     Ok(())
                                 })
-                            },
-                        )
-                        .await
+                            })
+                            .await
                     })
                 },
             )
@@ -383,5 +405,68 @@ async fn borrowed_scope_rejected(
         assert!(rejected);
         assert!(!entered.load(Ordering::SeqCst));
     }
+    Ok(())
+}
+
+async fn foreign_runtime_rejected(
+    runtime: &Arc<PgRuntime>,
+    fixture: &testkit::PgTlsFixture,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    use rss_transactional_messaging::policy::OperationDeadline;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let p = fixture.params();
+    let other = Arc::new(
+        PgRuntime::connect(
+            PgConfig::new(
+                &p.host,
+                p.port,
+                &p.database,
+                "reconcile_runtime",
+                PgPassword::new("fixture-only"),
+                PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
+            ),
+            MClock(Clock::new()),
+            fence_fixture::binding(),
+        )
+        .await?,
+    );
+    let composition = rss_reconcile_postgres::PgMessagingStore::new(
+        runtime.clone(),
+        TenantId::parse(TENANT)?,
+        OperationDeadline::from_remaining(control.remaining()),
+    )
+    .await?;
+    let entered = AtomicBool::new(false);
+    let target = target("foreign-runtime", TENANT)?;
+    let attempt = other
+        .local_tx_with_context(
+            TenantId::parse(TENANT)?,
+            OperationDeadline::from_remaining(control.remaining()),
+            (&composition, &entered, &target),
+            |(composition, entered, target), tx| {
+                Box::pin(async move {
+                    composition
+                        .wake_in(tx, target, entered, |entered, _| {
+                            Box::pin(async move {
+                                entered.store(true, Ordering::SeqCst);
+                                Ok(())
+                            })
+                        })
+                        .await
+                })
+            },
+        )
+        .await;
+    assert!(attempt.fold(
+        |_| false,
+        |_| false,
+        |_| true,
+        |_| false,
+        |_| false,
+        |_| false
+    ));
+    assert!(!entered.load(Ordering::SeqCst));
+    other.close().await;
     Ok(())
 }

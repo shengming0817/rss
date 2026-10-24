@@ -5,28 +5,42 @@ use sqlx::{PgConnection, PgPool, Row};
 const RUNTIME: &str = include_str!("runtime-admission.sql");
 const STRUCTURE: &str = include_str!("structure-admission.sql");
 
-#[derive(Clone, Copy)]
-pub(crate) enum Admission {
-    Full,
-    Discovery,
+#[derive(Clone)]
+pub(crate) struct Identity {
+    pub(crate) login: String,
+    pub(crate) role: String,
+    pub(crate) database: String,
 }
-impl Admission {
-    pub(crate) async fn validate(self, conn: &mut PgConnection) -> Result<(), Error> {
-        validate_runtime(conn).await?;
-        match self {
-            Self::Full => validate_structure(conn).await,
-            // A discovery transaction cannot return authority or invoke a business callback.
-            Self::Discovery => Ok(()),
+impl Identity {
+    #[cfg(feature = "transactional-messaging")]
+    pub(crate) async fn validate(&self, conn: &mut PgConnection) -> Result<(), Error> {
+        let valid: bool = sqlx::query_scalar("SELECT session_user::text=$1 AND current_user::text=$2 AND current_database()::text=$3")
+            .bind(&self.login).bind(&self.role).bind(&self.database)
+            .fetch_one(conn).await.map_err(crate::transaction::map_sql)?;
+        if valid {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::StorageContract))
         }
     }
 }
-
-pub(crate) async fn validate(pool: &PgPool) -> Result<(), Error> {
+pub(crate) async fn validate(pool: &PgPool) -> Result<Identity, Error> {
     let mut conn = pool.acquire().await.map_err(crate::transaction::map_sql)?;
     validate_connection(&mut conn).await
 }
-pub(crate) async fn validate_connection(conn: &mut PgConnection) -> Result<(), Error> {
-    Admission::Full.validate(conn).await
+pub(crate) async fn validate_connection(conn: &mut PgConnection) -> Result<Identity, Error> {
+    validate_runtime(conn).await?;
+    validate_structure(conn).await?;
+    let (login, role, database) =
+        sqlx::query_as("SELECT session_user::text,current_user::text,current_database()::text")
+            .fetch_one(conn)
+            .await
+            .map_err(crate::transaction::map_sql)?;
+    Ok(Identity {
+        login,
+        role,
+        database,
+    })
 }
 async fn check(conn: &mut PgConnection, sql: &'static str) -> Result<(), Error> {
     let safe = sqlx::query_scalar::<_, Option<bool>>(sql)
@@ -42,7 +56,7 @@ async fn check(conn: &mut PgConnection, sql: &'static str) -> Result<(), Error> 
 async fn validate_runtime(conn: &mut PgConnection) -> Result<(), Error> {
     check(conn, RUNTIME).await
 }
-pub(crate) async fn validate_structure(conn: &mut PgConnection) -> Result<(), Error> {
+async fn validate_structure(conn: &mut PgConnection) -> Result<(), Error> {
     check(conn, STRUCTURE).await?;
     functions(conn).await
 }

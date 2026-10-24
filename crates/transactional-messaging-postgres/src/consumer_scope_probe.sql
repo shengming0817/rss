@@ -1,6 +1,6 @@
 -- Function bodies come from the single installation artifact, not a second SQL implementation.
 WITH functions(signature,body,result,retset) AS (VALUES
- ('rss_transactional_messaging.consumer_domain_allowed(text)',$1::text,'boolean'::regtype,false),
+ ('rss_transactional_messaging.consumer_scope_domain()',$1::text,'text'::regtype,false),
  ('rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text)',$2::text,'boolean'::regtype,false),
  ('rss_transactional_messaging.projection_scope_matches(text,text)',$3::text,'boolean'::regtype,false),
  ('rss_transactional_messaging.local_projection_dr_status(uuid,bigint,uuid)',$4::text,'record'::regtype,true)
@@ -23,7 +23,7 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
   LEFT JOIN pg_attribute a ON a.attrelid='rss_transactional_messaging.consumer_scope'::regclass AND a.attname=e.name AND NOT a.attisdropped
   WHERE a.attnum IS NULL OR NOT a.attnotnull OR format_type(a.atttypid,a.atttypmod)<>e.type)
  AND NOT EXISTS(SELECT FROM (VALUES
-  ('outbox','outbox_consumer_scope','rss_transactional_messaging.consumer_domain_allowed(domain)'),
+  ('outbox','outbox_consumer_scope','((domain = ( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain)) IS NOT FALSE)'),
   ('inbox','inbox_consumer_scope','rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)'),
   ('consumer_dead_letter','dead_letter_consumer_scope','rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)')
  ) e(relation,name,predicate) LEFT JOIN pg_policy p ON p.polrelid=to_regclass('rss_transactional_messaging.'||e.relation) AND p.polname=e.name

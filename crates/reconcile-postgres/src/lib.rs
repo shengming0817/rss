@@ -1,7 +1,9 @@
 //! Independent PostgreSQL durable reconciliation with optional atomic messaging.
 #![forbid(unsafe_code)]
 #[cfg(feature = "transactional-messaging")]
-pub mod messaging;
+mod messaging;
+#[cfg(feature = "transactional-messaging")]
+pub use messaging::PgMessagingStore;
 mod probe;
 mod store;
 mod transaction;

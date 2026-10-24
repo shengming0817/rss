@@ -130,34 +130,41 @@ async fn guarded(
     hold: Option<(Arc<Notify>, Arc<Notify>)>,
     budget: Duration,
 ) -> anyhow::Result<&'static str> {
+    let composition = rss_reconcile_postgres::PgMessagingStore::new(
+        runtime.clone(),
+        TenantId::parse(TENANT)?,
+        OperationDeadline::from_remaining(Duration::from_secs(5)),
+    )
+    .await?;
     let result: LocalTxAttempt<(), PgError> = runtime
         .local_tx_with_context(
             TenantId::parse(TENANT)?,
             OperationDeadline::from_remaining(budget),
-            (claim, request, hold, auth()?),
-            |(claim, request, hold, auth), tx| {
+            (&composition, claim, request, hold, auth()?),
+            |(composition, claim, request, hold, auth), tx| {
                 Box::pin(async move {
                     rss_ledger_postgres::lock_head_in(tx, auth.clone(), request.ledger())
                         .await
                         .map_err(PgError::from)?;
-                    rss_reconcile_postgres::messaging::protect_in(
-                        tx,
-                        claim.as_ref(),
-                        (request, hold, auth),
-                        |(request, hold, auth), tx| {
-                            Box::pin(async move {
-                                rss_ledger_postgres::append_in(tx, (*auth).clone(), request)
-                                    .await
-                                    .map_err(PgError::from)?;
-                                if let Some((entered, release)) = hold {
-                                    entered.notify_one();
-                                    release.notified().await;
-                                }
-                                Ok(())
-                            })
-                        },
-                    )
-                    .await
+                    composition
+                        .protect_in(
+                            tx,
+                            claim.as_ref(),
+                            (request, hold, auth),
+                            |(request, hold, auth), tx| {
+                                Box::pin(async move {
+                                    rss_ledger_postgres::append_in(tx, (*auth).clone(), request)
+                                        .await
+                                        .map_err(PgError::from)?;
+                                    if let Some((entered, release)) = hold {
+                                        entered.notify_one();
+                                        release.notified().await;
+                                    }
+                                    Ok(())
+                                })
+                            },
+                        )
+                        .await
                 })
             },
         )

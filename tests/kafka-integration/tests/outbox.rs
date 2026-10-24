@@ -11,7 +11,7 @@ use rss_transactional_messaging_kafka::{KafkaPublishReceipt, KafkaPublisher};
 use rss_transactional_messaging_postgres::{
     PgConfig, PgOutboxStore, PgPassword, PgPrivateCa, PgRuntime,
 };
-use rss_transactional_messaging_runtime::relay::{RelayBatchLimit, relay_once};
+use rss_transactional_messaging_runtime::relay::relay_once;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use std::{sync::Arc, time::Duration};
 use support::*;
@@ -169,7 +169,7 @@ async fn retry_published(
         publisher,
         &Timer::new(),
         &Emitter,
-        RelayBatchLimit::new(std::num::NonZeroUsize::MIN)?,
+        std::num::NonZeroUsize::MIN,
     )
     .await?;
     assert_eq!(report.published(), 1);
@@ -204,7 +204,7 @@ async fn first_relay(
                 &publisher,
                 &Timer::new(),
                 &Emitter,
-                RelayBatchLimit::new(std::num::NonZeroUsize::MIN)?,
+                std::num::NonZeroUsize::MIN,
             )
             .await?,
         )

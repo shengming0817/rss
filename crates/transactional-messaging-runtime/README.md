@@ -7,7 +7,7 @@ The producer side owns `relay_once`, bounded concurrent claim dispatch, publish-
 same-ID ambiguous retry, and a polling worker with skipped missed ticks. Every already claimed entry
 is drained before a batch error is returned. Cancellation stops new claims; the active batch may
 finish within the host's explicit shutdown budget. `RelayConfig` accepts polling intervals from
-100ms through 300s and a validated `RelayBatchLimit` no greater than 64; the same limit bounds both
+100ms through 300s and an explicit `NonZeroUsize` capacity; the same limit bounds both
 durable claims and concurrent publication work in the public batch API.
 Every relay store/publisher future passes through the core-owned absolute-deadline race. Publish
 timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; claim, lease and

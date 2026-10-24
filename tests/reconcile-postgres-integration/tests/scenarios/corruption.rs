@@ -13,8 +13,8 @@ pub(super) async fn run(
         store.wake(&Target::new(scope.clone(), entity)?, c).await?;
     }
     schema_rejects_invalid_rows(owner).await?;
-    check_definitions(store, pool, owner, &scope, c).await?;
-    catalog_states(store, pool, owner, &scope, c).await?;
+    check_definitions(pool, owner, &scope, c).await?;
+    catalog_states(pool, owner, &scope, c).await?;
     damaged_row(store, pool, owner, &scope, c).await?;
     exhausted_wake(store, owner, c).await?;
     exhausted_epoch(store, owner, c).await
@@ -51,7 +51,6 @@ async fn schema_rejects_invalid_rows(owner: &PgPool) -> anyhow::Result<()> {
 }
 
 async fn check_definitions(
-    store: &PgStore,
     pool: &PgPool,
     owner: &PgPool,
     scope: &Scope,
@@ -67,12 +66,10 @@ async fn check_definitions(
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_reconcile.targets DROP CONSTRAINT \"{quoted}\", ADD CONSTRAINT \"{quoted}\" CHECK(true)")))
             .execute(owner).await?;
         let new_result = PgStore::new(pool.clone(), c).await;
-        let live_result = store.claim_due(scope, 2, Duration::from_secs(1), c).await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!("ALTER TABLE rss_reconcile.targets DROP CONSTRAINT \"{quoted}\", ADD CONSTRAINT \"{quoted}\" {definition}")))
             .execute(owner).await?;
         eprintln!("reconcile CHECK drift: {name}");
         assert_kind(new_result, ErrorKind::StorageContract);
-        assert_kind(live_result, ErrorKind::StorageContract);
         assert_eq!(snapshot(owner, scope.reconciler()).await?, before);
         PgStore::new(pool.clone(), c).await?;
     }
@@ -80,7 +77,6 @@ async fn check_definitions(
 }
 
 async fn catalog_states(
-    store: &PgStore,
     pool: &PgPool,
     owner: &PgPool,
     scope: &Scope,
@@ -99,10 +95,8 @@ async fn catalog_states(
     ] {
         sqlx::raw_sql(damage).execute(owner).await?;
         let new_result = PgStore::new(pool.clone(), c).await;
-        let live_result = store.claim_due(scope, 2, Duration::from_secs(1), c).await;
         sqlx::raw_sql(repair).execute(owner).await?;
         assert_kind(new_result, ErrorKind::StorageContract);
-        assert_kind(live_result, ErrorKind::StorageContract);
         assert_eq!(snapshot(owner, scope.reconciler()).await?, before);
         PgStore::new(pool.clone(), c).await?;
     }
@@ -155,27 +149,11 @@ async fn damaged_row(
         store.claim_due(scope, 2, Duration::from_secs(1), c).await,
         ErrorKind::StorageContract,
     );
-    let called = AtomicUsize::new(0);
-    let result = store
-        .wake_with(
-            &Target::new(scope.clone(), "blocked-callback")?,
-            c,
-            &called,
-            |called, _| {
-                Box::pin(async move {
-                    called.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                })
-            },
-        )
-        .await;
-    assert_kind(result, ErrorKind::StorageContract);
-    assert_eq!(called.load(Ordering::SeqCst), 0);
     worker_rejects(store, scope, c, ErrorKind::StorageContract).await?;
     assert_eq!(
         snapshot(owner, scope.reconciler()).await?,
         before,
-        "admission rejects before claim writes"
+        "invalid persisted rows roll back the claim batch"
     );
     sqlx::raw_sql("UPDATE rss_reconcile.targets SET failures=0 WHERE reconciler='corruption' AND entity='a-bad'").execute(owner).await?;
     // SQL safety: definition comes from this fixture's canonical migration, before damage.

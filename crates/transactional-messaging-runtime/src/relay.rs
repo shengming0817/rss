@@ -25,7 +25,6 @@ use tokio::time::MissedTickBehavior;
 
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
-const MAX_IN_FLIGHT: usize = 64;
 
 /// Invalid relay loop configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -36,36 +35,13 @@ pub enum RelayConfigError {
     /// Polling slower than the supported operational ceiling delays recovery excessively.
     #[error("relay poll interval must not exceed 300s")]
     PollIntervalTooLarge,
-    /// The requested bounded concurrency exceeds the public runtime limit.
-    #[error("relay max in flight must not exceed 64")]
-    MaxInFlightExceeded,
 }
 
 /// Validated polling and backpressure configuration for one relay worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelayConfig {
     poll_interval: Duration,
-    max_in_flight: RelayBatchLimit,
-}
-
-/// Validated hard bound for both claimed entries and concurrent relay work.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RelayBatchLimit(NonZeroUsize);
-
-impl RelayBatchLimit {
-    /// Validate a public relay batch bound.
-    pub fn new(value: NonZeroUsize) -> Result<Self, RelayConfigError> {
-        if value.get() > MAX_IN_FLIGHT {
-            return Err(RelayConfigError::MaxInFlightExceeded);
-        }
-        Ok(Self(value))
-    }
-
-    /// Return the validated non-zero limit.
-    #[must_use]
-    pub const fn get(self) -> NonZeroUsize {
-        self.0
-    }
+    max_in_flight: NonZeroUsize,
 }
 
 impl RelayConfig {
@@ -82,7 +58,7 @@ impl RelayConfig {
         }
         Ok(Self {
             poll_interval,
-            max_in_flight: RelayBatchLimit::new(max_in_flight)?,
+            max_in_flight,
         })
     }
 
@@ -94,7 +70,7 @@ impl RelayConfig {
 
     /// Return the hard concurrency and claim bound.
     #[must_use]
-    pub const fn max_in_flight(self) -> RelayBatchLimit {
+    pub const fn max_in_flight(self) -> NonZeroUsize {
         self.max_in_flight
     }
 }
@@ -146,7 +122,7 @@ pub async fn relay_once<P, S, U, C, E>(
     publisher: &U,
     clock: &C,
     emitter: &E,
-    limit: RelayBatchLimit,
+    limit: NonZeroUsize,
 ) -> Result<RelayReport, MessagingError>
 where
     P: Sync,
@@ -159,7 +135,7 @@ where
     let claim_started = clock.now();
     let claim_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
     let claims = match within(clock, claim_deadline, |deadline| {
-        store.claim_partition_heads(limit.get(), deadline)
+        store.claim_partition_heads(limit, deadline)
     })
     .await
     .and_then(std::convert::identity)
@@ -187,7 +163,7 @@ where
             )
         },
     ))
-    .buffer_unordered(limit.get().get())
+    .buffer_unordered(limit.get())
     .collect::<Vec<_>>()
     .await;
     results.sort_unstable_by_key(|(index, _)| *index);

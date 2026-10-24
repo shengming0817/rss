@@ -58,7 +58,7 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
         policy::OperationDeadline,
         transport::{PublishOutcome, Publisher},
     };
-    use rss_transactional_messaging_runtime::relay::{RelayBatchLimit, relay_once};
+    use rss_transactional_messaging_runtime::relay::relay_once;
     use rss_transactional_messaging_testkit::memory::MemoryOutboxStore;
     use std::{
         num::NonZeroUsize,
@@ -90,14 +90,7 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
         .await?;
     let publisher = CustomPublisher(AtomicUsize::new(0), tokio::sync::Notify::new());
     let observations = Observations(AtomicUsize::new(0));
-    let report = relay_once(
-        &store,
-        &publisher,
-        clock,
-        &observations,
-        RelayBatchLimit::new(NonZeroUsize::MIN)?,
-    )
-    .await?;
+    let report = relay_once(&store, &publisher, clock, &observations, NonZeroUsize::MIN).await?;
     assert_eq!(report.published(), 1);
     assert_eq!(publisher.0.load(Ordering::SeqCst), 1);
     assert_eq!(store.settlements(), [OutboxDisposition::Published]);
