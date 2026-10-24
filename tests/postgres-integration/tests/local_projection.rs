@@ -275,7 +275,10 @@ async fn run() -> anyhow::Result<()> {
         .connect_with(options.clone())
         .await?;
     sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE projection_producer LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE projection_worker LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE projection_other LOGIN PASSWORD 'fixture-only' NOBYPASSRLS;").execute(&owner).await?;
-    sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
+    let installed_0012 = MIGRATION_SQL
+        .strip_suffix(BATCH_PROJECTION_UPGRADE_SQL)
+        .ok_or_else(|| anyhow::anyhow!("ordered migration boundary"))?;
+    sqlx::raw_sql(installed_0012).execute(&owner).await?;
     sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO projection_producer; GRANT SELECT ON rss_transactional_messaging.policy,rss_transactional_messaging.outbox TO projection_producer; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO projection_producer;").execute(&owner).await?;
     {
         let mut tx = owner.begin().await?;
@@ -285,6 +288,18 @@ async fn run() -> anyhow::Result<()> {
     }
     sqlx::raw_sql("GRANT projection_other TO projection_worker; GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO projection_worker,projection_other; CREATE TABLE public.effect_a(id text PRIMARY KEY); CREATE TABLE public.effect_b(id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect_a,public.effect_b TO projection_worker;").execute(&owner).await?;
     fence_fixture::provision(&owner).await?;
+    for id in ["upgrade-pending", "upgrade-published"] {
+        let message = message(id, "orders")?;
+        sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+            .bind(message.canonical_bytes())
+            .bind(serde_json::json!({"trace":null,"tenant_authority":null}))
+            .execute(&owner)
+            .await?;
+    }
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id='upgrade-published'").execute(&owner).await?;
+    sqlx::raw_sql(BATCH_PROJECTION_UPGRADE_SQL)
+        .execute(&owner)
+        .await?;
     let config = |user| -> anyhow::Result<PgConfig> {
         Ok(PgConfig::new(
             &params.host,
@@ -327,6 +342,26 @@ async fn run() -> anyhow::Result<()> {
         worker,
         config: worker_config,
     };
+    let upgraded = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: false,
+        })
+        .await?;
+    let items = upgraded
+        .project_batch(
+            &Validator,
+            NonZeroUsize::new(2).unwrap(),
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].message_id().as_str(), "upgrade-pending");
+    committed_projection(only(items)?)?;
+    assert_eq!(f.state("upgrade-published").await?.3, "published");
+    drop(upgraded);
     Box::pin(batch::run(&f)).await?;
     Box::pin(success_and_duplicate(&f)).await?;
     Box::pin(ingress_rejection(&f)).await?;

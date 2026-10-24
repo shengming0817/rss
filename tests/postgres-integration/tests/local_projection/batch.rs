@@ -225,6 +225,43 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
         ],
     )
     .await?;
+    // Explain the installed candidate definition itself under the real scoped login. SQL
+    // functions with SET search_path otherwise hide their inner plan behind Function Scan.
+    let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_candidates(uuid,text)'::regprocedure")
+        .fetch_one(&f.owner).await?;
+    let explain = format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        body.replace("p_tenant", "$1::uuid")
+            .replace("p_domain", "$2")
+    );
+    let mut connection = f.raw_worker.acquire().await?;
+    sqlx::query("SET search_path=pg_catalog,rss_transactional_messaging,pg_temp")
+        .execute(&mut *connection)
+        .await?;
+    let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
+        .bind(tenant().to_string())
+        .bind("orders")
+        .fetch_one(&mut *connection)
+        .await?;
+    fn examined_outbox(plan: &serde_json::Value) -> f64 {
+        let own = if plan["Relation Name"] == "outbox" {
+            (plan["Actual Rows"].as_f64().unwrap_or(0.0)
+                + plan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+                * plan["Actual Loops"].as_f64().unwrap_or(1.0)
+        } else {
+            0.0
+        };
+        own + plan["Plans"]
+            .as_array()
+            .map(|children| children.iter().map(examined_outbox).sum::<f64>())
+            .unwrap_or(0.0)
+    }
+    assert!(
+        examined_outbox(&plan[0]["Plan"]) < 1500.0,
+        "candidate query must not traverse the terminal history: {plan}"
+    );
+    println!("installed candidate plan: {plan}");
+    drop(connection);
     let projection = f
         .projection(Effect {
             gate: None,
