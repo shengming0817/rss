@@ -1,4 +1,4 @@
-//! Empty discovery does not execute structural admission or mint authority.
+//! Admitted operations do not rescan catalogs; controlled drift requires re-admission.
 use super::*;
 
 pub(super) async fn run(
@@ -28,8 +28,6 @@ pub(super) async fn run(
     let due = store
         .claim_due(scope, 2, Duration::from_secs(1), control)
         .await;
-    let untouched: bool = sqlx::query_scalar("SELECT epoch=0 AND token IS NULL FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2")
-        .bind(TENANT).bind(scope.reconciler()).fetch_one(owner).await?;
     sqlx::raw_sql("ALTER TABLE rss_reconcile.targets DROP CONSTRAINT idle_extra")
         .execute(owner)
         .await?;
@@ -41,23 +39,18 @@ pub(super) async fn run(
         startup.err().map(|e| e.kind()),
         Some(ErrorKind::StorageContract)
     );
-    assert_eq!(
-        due.err().map(|e| e.kind()),
-        Some(ErrorKind::StorageContract)
-    );
-    assert!(
-        untouched,
-        "structural admission precedes every claim mutation"
-    );
-    let claimed = claim(store, &target, Duration::from_secs(1), control).await?;
+    let mut due = due?;
+    assert_eq!(due.len(), 1, "admitted operations do not revalidate DDL");
+    let claimed = due.remove(0);
     store
         .finish(&claimed, Completion::Converged, control)
         .await?;
-    safety(store, owner, control, scope).await
+    safety(store, pool, owner, control, scope).await
 }
 
 async fn safety(
     store: &PgStore,
+    pool: &PgPool,
     owner: &PgPool,
     control: &Control<'_, Clock>,
     scope: &Scope,
@@ -89,14 +82,12 @@ async fn safety(
         ),
     ] {
         sqlx::raw_sql(damage).execute(owner).await?;
-        let rejected = store
-            .claim_due(scope, 1, Duration::from_secs(1), control)
-            .await;
+        let rejected = PgStore::new(pool.clone(), control).await;
         sqlx::raw_sql(repair).execute(owner).await?;
         assert_eq!(
             rejected.err().map(|e| e.kind()),
             Some(ErrorKind::StorageContract),
-            "empty scan must reject: {damage}"
+            "re-admission must reject: {damage}"
         );
     }
     assert!(

@@ -17,7 +17,7 @@ pub async fn run(
     interruption(store, owner, c).await?;
     admission(pool, owner, c).await?;
     policy_admission(pool, owner, c).await?;
-    live_connection_admission(store, owner, c).await?;
+    readmission(pool, owner, c).await?;
     Ok(())
 }
 async fn scheduling(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
@@ -322,15 +322,7 @@ async fn policy_admission(
     Ok(())
 }
 
-async fn live_connection_admission(
-    store: &PgStore,
-    owner: &PgPool,
-    c: &Control<'_, Clock>,
-) -> anyhow::Result<()> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let t = target("live-admission", TENANT)?;
-    store.wake(&t, c).await?;
-    let claim = claim(store, &t, Duration::from_secs(2), c).await?;
+async fn readmission(pool: &PgPool, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     for (change, restore) in [
         (
             "GRANT UPDATE ON rss_reconcile.targets TO reconcile_runtime",
@@ -346,18 +338,10 @@ async fn live_connection_admission(
         ),
     ] {
         sqlx::raw_sql(change).execute(owner).await?;
-        let called = AtomicBool::new(false);
-        let result = store
-            .protect(&claim, c, &called, |called, _| {
-                Box::pin(async move {
-                    called.store(true, Ordering::SeqCst);
-                    Ok(())
-                })
-            })
-            .await;
+        let result = PgStore::new(pool.clone(), c).await;
         sqlx::raw_sql(restore).execute(owner).await?;
-        assert!(matches!(result,Err(e) if e.kind()==ErrorKind::StorageContract));
-        assert!(!called.load(Ordering::SeqCst));
+        assert!(matches!(result, Err(e) if e.kind()==ErrorKind::StorageContract));
+        PgStore::new(pool.clone(), c).await?;
     }
     Ok(())
 }

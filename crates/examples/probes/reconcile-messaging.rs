@@ -39,7 +39,7 @@ impl Reconciler<rss_reconcile_postgres::PgClaim> for BorrowedBusiness<'_> {
     }
 }
 pub async fn messages<T: Timer>(
-    runtime: &rss_transactional_messaging_postgres::PgRuntime,
+    store: &rss_reconcile_postgres::PgMessagingStore,
     claim: &rss_reconcile_postgres::PgClaim,
     c: &Control<'_, T>,
     outbox: rss_transactional_messaging_postgres::PgOutboxWriter,
@@ -49,7 +49,7 @@ pub async fn messages<T: Timer>(
     rss_transactional_messaging_postgres::PgError,
 > {
     use rss_transactional_messaging::outbox::OutboxWriter;
-    rss_reconcile_postgres::messaging::protect(runtime, claim, c, (), move |_, tx| {
+    store.protect(claim, c, (), move |_, tx| {
         Box::pin(async move {
             tx.prepare_outbox_partitions(&message.partition().cloned().into_iter().collect::<Vec<_>>()).await?;
             outbox.append(tx, message).await?;

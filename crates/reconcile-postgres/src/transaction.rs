@@ -1,6 +1,6 @@
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs and pool/inner.rs@v0.9.0
 //! ref: baseline 5b63e10 adapters/postgres/src/cotx/settlement.rs
-use crate::probe::Admission;
+use crate::probe::Identity;
 use futures::future::BoxFuture;
 use rss_reconcile::{Control, Error, ErrorKind, Scope, Timer};
 use rss_request_context::TenantId;
@@ -14,6 +14,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct PgStore {
     pub(crate) pool: PgPool,
+    identity: Identity,
     #[cfg(feature = "integration")]
     pub(crate) fault: Arc<std::sync::atomic::AtomicU8>,
 }
@@ -21,9 +22,10 @@ impl PgStore {
     /// Adopt a runtime pool after checking schema identity, RLS and role separation.
     /// No migrations or role grants are executed.
     pub async fn new<T: Timer>(pool: PgPool, control: &Control<'_, T>) -> Result<Self, Error> {
-        control.run(crate::probe::validate(&pool)).await?;
+        let identity = control.run(crate::probe::validate(&pool)).await?;
         Ok(Self {
             pool,
+            identity,
 
             #[cfg(feature = "integration")]
             fault: Arc::new(std::sync::atomic::AtomicU8::new(0)),
@@ -59,13 +61,11 @@ impl PgStore {
     {
         control.check()?;
         control
-            .run(self.transact(
-                scope.tenant(),
-                control.remaining(),
-                Admission::Full,
-                (),
-                move |_, tx| operation(tx),
-            ))
+            .run(
+                self.transact(scope.tenant(), control.remaining(), (), move |_, tx| {
+                    operation(tx)
+                }),
+            )
             .await
             .map_err(Error::uncertain)
     }
@@ -74,7 +74,7 @@ impl PgStore {
         &self,
         scope: &Scope,
         control: &Control<'_, T>,
-        admission: Admission,
+
         operation: F,
     ) -> Result<R, Error>
     where
@@ -82,13 +82,11 @@ impl PgStore {
     {
         control.check()?;
         control
-            .run(self.transact(
-                scope.tenant(),
-                control.remaining(),
-                admission,
-                (),
-                move |_, tx| operation(tx),
-            ))
+            .run(
+                self.transact(scope.tenant(), control.remaining(), (), move |_, tx| {
+                    operation(tx)
+                }),
+            )
             .await
             .map_err(Error::uncertain)
     }
@@ -105,13 +103,7 @@ impl PgStore {
     {
         control.check()?;
         control
-            .run(self.transact(
-                scope.tenant(),
-                control.remaining(),
-                Admission::Full,
-                context,
-                operation,
-            ))
+            .run(self.transact(scope.tenant(), control.remaining(), context, operation))
             .await
             .map_err(Error::uncertain)
     }
@@ -119,7 +111,7 @@ impl PgStore {
         &self,
         tenant: TenantId,
         timeout: Duration,
-        admission: Admission,
+
         mut context: C,
         operation: F,
     ) -> Result<R, Error>
@@ -135,8 +127,7 @@ impl PgStore {
         #[cfg(feature = "integration")]
         let fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
         let result = async {
-            setup(&mut tx, tenant, timeout).await?;
-            admission.validate(&mut tx).await?;
+            setup(&mut tx, tenant, timeout, &self.identity).await?;
             operation(
                 &mut context,
                 &mut PgTransaction {
@@ -233,11 +224,17 @@ async fn setup(
     connection: &mut PgConnection,
     tenant: TenantId,
     timeout: Duration,
+    identity: &Identity,
 ) -> Result<(), Error> {
     let millis = timeout.as_millis().clamp(1, i32::MAX as u128).to_string();
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true)")
-        .bind(tenant.to_string()).bind(millis).execute(connection).await.map_err(map_sql)?;
-    Ok(())
+    let valid: bool = sqlx::query_scalar("SELECT session_user::text=$3 AND current_user::text=$4 AND current_database()::text=$5, set_config('rss.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true)")
+        .bind(tenant.to_string()).bind(millis).bind(&identity.login).bind(&identity.role).bind(&identity.database)
+        .fetch_one(connection).await.map_err(map_sql)?;
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::new(ErrorKind::StorageContract))
+    }
 }
 pub(crate) fn map_sql(error: sqlx::Error) -> Error {
     let kind = classify(&error);
