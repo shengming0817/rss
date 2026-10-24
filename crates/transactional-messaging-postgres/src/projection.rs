@@ -110,7 +110,7 @@ pub struct PgLocalProjection<H, K> {
     group: ConsumerGroup,
     renewal: LeaseRenewalPolicy,
     #[cfg(feature = "integration")]
-    fault: std::sync::Mutex<Option<crate::PgTransactionFault>>,
+    fault: std::sync::Mutex<Option<crate::transaction::TransactionInjection>>,
 }
 
 impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K> {
@@ -156,22 +156,26 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         })
     }
 
-    /// Inject the effect transaction rather than the preceding source/Inbox claims.
-    /// Use only on an isolated fixture runtime with no concurrent projection calls.
+    /// Bind a fault to the next effect transaction, optionally pausing before its connection acquire.
+    /// Sibling source/Inbox transactions cannot consume this injection. Use only in fixtures.
     #[cfg(feature = "integration")]
     pub fn inject_next_projection_fault(
         &self,
         fault: crate::PgTransactionFault,
+        before_acquire: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), PgError> {
-        *self.fault.lock().map_err(|_| PgError::invariant())? = Some(fault);
+        *self.fault.lock().map_err(|_| PgError::invariant())? =
+            Some(crate::transaction::TransactionInjection {
+                fault,
+                before_acquire: Box::pin(before_acquire),
+            });
         Ok(())
     }
     #[cfg(feature = "integration")]
-    fn inject_projection_fault(&self) -> Result<(), PgError> {
-        if let Some(fault) = self.fault.lock().map_err(|_| PgError::invariant())?.take() {
-            self.runtime.inject_next_transaction_fault(fault);
-        }
-        Ok(())
+    fn take_projection_fault(
+        &self,
+    ) -> Result<Option<crate::transaction::TransactionInjection>, PgError> {
+        Ok(self.fault.lock().map_err(|_| PgError::invariant())?.take())
     }
 
     /// Durable scheduling hint; notifications remain optional and callers own bounded waiting.
@@ -323,7 +327,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             inbox: &claim,
         };
         #[cfg(feature = "integration")]
-        self.inject_projection_fault()?;
+        let injection = self.take_projection_fault()?;
         let outcome = crate::consumer::execute_transaction(
             &self.runtime,
             &effect,
@@ -333,6 +337,8 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             binding.receipt_intent(),
             remaining(self, cutoff),
             Some((&self.outbox, &source)),
+            #[cfg(feature = "integration")]
+            injection,
         )
         .await;
         self.release_after_rollback(outcome.status(), claim, source, cutoff)
@@ -381,9 +387,9 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let identity = intent.consumer();
         let fingerprint = intent.fingerprint();
         #[cfg(feature = "integration")]
-        self.inject_projection_fault()?;
-        let attempt = self.runtime.local_tx_with_context(identity.tenant_id(), remaining(self, cutoff),
-            (self, source, identity, fingerprint), |(owner, source, identity, fingerprint), tx| Box::pin(async move {
+        let injection = self.take_projection_fault()?;
+        let attempt = self.runtime.transaction_with_context(identity.tenant_id(), remaining(self, cutoff),
+            (self, source, identity, fingerprint), true, #[cfg(feature = "integration")] injection, |(owner, source, identity, fingerprint), tx| Box::pin(async move {
                 let row = sqlx::query("SELECT contract,fingerprint,disposition FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
                     .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str())
                     .fetch_one(&mut *tx.connection).await?;

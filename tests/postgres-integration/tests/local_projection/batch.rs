@@ -368,15 +368,47 @@ async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    p.inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck)?;
-    let batch = p
-        .project_batch(
-            &Validator,
-            NonZeroUsize::try_from(3usize)?,
-            deadline(),
-            Duration::from_secs(5),
-        )
-        .await?;
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    p.inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck, {
+        let entered = entered.clone();
+        let resume = resume.clone();
+        async move {
+            entered.notify_one();
+            resume.notified().await;
+        }
+    })?;
+    let capacity = NonZeroUsize::try_from(3usize)?;
+    let projection = &p;
+    let project = async move {
+        projection
+            .project_batch(&Validator, capacity, deadline(), Duration::from_secs(5))
+            .await
+    };
+    let siblings = async {
+        entered.notified().await;
+        // The target has taken its fault but cannot acquire a connection. Other events must
+        // finish their source/Inbox/effect transactions without stealing that fault.
+        loop {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM public.effect_a WHERE id LIKE 'batch-unknown-%'",
+            )
+            .fetch_one(&f.owner)
+            .await?;
+            if count == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        resume.notify_one();
+        Ok::<(), anyhow::Error>(())
+    };
+    let (batch, siblings) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(project, siblings)
+    })
+    .await?;
+    siblings?;
+    let batch = batch?;
     assert_eq!(batch.len(), 3);
     let mut unknown = 0;
     for item in batch {

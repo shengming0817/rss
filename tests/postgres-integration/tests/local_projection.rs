@@ -497,7 +497,7 @@ async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
             fail: true,
         })
         .await?;
-    p.inject_next_projection_fault(PgTransactionFault::CommitPending)?;
+    p.inject_next_projection_fault(PgTransactionFault::CommitPending, std::future::ready(()))?;
     let pending = uncertain_projection(only(
         p.project_batch(
             &Validator,
@@ -621,7 +621,10 @@ async fn unknown_rollback(f: &Fixture) -> anyhow::Result<()> {
             fail: true,
         })
         .await?;
-    p.inject_next_projection_fault(PgTransactionFault::RollbackFailedAfterAck)?;
+    p.inject_next_projection_fault(
+        PgTransactionFault::RollbackFailedAfterAck,
+        std::future::ready(()),
+    )?;
     let (outcome, recovery) = projection_attempt(only(
         p.project_batch(
             &Validator,
@@ -652,7 +655,10 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    p.inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck)?;
+    p.inject_next_projection_fault(
+        PgTransactionFault::CommitUnknownAfterAck,
+        std::future::ready(()),
+    )?;
     let pending = uncertain_projection(only(
         p.project_batch(
             &Validator,
@@ -1088,7 +1094,7 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    p.inject_next_projection_fault(PgTransactionFault::CommitPending)?;
+    p.inject_next_projection_fault(PgTransactionFault::CommitPending, std::future::ready(()))?;
     let pending = uncertain_projection(only(
         p.project_batch(
             &Validator,
@@ -1129,7 +1135,10 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    p.inject_next_projection_fault(PgTransactionFault::CommitUnknownAfterAck)?;
+    p.inject_next_projection_fault(
+        PgTransactionFault::CommitUnknownAfterAck,
+        std::future::ready(()),
+    )?;
     let pending = uncertain_projection(only(
         p.project_batch(
             &Validator,

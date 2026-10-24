@@ -505,8 +505,16 @@ impl PgRuntime {
             ) -> BoxFuture<'a, Result<T, PgError>>
             + Send,
     {
-        self.transaction_with_context(tenant, deadline, context, true, operation)
-            .await
+        self.transaction_with_context(
+            tenant,
+            deadline,
+            context,
+            true,
+            #[cfg(feature = "integration")]
+            None,
+            operation,
+        )
+        .await
     }
 
     pub(crate) async fn transaction_with_context<T: Send, C: Send, F>(
@@ -515,6 +523,7 @@ impl PgRuntime {
         deadline: OperationDeadline,
         mut context: C,
         lock: bool,
+        #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
         operation: F,
     ) -> LocalTxAttempt<T, PgError>
     where
@@ -532,7 +541,10 @@ impl PgRuntime {
             &self.timer,
             cutoff,
             LocalTxDeadlineStage::Acquire,
-            self.acquire(),
+            self.acquire_for_transaction(
+                #[cfg(feature = "integration")]
+                injection,
+            ),
         )
         .await
         {
@@ -641,6 +653,27 @@ impl PgRuntime {
         #[cfg(feature = "integration")]
         {
             lease.fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(lease)
+    }
+
+    pub(crate) async fn acquire_for_transaction(
+        &self,
+        #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
+    ) -> Result<ConnectionLease, sqlx::Error> {
+        #[cfg(feature = "integration")]
+        let fault = if let Some(injection) = injection {
+            injection.before_acquire.await;
+            Some(injection.fault)
+        } else {
+            None
+        };
+        let lease = self.acquire().await?;
+        #[cfg(feature = "integration")]
+        let mut lease = lease;
+        #[cfg(feature = "integration")]
+        if let Some(fault) = fault {
+            lease.fault = fault as u8;
         }
         Ok(lease)
     }
@@ -868,6 +901,12 @@ impl PgTransaction<'_> {
 
 // ref: baseline/pre-community-core-20260902:adapters/postgres/src/cotx/settlement.rs
 // ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.8.6
+#[cfg(feature = "integration")]
+pub(crate) struct TransactionInjection {
+    pub(crate) fault: PgTransactionFault,
+    pub(crate) before_acquire: BoxFuture<'static, ()>,
+}
+
 pub(crate) struct ConnectionLease {
     connection: PoolConnection<Postgres>,
     quarantine: bool,

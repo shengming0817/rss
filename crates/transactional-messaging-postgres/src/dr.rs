@@ -116,7 +116,7 @@ impl Store for PgDrStore {
         }
         let attempt = self
             .runtime
-            .transaction_with_context(plan.tenant(), deadline, plan, false, |plan, tx| {
+            .transaction_with_context(plan.tenant(), deadline, plan, false, #[cfg(feature = "integration")] None, |plan, tx| {
                 Box::pin(async move {
                     let (direction, evidence) = match plan.action() {
                         PlanAction::Recover {direction, evidence,..} => (
@@ -169,43 +169,51 @@ impl Store for PgDrStore {
         self.validate(plan)?;
         map(self
             .runtime
-            .transaction_with_context(plan.tenant(), deadline, plan, false, |plan, tx| {
-                Box::pin(async move {
-                    let row = sqlx::query(
-                        "SELECT * FROM rss_transactional_messaging.read_dr($1::uuid,$2)",
-                    )
-                    .bind(plan.operation().to_string())
-                    .bind(plan.digest().as_slice())
-                    .fetch_optional(&mut *tx.connection)
-                    .await?;
-                    row.map(|r| {
-                        let epoch =
-                            Epoch::new(r.try_get("epoch")?).map_err(|_| PgError::invariant())?;
-                        let statuses: Vec<String> = r.try_get("statuses")?;
-                        let reasons: Vec<Option<String>> = r.try_get("reasons")?;
-                        if reasons.len() != statuses.len() {
-                            return Err(PgError::invariant());
-                        }
-                        let members = statuses
-                            .iter()
-                            .zip(reasons.iter())
-                            .map(|(status, reason)| member_status(status, reason.as_deref()))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        if epoch != plan.next() || members.len() != plan.members().len() {
-                            return Err(PgError::invariant());
-                        }
-                        Ok(Progress {
-                            receipt: Receipt {
-                                operation: plan.operation(),
-                                digest: plan.digest(),
-                                epoch,
-                            },
-                            members,
+            .transaction_with_context(
+                plan.tenant(),
+                deadline,
+                plan,
+                false,
+                #[cfg(feature = "integration")]
+                None,
+                |plan, tx| {
+                    Box::pin(async move {
+                        let row = sqlx::query(
+                            "SELECT * FROM rss_transactional_messaging.read_dr($1::uuid,$2)",
+                        )
+                        .bind(plan.operation().to_string())
+                        .bind(plan.digest().as_slice())
+                        .fetch_optional(&mut *tx.connection)
+                        .await?;
+                        row.map(|r| {
+                            let epoch = Epoch::new(r.try_get("epoch")?)
+                                .map_err(|_| PgError::invariant())?;
+                            let statuses: Vec<String> = r.try_get("statuses")?;
+                            let reasons: Vec<Option<String>> = r.try_get("reasons")?;
+                            if reasons.len() != statuses.len() {
+                                return Err(PgError::invariant());
+                            }
+                            let members = statuses
+                                .iter()
+                                .zip(reasons.iter())
+                                .map(|(status, reason)| member_status(status, reason.as_deref()))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            if epoch != plan.next() || members.len() != plan.members().len() {
+                                return Err(PgError::invariant());
+                            }
+                            Ok(Progress {
+                                receipt: Receipt {
+                                    operation: plan.operation(),
+                                    digest: plan.digest(),
+                                    epoch,
+                                },
+                                members,
+                            })
                         })
+                        .transpose()
                     })
-                    .transpose()
-                })
-            })
+                },
+            )
             .await)
         .fold(Ok, Err, Err, Err, Err, Err)
     }
