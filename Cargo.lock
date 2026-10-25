@@ -3097,6 +3097,7 @@ name = "postgres-integration"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "futures",
  "ring",
  "rss-contract",
  "rss-data-protection",

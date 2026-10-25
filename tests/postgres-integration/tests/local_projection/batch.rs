@@ -84,11 +84,11 @@ async fn append(f: &Fixture, entries: Vec<(String, String)>) -> anyhow::Result<(
 }
 
 pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
-    concurrent_heads(f).await?;
-    independent_deadline(f).await?;
-    mixed_unknown(f).await?;
-    above_old_limit(f).await?;
-    history_and_policy(f).await
+    Box::pin(concurrent_heads(f)).await?;
+    Box::pin(independent_deadline(f)).await?;
+    Box::pin(mixed_unknown(f)).await?;
+    Box::pin(above_old_limit(f)).await?;
+    Box::pin(history_and_policy(f)).await
 }
 #[allow(
     clippy::cognitive_complexity,
