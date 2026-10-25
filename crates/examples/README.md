@@ -151,19 +151,18 @@ advances, an exact replay returns the original command at its current durable st
 a command or outbox row. A new command with the old coordinate remains fenced.
 
 
-### Fixed-candidate MQTT, Observation, Ledger and Recovery (#2375)
+### Fixed-candidate MQTT, Observation and Recovery (#2375)
 
 Each entry requires `--source` or `--artifacts DIR --revision SHA`; no implicit packaging mode
 remains. Source and artifact consumers use the same examples at the exact candidate revision.
 All consumers have independent manifests, locks, targets and validated dependency graphs.
-Ledger, Observation and Recovery pin exact capability-package features for every scenario
+Observation and Recovery pin exact capability-package features for every scenario
 independently of the example manifest, so deleting a feature forwarding edge fails validation.
 Missing dependencies are reported together in sorted package-name order.
 
 ```sh
 python3 hack/mqtt-package-proof.py --source
 python3 hack/observation-package-proof.py --source
-python3 hack/ledger-package-proof.py --source
 python3 hack/recovery-package-proof.py --source
 # The same entries accept an exact clean candidate bundle:
 python3 hack/recovery-package-proof.py --artifacts "$RSS_PACKAGE_PROOF" --revision "$RSS_REVISION"
@@ -175,12 +174,9 @@ The logging restriction remains consumer-owned in `src/mqtt/logging.rs`.
 Observation runs snapshot/delta core decisions and the single `observation` handoff against PG;
 `observation-install` installs both candidate-owned component schemas with a dedicated owner.
 Its model, installer and facts SQL have moved from the adapter examples to `src/observation`.
-Ledger runtime requires `ledger_key_id` and 32-byte `ledger_key` from the fixture over stdin.
-It independently runs core chain verification, standalone PG and the borrowed messaging
-transaction: commit and rollback are checked against both durable stores.
 Recovery runs core authorization/plan decisions, PG Outbox redrive with the original delivery
 window, and one PG + Object Lock S3 archive with exact-version readback and HOT cleanup.
-Compile-only combinations print `GRAPH PASS`: Observation adapter/projection, Ledger all,
+Compile-only combinations print `GRAPH PASS`: Observation adapter/projection,
 Recovery S3-only/managed, and Axum both/all. These prove independent API/feature resolution.
 Core and provider execution print `BEHAVIOR PASS` (MQTT explicitly reports real broker behavior;
 Axum platform reports its asserted result). Complete fault matrices remain with the component owners.

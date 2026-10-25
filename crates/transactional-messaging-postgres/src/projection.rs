@@ -5,7 +5,7 @@ use crate::{
     PgConsumerEffect, PgConsumerEffectFailure, PgError, PgInboxClaim, PgInboxStore, PgOutboxClaim,
     PgOutboxStore, PgRecoveryCapture, PgRuntime, PgTransaction,
 };
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{Stream, stream::FuturesUnordered};
 use rss_data_protection::Aead;
 use rss_request_context::TenantId;
 use rss_request_context::{Deadline, ExecutionTimer};
@@ -194,15 +194,18 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     /// Claim once up to the currently available runtime capacity, then settle each event independently.
     /// Claim waiting has its own deadline. Each event receives a fresh execution budget when it starts;
     /// substeps share that event's absolute cutoff. Results are returned in completion order.
-    /// No tasks are spawned. Dropping this future does not prove rollback: durable leases and receipts
-    /// remain authoritative after cancellation. A single event failure never discards other results.
-    pub async fn project_batch<V: IngressValidator<Vec<u8>>>(
-        &self,
-        validator: &V,
+    /// No tasks are spawned: keep polling the returned stream to drive every claimed event.
+    /// Completed items release their runtime capacity immediately. Callers may claim another batch
+    /// while polling existing streams; stop claiming before draining during shutdown.
+    /// Dropping the future or stream does not prove rollback: durable leases and receipts remain
+    /// authoritative after cancellation. An item error does not cancel its siblings.
+    pub async fn project_batch<'a, V: IngressValidator<Vec<u8>>>(
+        &'a self,
+        validator: &'a V,
         limit: NonZeroUsize,
         claim_deadline: OperationDeadline,
         execution_budget: Duration,
-    ) -> Result<Vec<PgProjectionItem>, PgError> {
+    ) -> Result<impl Stream<Item = PgProjectionItem> + Send + 'a, PgError> {
         if execution_budget.is_zero() {
             return Err(PgError::invariant());
         }
@@ -246,7 +249,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                 }
             });
         }
-        Ok(pending.collect().await)
+        Ok(pending)
     }
 
     async fn project_claimed<V: IngressValidator<Vec<u8>>>(

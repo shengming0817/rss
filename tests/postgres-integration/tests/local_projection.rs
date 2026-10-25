@@ -22,6 +22,16 @@ use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use support::{Key, Timer, tenant};
 use tokio::sync::Notify;
 
+// Existing assertions inspect a completed batch; production callers consume items as they finish.
+async fn collect_batch<F, S>(batch: F) -> Result<Vec<PgProjectionItem>, PgError>
+where
+    F: std::future::Future<Output = Result<S, PgError>>,
+    S: futures::Stream<Item = PgProjectionItem>,
+{
+    use futures::StreamExt;
+    Ok(batch.await?.collect().await)
+}
+
 fn deadline() -> OperationDeadline {
     let timer = Timer::new();
     OperationDeadline::from_cutoff(timer.cutoff(), &timer)
@@ -349,14 +359,13 @@ async fn run() -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    let items = upgraded
-        .project_batch(
-            &Validator,
-            NonZeroUsize::try_from(2usize)?,
-            deadline(),
-            Duration::from_secs(5),
-        )
-        .await?;
+    let items = collect_batch(upgraded.project_batch(
+        &Validator,
+        NonZeroUsize::try_from(2usize)?,
+        deadline(),
+        Duration::from_secs(5),
+    ))
+    .await?;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].message_id().as_str(), "upgrade-pending");
     committed_projection(only(items)?)?;
@@ -398,14 +407,13 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
         let projection = projection.clone();
         async move {
             only(
-                projection
-                    .project_batch(
-                        &Validator,
-                        NonZeroUsize::MIN,
-                        deadline(),
-                        Duration::from_secs(5),
-                    )
-                    .await?,
+                collect_batch(projection.project_batch(
+                    &Validator,
+                    NonZeroUsize::MIN,
+                    deadline(),
+                    Duration::from_secs(5),
+                ))
+                .await?,
             )
         }
     });
@@ -415,15 +423,14 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
         (0, 0, None, "publishing".into())
     );
     assert!(
-        projection
-            .project_batch(
-                &Validator,
-                NonZeroUsize::MIN,
-                deadline(),
-                Duration::from_secs(5)
-            )
-            .await?
-            .is_empty()
+        collect_batch(projection.project_batch(
+            &Validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5)
+        ))
+        .await?
+        .is_empty()
     );
     gate.resume.notify_one();
     let receipt = committed_projection(task.await??)?;
@@ -433,15 +440,14 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
         (1, 1, Some("succeeded".into()), "published".into())
     );
     assert!(
-        projection
-            .project_batch(
-                &Validator,
-                NonZeroUsize::MIN,
-                deadline(),
-                Duration::from_secs(5)
-            )
-            .await?
-            .is_empty()
+        collect_batch(projection.project_batch(
+            &Validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5)
+        ))
+        .await?
+        .is_empty()
     );
     Ok(())
 }
@@ -458,12 +464,12 @@ async fn ingress_rejection(f: &Fixture) -> anyhow::Result<()> {
     f.append("ingress-denied", "orders").await?;
     assert!(matches!(
         only(
-            p.project_batch(
+            collect_batch(p.project_batch(
                 &RejectIngress,
                 NonZeroUsize::MIN,
                 deadline(),
                 Duration::from_secs(5)
-            )
+            ))
             .await?
         )?,
         PgProjectionOutcome::Rejected(EnvelopeValidationFailure::UnsupportedContract)
@@ -499,12 +505,12 @@ async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     p.inject_next_projection_fault(PgTransactionFault::CommitPending, std::future::ready(()))?;
     let pending = uncertain_projection(only(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5),
-        )
+        ))
         .await?,
     )?)?;
     assert_eq!(
@@ -517,12 +523,12 @@ async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-rejected' AND status='publishing'").execute(&f.owner).await?;
     let receipt = committed_projection(only(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5),
-        )
+        ))
         .await?,
     )?)?;
     assert_eq!(
@@ -561,12 +567,12 @@ async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
         })
         .await?;
     let receipt = committed_projection(only(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5),
-        )
+        ))
         .await?,
     )?)?;
     assert_eq!(
@@ -594,12 +600,12 @@ async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert_eq!(
         attempt_status(only(
-            p.project_batch(
+            collect_batch(p.project_batch(
                 &Validator,
                 NonZeroUsize::MIN,
                 deadline(),
                 Duration::from_secs(5)
-            )
+            ))
             .await?
         )?)?,
         Status::HandlerTransient
@@ -626,12 +632,12 @@ async fn unknown_rollback(f: &Fixture) -> anyhow::Result<()> {
         std::future::ready(()),
     )?;
     let (outcome, recovery) = projection_attempt(only(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5),
-        )
+        ))
         .await?,
     )?)?
     .into_parts();
@@ -660,12 +666,12 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
         std::future::ready(()),
     )?;
     let pending = uncertain_projection(only(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5),
-        )
+        ))
         .await?,
     )?)?;
     assert_eq!(
@@ -678,12 +684,12 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("committed fact missing"))?;
     assert_eq!(receipt.disposition(), TerminalDisposition::Succeeded);
     assert!(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5)
-        )
+        ))
         .await?
         .is_empty()
     );
@@ -707,12 +713,12 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
         let p = p.clone();
         async move {
             only(
-                p.project_batch(
+                collect_batch(p.project_batch(
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
                     Duration::from_secs(5),
-                )
+                ))
                 .await?,
             )
         }
@@ -720,12 +726,12 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     gate.entered.notified().await;
     tokio::time::sleep(Duration::from_millis(2500)).await;
     assert!(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5)
-        )
+        ))
         .await?
         .is_empty()
     );
@@ -752,12 +758,12 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
         let p = p.clone();
         async move {
             only(
-                p.project_batch(
+                collect_batch(p.project_batch(
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
                     Duration::from_secs(5),
-                )
+                ))
                 .await?,
             )
         }
@@ -904,14 +910,13 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
         let projection = projection.clone();
         async move {
             only(
-                projection
-                    .project_batch(
-                        &Validator,
-                        NonZeroUsize::MIN,
-                        deadline(),
-                        Duration::from_secs(5),
-                    )
-                    .await?,
+                collect_batch(projection.project_batch(
+                    &Validator,
+                    NonZeroUsize::MIN,
+                    deadline(),
+                    Duration::from_secs(5),
+                ))
+                .await?,
             )
         }
     });
@@ -951,14 +956,13 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     assert_eq!(
         committed_projection(only(
-            restarted
-                .project_batch(
-                    &Validator,
-                    NonZeroUsize::MIN,
-                    deadline(),
-                    Duration::from_secs(5)
-                )
-                .await?
+            collect_batch(restarted.project_batch(
+                &Validator,
+                NonZeroUsize::MIN,
+                deadline(),
+                Duration::from_secs(5)
+            ))
+            .await?
         )?)?
         .disposition(),
         TerminalDisposition::Succeeded
@@ -1031,12 +1035,12 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
         let a = a.clone();
         async move {
             only(
-                a.project_batch(
+                collect_batch(a.project_batch(
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
                     Duration::from_secs(5),
-                )
+                ))
                 .await?,
             )
         }
@@ -1044,12 +1048,12 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
     gate.entered.notified().await;
     let second = tokio::spawn(async move {
         only(
-            b.project_batch(
+            collect_batch(b.project_batch(
                 &Validator,
                 NonZeroUsize::MIN,
                 deadline(),
                 Duration::from_secs(5),
-            )
+            ))
             .await?,
         )
     });
@@ -1096,12 +1100,12 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     p.inject_next_projection_fault(PgTransactionFault::CommitPending, std::future::ready(()))?;
     let pending = uncertain_projection(only(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5),
-        )
+        ))
         .await?,
     )?)?;
     assert_eq!(
@@ -1115,12 +1119,12 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.dr_members SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-success' AND status='publishing'").execute(&f.owner).await?;
     assert_eq!(
         committed_projection(only(
-            p.project_batch(
+            collect_batch(p.project_batch(
                 &Validator,
                 NonZeroUsize::MIN,
                 deadline(),
                 Duration::from_secs(5)
-            )
+            ))
             .await?
         )?)?
         .disposition(),
@@ -1140,12 +1144,12 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
         std::future::ready(()),
     )?;
     let pending = uncertain_projection(only(
-        p.project_batch(
+        collect_batch(p.project_batch(
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
             Duration::from_secs(5),
-        )
+        ))
         .await?,
     )?)?;
     assert_eq!(

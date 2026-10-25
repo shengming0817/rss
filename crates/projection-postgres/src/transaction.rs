@@ -23,7 +23,11 @@ impl PgStore {
     pub async fn new<T: Timer>(pool: PgPool, control: &Control<'_, T>) -> Result<Self, Error> {
         let mut lease = Lease {
             connection: control
-                .run(async { pool.acquire().await.map_err(|e| sql_error(e, Phase::Acquire)) })
+                .run(async {
+                    pool.acquire()
+                        .await
+                        .map_err(|e| sql_error(e, Phase::Acquire))
+                })
                 .await?,
             quarantine: true,
         };

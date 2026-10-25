@@ -63,7 +63,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('functions', to_regprocedure('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)') IS NULL),
  ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text)')
    AND NOT p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
-   AND 'search_path=pg_catalog, rss_transactional_messaging, pg_temp'=ANY(p.proconfig)
+   AND p.proconfig IS NULL AND p.provolatile='s'
    AND NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_function_privilege(r.oid,p.oid,'EXECUTE'))
    AND NOT EXISTS(SELECT FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))),
 
