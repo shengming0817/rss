@@ -125,9 +125,13 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
     let task = tokio::spawn({
         let projection = projection.clone();
         async move {
-            projection
-                .project_batch(&Validator, limit, deadline(), Duration::from_secs(5))
-                .await
+            collect_batch(projection.project_batch(
+                &Validator,
+                limit,
+                deadline(),
+                Duration::from_secs(5),
+            ))
+            .await
         }
     });
     // Both effects must enter before either can complete; sequential execution cannot satisfy this.
@@ -155,14 +159,13 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(f.state("batch-failure").await?.0, 0);
     // Finish the successful partition's successor; a failed sibling cannot roll it back or block it.
     release.add_permits(8);
-    let results = projection
-        .project_batch(
-            &Validator,
-            NonZeroUsize::try_from(8usize)?,
-            deadline(),
-            Duration::from_secs(5),
-        )
-        .await?;
+    let results = collect_batch(projection.project_batch(
+        &Validator,
+        NonZeroUsize::try_from(8usize)?,
+        deadline(),
+        Duration::from_secs(5),
+    ))
+    .await?;
     assert!(
         results
             .iter()
@@ -281,28 +284,26 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    let items = projection
-        .project_batch(
-            &Validator,
-            NonZeroUsize::try_from(8usize)?,
-            deadline(),
-            Duration::from_secs(5),
-        )
-        .await?;
+    let items = collect_batch(projection.project_batch(
+        &Validator,
+        NonZeroUsize::try_from(8usize)?,
+        deadline(),
+        Duration::from_secs(5),
+    ))
+    .await?;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].message_id().as_str(), "history-head");
     assert_eq!(
         committed_projection(only(items)?)?.disposition(),
         TerminalDisposition::Succeeded
     );
-    let items = projection
-        .project_batch(
-            &Validator,
-            NonZeroUsize::MIN,
-            deadline(),
-            Duration::from_secs(5),
-        )
-        .await?;
+    let items = collect_batch(projection.project_batch(
+        &Validator,
+        NonZeroUsize::MIN,
+        deadline(),
+        Duration::from_secs(5),
+    ))
+    .await?;
     assert_eq!(
         committed_projection(only(items)?)?.disposition(),
         TerminalDisposition::Succeeded
@@ -334,14 +335,13 @@ async fn independent_deadline(f: &Fixture) -> anyhow::Result<()> {
         })
         .await?;
     let task = tokio::spawn(async move {
-        projection
-            .project_batch(
-                &Validator,
-                NonZeroUsize::MIN,
-                OperationDeadline::from_remaining(Duration::from_secs(1)),
-                Duration::from_secs(5),
-            )
-            .await
+        collect_batch(projection.project_batch(
+            &Validator,
+            NonZeroUsize::MIN,
+            OperationDeadline::from_remaining(Duration::from_secs(1)),
+            Duration::from_secs(5),
+        ))
+        .await
     });
     tokio::time::timeout(Duration::from_secs(2), gate.entered.notified()).await?;
     // Expire the claim budget while the independent effect is deliberately paused.
@@ -381,9 +381,13 @@ async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
     let capacity = NonZeroUsize::try_from(3usize)?;
     let projection = &p;
     let project = async move {
-        projection
-            .project_batch(&Validator, capacity, deadline(), Duration::from_secs(5))
-            .await
+        collect_batch(projection.project_batch(
+            &Validator,
+            capacity,
+            deadline(),
+            Duration::from_secs(5),
+        ))
+        .await
     };
     let siblings = async {
         entered.notified().await;

@@ -22,17 +22,10 @@ pub mod observation;
 #[cfg(feature = "mqtt")]
 pub mod mqtt;
 
-#[cfg(feature = "ledger-pg")]
-pub mod ledger;
-
 #[cfg(feature = "recovery-pg")]
 pub mod recovery;
 
-#[cfg(any(
-    feature = "mqtt",
-    feature = "ledger-messaging",
-    feature = "recovery-pg"
-))]
+#[cfg(any(feature = "mqtt", feature = "recovery-pg"))]
 pub mod sample_message;
 
 #[cfg(any(

@@ -11,9 +11,6 @@ members = [
   "tests/webhook-integration",
   "crates/transactional-messaging-webhook",
   "crates/examples",
-  "tests/ledger-postgres-integration",
-  "crates/ledger-postgres",
-  "crates/ledger",
   "tests/archive-integration",
   "crates/transactional-messaging-recovery-s3",
   "crates/mqtt",
@@ -65,8 +62,6 @@ packages = [
   { package = "rss-timeseries-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2810 } },
   { package = "rss-timeseries", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2809 } },
   { package = "rss-transactional-messaging-webhook", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2804 } },
-  { package = "rss-ledger", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2312 } },
-  { package = "rss-ledger-postgres", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2312 } },
   { package = "rss-transactional-messaging-recovery-s3", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-mqtt", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-transactional-messaging-kafka", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
@@ -118,8 +113,6 @@ rss-axum = { path = "crates/axum", version = "0.1.0", default-features = false }
 libc = "0.2"
 windows-sys = { version = "0.61", default-features = false }
 arc-swap = "1.9.2"
-rss-ledger-postgres = { path = "crates/ledger-postgres", version = "0.1.0" }
-rss-ledger = { path = "crates/ledger", version = "0.1.0" }
 aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 rss-transactional-messaging-recovery-s3 = { path = "crates/transactional-messaging-recovery-s3", version = "0.1.0" }
 aws-sdk-s3 = { version = "=1.144.0", default-features = false, features = ["rt-tokio"] }

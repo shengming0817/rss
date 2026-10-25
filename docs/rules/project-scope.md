@@ -30,10 +30,7 @@ HTTP futures 由同一 owner 持有，执行产品明确选择的容量与时限
 storage lineage / tenant epoch 持久化 fencing，并约束正常消息、恢复与归档执行。
 成功 Published / Consumer terminal 事实及原投递期限保留，不引入产品 admission controller。
 
-可校验追加账本已接纳：`rss-ledger` 拥有链/记录身份、V1 规范认证编码、HMAC 链链接及有界窗口验证；
-`rss-ledger-postgres` 拥有组件 schema、同链幂等原子追加、持久恢复及现有 PG 事务接缝组合。
-产品拥有事件含义、查询授权、密钥托管与轮转、保留/hold 和生产迁移。该准入不恢复 audit/identity 产品域，
-不承诺历史审计数据导入、透明日志平台或 WORM；实现、独立消费与实际发布分别提供证据。
+可校验追加账本由 rss-audit 仓库唯一持有，作为审计可选完整性增强；RSS 不再维护或发布 Ledger core/PG adapter，也不反向依赖审计组件。
 
 Webhook 出站 adapter 已接纳：`rss-transactional-messaging-webhook` 拥有单目标 HTTPS、
 Standard Webhooks 签名、宿主授权地址限制的实际执行及 HTTP 接收结果分类；复用事务消息 Outbox、

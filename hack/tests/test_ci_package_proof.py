@@ -186,9 +186,9 @@ class GraphProof(unittest.TestCase):
         root = Path("/proof/consumer")
         allowed = {"rss-transactional-messaging": Path("/proof/core")}
         graph = self.graph(root, allowed["rss-transactional-messaging"])
-        with self.assertRaisesRegex(ValueError, "consumer dependencies missing: rss-ledger, rss-runtime$"):
+        with self.assertRaisesRegex(ValueError, "consumer dependencies missing: rss-contract, rss-runtime$"):
             proof.validate_graph(graph, root, allowed, set(), set(),
-                                 required_dependencies={"rss-runtime", "rss-ledger", "rss-transactional-messaging"})
+                                 required_dependencies={"rss-runtime", "rss-contract", "rss-transactional-messaging"})
 
     def test_source_escape_and_unified_features_fail(self):
         root = Path("/proof/consumer")

@@ -18,7 +18,7 @@ sys.path.insert(0, str(HACK))
 import package_proof
 
 REVISION = "a" * 40
-ENTRIES = ("axum", "mqtt", "ledger", "observation", "recovery", "timeseries")
+ENTRIES = ("axum", "mqtt", "observation", "recovery", "timeseries")
 
 
 def bundle(root, *, sha=REVISION, dirty=False, extra=None):
@@ -184,7 +184,6 @@ class FeatureForwarding(unittest.TestCase):
             for path in (root / "crates").glob("*/Cargo.toml")
         }
         cases = (
-            ("ledger", "all", "ledger-all", "rss-ledger-postgres/integration"),
             ("observation", "projection", "observation-projection", "rss-observation-postgres/projection"),
             ("observation", "projection-postgres", "observation-handoff", "rss-observation-postgres/projection-postgres"),
             ("recovery", "postgres", "recovery-pg", "rss-transactional-messaging-postgres/recovery"),

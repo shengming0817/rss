@@ -17,7 +17,7 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 
 Use an external migrator to provision a `rss_tmsg_relay` role with
 `NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION` and no membership
-in any other role, then execute the complete `MIGRATION_SQL` (0001–0013). The migrator must be able to transfer
+in any other role, then execute the complete `MIGRATION_SQL` (0001–0014). The migrator must be able to transfer
 function ownership to that role. Do not run migrations through the application pool.
 
 Registry consumers obtain the same versioned SQL through
@@ -137,8 +137,8 @@ Consumer effect savepoint rollback releases allocator changes and disables furth
 that view while allowing the legitimate rejection receipt/DLQ to commit. Successful release retains
 locks until outer transaction settlement.
 
-`OUTBOX_PARTITION_UPGRADE_SQL` installs 0009–0013 after 0008; `OUTBOX_MESSAGE_UPGRADE_SQL` installs
-0010–0013 after 0009. All upgrade constants include the current contract and require an empty Outbox.
+`OUTBOX_PARTITION_UPGRADE_SQL` installs 0009–0014 after 0008; `OUTBOX_MESSAGE_UPGRADE_SQL` installs
+0010–0014 after 0009. All upgrade constants include the current contract and require an empty Outbox.
 Existing ordered rows are rejected: their original commit order cannot be recovered by sorting `seq`.
 No backfill, old-schema runtime, advisory-lock fallback or dual ordering is provided. Use an empty
 ordered Outbox and replace the old runtime grants before reconnecting. The external operator owns
@@ -333,23 +333,24 @@ observation. It performs one mutation and never resets the total budget.
 
 ## Consumer archive schema and role cutover (#2302)
 
-Fresh installation uses `MIGRATION_SQL` (0001–0013). Upgrade exactly once from the installed boundary:
+Fresh installation uses `MIGRATION_SQL` (0001–0014). Upgrade exactly once from the installed boundary:
 
 | Installed through | Remaining SQL |
 |---|---|
-| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0013) |
-| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0013) |
-| 0004 or 0005 | Apply each remaining numbered migration in order, through 0013 |
-| 0006 | `DR_UPGRADE_SQL` (0007–0013) |
-| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0013; empty Outbox) |
-| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010–0013; empty Outbox) |
-| 0010 | Apply 0011, 0012, then 0013 |
-| 0011 | Apply `0012_scope_local_projection.sql`, then 0013 |
-| 0012 | `BATCH_PROJECTION_UPGRADE_SQL` (0013; existing Outbox supported) |
+| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0014) |
+| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0014) |
+| 0004 or 0005 | Apply each remaining numbered migration in order, through 0014 |
+| 0006 | `DR_UPGRADE_SQL` (0007–0014) |
+| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0014; empty Outbox) |
+| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010–0014; empty Outbox) |
+| 0010 | Apply 0011, 0012, 0013, then 0014 |
+| 0011 | Apply `0012_scope_local_projection.sql`, then 0013 and 0014 |
+| 0012 | `BATCH_PROJECTION_UPGRADE_SQL` (0013–0014; existing Outbox supported) |
+| 0013 | `BOUNDED_CLAIM_UPGRADE_SQL` (0014; existing Outbox supported) |
 
 Stop old workers, apply the remaining schema, provision fixed LOGIN scopes where selected, and
 replace/admit runtimes before resuming traffic. Scope predicates are validated at startup for all
-profiles; a new runtime intentionally rejects an installation missing 0013.
+profiles; a new runtime intentionally rejects an installation missing 0014.
 
 Do not rerun aggregate constants containing already applied DDL. Migration 0005 replaces
 `archive_fault` with `archive_fault(uuid,uuid,bytea,text)`; grant that signature after upgrading.
@@ -403,7 +404,7 @@ single-tenant mode, automatic adoption of database values or legacy SQL overload
 fences only that tenant; a multi-tenant relay skips fenced tenants while serving its remaining scope.
 Reconstruct the affected runtime with a newly authorized binding after cutover.
 
-`DR_UPGRADE_SQL` applies migrations 0007–0013 after 0006, once, with traffic isolated and no existing Outbox rows. Fresh installs
+`DR_UPGRADE_SQL` applies migrations 0007–0014 after 0006, once, with traffic isolated and no existing Outbox rows. Fresh installs
 use `MIGRATION_SQL`. The external migrator must provision the singleton `storage_lineage` row with
 nonzero 16-byte target/lineage identifiers and each `tenant_epoch` row with a positive epoch before
 admitting traffic. Supply these values from independently verified restore/deployment evidence.
@@ -559,3 +560,8 @@ requires neither Inbox nor relay rights. All profiles preserve storage/tenant ex
 
 `PgOutboxStore::has_dead_letters` provides a bounded, domain/tenant-scoped read of unresolved
 isolation evidence. It does not resolve records or choose host admission policy.
+
+`project_batch` returns a borrowed stream after claiming. Poll it continuously to drive effects and
+consume each result as it completes; each completion releases its runtime slot. To refill capacity,
+the host polls new claims alongside outstanding streams. Stop claiming and drain existing streams
+on shutdown. Dropping a stream is cancellation, never proof of rollback or successful settlement.

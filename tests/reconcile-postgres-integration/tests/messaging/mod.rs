@@ -1,4 +1,3 @@
-mod ledger;
 use rss_request_context::{Clock as MessageClock, Deadline, ExecutionTimer};
 #[path = "../../../fixtures/message_fence.rs"]
 mod fence_fixture;
@@ -74,7 +73,6 @@ pub async fn run(
         Box::pin(scenario(mode, store, owner, &runtime, c, true)).await?;
     }
     Box::pin(scenario("outer-rollback", store, owner, &runtime, c, true)).await?;
-    ledger::competition(store, owner, &runtime, c).await?;
     for unknown in [false, true] {
         wake_failure(&runtime, owner, c, unknown).await?;
     }
@@ -91,7 +89,6 @@ async fn install(owner: &PgPool) -> anyhow::Result<()> {
         .execute(owner)
         .await?;
     sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO reconcile_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO reconcile_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO reconcile_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO reconcile_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO reconcile_runtime;").execute(owner).await?;
-    ledger::install(owner).await?;
     Ok(())
 }
 async fn scenario(
@@ -129,10 +126,6 @@ async fn scenario(
     let rollback = mode == "rollback";
     let expired = mode == "expired";
     let effect_id = id.clone();
-    let ledger_request = ledger::request(&id, &id)?;
-    let append_ledger = borrowed && mode != "outer-rollback";
-    let request_for_callback = ledger_request.clone();
-    let authenticator = ledger::auth()?;
     let callback = scoped(move |_, tx| {
         Box::pin(async move {
             let tenant = tx.tenant_id().to_string();
@@ -148,11 +141,6 @@ async fn scenario(
             })
             .await?;
             outbox.append(tx, PendingMessage::new(envelope)).await?;
-            if append_ledger {
-                rss_ledger_postgres::append_in(tx, authenticator, &request_for_callback)
-                    .await
-                    .map_err(PgError::from)?;
-            }
             if expired {
                 tokio::time::sleep(Duration::from_millis(45)).await;
             }
@@ -174,19 +162,9 @@ async fn scenario(
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                     c.remaining(),
                 ),
-                (
-                    &composition,
-                    &claim,
-                    &t,
-                    Some(callback),
-                    ledger_request,
-                    ledger::auth()?,
-                ),
-                |(composition, claim, target, callback, request, auth), tx| {
+                (&composition, &claim, &t, Some(callback)),
+                |(composition, claim, target, callback), tx| {
                     Box::pin(async move {
-                        rss_ledger_postgres::lock_head_in(tx, auth.clone(), request.ledger())
-                            .await
-                            .map_err(PgError::from)?;
                         let callback = callback
                             .take()
                             .ok_or_else(|| PgError::from(sqlx::Error::RowNotFound))?;
@@ -217,14 +195,6 @@ async fn scenario(
         |_| "fenced",
     );
     verify_result(mode, &id, status, owner).await?;
-    if borrowed {
-        ledger::verify(
-            owner,
-            &id,
-            !matches!(mode, "rollback" | "outer-rollback" | "expired"),
-        )
-        .await?;
-    }
     Ok(())
 }
 async fn verify_result(mode: &str, id: &str, status: &str, owner: &PgPool) -> anyhow::Result<()> {
