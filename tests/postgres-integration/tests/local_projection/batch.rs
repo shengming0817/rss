@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 struct BatchEffect {
     entered: Arc<Semaphore>,
     release: Arc<Semaphore>,
+    slow_release: Arc<Semaphore>,
 }
 impl PgConsumerEffect<Vec<u8>> for BatchEffect {
     async fn apply(
@@ -15,7 +16,12 @@ impl PgConsumerEffect<Vec<u8>> for BatchEffect {
         _: OperationDeadline,
     ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
         self.entered.add_permits(1);
-        self.release
+        let release = if message.id().as_str() == "batch-failure" {
+            &self.slow_release
+        } else {
+            &self.release
+        };
+        release
             .acquire()
             .await
             .map_err(PgConsumerEffectFailure::handler_transient)?
@@ -100,7 +106,16 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     let entered = Arc::new(Semaphore::new(0));
     let release = Arc::new(Semaphore::new(0));
-    let capture = PgRecoveryCapture::new(f.worker.clone(), Arc::new(Key(1)), deadline()).await?;
+    let slow_release = Arc::new(Semaphore::new(0));
+    let worker = Arc::new(
+        PgRuntime::connect_consumer(
+            f.config.clone().with_pool_limits(0, 3),
+            Timer::new(),
+            fence_fixture::binding(),
+        )
+        .await?,
+    );
+    let capture = PgRecoveryCapture::new(worker.clone(), Arc::new(Key(1)), deadline()).await?;
     let projection = Arc::new(
         PgLocalProjection::new(
             capture,
@@ -109,6 +124,7 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
             BatchEffect {
                 entered: entered.clone(),
                 release: release.clone(),
+                slow_release: slow_release.clone(),
             },
             DeliveryBudget::new(
                 Duration::from_secs(30),
@@ -122,59 +138,71 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
         .await?,
     );
     let limit = NonZeroUsize::try_from(70usize)?;
+    let (completed, mut results) = tokio::sync::mpsc::channel(2);
     let task = tokio::spawn({
         let projection = projection.clone();
         async move {
-            collect_batch(projection.project_batch(
-                &Validator,
-                limit,
-                deadline(),
-                Duration::from_secs(5),
-            ))
-            .await
+            use futures::StreamExt;
+            let stream = projection
+                .project_batch(&Validator, limit, deadline(), Duration::from_secs(5))
+                .await?;
+            futures::pin_mut!(stream);
+            while let Some(item) = stream.next().await {
+                completed
+                    .send(item)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("receiver closed"))?;
+            }
+            Ok::<_, anyhow::Error>(())
         }
     });
-    // Both effects must enter before either can complete; sequential execution cannot satisfy this.
+    // This runtime has exactly two projection slots; both events must enter before release.
     tokio::time::timeout(Duration::from_secs(2), entered.acquire_many(2))
         .await??
         .forget();
     assert_eq!(f.state("batch-next").await?.3, "pending");
-    release.add_permits(2);
-    let results = task.await??;
-    assert_eq!(results.len(), 2);
-    for item in results {
-        assert_eq!(item.tenant_id(), tenant());
-        let id = item.message_id().as_str().to_owned();
-        let status = attempt_status(item.into_outcome()?)?;
-        assert_eq!(
-            status,
-            if id == "batch-failure" {
-                Status::HandlerTransient
-            } else {
-                Status::Committed
-            }
-        );
-    }
-    assert_eq!(f.state("batch-first").await?.0, 1);
+    release.add_permits(1);
+    let first = tokio::time::timeout(Duration::from_secs(2), results.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing fast result"))?;
+    assert_eq!(first.message_id().as_str(), "batch-first");
+    assert_eq!(first.tenant_id(), tenant());
+    assert_eq!(attempt_status(first.into_outcome()?)?, Status::Committed);
+    assert!(!task.is_finished(), "slow sibling remains blocked");
     assert_eq!(f.state("batch-failure").await?.0, 0);
-    // Finish the successful partition's successor; a failed sibling cannot roll it back or block it.
-    release.add_permits(8);
-    let results = collect_batch(projection.project_batch(
-        &Validator,
-        NonZeroUsize::try_from(8usize)?,
-        deadline(),
-        Duration::from_secs(5),
-    ))
-    .await?;
+    // Reuse the completed slot while the first stream still drives its blocked sibling.
+    release.add_permits(1);
+    let refill = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_batch(projection.project_batch(
+            &Validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )),
+    )
+    .await??;
+    assert_eq!(refill.len(), 1);
+    assert_eq!(refill[0].message_id().as_str(), "batch-next");
+    committed_projection(only(refill)?)?;
     assert!(
-        results
-            .iter()
-            .any(|item| item.message_id().as_str() == "batch-next")
+        !task.is_finished(),
+        "refill must not wait for the slow sibling"
     );
-    for item in results {
-        let _ = item.into_outcome()?;
-    }
+    slow_release.add_permits(1);
+    let slow = tokio::time::timeout(Duration::from_secs(2), results.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing slow result"))?;
+    assert_eq!(slow.message_id().as_str(), "batch-failure");
+    assert_eq!(
+        attempt_status(slow.into_outcome()?)?,
+        Status::HandlerTransient
+    );
+    task.await??;
+    assert_eq!(f.state("batch-first").await?.0, 1);
     assert_eq!(f.state("batch-next").await?.0, 1);
+    drop(projection);
+    worker.close().await;
     // Resolve the intentional failed fixture without leaving work for unrelated single-event scenarios.
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='resolved',lease_token=NULL,lease_until=NULL WHERE message_id='batch-failure'")
         .execute(&f.owner).await?;
