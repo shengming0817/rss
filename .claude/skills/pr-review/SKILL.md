@@ -162,7 +162,7 @@ echo "✅ 已贴评论：$URL"                                                  
 
 ### B1 读上一轮 findings（无损源）
 
-**优先当前会话窗口**：同 session 内刚跑过 `/pr-review` 或 `/fix`、findings 已在上下文 → 直接用，不重复拉取。窗口没有 → `bash hack/automation/pr-comments.sh latest <N> pr-review`（最新 review findings）+ `bash hack/automation/pr-comments.sh latest <N> fix`（其后 pm:fix 声称修了什么）；按 createdAt 选最新、过滤 kind（每条带 `file:line` + 证据 + 建议）。两者都无 → 报错退出（无可验证项）。
+**复用 PR 审查会话**：同一 PR 后续各轮复用同一个 branch 会话；每轮先核对 live head 及最新 review/fix 记录。同 session 内的 findings 仅在仍对应最新一轮时复用，不凭旧上下文跳过核对。需补齐记录时 → `bash hack/automation/pr-comments.sh latest <N> pr-review`（最新 review findings）+ `bash hack/automation/pr-comments.sh latest <N> fix`（其后 pm:fix 声称修了什么）；按 createdAt 选最新、过滤 kind（每条带 `file:line` + 证据 + 建议）。两者都无 → 报错退出（无可验证项）。
 
 **额外解析 OSS 集合**：经 `pm:fix` 的 `🚦 OUT_OF_SCOPE（详见本 PR pm:oos 评论）` 指针入口，从**本 PR `pm:oos` 评论**取每条 OSS 记录（`file:line` + 已建 issue #N / `deferred:<原因>`）——pm:oos 是 OSS 的无损数据源，pm:fix 只是一行指针。据此认出上一轮被**声明为 OUT_OF_SCOPE** 的 finding，把上一轮 findings 拆成两组：**IN_SCOPE**（B3 验代码）与**被声明 OSS**（B3 评估分类是否合理，不验代码）。
 

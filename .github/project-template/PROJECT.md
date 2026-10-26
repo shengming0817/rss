@@ -150,6 +150,6 @@ Finding 的范围归属与 P/Cx 正交；先按需求证据和文件关系判归
 - fix/check 输入记录的 SHA 须与 live head 一致；head 改变后，旧审查与修复记录失效。
 - IN_SCOPE Cx3/Cx4 合并为一次批量处置请求。属于原验收且为正确性、安全性或构建必需的 Cx3 建议当前 PR 修，其他建议 defer；用户可按 finding 覆盖建议。
 - deferred/OOS 项先落 issue，再发布评论与切标签；pri-p0 或标签无法确定时记录原因和草稿。
-- 修复与本地验证收尾后等待 10 分钟，再执行一次 `/pr-monitor <PR#> --mode=auto`。
+- **审查交接（必做）**：完成本地验证、必要修复及交接后，每个 PR 使用一个 `turns=none` 的独立 branch 会话。ship 在该会话执行 `/pr-review <PR#>`；fix 后复用同一会话执行 `/pr-review <PR#> --check`。后续各轮持续复用，修复由原实施会话完成，结束后汇总交接结果。
 - 自动 fix 最多三轮，按受信 `pm:fix` 评论计数；每轮仅发布一次，读取失败不当作零轮，用户明确要求继续时例外。
 - 对话报告与 PR 评论保留完整 finding、`file:line`、证据、处置与验证结果。评论标记和正文结构由 `pr-comment.md` 定义。
