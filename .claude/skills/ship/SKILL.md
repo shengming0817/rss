@@ -79,7 +79,7 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 
 按 `.claude/agents/reviewer.md` 的派发分档启动内置 reviewer。主 agent 对结果去重并按根因聚类；P/Cx 评级引用 `.github/project-template/PROJECT.md` §3，Finding 范围归属引用 `PROJECT.md` §3.3，后续流程引用 §5。
 
-外部再审不属于本阶段；本技能只完成 ship 流程内的首审与交接。
+外部再审不属于本阶段；阶段 7 完成交接后，由该 PR 的独立 branch 会话执行。
 
 ---
 
@@ -88,9 +88,9 @@ allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 1. 完整展示聚类后的 findings，并保留可定位证据。
 2. IN_SCOPE Cx1/Cx2 直接修复，不逐条询问。只要存在任一 IN_SCOPE Cx3/Cx4，就必须严格按 `.github/project-template/PROJECT.md` §5 发起一次批量处置，由用户对整批建议作出决策；只有不存在此类 finding 时才不沟通。这是顶部自主推进规则的显式决策门，不以“方案无歧义”为由跳过。
 3. 提交并推送本轮修复，完成冲突预检及冲突处理。
-4. **集中验证**：全部计划批次、review 修复和冲突处理完成后，代码任务按目标仓入口执行必要 T2，再运行一次项目 CI；CI 已承载的同项 T2 复用该入口的结果。每次收集全部失败，集中修复后精确复验失败项及受影响范围；通过后提交并推送验证修复。 **沟通方式与交接等待一致**：开始时仅说明一次进入集中验证，随后静默执行测试、失败收集、集中修复和精确复验；不逐命令、逐测试、逐失败项或按固定间隔播报进度，也不重复报告“仍在运行”。验证日志与失败证据保留在工具输出或交接 artifact，结果在最终报告中统一汇总。仅遇到无法自行解决的阻塞、需要用户决策或用户主动询问时沟通；静默不省略验证或隐藏失败。
+4. **集中验证**：全部计划批次、review 修复和冲突处理完成后，代码任务按目标仓入口执行必要 T2，再运行一次项目 CI；CI 已承载的同项 T2 复用该入口的结果。每次收集全部失败，集中修复后精确复验失败项及受影响范围；通过后提交并推送验证修复。 **执行与沟通**：开始时仅说明一次进入集中验证，随后静默执行测试、失败收集、集中修复和精确复验；不逐命令、逐测试、逐失败项或按固定间隔播报进度，也不重复报告“仍在运行”。验证日志与失败证据保留在工具输出或交接 artifact，结果在最终报告中统一汇总。仅遇到无法自行解决的阻塞、需要用户决策或用户主动询问时沟通；静默不省略验证或隐藏失败。
 5. 验证通过后，按 `.github/project-template/PROJECT.md` §5 完成 OOS/defer issue、绑定最终 head 的可读评论 artifact，最后用 §2.5 的 `forge.sh pr-set-status` 切 `needs-review-again`；内容格式引用 `backlog.md` 和 `pr-comment.md`。
-6. **交接等待（必做）**：本地验证及必要修复收尾完成后，按 `.github/project-template/PROJECT.md` §5 的交接等待及执行与沟通规则静默等待满 10 分钟；开始时一次性说明 UTC 到期时间，期间禁止查询交接状态或倒计时报时，到期后再启动一次 `/pr-monitor <PR#> --mode=auto`。
+6. **审查交接（必做）**：完成本地验证、必要修复及交接后，每个 PR 使用一个 `turns=none` 的独立 branch 会话。ship 在该会话执行 `/pr-review <PR#>`；fix 后复用同一会话执行 `/pr-review <PR#> --check`。后续各轮持续复用，修复由原实施会话完成，结束后汇总交接结果。
 
 artifact 必须先于总结与触发 label 落地；具体顺序见 `.github/project-template/PROJECT.md` §5。
 
@@ -104,6 +104,6 @@ artifact 必须先于总结与触发 label 落地；具体顺序见 `.github/pro
 - pm:ship 评论 URL；
 - 实施范围与关键测试结果；
 - findings 的修复/defer 摘要及对应 issue 指针；
-- 本地验证结果和后续 reviewer/monitor 交接。
+- 本地验证结果及 branch 会话的审查交接结果。
 
 交付报告只汇总已落地 artifact，不重复 findings 详表，也不新增审批门。

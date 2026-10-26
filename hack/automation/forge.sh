@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # forge.sh — forge-agnostic CLI adapter for the rss PR / issue automation.
 #
-# WHY: the project-management skills (ship/fix/issues/pr-monitor/pr-review) and
+# WHY: the project-management skills (ship/fix/issues/pr-review) and
 # the pr-comments / issue-labels scripts must not embed raw forge CLI commands or
 # forge-specific concepts inline. Every forge operation funnels through this
 # single adapter: callers speak forge-neutral VERBS, the adapter dispatches to
