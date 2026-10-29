@@ -439,7 +439,7 @@ async fn settle<S: DurableStore, T: Timer>(
                 Completion::Suspended { failures }
             } else {
                 Completion::Retry {
-                    after: policy.backoff(failures),
+                    after: policy.retry_delay(claim.target(), failures),
                     failures,
                 }
             };

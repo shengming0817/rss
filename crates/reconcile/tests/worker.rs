@@ -1330,3 +1330,66 @@ async fn fatal_claim_error_is_observed_before_a_forced_drain_interruption() -> a
     );
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_failures_persist_separate_bounded_retry_times() -> anyhow::Result<()> {
+    for ceiling in [1, 8] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_millis(50), &cancel);
+        let store = Store {
+            rows: Mutex::new(vec![]),
+            clock: Clock::new(),
+            lost: false,
+            scans: AtomicUsize::new(0),
+            scan_delay: None,
+            scan_failure: None,
+            scan_failure_after: 0,
+            finish_delay: None,
+            finish_failure: None,
+            finishes: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        };
+        let scope = scope()?;
+        for entity in ["first", "second"] {
+            store
+                .wake(&Target::new(scope.clone(), entity)?, &control)
+                .await?;
+        }
+        let policy = Policy::try_from(PolicyConfig {
+            concurrency: 2,
+            lease_ttl: Duration::from_millis(15),
+            attempt_timeout: Duration::from_millis(100),
+            scan_interval: Duration::from_millis(2),
+            idle_scan_interval: Duration::from_millis(2),
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(ceiling),
+            max_attempts: 2,
+        })?;
+        let report = run(
+            &store,
+            &business(1),
+            &scope,
+            policy,
+            &control,
+            &stop,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(report.retried, 2);
+        assert_eq!(report.converged + report.suspended, 0);
+        let rows = store.lock();
+        assert!(rows.iter().all(|row| row.failures == 1
+            && !row.leased
+            && row.due >= Duration::from_secs(1)
+            && row.due <= Duration::from_secs(ceiling.min(2))));
+        let due: std::collections::BTreeSet<_> = rows.iter().map(|row| row.due).collect();
+        if ceiling == 1 {
+            assert_eq!(due.len(), 1);
+        } else {
+            assert!(due.len() > 1, "one retry wave was synchronized again");
+        }
+    }
+    Ok(())
+}
