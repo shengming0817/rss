@@ -1,6 +1,7 @@
 use super::*;
 mod corruption;
 mod discovery;
+mod retry;
 pub async fn run(
     store: &PgStore,
     pool: &PgPool,
@@ -11,6 +12,7 @@ pub async fn run(
     corruption::run(store, pool, owner, c).await?;
     application_lock_timeout_rolls_back(store, owner, c).await?;
     scheduling(store, owner, c).await?;
+    retry::run(store, pool, owner, c).await?;
     isolation(store, pool, owner, c).await?;
     fencing(store, owner, c).await?;
     atomicity(store, owner, c).await?;

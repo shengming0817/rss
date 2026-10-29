@@ -1393,3 +1393,75 @@ async fn concurrent_failures_persist_separate_bounded_retry_times() -> anyhow::R
     }
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn capped_retries_survive_runner_restart_and_early_notifications() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_millis(50), &cancel);
+    let store = idle_store();
+    let scope = scope()?;
+    for entity in ["first", "second"] {
+        store
+            .wake(&Target::new(scope.clone(), entity)?, &control)
+            .await?;
+    }
+    for row in store.lock().iter_mut() {
+        row.failures = 5;
+    }
+    let policy = Policy::try_from(PolicyConfig {
+        concurrency: 2,
+        lease_ttl: Duration::from_secs(1),
+        attempt_timeout: Duration::from_millis(100),
+        scan_interval: Duration::from_millis(2),
+        idle_scan_interval: Duration::from_secs(1),
+        initial_backoff: Duration::from_secs(5),
+        max_backoff: Duration::from_secs(60),
+        max_attempts: 100,
+    })?;
+    let work = business(1);
+    let stop = CancellationToken::new();
+    let report = run(&store, &work, &scope, policy, &control, &stop, |_| {}).await?;
+    assert_eq!(report.retried, 2);
+    let deadlines: Vec<_> = store.lock().iter().map(|row| row.due).collect();
+    assert_ne!(deadlines[0], deadlines[1]);
+    assert!(
+        deadlines
+            .iter()
+            .all(|due| *due >= Duration::from_secs(30) && *due <= Duration::from_secs(60))
+    );
+    let restarted = Control::new(&clock, Duration::from_secs(1), &cancel);
+    let notify = tokio::sync::Notify::new();
+    let notifications = async {
+        for _ in 0..5 {
+            notify.notify_one();
+            restarted.sleep(Duration::from_millis(10)).await;
+        }
+        stop.cancel();
+    };
+    let (report, ()) = tokio::join!(
+        run_with_notify(
+            &store,
+            &work,
+            &scope,
+            policy,
+            &restarted,
+            &stop,
+            &notify,
+            |_| {}
+        ),
+        notifications
+    );
+    assert_eq!(report?.retried, 0);
+    assert_eq!(work.observed.load(Ordering::SeqCst), 2);
+    let rows = store.lock();
+    assert_eq!(
+        rows.iter().map(|row| row.due).collect::<Vec<_>>(),
+        deadlines
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row.failures == 6 && row.epoch == 1 && !row.leased)
+    );
+    Ok(())
+}
