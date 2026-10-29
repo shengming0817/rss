@@ -54,6 +54,7 @@ struct Store {
     scans: AtomicUsize,
     scan_delay: Option<(usize, Duration)>,
     scan_failure: Option<ErrorKind>,
+    scan_failure_after: usize,
     finish_delay: Option<Duration>,
     finish_failure: Option<ErrorKind>,
     finishes: AtomicUsize,
@@ -99,7 +100,9 @@ impl DurableStore for Store {
         _: &Control<'_, T>,
     ) -> Result<Vec<Token>, Error> {
         let scan = self.scans.fetch_add(1, Ordering::SeqCst);
-        if let Some(kind) = self.scan_failure {
+        if let Some(kind) = self.scan_failure
+            && scan >= self.scan_failure_after
+        {
             return Err(Error::new(kind));
         }
         let now = self.clock.now();
@@ -282,6 +285,7 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -320,6 +324,7 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -360,6 +365,7 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -401,6 +407,7 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: None,
+            scan_failure_after: 0,
             finish_delay: None,
             finish_failure: None,
             finishes: AtomicUsize::new(0),
@@ -441,6 +448,7 @@ async fn idle_worker_recovers_a_durable_wake_without_notification() -> anyhow::R
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -488,6 +496,7 @@ async fn delayed_claim_is_renewed_before_any_business_callback() -> anyhow::Resu
         scans: AtomicUsize::new(0),
         scan_delay: Some((0, Duration::from_millis(12))),
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -518,6 +527,7 @@ async fn scan_failures_have_operation_units_not_target_units() -> anyhow::Result
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: Some(kind),
+            scan_failure_after: 0,
             finish_delay: None,
             finish_failure: None,
             finishes: AtomicUsize::new(0),
@@ -586,6 +596,7 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
         scans: AtomicUsize::new(0),
         scan_delay: Some((1, Duration::from_millis(30))),
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -625,6 +636,7 @@ async fn panic_payload_escapes_run_without_settling_claim() -> anyhow::Result<()
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -665,6 +677,7 @@ async fn uncertain_execution_preserves_claim_and_emits_target_failure() -> anyho
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: None,
+            scan_failure_after: 0,
             finish_delay: None,
             finish_failure: None,
             finishes: AtomicUsize::new(0),
@@ -708,6 +721,7 @@ async fn scheduled_retry_retains_typed_redacted_diagnostic() -> anyhow::Result<(
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -746,6 +760,7 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -809,6 +824,7 @@ async fn nontransient_scan_failure_returns_without_retry_or_settlement() -> anyh
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: Some(kind),
+            scan_failure_after: 0,
             finish_delay: None,
             finish_failure: None,
             finishes: AtomicUsize::new(0),
@@ -846,6 +862,7 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: None,
+            scan_failure_after: 0,
             finish_delay: None,
             finish_failure: None,
             finishes: AtomicUsize::new(0),
@@ -900,6 +917,7 @@ fn idle_store() -> Store {
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        scan_failure_after: 0,
         finish_delay: None,
         finish_failure: None,
         finishes: AtomicUsize::new(0),
@@ -1202,7 +1220,7 @@ async fn draining_preserves_uncertain_finish_and_bounds_a_stalled_finish() -> an
         assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
         assert!(clock.now() < Duration::from_secs(1));
         assert!(
-            matches!(failures.lock().unwrap_or_else(|e|e.into_inner()).as_slice(), [Observation::AttemptFailed {stage:Stage::Finish,error,..}] if error.kind()==kind)
+            matches!(failures.lock().unwrap_or_else(|e|e.into_inner()).as_slice(), [Observation::AttemptFailed {stage:Stage::Finish,error,..}] if error.kind()==if kind==ErrorKind::Deadline {ErrorKind::CommitUnknown} else {kind})
         );
     }
     Ok(())
@@ -1272,5 +1290,44 @@ async fn stop_keeps_an_inflight_claim_until_its_acquired_work_is_settled() -> an
     assert_eq!(store.scans.load(Ordering::SeqCst), 1);
     assert_eq!(store.finishes.load(Ordering::SeqCst), 1);
     assert_eq!(store.lock()[1].epoch, 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn fatal_claim_error_is_observed_before_a_forced_drain_interruption() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let forced = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(1), &forced);
+    let mut store = idle_store();
+    store.scan_failure = Some(ErrorKind::RollbackFailed);
+    store.scan_failure_after = 1;
+    let scope = scope()?;
+    store
+        .wake(&Target::new(scope.clone(), "active")?, &control)
+        .await?;
+    let work = PausedApply {
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    let scan_failed = tokio::sync::Notify::new();
+    let failures = Mutex::new(Vec::new());
+    let runner = run(&store, &work, &scope, policy()?, &control, &stop, |event| {
+        failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event);
+        scan_failed.notify_one();
+    });
+    let interrupt = async {
+        work.entered.notified().await;
+        scan_failed.notified().await;
+        forced.cancel();
+    };
+    let (result, ()) = tokio::join!(runner, interrupt);
+    assert!(matches!(result, Err(error) if error.kind()==ErrorKind::Cancelled));
+    assert!(
+        matches!(failures.lock().unwrap_or_else(|e|e.into_inner()).as_slice(), [Observation::ScanFailed{error,..}] if error.kind()==ErrorKind::RollbackFailed)
+    );
     Ok(())
 }

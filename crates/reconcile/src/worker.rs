@@ -51,13 +51,13 @@ struct Failure {
 }
 struct Outcome {
     result: Result<Completion, Failure>,
-    prior: Option<Failure>,
+    prior: Vec<Failure>,
 }
 impl Outcome {
     fn failed(stage: Stage, error: Error) -> Self {
         Self {
             result: Err(Failure { stage, error }),
-            prior: None,
+            prior: Vec::new(),
         }
     }
 }
@@ -87,7 +87,7 @@ impl<F: FnMut(Observation)> Active<'_, F> {
             self.schedule(now, *after);
         }
         self.targets.remove(&target);
-        if let Some(failure) = outcome.prior {
+        for failure in outcome.prior {
             self.emit(&target, failure);
         }
         match outcome.result {
@@ -279,6 +279,7 @@ async fn run_inner<
                     active.schedule(control.elapsed(), policy.scan);
                 }
                 Err(e) => {
+                    active.scan_error(scope, e.clone());
                     active.drain(control).await?;
                     return Err(e);
                 }
@@ -381,7 +382,26 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
             renewed=async {outer.sleep_until(renew_at).await;renew_lease(store,&claim,policy,outer).await}=>match renewed {Ok(at)=>renew_at=at,Err(e)=>return Outcome::failed(Stage::Renew,e)},
         }
     };
-    settle(store, &claim, policy, outer, outcome).await
+    let finish = settle(store, &claim, policy, outer, outcome);
+    tokio::pin!(finish);
+    loop {
+        tokio::select! {
+            biased;
+            outcome = &mut finish => return outcome,
+            renewed = async { outer.sleep_until(renew_at).await; renew_lease(store, &claim, policy, outer).await } => match renewed {
+                Ok(at) => renew_at = at,
+                Err(error) => {
+                    // A committed finish releases its token before the receipt may arrive.
+                    // Never discard that receipt in response to a concurrent renewal failure.
+                    let mut outcome = finish.await;
+                    if outcome.result.is_err() {
+                        outcome.prior.push(Failure { stage: Stage::Renew, error });
+                    }
+                    return outcome;
+                }
+            },
+        }
+    }
 }
 async fn settle<S: DurableStore, T: Timer>(
     store: &S,
@@ -391,7 +411,7 @@ async fn settle<S: DurableStore, T: Timer>(
     outcome: Result<Completion, Failure>,
 ) -> Outcome {
     let (completion, prior) = match outcome {
-        Ok(completion) => (completion, None),
+        Ok(completion) => (completion, Vec::new()),
         Err(failure)
             if matches!(
                 failure.error.kind(),
@@ -403,7 +423,7 @@ async fn settle<S: DurableStore, T: Timer>(
         {
             return Outcome {
                 result: Err(failure),
-                prior: None,
+                prior: Vec::new(),
             };
         }
         Err(failure) => {
@@ -423,13 +443,14 @@ async fn settle<S: DurableStore, T: Timer>(
                     failures,
                 }
             };
-            (completion, Some(failure))
+            (completion, vec![failure])
         }
     };
     let settlement = control.child(policy.attempt);
     let result = settlement
         .run(store.finish(claim, completion, &settlement))
         .await
+        .map_err(Error::uncertain)
         .map(|()| completion)
         .map_err(|error| Failure {
             stage: Stage::Finish,

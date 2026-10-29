@@ -295,7 +295,7 @@ async fn graceful_stop(
     };
     let policy = Policy::try_from(PolicyConfig {
         concurrency: 1,
-        lease_ttl: Duration::from_secs(10),
+        lease_ttl: Duration::from_secs(1),
         attempt_timeout: Duration::from_secs(3),
         scan_interval: Duration::from_millis(5),
         idle_scan_interval: Duration::from_secs(1),
@@ -303,8 +303,9 @@ async fn graceful_stop(
         max_backoff: Duration::from_millis(50),
         max_attempts: 3,
     })?;
+    let settling = DelayedSettlement(store);
     let runner = rss_reconcile::run(
-        store,
+        &settling,
         &business,
         target.scope(),
         policy,
@@ -329,8 +330,46 @@ async fn graceful_stop(
     let report = runner.await?;
     assert_eq!(report.reobserve, 1);
     assert_eq!(count(owner, target.scope().reconciler()).await?, 1);
-    let settled: bool = sqlx::query_scalar("SELECT token IS NULL AND result='reobserve' FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity=$3")
+    let settled: bool = sqlx::query_scalar("SELECT token IS NULL AND result='pending' FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity=$3")
         .bind(target.scope().tenant().to_string()).bind(target.scope().reconciler()).bind(target.entity()).fetch_one(owner).await?;
     assert!(settled, "runner returned before the real claim settlement");
     Ok(())
+}
+
+// Delay before acquiring the real PG finish transaction; renewal must keep its claim valid.
+struct DelayedSettlement<'a>(&'a PgStore);
+impl DurableStore for DelayedSettlement<'_> {
+    type Claim = PgClaim;
+    async fn wake<T: Timer>(&self, target: &Target, c: &Control<'_, T>) -> Result<(), Error> {
+        self.0.wake(target, c).await
+    }
+    async fn claim_due<T: Timer>(
+        &self,
+        scope: &Scope,
+        limit: usize,
+        lease: Duration,
+        c: &Control<'_, T>,
+    ) -> Result<Vec<PgClaim>, Error> {
+        self.0.claim_due(scope, limit, lease, c).await
+    }
+    async fn renew<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        lease: Duration,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.0.renew(claim, lease, c).await
+    }
+    async fn release<T: Timer>(&self, claim: &PgClaim, c: &Control<'_, T>) -> Result<(), Error> {
+        self.0.release(claim, c).await
+    }
+    async fn finish<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        completion: Completion,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        c.sleep(Duration::from_millis(1200)).await;
+        self.0.finish(claim, completion, c).await
+    }
 }
