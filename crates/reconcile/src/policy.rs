@@ -22,7 +22,9 @@ pub struct PolicyConfig {
     pub scan_interval: Duration,
     /// Recovery scan interval when no known target is due sooner.
     pub idle_scan_interval: Duration,
+    /// Initial retry floor; independent targets spread within the remaining bounded delay.
     pub initial_backoff: Duration,
+    /// Ceiling including retry jitter.
     pub max_backoff: Duration,
     /// Includes the first attempt; 1 means no automatic retry after the first failure.
     pub max_attempts: u32,
@@ -76,6 +78,23 @@ impl Policy {
                     .unwrap_or(u32::MAX),
             )
             .min(self.cap)
+    }
+    // ref: tower-rs/tower tower/src/retry/backoff.rs (capped additive jitter).
+    // The claim identity and failure count spread a retry wave without new RNG/config
+    // state. Persisted next_run remains authoritative across restart and notification.
+    pub(crate) fn retry_delay(&self, target: &crate::Target, failures: u32) -> Duration {
+        use std::hash::{Hash, Hasher};
+        let base = self.backoff(failures);
+        let room = base.min(self.cap - base);
+        // Validation bounds all policy durations to one day and whole milliseconds.
+        let room = room.as_secs() * 1000 + u64::from(room.subsec_millis());
+        if room == 0 {
+            return base;
+        }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        target.hash(&mut hash);
+        failures.hash(&mut hash);
+        base + Duration::from_millis(hash.finish() % (room + 1))
     }
     /// Maximum concurrent entity executions.
     pub const fn concurrency(&self) -> usize {

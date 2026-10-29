@@ -92,7 +92,8 @@ async fn scenario(
         max_attempts: 3,
     })?;
     let cancel = CancellationToken::new();
-    let worker_control = Control::new(clock, c.remaining(), &cancel);
+    let force = CancellationToken::new();
+    let worker_control = Control::new(clock, c.elapsed().saturating_add(c.remaining()), &force);
     let completion = async {
         loop {
             let done: bool = store.local_tx(target.scope(), c, |tx| Box::pin(async move {
@@ -114,6 +115,7 @@ async fn scenario(
             target.scope(),
             policy,
             &worker_control,
+            &cancel,
             |_| {}
         ),
         completion

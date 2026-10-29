@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 /// The core operation that produced an observed target failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -50,13 +51,13 @@ struct Failure {
 }
 struct Outcome {
     result: Result<Completion, Failure>,
-    prior: Option<Failure>,
+    prior: Vec<Failure>,
 }
 impl Outcome {
     fn failed(stage: Stage, error: Error) -> Self {
         Self {
             result: Err(Failure { stage, error }),
-            prior: None,
+            prior: Vec::new(),
         }
     }
 }
@@ -70,13 +71,23 @@ struct Active<'a, F> {
     idle_scan: Duration,
 }
 impl<F: FnMut(Observation)> Active<'_, F> {
+    async fn drain<T: Timer>(&mut self, control: &Control<'_, T>) -> Result<(), Error> {
+        while !self.tasks.is_empty() {
+            if let Some((target, outcome)) =
+                control.run(async { Ok(self.tasks.next().await) }).await?
+            {
+                self.record(target, outcome, control.elapsed());
+            }
+        }
+        Ok(())
+    }
     fn record(&mut self, target: Target, outcome: Outcome, now: Duration) {
         if let Ok(Completion::Reobserve(after) | Completion::Retry { after, .. }) = &outcome.result
         {
             self.schedule(now, *after);
         }
         self.targets.remove(&target);
-        if let Some(failure) = outcome.prior {
+        for failure in outcome.prior {
             self.emit(&target, failure);
         }
         match outcome.result {
@@ -131,7 +142,9 @@ impl<F: FnMut(Observation)> Active<'_, F> {
         });
     }
 }
-/// Run from durable startup/periodic scans until cancellation/deadline. No dummy Notify needed.
+/// Run durable scans until `stop`, then await all acquired work and its settlement.
+/// `control` remains the hard execution deadline/cancellation boundary. During draining,
+/// interruption returns an error, never a successful drain. Dropping the future aborts work.
 /// Diagnostics are delivered synchronously at attempt completion; keep the observer nonblocking.
 /// Panic propagates unchanged to the caller. No detached tasks: drop cancels all in-flight work.
 pub async fn run<
@@ -145,11 +158,19 @@ pub async fn run<
     scope: &Scope,
     policy: Policy,
     control: &Control<'_, T>,
+    stop: &CancellationToken,
     observe: F,
 ) -> Result<Report, Error> {
-    run_inner(store, reconciler, scope, policy, control, None, observe).await
+    run_inner(
+        store, reconciler, scope, policy, control, stop, None, observe,
+    )
+    .await
 }
 /// Additionally accept best-effort wake hints; durable scans remain the recovery authority.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "stop admission and hard execution control are distinct caller-owned signals"
+)]
 pub async fn run_with_notify<
     S: DurableStore,
     R: Reconciler<S::Claim>,
@@ -161,6 +182,7 @@ pub async fn run_with_notify<
     scope: &Scope,
     policy: Policy,
     control: &Control<'_, T>,
+    stop: &CancellationToken,
     notify: &Notify,
     observe: F,
 ) -> Result<Report, Error> {
@@ -170,11 +192,16 @@ pub async fn run_with_notify<
         scope,
         policy,
         control,
+        stop,
         Some(notify),
         observe,
     )
     .await
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one runner owns both admission and active execution"
+)]
 async fn run_inner<
     S: DurableStore,
     R: Reconciler<S::Claim>,
@@ -186,6 +213,7 @@ async fn run_inner<
     scope: &Scope,
     policy: Policy,
     control: &Control<'_, T>,
+    stop: &CancellationToken,
     notify: Option<&Notify>,
     observe: F,
 ) -> Result<Report, Error> {
@@ -198,6 +226,10 @@ async fn run_inner<
         idle_scan: policy.idle_scan,
     };
     loop {
+        if stop.is_cancelled() {
+            active.drain(control).await?;
+            return Ok(active.report);
+        }
         if control.check().is_err() {
             return Ok(active.report);
         }
@@ -211,11 +243,13 @@ async fn run_inner<
             match batch {
                 Ok(claims) => {
                     if claims.len() > available {
+                        active.drain(control).await?;
                         return Err(Error::new(ErrorKind::Invariant));
                     }
                     for claim in claims {
                         let target = claim.target().clone();
                         if target.scope() != scope || !active.targets.insert(target.clone()) {
+                            active.drain(control).await?;
                             return Err(Error::new(ErrorKind::Invariant));
                         }
                         active.tasks.push(Box::pin(async move {
@@ -230,6 +264,9 @@ async fn run_inner<
                     if matches!(e.kind(), ErrorKind::Cancelled | ErrorKind::Deadline)
                         && control.check().is_err() =>
                 {
+                    if stop.is_cancelled() {
+                        return Err(e);
+                    }
                     return Ok(active.report);
                 }
                 Err(e)
@@ -241,7 +278,11 @@ async fn run_inner<
                     active.scan_error(scope, e);
                     active.schedule(control.elapsed(), policy.scan);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    active.scan_error(scope, e.clone());
+                    active.drain(control).await?;
+                    return Err(e);
+                }
             }
             if freed && active.tasks.len() < policy.concurrency {
                 continue;
@@ -252,6 +293,7 @@ async fn run_inner<
         let event = control
             .run(async {
                 tokio::select! {
+                    ()=stop.cancelled()=>Ok(None),
                     result=active.tasks.next(),if !active.tasks.is_empty()=>Ok(result),
                     ()=wake_hint(notify),if available=>Ok(None),
                     ()=control.sleep(delay),if available=>Ok(None),
@@ -261,6 +303,7 @@ async fn run_inner<
         match event {
             Ok(Some((target, outcome))) => active.record(target, outcome, control.elapsed()),
             Ok(None) => {}
+            Err(error) if stop.is_cancelled() => return Err(error),
             Err(_) => return Ok(active.report),
         }
     }
@@ -339,7 +382,26 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
             renewed=async {outer.sleep_until(renew_at).await;renew_lease(store,&claim,policy,outer).await}=>match renewed {Ok(at)=>renew_at=at,Err(e)=>return Outcome::failed(Stage::Renew,e)},
         }
     };
-    settle(store, &claim, policy, outer, outcome).await
+    let finish = settle(store, &claim, policy, outer, outcome);
+    tokio::pin!(finish);
+    loop {
+        tokio::select! {
+            biased;
+            outcome = &mut finish => return outcome,
+            renewed = async { outer.sleep_until(renew_at).await; renew_lease(store, &claim, policy, outer).await } => match renewed {
+                Ok(at) => renew_at = at,
+                Err(error) => {
+                    // A committed finish releases its token before the receipt may arrive.
+                    // Never discard that receipt in response to a concurrent renewal failure.
+                    let mut outcome = finish.await;
+                    if outcome.result.is_err() {
+                        outcome.prior.push(Failure { stage: Stage::Renew, error });
+                    }
+                    return outcome;
+                }
+            },
+        }
+    }
 }
 async fn settle<S: DurableStore, T: Timer>(
     store: &S,
@@ -349,7 +411,7 @@ async fn settle<S: DurableStore, T: Timer>(
     outcome: Result<Completion, Failure>,
 ) -> Outcome {
     let (completion, prior) = match outcome {
-        Ok(completion) => (completion, None),
+        Ok(completion) => (completion, Vec::new()),
         Err(failure)
             if matches!(
                 failure.error.kind(),
@@ -361,7 +423,7 @@ async fn settle<S: DurableStore, T: Timer>(
         {
             return Outcome {
                 result: Err(failure),
-                prior: None,
+                prior: Vec::new(),
             };
         }
         Err(failure) => {
@@ -377,16 +439,18 @@ async fn settle<S: DurableStore, T: Timer>(
                 Completion::Suspended { failures }
             } else {
                 Completion::Retry {
-                    after: policy.backoff(failures),
+                    after: policy.retry_delay(claim.target(), failures),
                     failures,
                 }
             };
-            (completion, Some(failure))
+            (completion, vec![failure])
         }
     };
-    let result = control
-        .run(store.finish(claim, completion, control))
+    let settlement = control.child(policy.attempt);
+    let result = settlement
+        .run(store.finish(claim, completion, &settlement))
         .await
+        .map_err(Error::uncertain)
         .map(|()| completion)
         .map_err(|error| Failure {
             stage: Stage::Finish,

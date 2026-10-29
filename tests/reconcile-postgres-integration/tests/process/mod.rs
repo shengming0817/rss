@@ -1,11 +1,12 @@
 use super::*;
 use std::process::{Command, Stdio};
 pub async fn run(
-    _: &PgStore,
+    store: &PgStore,
     owner: &PgPool,
     fixture: &testkit::PgTlsFixture,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    graceful_stop(store, owner, c).await?;
     for mode in ["claim", "staged", "applied", "finished"] {
         crash(mode, owner, fixture, c).await?;
     }
@@ -116,8 +117,9 @@ async fn recover(
                 c.sleep(Duration::from_millis(5)).await;
             }
         };
+        let stop = CancellationToken::new();
         tokio::select! {
-            result = rss_reconcile::run(store.as_ref(), &runner, t.scope(), policy, c, |_| {}) => {
+            result = rss_reconcile::run(store.as_ref(), &runner, t.scope(), policy, c, &stop, |_| {}) => {
                 anyhow::bail!("{mode}: recovery stopped before durable convergence: {:?}", result?);
             }
             result = tokio::time::timeout(c.remaining(), converged) => { result??; }
@@ -239,4 +241,135 @@ async fn worker_child() -> anyhow::Result<()> {
     std::fs::write(marker, b"committed")?;
     std::future::pending::<()>().await;
     Ok(())
+}
+
+struct PausedTransaction<'a> {
+    store: &'a PgStore,
+    key: String,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+impl Reconciler<PgClaim> for PausedTransaction<'_> {
+    type State = bool;
+    async fn observe<T: Timer>(
+        &self,
+        _: &PgClaim,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileDiff<bool>, Error> {
+        Ok(ReconcileDiff::between(
+            DesiredState::present(true),
+            ActualState::present(false),
+        ))
+    }
+    async fn apply<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        _: ReconcileDiff<bool>,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.store
+            .protect(claim, control, self, |owner, tx| {
+                Box::pin(async move {
+                    effect(tx, owner.key.clone()).await?;
+                    owner.entered.notify_one();
+                    owner.resume.notified().await;
+                    Ok(())
+                })
+            })
+            .await
+    }
+}
+async fn graceful_stop(
+    store: &PgStore,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let target = target("graceful-stop", TENANT)?;
+    store.wake(&target, control).await?;
+    let stop = CancellationToken::new();
+    let business = PausedTransaction {
+        store,
+        key: target.scope().reconciler().into(),
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    let policy = Policy::try_from(PolicyConfig {
+        concurrency: 1,
+        lease_ttl: Duration::from_secs(1),
+        attempt_timeout: Duration::from_secs(3),
+        scan_interval: Duration::from_millis(5),
+        idle_scan_interval: Duration::from_secs(1),
+        initial_backoff: Duration::from_millis(5),
+        max_backoff: Duration::from_millis(50),
+        max_attempts: 3,
+    })?;
+    let settling = DelayedSettlement(store);
+    let runner = rss_reconcile::run(
+        &settling,
+        &business,
+        target.scope(),
+        policy,
+        control,
+        &stop,
+        |_| {},
+    );
+    tokio::pin!(runner);
+    tokio::select! { result=&mut runner=>anyhow::bail!("premature runner exit: {result:?}"), ()=business.entered.notified()=>{} }
+    stop.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut runner)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        count(owner, target.scope().reconciler()).await?,
+        0,
+        "business write is still uncommitted"
+    );
+    business.resume.notify_one();
+    let report = runner.await?;
+    assert_eq!(report.reobserve, 1);
+    assert_eq!(count(owner, target.scope().reconciler()).await?, 1);
+    let settled: bool = sqlx::query_scalar("SELECT token IS NULL AND result='pending' FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity=$3")
+        .bind(target.scope().tenant().to_string()).bind(target.scope().reconciler()).bind(target.entity()).fetch_one(owner).await?;
+    assert!(settled, "runner returned before the real claim settlement");
+    Ok(())
+}
+
+// Delay before acquiring the real PG finish transaction; renewal must keep its claim valid.
+struct DelayedSettlement<'a>(&'a PgStore);
+impl DurableStore for DelayedSettlement<'_> {
+    type Claim = PgClaim;
+    async fn wake<T: Timer>(&self, target: &Target, c: &Control<'_, T>) -> Result<(), Error> {
+        self.0.wake(target, c).await
+    }
+    async fn claim_due<T: Timer>(
+        &self,
+        scope: &Scope,
+        limit: usize,
+        lease: Duration,
+        c: &Control<'_, T>,
+    ) -> Result<Vec<PgClaim>, Error> {
+        self.0.claim_due(scope, limit, lease, c).await
+    }
+    async fn renew<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        lease: Duration,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.0.renew(claim, lease, c).await
+    }
+    async fn release<T: Timer>(&self, claim: &PgClaim, c: &Control<'_, T>) -> Result<(), Error> {
+        self.0.release(claim, c).await
+    }
+    async fn finish<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        completion: Completion,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        c.sleep(Duration::from_millis(1200)).await;
+        self.0.finish(claim, completion, c).await
+    }
 }

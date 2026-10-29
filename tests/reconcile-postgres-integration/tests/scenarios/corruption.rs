@@ -171,8 +171,9 @@ async fn recovery(
     let restarted = PgStore::new(pool.clone(), c).await?;
     let business = Observations(AtomicUsize::new(0));
     // Observe durable finish, using the existing caller budget rather than a performance cutoff.
+    let stop = CancellationToken::new();
     tokio::select! {
-        result = rss_reconcile::run(&restarted, &business, scope, policy()?, c, |_| {}) => {
+        result = rss_reconcile::run(&restarted, &business, scope, policy()?, c, &stop, |_| {}) => {
             anyhow::bail!("worker stopped before durable recovery: {:?}", result?);
         }
         result = tokio::time::timeout(c.remaining(), wait_for_recovery(owner, scope, c)) => { result??; }
@@ -293,6 +294,7 @@ async fn worker_rejects(
         scope,
         policy()?,
         &c.child(Duration::from_secs(1)),
+        &CancellationToken::new(),
         |_| {},
     )
     .await;
