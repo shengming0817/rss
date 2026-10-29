@@ -8,18 +8,18 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 `MIGRATION_SQL` 是新 schema 的版本化安装定义，由独立 NOSUPERUSER NOBYPASSRLS schema owner 执行。应用给 runtime 角色 schema USAGE、表 SELECT、函数 EXECUTE；不要授予组件表直接写权限、schema CREATE、owner membership 或 BYPASSRLS。所有租户表启用 FORCE RLS，函数固定 search_path，PUBLIC 权限撤销。迁移执行、角色配置和业务表由产品拥有。
 
-首次发布只支持 fresh install，不读取、转换或接管历史 `public.reconcile_*`。历史表是否存在不参与新实现决策。后续组件 migration 只追加，维护新持久化 identity；不把“不兼容旧实现”解释为可以改写未来已发布存储格式。
+当前支持 fresh install 和 `UPGRADE_SQL` 定义的单向升级，不读取、转换或接管历史 `public.reconcile_*`。历史表是否存在不参与新实现决策。后续组件 migration 只追加，维护新持久化 identity；不把“不兼容旧实现”解释为可以改写未来已发布存储格式。
 
 目标表唯一持有 due time、wake version、失败状态、token 与递增 epoch。没有产品 snapshot、设备策略或历史审计账本。扫描用数据库时间和 `SKIP LOCKED`，claim、renew、release、finish 都限定 tenant/target/token/epoch。租户 setting 在可信应用内提供隔离，不认证持有数据库凭据的调用方。
 
 ## 存储损坏与恢复边界
 
 准入精确校验组件 CHECK 的定义集合及 validated 状态；缺失、弱化、额外约束或
-`NOT VALID` 均返回 `StorageContract`。定义顺序和约束名称不影响语义匹配。运行池每次实际借出
-连接执行实际操作时同样检查；空发现只检查当前安全边界。规范 schema 禁止负数/超出 u32 的 failures、非法目标身份、
+`NOT VALID` 均返回 `StorageContract`。定义顺序和约束名称不影响语义匹配。已准入操作复用该结构前提，借出连接时校验实际连接身份；
+schema/ACL 变更必须停流并重新准入，空发现不重新扫描 catalog。规范 schema 禁止负数/超出 u32 的 failures、非法目标身份、
 非正 wake version、负 epoch 和不合法 lease 形状；它不能证明任意外部存储破坏从未发生。
 
-准入失败发生在 claim/业务回调前。若 claim SQL 或行转换失败，整批事务回滚，不返回部分成功 claim；
+构造时的准入失败发生在 claim/业务回调前。若 claim SQL 或行转换失败，整批事务回滚，不返回部分成功 claim；
 提交或回滚结果未知仍按原结算类别处理。worker 对 `StorageContract`、`Invariant` 和 `InvalidInput`
 扫描错误直接返回，不热重试，也不自动跳过、删除或隔离目标。外部 owner 修复数据及规范约束后，
 消费方重新构造所需 store 并重启 worker；正常邻接目标和后续扫描的恢复由真实 PG suite 验证。
