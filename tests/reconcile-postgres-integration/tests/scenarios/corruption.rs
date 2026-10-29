@@ -1,6 +1,6 @@
 //! INVARIANT: RECONCILE-STORAGE-CONTRACT-01 — real catalog damage must fail closed.
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{collections::HashSet, sync::Mutex};
 
 pub(super) async fn run(
     store: &PgStore,
@@ -194,7 +194,7 @@ async fn recovery(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let restarted = PgStore::new(pool.clone(), c).await?;
-    let business = Observations(AtomicUsize::new(0));
+    let business = Observations(Mutex::new(HashSet::new()));
     // Observe durable finish, using the existing caller budget rather than a performance cutoff.
     let stop = CancellationToken::new();
     tokio::select! {
@@ -203,7 +203,14 @@ async fn recovery(
         }
         result = tokio::time::timeout(c.remaining(), wait_for_recovery(owner, scope, c)) => { result??; }
     }
-    assert_eq!(business.0.load(Ordering::SeqCst), 2);
+    // Unknown finish may repeat observation. Both original identities must actually be observed.
+    assert_eq!(
+        business.targets(),
+        HashSet::from([
+            Target::new(scope.clone(), "a-bad")?,
+            Target::new(scope.clone(), "b-good")?,
+        ])
+    );
     assert!(
         restarted
             .claim_due(scope, 2, Duration::from_secs(1), c)
@@ -297,16 +304,24 @@ fn policy() -> Result<Policy, Error> {
         max_attempts: 2,
     })
 }
-struct Observations(AtomicUsize);
+struct Observations(Mutex<HashSet<Target>>);
+impl Observations {
+    fn targets(&self) -> HashSet<Target> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
 impl Reconciler<PgClaim> for Observations {
     type State = ();
     async fn observe<T: Timer>(
         &self,
-        _: &PgClaim,
+        claim: &PgClaim,
         _: &Control<'_, T>,
     ) -> Result<ReconcileStep<ReconcileDiff<()>>, Error> {
         let observed = async {
-            self.0.fetch_add(1, Ordering::SeqCst);
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(claim.target().clone());
             Ok(ReconcileDiff::between(
                 DesiredState::present(()),
                 ActualState::present(()),
@@ -334,7 +349,7 @@ async fn worker_rejects(
     c: &Control<'_, Clock>,
     expected: ErrorKind,
 ) -> anyhow::Result<()> {
-    let business = Observations(AtomicUsize::new(0));
+    let business = Observations(Mutex::new(HashSet::new()));
     let result = rss_reconcile::run(
         store,
         &business,
@@ -346,7 +361,7 @@ async fn worker_rejects(
     )
     .await;
     assert!(matches!(result, Err(e) if e.kind()==expected));
-    assert_eq!(business.0.load(Ordering::SeqCst), 0);
+    assert!(business.targets().is_empty());
     Ok(())
 }
 
