@@ -75,6 +75,18 @@ pub(super) async fn run(
     })
     .await?;
     assert_eq!(report.retried, 2);
+    assert_eq!(business.0.load(Ordering::SeqCst), 2);
+    verify_restart(pool, owner, c, &scope, policy, &business).await
+}
+
+async fn verify_restart(
+    pool: &PgPool,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    scope: &Scope,
+    policy: Policy,
+    business: &Failing,
+) -> anyhow::Result<()> {
     let before = snapshot(owner).await?;
     assert_eq!(before.len(), 2);
     assert!(
@@ -96,8 +108,8 @@ pub(super) async fn run(
     let (report, ()) = tokio::join!(
         rss_reconcile::run_with_notify(
             &restarted,
-            &business,
-            &scope,
+            business,
+            scope,
             policy,
             c,
             &stop,
@@ -110,7 +122,7 @@ pub(super) async fn run(
     assert_eq!(business.0.load(Ordering::SeqCst), 2);
     assert!(
         restarted
-            .claim_due(&scope, 2, Duration::from_secs(1), c)
+            .claim_due(scope, 2, Duration::from_secs(1), c)
             .await?
             .is_empty()
     );
