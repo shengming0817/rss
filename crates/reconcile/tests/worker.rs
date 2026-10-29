@@ -54,6 +54,8 @@ struct Store {
     scans: AtomicUsize,
     scan_delay: Option<(usize, Duration)>,
     scan_failure: Option<ErrorKind>,
+    finish_delay: Option<Duration>,
+    finish_failure: Option<ErrorKind>,
     finishes: AtomicUsize,
     releases: AtomicUsize,
 }
@@ -141,8 +143,14 @@ impl DurableStore for Store {
         &self,
         c: &Token,
         out: Completion,
-        _: &Control<'_, T>,
+        control: &Control<'_, T>,
     ) -> Result<(), Error> {
+        if let Some(delay) = self.finish_delay {
+            control.sleep(delay).await;
+        }
+        if let Some(kind) = self.finish_failure {
+            return Err(Error::new(kind));
+        }
         self.finishes.fetch_add(1, Ordering::SeqCst);
         let mut rows = self.lock();
         let r = Self::check(&mut rows, c)?;
@@ -265,6 +273,7 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
 {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_millis(50), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -273,6 +282,8 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -281,7 +292,16 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
         .wake(&Target::new(scope.clone(), "one")?, &control)
         .await?;
     let business = business(0);
-    let report = run(&store, &business, &scope, policy()?, &control, |_| {}).await?;
+    let report = run(
+        &store,
+        &business,
+        &scope,
+        policy()?,
+        &control,
+        &stop,
+        |_| {},
+    )
+    .await?;
     assert_eq!(report.converged, 1);
     assert!(report.reobserve >= 1);
     assert!(business.observed.load(Ordering::SeqCst) > business.applied.load(Ordering::SeqCst));
@@ -291,6 +311,7 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
 async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_millis(35), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -299,6 +320,8 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -309,7 +332,16 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
             .await?;
     }
     let business = business(2);
-    let report = run(&store, &business, &scope, policy()?, &control, |_| {}).await?;
+    let report = run(
+        &store,
+        &business,
+        &scope,
+        policy()?,
+        &control,
+        &stop,
+        |_| {},
+    )
+    .await?;
     assert!(report.fenced >= 2);
     assert!(business.peak.load(Ordering::SeqCst) <= 2);
     assert_eq!(business.active.load(Ordering::SeqCst), 0);
@@ -319,6 +351,7 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
 async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(1), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -327,6 +360,8 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -357,6 +392,7 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
     for max_attempts in [1, 2] {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
         let control = Control::new(&clock, Duration::from_millis(35), &cancel);
         let store = Store {
             rows: Mutex::new(vec![]),
@@ -365,6 +401,8 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: None,
+            finish_delay: None,
+            finish_failure: None,
             finishes: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
         };
@@ -378,6 +416,7 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
             &scope,
             policy_with_attempts(max_attempts)?,
             &control,
+            &stop,
             |_| {},
         )
         .await?;
@@ -393,6 +432,7 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
 async fn idle_worker_recovers_a_durable_wake_without_notification() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let c = Control::new(&clock, Duration::from_millis(55), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -401,6 +441,8 @@ async fn idle_worker_recovers_a_durable_wake_without_notification() -> anyhow::R
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -415,7 +457,16 @@ async fn idle_worker_recovers_a_durable_wake_without_notification() -> anyhow::R
         store.wake(&target, &c).await
     };
     let (report, wake) = tokio::join!(
-        run_with_notify(&store, &business, &scope, policy()?, &c, &notify, |_| {}),
+        run_with_notify(
+            &store,
+            &business,
+            &scope,
+            policy()?,
+            &c,
+            &stop,
+            &notify,
+            |_| {}
+        ),
         producer
     );
     wake?;
@@ -428,6 +479,7 @@ async fn idle_worker_recovers_a_durable_wake_without_notification() -> anyhow::R
 async fn delayed_claim_is_renewed_before_any_business_callback() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let c = Control::new(&clock, Duration::from_millis(35), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -436,6 +488,8 @@ async fn delayed_claim_is_renewed_before_any_business_callback() -> anyhow::Resu
         scans: AtomicUsize::new(0),
         scan_delay: Some((0, Duration::from_millis(12))),
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -444,7 +498,7 @@ async fn delayed_claim_is_renewed_before_any_business_callback() -> anyhow::Resu
         .wake(&Target::new(scope.clone(), "expired-on-return")?, &c)
         .await?;
     let business = business(0);
-    let report = run(&store, &business, &scope, policy()?, &c, |_| {}).await?;
+    let report = run(&store, &business, &scope, policy()?, &c, &stop, |_| {}).await?;
     assert_eq!(report.fenced, 1);
     assert_eq!(business.observed.load(Ordering::SeqCst), 0);
     assert_eq!(business.applied.load(Ordering::SeqCst), 0);
@@ -455,6 +509,7 @@ async fn scan_failures_have_operation_units_not_target_units() -> anyhow::Result
     for kind in [ErrorKind::Transient, ErrorKind::CommitUnknown] {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
         let c = Control::new(&clock, Duration::from_millis(20), &cancel);
         let store = Store {
             rows: Mutex::new(vec![]),
@@ -463,10 +518,21 @@ async fn scan_failures_have_operation_units_not_target_units() -> anyhow::Result
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: Some(kind),
+            finish_delay: None,
+            finish_failure: None,
             finishes: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
         };
-        let report = run(&store, &business(0), &scope()?, policy()?, &c, |_| {}).await?;
+        let report = run(
+            &store,
+            &business(0),
+            &scope()?,
+            policy()?,
+            &c,
+            &stop,
+            |_| {},
+        )
+        .await?;
         assert_eq!(report.execution_failed, 0);
         assert_eq!(report.scan_failed > 0, kind == ErrorKind::Transient);
         assert_eq!(
@@ -511,6 +577,7 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
 -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let c = Control::new(&clock, Duration::from_millis(100), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -519,6 +586,8 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
         scans: AtomicUsize::new(0),
         scan_delay: Some((1, Duration::from_millis(30))),
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -537,7 +606,7 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
         max_attempts: 3,
     })?;
     let probe = AdmissionProbe(AtomicUsize::new(0));
-    run(&store, &probe, &scope, p, &c, |_| {}).await?;
+    run(&store, &probe, &scope, p, &c, &stop, |_| {}).await?;
     assert_eq!(probe.0.load(Ordering::SeqCst), 1);
     Ok(())
 }
@@ -547,6 +616,7 @@ async fn panic_payload_escapes_run_without_settling_claim() -> anyhow::Result<()
     use futures::FutureExt;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let c = Control::new(&clock, Duration::from_millis(40), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -555,6 +625,8 @@ async fn panic_payload_escapes_run_without_settling_claim() -> anyhow::Result<()
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -564,7 +636,7 @@ async fn panic_payload_escapes_run_without_settling_claim() -> anyhow::Result<()
         .await?;
     let business = business(3);
     let result =
-        std::panic::AssertUnwindSafe(run(&store, &business, &scope, policy()?, &c, |_| {}))
+        std::panic::AssertUnwindSafe(run(&store, &business, &scope, policy()?, &c, &stop, |_| {}))
             .catch_unwind()
             .await;
     let payload = result
@@ -584,6 +656,7 @@ async fn uncertain_execution_preserves_claim_and_emits_target_failure() -> anyho
     ] {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
         let c = Control::new(&clock, Duration::from_millis(35), &cancel);
         let store = Store {
             rows: Mutex::new(vec![]),
@@ -592,6 +665,8 @@ async fn uncertain_execution_preserves_claim_and_emits_target_failure() -> anyho
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: None,
+            finish_delay: None,
+            finish_failure: None,
             finishes: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
         };
@@ -599,9 +674,15 @@ async fn uncertain_execution_preserves_claim_and_emits_target_failure() -> anyho
         let t = Target::new(scope.clone(), "unknown-action")?;
         store.wake(&t, &c).await?;
         let mut observations = vec![];
-        let report = run(&store, &business(behavior), &scope, policy()?, &c, |o| {
-            observations.push(o)
-        })
+        let report = run(
+            &store,
+            &business(behavior),
+            &scope,
+            policy()?,
+            &c,
+            &stop,
+            |o| observations.push(o),
+        )
         .await?;
         assert_eq!(report.execution_failed, 1);
         assert_eq!(report.retried + report.suspended, 0);
@@ -618,6 +699,7 @@ async fn uncertain_execution_preserves_claim_and_emits_target_failure() -> anyho
 async fn scheduled_retry_retains_typed_redacted_diagnostic() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let c = Control::new(&clock, Duration::from_millis(40), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -626,6 +708,8 @@ async fn scheduled_retry_retains_typed_redacted_diagnostic() -> anyhow::Result<(
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -633,7 +717,7 @@ async fn scheduled_retry_retains_typed_redacted_diagnostic() -> anyhow::Result<(
     let t = Target::new(scope.clone(), "diagnostic")?;
     store.wake(&t, &c).await?;
     let mut observations = vec![];
-    let report = run(&store, &business(6), &scope, policy()?, &c, |o| {
+    let report = run(&store, &business(6), &scope, policy()?, &c, &stop, |o| {
         observations.push(o)
     })
     .await?;
@@ -653,6 +737,7 @@ async fn scheduled_retry_retains_typed_redacted_diagnostic() -> anyhow::Result<(
 async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let c = Control::new(&clock, Duration::from_millis(100), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
@@ -661,6 +746,8 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     };
@@ -687,7 +774,16 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
     };
     let behavior = business(0);
     let (report, wake) = tokio::join!(
-        run_with_notify(&store, &behavior, &scope, policy, &c, &notify, |_| {}),
+        run_with_notify(
+            &store,
+            &behavior,
+            &scope,
+            policy,
+            &c,
+            &stop,
+            &notify,
+            |_| {}
+        ),
         producer
     );
     wake?;
@@ -704,6 +800,7 @@ async fn nontransient_scan_failure_returns_without_retry_or_settlement() -> anyh
     ] {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
         let c = Control::new(&clock, Duration::from_secs(1), &cancel);
         let store = Store {
             rows: Mutex::new(vec![]),
@@ -712,10 +809,21 @@ async fn nontransient_scan_failure_returns_without_retry_or_settlement() -> anyh
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: Some(kind),
+            finish_delay: None,
+            finish_failure: None,
             finishes: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
         };
-        let result = run(&store, &business(0), &scope()?, policy()?, &c, |_| {}).await;
+        let result = run(
+            &store,
+            &business(0),
+            &scope()?,
+            policy()?,
+            &c,
+            &stop,
+            |_| {},
+        )
+        .await;
         assert!(matches!(result, Err(e) if e.kind()==kind));
         assert_eq!(store.scans.load(Ordering::SeqCst), 1);
         assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
@@ -729,6 +837,7 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
     for behavior in [0, 1] {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
         let control = Control::new(&clock, Duration::from_millis(100), &cancel);
         let store = Store {
             rows: Mutex::new(vec![]),
@@ -737,6 +846,8 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
             scans: AtomicUsize::new(0),
             scan_delay: None,
             scan_failure: None,
+            finish_delay: None,
+            finish_failure: None,
             finishes: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
         };
@@ -760,6 +871,7 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
             &scope,
             policy,
             &control,
+            &stop,
             |_| {},
         )
         .await?;
@@ -788,6 +900,8 @@ fn idle_store() -> Store {
         scans: AtomicUsize::new(0),
         scan_delay: None,
         scan_failure: None,
+        finish_delay: None,
+        finish_failure: None,
         finishes: AtomicUsize::new(0),
         releases: AtomicUsize::new(0),
     }
@@ -808,6 +922,7 @@ fn idle_policy(scan: Duration, idle: Duration) -> Result<Policy, Error> {
 async fn lost_notification_recovers_in_a_free_slot_while_another_task_runs() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_millis(25), &cancel);
     let store = idle_store();
     let scope = scope()?;
@@ -828,6 +943,7 @@ async fn lost_notification_recovers_in_a_free_slot_while_another_task_runs() -> 
             &scope,
             idle_policy(Duration::from_millis(2), Duration::from_millis(10))?,
             &control,
+            &stop,
             |_| {}
         ),
         late,
@@ -843,6 +959,7 @@ async fn future_reobservation_survives_early_notifications_and_slow_scans() -> a
     for slow in [false, true] {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
         let control = Control::new(&clock, Duration::from_millis(80), &cancel);
         let mut store = idle_store();
         if slow {
@@ -865,6 +982,7 @@ async fn future_reobservation_survives_early_notifications_and_slow_scans() -> a
                 &scope,
                 idle_policy(Duration::from_millis(10), Duration::from_secs(1))?,
                 &control,
+                &stop,
                 &notify,
                 |_| {}
             ),
@@ -918,6 +1036,7 @@ async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Re
             for slow_scan in [false, true] {
                 let clock = Clock::new();
                 let cancel = CancellationToken::new();
+                let stop = CancellationToken::new();
                 let control = Control::new(&clock, Duration::from_millis(50), &cancel);
                 let mut store = idle_store();
                 if slow_scan {
@@ -942,7 +1061,8 @@ async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Re
                     max_backoff: Duration::from_millis(10),
                     max_attempts: 2,
                 })?;
-                let report = run(&store, &reconciler, &scope, policy, &control, |_| {}).await?;
+                let report =
+                    run(&store, &reconciler, &scope, policy, &control, &stop, |_| {}).await?;
                 assert_eq!(
                     reconciler.observations.load(Ordering::SeqCst),
                     2,
@@ -957,5 +1077,200 @@ async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Re
             }
         }
     }
+    Ok(())
+}
+
+struct PausedApply {
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+impl Reconciler<Token> for PausedApply {
+    type State = bool;
+    async fn observe<T: Timer>(
+        &self,
+        _: &Token,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileDiff<bool>, Error> {
+        Ok(ReconcileDiff::between(
+            DesiredState::present(true),
+            ActualState::present(false),
+        ))
+    }
+    async fn apply<T: Timer>(
+        &self,
+        _: &Token,
+        _: ReconcileDiff<bool>,
+        _: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.entered.notify_one();
+        self.resume.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_drains_apply_and_settlement_without_claiming_the_next_target() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let forced = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(1), &forced);
+    let mut store = idle_store();
+    store.finish_delay = Some(Duration::from_millis(20));
+    let scope = scope()?;
+    for name in ["first", "next"] {
+        store
+            .wake(&Target::new(scope.clone(), name)?, &control)
+            .await?;
+    }
+    let work = PausedApply {
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    let policy = Policy::try_from(PolicyConfig {
+        concurrency: 1,
+        lease_ttl: Duration::from_secs(1),
+        attempt_timeout: Duration::from_millis(100),
+        scan_interval: Duration::from_millis(1),
+        idle_scan_interval: Duration::from_secs(1),
+        initial_backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(10),
+        max_attempts: 2,
+    })?;
+    let runner = run(&store, &work, &scope, policy, &control, &stop, |_| {});
+    tokio::pin!(runner);
+    tokio::select! { result=&mut runner=>anyhow::bail!("premature runner exit: {result:?}"), ()=work.entered.notified()=>{} }
+    stop.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), &mut runner)
+            .await
+            .is_err()
+    );
+    work.resume.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), &mut runner)
+            .await
+            .is_err(),
+        "finish must remain part of the drain"
+    );
+    let report = runner.await?;
+    assert_eq!(report.reobserve, 1);
+    assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+    assert_eq!(store.finishes.load(Ordering::SeqCst), 1);
+    assert!(store.lock().iter().all(|row| !row.leased));
+    assert_eq!(store.lock()[1].epoch, 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn draining_preserves_uncertain_finish_and_bounds_a_stalled_finish() -> anyhow::Result<()> {
+    for kind in [
+        ErrorKind::CommitUnknown,
+        ErrorKind::RollbackFailed,
+        ErrorKind::Deadline,
+    ] {
+        let clock = Clock::new();
+        let forced = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(2), &forced);
+        let mut store = idle_store();
+        if kind == ErrorKind::Deadline {
+            store.finish_delay = Some(Duration::from_secs(1));
+        } else {
+            store.finish_failure = Some(kind);
+        }
+        let scope = scope()?;
+        store
+            .wake(&Target::new(scope.clone(), "settlement")?, &control)
+            .await?;
+        let work = PausedApply {
+            entered: Default::default(),
+            resume: Default::default(),
+        };
+        let failures = Mutex::new(Vec::new());
+        let runner = run(&store, &work, &scope, policy()?, &control, &stop, |event| {
+            failures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event)
+        });
+        tokio::pin!(runner);
+        tokio::select! { result=&mut runner=>anyhow::bail!("premature runner exit: {result:?}"), ()=work.entered.notified()=>{} }
+        stop.cancel();
+        work.resume.notify_one();
+        let report = runner.await?;
+        assert_eq!(report.execution_failed, 1);
+        assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
+        assert!(clock.now() < Duration::from_secs(1));
+        assert!(
+            matches!(failures.lock().unwrap_or_else(|e|e.into_inner()).as_slice(), [Observation::AttemptFailed {stage:Stage::Finish,error,..}] if error.kind()==kind)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn forced_cancellation_during_drain_is_not_success() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let forced = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(1), &forced);
+    let store = idle_store();
+    let scope = scope()?;
+    store
+        .wake(&Target::new(scope.clone(), "active")?, &control)
+        .await?;
+    let work = PausedApply {
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    let runner = run(&store, &work, &scope, policy()?, &control, &stop, |_| {});
+    tokio::pin!(runner);
+    tokio::select! { result=&mut runner=>anyhow::bail!("premature runner exit: {result:?}"), ()=work.entered.notified()=>{} }
+    stop.cancel();
+    forced.cancel();
+    assert!(matches!(runner.await, Err(error) if error.kind()==ErrorKind::Cancelled));
+    assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_keeps_an_inflight_claim_until_its_acquired_work_is_settled() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let forced = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(1), &forced);
+    let mut store = idle_store();
+    store.scan_delay = Some((0, Duration::from_millis(20)));
+    let scope = scope()?;
+    for name in ["claimed", "not-claimed"] {
+        store
+            .wake(&Target::new(scope.clone(), name)?, &control)
+            .await?;
+    }
+    let policy = Policy::try_from(PolicyConfig {
+        concurrency: 1,
+        lease_ttl: Duration::from_secs(1),
+        attempt_timeout: Duration::from_millis(100),
+        scan_interval: Duration::from_millis(1),
+        idle_scan_interval: Duration::from_secs(1),
+        initial_backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(10),
+        max_attempts: 2,
+    })?;
+    let work = business(0);
+    let request_stop = async {
+        while store.scans.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        stop.cancel();
+    };
+    let (report, ()) = tokio::join!(
+        run(&store, &work, &scope, policy, &control, &stop, |_| {}),
+        request_stop
+    );
+    assert_eq!(report?.reobserve, 1);
+    assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+    assert_eq!(store.finishes.load(Ordering::SeqCst), 1);
+    assert_eq!(store.lock()[1].epoch, 0);
     Ok(())
 }
