@@ -8,6 +8,11 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。主�
 - 上述能力的模型、公共接口、执行与恢复算法、独立 provider adapter、组件专属 schema 和必要升级定义。
 - 组件验证、独立消费与发布所需的最小代码和文档。
 
+rss-reconcile 拥有独立 target 的持久调度、claim/epoch fencing 与租户内不透明排他资源集合的
+领取协调、正常忙让出和有界公平扫描；PG adapter 持有资源声明、原 claim 占用与原事务接缝。
+产品决定资源含义与冲突矩阵、资格复验、Scope 生命周期和旧待办的显式资源绑定。
+资源协调不替代业务锁或授权，不引入独立调度器、产品租约或远端效果撤销承诺。
+
 Observation 核心拥有来自离线、多来源生产者的可靠接收、报告语义、流身份与快照/增量完整性；
 `rss-observation-postgres` 拥有组件 schema 和原子持久化。核心不依赖 provider、命令库或 telemetry。
 

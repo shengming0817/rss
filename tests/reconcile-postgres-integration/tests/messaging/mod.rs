@@ -78,6 +78,7 @@ pub async fn run(
     }
     borrowed_scope_rejected(store, &runtime, c).await?;
     foreign_runtime_rejected(&runtime, fixture, c).await?;
+    resource_decisions(store, owner, &runtime, c).await?;
     runtime.close().await;
     Ok(())
 }
@@ -109,7 +110,9 @@ async fn scenario(
     .await?;
     let id = format!("message-{mode}-{borrowed}");
     let t = target(&id, TENANT)?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     let claim = claim(
         store,
         &t,
@@ -155,8 +158,8 @@ async fn scenario(
     }
     let outer_rollback = mode == "outer-rollback";
     let borrowed_wake = mode == "wake";
-    let result = if borrowed {
-        runtime
+    let status = if borrowed {
+        let result = runtime
             .local_tx_with_context(
                 TenantId::parse(TENANT)?,
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
@@ -169,9 +172,23 @@ async fn scenario(
                             .take()
                             .ok_or_else(|| PgError::from(sqlx::Error::RowNotFound))?;
                         if borrowed_wake {
-                            composition.wake_in(tx, target, (), callback).await?;
+                            composition
+                                .wake_in(
+                                    tx,
+                                    target,
+                                    &ResourceSet::empty((target).scope().tenant()),
+                                    (),
+                                    callback,
+                                )
+                                .await?;
                         } else {
-                            composition.protect_in(tx, claim, (), callback).await?;
+                            composition
+                                .protect_in(tx, claim, (), |context, tx| {
+                                    Box::pin(async move {
+                                        callback(context, tx).await.map(ProtectedStep::Ready)
+                                    })
+                                })
+                                .await?;
                         }
                         if outer_rollback {
                             return Err(PgError::from(sqlx::Error::RowNotFound));
@@ -180,22 +197,35 @@ async fn scenario(
                     })
                 },
             )
-            .await
+            .await;
+        attempt_status(result)
     } else if mode == "wake" {
-        composition.wake_with(&t, c, (), callback).await
+        let result = composition
+            .wake_with(&t, &ResourceSet::empty(t.scope().tenant()), c, (), callback)
+            .await;
+        attempt_status(result)
     } else {
-        composition.protect(&claim, c, (), callback).await
+        let result = composition
+            .protect(&claim, c, (), |context, tx| {
+                Box::pin(async move { callback(context, tx).await.map(ProtectedStep::Ready) })
+            })
+            .await;
+        attempt_status(result)
     };
-    let status = result.fold(
-        |()| "committed",
+    verify_result(mode, &id, status, owner).await?;
+    Ok(())
+}
+fn attempt_status<T>(
+    result: rss_transactional_messaging::transaction::LocalTxAttempt<T, PgError>,
+) -> &'static str {
+    result.fold(
+        |_| "committed",
         |_| "not-started",
         |_| "rolled-back",
         |_| "rollback-failed",
         |_| "unknown",
         |_| "fenced",
-    );
-    verify_result(mode, &id, status, owner).await?;
-    Ok(())
+    )
 }
 async fn verify_result(mode: &str, id: &str, status: &str, owner: &PgPool) -> anyhow::Result<()> {
     match mode {
@@ -273,31 +303,37 @@ async fn wake_failure(
         runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     }
     let result = composition
-        .wake_with(&t, c, &audit, move |audit, tx| {
-            Box::pin(async move {
-                let id = audit.id.clone();
-                let tenant = tx.tenant_id().to_string();
-                tx.with_connection(move |conn| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            "INSERT INTO public.effects(tenant_id,id,n) VALUES($1::uuid,$2,1)",
-                        )
-                        .bind(tenant)
-                        .bind(id)
-                        .execute(conn)
-                        .await?;
-                        Ok(())
+        .wake_with(
+            &t,
+            &ResourceSet::empty(t.scope().tenant()),
+            c,
+            &audit,
+            move |audit, tx| {
+                Box::pin(async move {
+                    let id = audit.id.clone();
+                    let tenant = tx.tenant_id().to_string();
+                    tx.with_connection(move |conn| {
+                        Box::pin(async move {
+                            sqlx::query(
+                                "INSERT INTO public.effects(tenant_id,id,n) VALUES($1::uuid,$2,1)",
+                            )
+                            .bind(tenant)
+                            .bind(id)
+                            .execute(conn)
+                            .await?;
+                            Ok(())
+                        })
                     })
+                    .await?;
+                    outbox.append(tx, PendingMessage::new(envelope)).await?;
+                    if unknown {
+                        Ok(())
+                    } else {
+                        Err(PgError::from(sqlx::Error::RowNotFound))
+                    }
                 })
-                .await?;
-                outbox.append(tx, PendingMessage::new(envelope)).await?;
-                if unknown {
-                    Ok(())
-                } else {
-                    Err(PgError::from(sqlx::Error::RowNotFound))
-                }
-            })
-        })
+            },
+        )
         .await;
     let outcome = result.fold(
         |()| "commit",
@@ -329,7 +365,13 @@ async fn borrowed_scope_rejected(
     )
     .await?;
     let target = target("borrowed-cross-tenant", TENANT)?;
-    store.wake(&target, control).await?;
+    store
+        .wake(
+            &target,
+            &ResourceSet::empty(target.scope().tenant()),
+            control,
+        )
+        .await?;
     let claim = claim(store, &target, Duration::from_secs(3), control).await?;
     let entered = AtomicBool::new(false);
     for wake in [false, true] {
@@ -344,28 +386,40 @@ async fn borrowed_scope_rejected(
                     Box::pin(async move {
                         if wake {
                             return composition
-                                .wake_in(tx, claim.target(), entered, |entered, _| {
-                                    Box::pin(async move {
-                                        entered.store(true, Ordering::SeqCst);
-                                        Ok(())
-                                    })
-                                })
+                                .wake_in(
+                                    tx,
+                                    claim.target(),
+                                    &ResourceSet::empty((claim.target()).scope().tenant()),
+                                    entered,
+                                    |entered, _| {
+                                        Box::pin(async move {
+                                            entered.store(true, Ordering::SeqCst);
+                                            Ok(())
+                                        })
+                                    },
+                                )
                                 .await;
                         }
                         composition
                             .protect_in(tx, claim, entered, |entered, _| {
                                 Box::pin(async move {
-                                    entered.store(true, Ordering::SeqCst);
-                                    Ok(())
+                                    (async move {
+                                        entered.store(true, Ordering::SeqCst);
+                                        Ok(())
+                                    })
+                                    .await
+                                    .map(|_| ())
+                                    .map(rss_reconcile_postgres::ProtectedStep::Ready)
                                 })
                             })
                             .await
+                            .map(|_| ())
                     })
                 },
             )
             .await;
         let rejected = result.fold(
-            |()| false,
+            |_| false,
             |_| false,
             |_| true,
             |_| false,
@@ -417,12 +471,18 @@ async fn foreign_runtime_rejected(
             |(composition, entered, target), tx| {
                 Box::pin(async move {
                     composition
-                        .wake_in(tx, target, entered, |entered, _| {
-                            Box::pin(async move {
-                                entered.store(true, Ordering::SeqCst);
-                                Ok(())
-                            })
-                        })
+                        .wake_in(
+                            tx,
+                            target,
+                            &ResourceSet::empty((target).scope().tenant()),
+                            entered,
+                            |entered, _| {
+                                Box::pin(async move {
+                                    entered.store(true, Ordering::SeqCst);
+                                    Ok(())
+                                })
+                            },
+                        )
                         .await
                 })
             },
@@ -438,5 +498,101 @@ async fn foreign_runtime_rejected(
     ));
     assert!(!entered.load(Ordering::SeqCst));
     other.close().await;
+    Ok(())
+}
+
+async fn resource_decisions(
+    store: &PgStore,
+    owner: &PgPool,
+    runtime: &Arc<PgRuntime>,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let composition = rss_reconcile_postgres::PgMessagingStore::new(
+        runtime.clone(),
+        TenantId::parse(TENANT)?,
+        rss_transactional_messaging::policy::OperationDeadline::from_remaining(c.remaining()),
+    )
+    .await?;
+    let t = target("messaging-rebind", TENANT)?;
+    store
+        .wake(
+            &t,
+            &ResourceSet::new(t.scope().tenant(), ["messaging:a"])?,
+            c,
+        )
+        .await?;
+    let old = claim(store, &t, Duration::from_secs(5), c).await?;
+    let replacement = ResourceSet::new(t.scope().tenant(), ["messaging:b"])?;
+    let decision = composition
+        .protect(&old, c, replacement, |resources, _| {
+            Box::pin(async move {
+                Ok(ProtectedStep::<()>::Rebind(
+                    resources.clone(),
+                    Duration::from_millis(1),
+                ))
+            })
+        })
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err)?;
+    assert!(matches!(decision, ReconcileStep::Deferred(_)));
+    deferred_message_binding(store, owner, c, &composition, &old).await?;
+    externally_rebind_message(store, runtime, c, &composition, &t).await
+}
+async fn deferred_message_binding(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    composition: &rss_reconcile_postgres::PgMessagingStore,
+    old: &PgClaim,
+) -> anyhow::Result<()> {
+    let result: String = sqlx::query_scalar(
+        "SELECT result FROM rss_reconcile.targets WHERE reconciler='messaging-rebind'",
+    )
+    .fetch_one(owner)
+    .await?;
+    assert_eq!(
+        result, "running",
+        "rebind cannot manufacture an applied effect"
+    );
+    let skipped = composition
+        .protect(old, c, (), |_, _| {
+            Box::pin(async { Err::<ProtectedStep<()>, _>(PgError::from(sqlx::Error::RowNotFound)) })
+        })
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err)?;
+    assert!(
+        matches!(skipped, ReconcileStep::Deferred(_)),
+        "stale binding skips the callback without aborting the owner transaction"
+    );
+    store
+        .finish(old, Completion::Deferred(Duration::from_millis(1)), c)
+        .await?;
+    c.sleep(Duration::from_millis(2)).await;
+    Ok(())
+}
+async fn externally_rebind_message(
+    store: &PgStore,
+    runtime: &Arc<PgRuntime>,
+    c: &Control<'_, Clock>,
+    composition: &rss_reconcile_postgres::PgMessagingStore,
+    t: &Target,
+) -> anyhow::Result<()> {
+    let new = claim(store, t, Duration::from_secs(5), c).await?;
+    let resources = ResourceSet::new(t.scope().tenant(), ["messaging:c"])?;
+    runtime
+        .local_tx_with_context(
+            t.scope().tenant(),
+            rss_transactional_messaging::policy::OperationDeadline::from_remaining(c.remaining()),
+            (composition, t, &resources),
+            |state, tx| Box::pin(async move { state.0.bind_in(tx, state.1, state.2).await }),
+        )
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err)?;
+    assert!(
+        matches!(store.renew(&new,Duration::from_secs(5),c).await,Err(e) if e.kind()==ErrorKind::BindingChanged)
+    );
+    store
+        .finish(&new, Completion::Deferred(Duration::from_secs(30)), c)
+        .await?;
     Ok(())
 }

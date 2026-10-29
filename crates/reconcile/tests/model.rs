@@ -65,3 +65,17 @@ fn identities_remain_hidden_in_recursive_observations() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn resource_sets_are_explicit_bounded_canonical_and_redacted() -> anyhow::Result<()> {
+    use rss_reconcile::ResourceSet;
+    let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+    let resources = ResourceSet::new(tenant, ["device:b", "device:a", "device:b"])?;
+    assert_eq!(resources.keys(), ["device:a", "device:b"]);
+    assert_eq!(resources.tenant(), tenant);
+    assert!(ResourceSet::empty(tenant).keys().is_empty());
+    assert!(ResourceSet::new(tenant, ["bad key"]).is_err());
+    assert!(ResourceSet::new(tenant, std::iter::repeat_n("same", 1001)).is_err());
+    assert_eq!(format!("{resources:?}"), "ResourceSet(<redacted>)");
+    Ok(())
+}

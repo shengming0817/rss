@@ -7,7 +7,14 @@ pub async fn run(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     graceful_stop(store, owner, c).await?;
-    for mode in ["claim", "staged", "applied", "finished", "retry-finished"] {
+    for mode in [
+        "claim",
+        "staged",
+        "applied",
+        "finished",
+        "retry-finished",
+        "resource",
+    ] {
         crash(mode, owner, fixture, c).await?;
     }
     Ok(())
@@ -40,23 +47,13 @@ async fn crash(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()?;
-    let ready = tokio::time::timeout(Duration::from_secs(20), async {
-        while !marker.exists() {
-            anyhow::ensure!(
-                child.try_wait()?.is_none(),
-                "child exited before crash point"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        Ok::<(), anyhow::Error>(())
+    stop_child(&mut child, &marker, mode, fixture, c).await?;
+    tokio::time::sleep(if mode == "resource" {
+        Duration::from_millis(2100)
+    } else {
+        Duration::from_millis(180)
     })
     .await;
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-    }
-    child.wait()?;
-    ready??;
-    tokio::time::sleep(Duration::from_millis(180)).await;
     let pool = PgPoolOptions::new()
         .max_connections(3)
         .connect_with(options(fixture))
@@ -72,11 +69,52 @@ async fn crash(
         .await?;
         assert_eq!(deadline, std::fs::read_to_string(&marker)?);
     }
+    if mode == "resource" {
+        // Keep both scopes progressing: an abandoned older waiter correctly blocks reobserve.
+        let contender = Target::new(
+            Scope::new(TenantId::parse(TENANT)?, "process-contender")?,
+            "blocked",
+        )?;
+        let recovered = claim(&store, &contender, Duration::from_secs(2), c).await?;
+        store.finish(&recovered, Completion::Converged, c).await?;
+    }
     recover(mode, owner, c, &store, &t).await?;
     assert_eq!(store.close(c).await, CloseOutcome::Drained);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+async fn stop_child(
+    child: &mut std::process::Child,
+    marker: &std::path::Path,
+    mode: &str,
+    fixture: &testkit::PgTlsFixture,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let ready = tokio::time::timeout(Duration::from_secs(20), async {
+        while !marker.exists() {
+            anyhow::ensure!(
+                child.try_wait()?.is_none(),
+                "child exited before crash point"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    let resource_check = if ready.is_ok() && mode == "resource" {
+        cross_process_blocked(fixture, c).await
+    } else {
+        Ok(())
+    };
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    child.wait()?;
+    ready??;
+    resource_check?;
+    Ok(())
+}
+
 async fn recover(
     mode: &str,
     owner: &PgPool,
@@ -91,6 +129,7 @@ async fn recover(
             store
                 .claim_due(t.scope(), 1, Duration::from_secs(1), c)
                 .await?
+                .claims
                 .is_empty()
         );
     } else {
@@ -158,40 +197,48 @@ impl Reconciler<PgClaim> for Business {
         &self,
         claim: &PgClaim,
         c: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<i64>, Error> {
-        let id = claim.target().scope().reconciler().to_owned();
-        let observed = self
-            .store
-            .local_tx(claim.target().scope(), c, move |tx| {
-                Box::pin(async move {
-                    tx.with_connection(move |conn| {
-                        Box::pin(async move {
-                            sqlx::query_scalar::<_, i64>(
+    ) -> Result<ReconcileStep<ReconcileDiff<i64>>, Error> {
+        let observed = async {
+            let id = claim.target().scope().reconciler().to_owned();
+            let observed = self
+                .store
+                .local_tx(claim.target().scope(), c, move |tx| {
+                    Box::pin(async move {
+                        tx.with_connection(move |conn| {
+                            Box::pin(async move {
+                                sqlx::query_scalar::<_, i64>(
                                 "SELECT coalesce(sum(n),0)::bigint FROM public.effects WHERE id=$1",
                             )
                             .bind(id)
                             .fetch_one(conn)
                             .await
+                            })
                         })
+                        .await
                     })
-                    .await
                 })
-            })
-            .await?;
-        Ok(ReconcileDiff::between(
-            DesiredState::present(1),
-            ActualState::present(observed),
-        ))
+                .await?;
+            Ok(ReconcileDiff::between(
+                DesiredState::present(1),
+                ActualState::present(observed),
+            ))
+        }
+        .await;
+        observed.map(ReconcileStep::Ready)
     }
     async fn apply<T: Timer>(
         &self,
         claim: &PgClaim,
         _: ReconcileDiff<i64>,
         c: &Control<'_, T>,
-    ) -> Result<(), Error> {
+    ) -> Result<ReconcileStep<()>, Error> {
         self.store
             .protect(claim, c, &self.key, |key, tx| {
-                Box::pin(async move { effect(tx, (*key).clone()).await })
+                Box::pin(async move {
+                    effect(tx, (*key).clone())
+                        .await
+                        .map(rss_reconcile_postgres::ProtectedStep::Ready)
+                })
             })
             .await
     }
@@ -221,9 +268,29 @@ async fn worker_child() -> anyhow::Result<()> {
     let mode = std::env::var("RECONCILE_TEST_MODE")?;
     let marker = std::env::var("RECONCILE_TEST_MARKER")?;
     let t = target(&format!("crash-{mode}"), TENANT)?;
-    store.wake(&t, &control).await?;
-    let claim = claim(&store, &t, Duration::from_millis(150), &control).await?;
-    if mode == "claim" {
+    store
+        .wake(
+            &t,
+            &if mode == "resource" {
+                ResourceSet::new(t.scope().tenant(), ["process:shared"])?
+            } else {
+                ResourceSet::empty(t.scope().tenant())
+            },
+            &control,
+        )
+        .await?;
+    let claim = claim(
+        &store,
+        &t,
+        if mode == "resource" {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(150)
+        },
+        &control,
+    )
+    .await?;
+    if matches!(mode.as_str(), "claim" | "resource") {
         std::fs::write(&marker, b"claimed")?;
         std::future::pending::<()>().await;
     }
@@ -255,12 +322,16 @@ async fn worker_child() -> anyhow::Result<()> {
     store
         .protect(&claim, &control, (), move |_, tx| {
             Box::pin(async move {
-                effect(tx, id).await?;
-                if staged {
-                    std::fs::write(inside, b"staged").map_err(PgOperationError::unavailable)?;
-                    std::future::pending::<()>().await;
-                }
-                Ok(())
+                (async move {
+                    effect(tx, id).await?;
+                    if staged {
+                        std::fs::write(inside, b"staged").map_err(PgOperationError::unavailable)?;
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(())
+                })
+                .await
+                .map(rss_reconcile_postgres::ProtectedStep::Ready)
             })
         })
         .await?;
@@ -286,25 +357,33 @@ impl Reconciler<PgClaim> for PausedTransaction<'_> {
         &self,
         _: &PgClaim,
         _: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<bool>, Error> {
-        Ok(ReconcileDiff::between(
-            DesiredState::present(true),
-            ActualState::present(false),
-        ))
+    ) -> Result<ReconcileStep<ReconcileDiff<bool>>, Error> {
+        let observed = async {
+            Ok(ReconcileDiff::between(
+                DesiredState::present(true),
+                ActualState::present(false),
+            ))
+        }
+        .await;
+        observed.map(ReconcileStep::Ready)
     }
     async fn apply<T: Timer>(
         &self,
         claim: &PgClaim,
         _: ReconcileDiff<bool>,
         control: &Control<'_, T>,
-    ) -> Result<(), Error> {
+    ) -> Result<ReconcileStep<()>, Error> {
         self.store
             .protect(claim, control, self, |owner, tx| {
                 Box::pin(async move {
-                    effect(tx, owner.key.clone()).await?;
-                    owner.entered.notify_one();
-                    owner.resume.notified().await;
-                    Ok(())
+                    (async move {
+                        effect(tx, owner.key.clone()).await?;
+                        owner.entered.notify_one();
+                        owner.resume.notified().await;
+                        Ok(())
+                    })
+                    .await
+                    .map(rss_reconcile_postgres::ProtectedStep::Ready)
                 })
             })
             .await
@@ -316,7 +395,13 @@ async fn graceful_stop(
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let target = target("graceful-stop", TENANT)?;
-    store.wake(&target, control).await?;
+    store
+        .wake(
+            &target,
+            &ResourceSet::empty(target.scope().tenant()),
+            control,
+        )
+        .await?;
     let stop = CancellationToken::new();
     let business = PausedTransaction {
         store,
@@ -371,16 +456,30 @@ async fn graceful_stop(
 struct DelayedSettlement<'a>(&'a PgStore);
 impl DurableStore for DelayedSettlement<'_> {
     type Claim = PgClaim;
-    async fn wake<T: Timer>(&self, target: &Target, c: &Control<'_, T>) -> Result<(), Error> {
-        self.0.wake(target, c).await
+    async fn wake<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.0.wake(target, resources, c).await
     }
+    async fn bind_resources<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.0.bind_resources(target, resources, c).await
+    }
+
     async fn claim_due<T: Timer>(
         &self,
         scope: &Scope,
         limit: usize,
         lease: Duration,
         c: &Control<'_, T>,
-    ) -> Result<Vec<PgClaim>, Error> {
+    ) -> Result<ClaimBatch<PgClaim>, Error> {
         self.0.claim_due(scope, limit, lease, c).await
     }
     async fn renew<T: Timer>(
@@ -403,4 +502,45 @@ impl DurableStore for DelayedSettlement<'_> {
         c.sleep(Duration::from_millis(1200)).await;
         self.0.finish(claim, completion, c).await
     }
+}
+
+async fn cross_process_blocked(
+    fixture: &testkit::PgTlsFixture,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options(fixture))
+        .await?;
+    let store = PgStore::new(pool, c).await?;
+    let scope = Scope::new(TenantId::parse(TENANT)?, "process-contender")?;
+    let blocked = Target::new(scope.clone(), "blocked")?;
+    let independent = Target::new(scope.clone(), "independent")?;
+    store
+        .wake(
+            &blocked,
+            &ResourceSet::new(scope.tenant(), ["process:shared"])?,
+            c,
+        )
+        .await?;
+    store
+        .wake(
+            &independent,
+            &ResourceSet::new(scope.tenant(), ["process:independent"])?,
+            c,
+        )
+        .await?;
+    let claims = store
+        .claim_due(&scope, 2, Duration::from_secs(1), c)
+        .await?
+        .claims;
+    assert_eq!(
+        claims.len(),
+        1,
+        "another process still owns the shared resource"
+    );
+    assert_eq!(claims[0].target().entity(), "independent");
+    store.finish(&claims[0], Completion::Converged, c).await?;
+    assert_eq!(store.close(c).await, CloseOutcome::Drained);
+    Ok(())
 }

@@ -630,6 +630,31 @@ check "gitlab branch-pr-merged dry: merged" "match" \
 ( . "${HERE}/../forge.conf" >/dev/null 2>&1; [ "${AZURE_HAS_CI}" = "false" ] ); narrow_cfg_rc=$?
 check "forge.conf: narrow carrier is not full CI" "zero" "$(zero "${narrow_cfg_rc}")"
 
+# ---- native predecessor ------------------------------------------------------
+DRY_RUN=0
+: > "${seen}"
+az() {
+    case "$*" in
+        *"relation add"*) printf added > "${seen}"; printf '{}' ;;
+        *"work-item show"*)
+            if [ -s "${seen}" ]; then
+                printf '{"relations":[{"rel":"System.LinkTypes.Dependency-Reverse","url":"https://dev.azure.com/acme/_apis/wit/workItems/22"}]}'
+            else printf '{"relations":[]}' ; fi ;;
+        *) return 1 ;;
+    esac
+}
+out="$(_azure_issue_link_blocker 11 22)"; rc=$?
+check "blocker creates and reads native predecessor" '[22]' "$out"
+check "blocker success" zero "$(zero "$rc")"
+az() { case "$*" in *"relation add"*) return 9 ;; *) printf '{"relations":[{"rel":"System.LinkTypes.Dependency-Reverse","url":"https://dev.azure.com/acme/_apis/wit/workItems/22"}]}' ;; esac; }
+out="$(_azure_issue_link_blocker 11 22)"; rc=$?
+check "existing blocker is idempotent" zero "$(zero "$rc")"
+az() { printf '{"relations":[]}'; }
+_azure_issue_link_blocker 11 22 >/dev/null 2>&1; rc=$?
+check "missing blocker read-back rejects success" nonzero "$(nonzero "$rc")"
+_azure_issue_link_blocker 11 11 >/dev/null 2>&1; rc=$?
+check "self dependency rejected" nonzero "$(nonzero "$rc")"
+
 if [ "${fail}" -eq 0 ]; then
     echo "PASS azure.selftest.sh"
 else

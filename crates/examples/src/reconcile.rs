@@ -30,28 +30,32 @@ impl Reconciler<PgClaim> for Business<'_> {
         &self,
         claim: &PgClaim,
         c: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<i64>, Error> {
-        let value = value(self.0, claim.target().scope(), c).await?;
-        Ok(ReconcileDiff::between(
-            DesiredState::present(1),
-            ActualState::present(value),
-        ))
+    ) -> Result<ReconcileStep<ReconcileDiff<i64>>, Error> {
+        let observed = async {
+            let value = value(self.0, claim.target().scope(), c).await?;
+            Ok(ReconcileDiff::between(
+                DesiredState::present(1),
+                ActualState::present(value),
+            ))
+        }
+        .await;
+        observed.map(ReconcileStep::Ready)
     }
     async fn apply<T: Timer>(
         &self,
         claim: &PgClaim,
         _: ReconcileDiff<i64>,
         c: &Control<'_, T>,
-    ) -> Result<(), Error> {
+    ) -> Result<ReconcileStep<()>, Error> {
         let tenant = claim.target().scope().tenant().to_string();
-        self.0.protect(claim, c, tenant, |tenant, tx| Box::pin(async move {
+        self.0.protect(claim, c, tenant, |tenant, tx| Box::pin(async move { (async move {
             let tenant = tenant.clone();
             tx.with_connection(move |conn| Box::pin(async move {
                 sqlx::query("INSERT INTO public.reconcile_demo(tenant_id,n) VALUES($1::uuid,1) ON CONFLICT(tenant_id) DO UPDATE SET n=1")
                     .bind(tenant.as_str()).execute(conn).await?;
                 Ok(())
             })).await
-        })).await
+        }).await.map(rss_reconcile_postgres::ProtectedStep::Ready) })).await
     }
 }
 async fn value<T: Timer>(store: &PgStore, scope: &Scope, c: &Control<'_, T>) -> Result<i64, Error> {
@@ -79,7 +83,9 @@ async fn scenario(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let target = Target::new(Scope::new(tenant, "example")?, "entity")?;
-    store.wake(&target, c).await?;
+    store
+        .wake(&target, &ResourceSet::new(tenant, ["demo:row"])?, c)
+        .await?;
     let business = Business(store);
     let policy = Policy::try_from(PolicyConfig {
         concurrency: 1,
@@ -138,6 +144,7 @@ async fn scenario(
         store
             .claim_due(target.scope(), 1, Duration::from_secs(10), c)
             .await?
+            .claims
             .is_empty(),
         "completed work still pending"
     );

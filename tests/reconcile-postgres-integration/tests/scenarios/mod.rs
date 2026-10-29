@@ -1,18 +1,29 @@
 use super::*;
 mod corruption;
 mod discovery;
+mod resources;
 mod retry;
+pub(crate) mod upgrade;
 pub async fn run(
     store: &PgStore,
     pool: &PgPool,
     owner: &PgPool,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    eprintln!("reconcile scenario: upgrade");
+    upgrade::verify(store, owner, c).await?;
+    eprintln!("reconcile scenario: discovery");
     discovery::run(store, pool, owner, c).await?;
+    eprintln!("reconcile scenario: corruption");
     corruption::run(store, pool, owner, c).await?;
+    eprintln!("reconcile scenario: application lock timeout");
     application_lock_timeout_rolls_back(store, owner, c).await?;
+    eprintln!("reconcile scenario: scheduling");
     scheduling(store, owner, c).await?;
+    eprintln!("reconcile scenario: retry");
     retry::run(store, pool, owner, c).await?;
+    eprintln!("reconcile scenario: resources");
+    resources::run(store, pool, owner, c).await?;
     isolation(store, pool, owner, c).await?;
     fencing(store, owner, c).await?;
     atomicity(store, owner, c).await?;
@@ -24,16 +35,21 @@ pub async fn run(
 }
 async fn scheduling(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     let t = target("scheduling", TENANT)?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     let old = claim(store, &t, Duration::from_secs(2), c).await?;
     assert!(
         store
             .claim_due(t.scope(), 2, Duration::from_secs(1), c)
             .await?
+            .claims
             .is_empty()
     );
     store.renew(&old, Duration::from_secs(2), c).await?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     store.finish(&old, Completion::Converged, c).await?;
     let new = claim(store, &t, Duration::from_secs(2), c).await?;
     assert!(new.epoch() > old.epoch());
@@ -60,6 +76,7 @@ async fn retry_cycle(
         store
             .claim_due(t.scope(), 1, Duration::from_secs(1), c)
             .await?
+            .claims
             .is_empty()
     );
     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -81,9 +98,12 @@ async fn suspend_cycle(
         store
             .claim_due(t.scope(), 1, Duration::from_secs(1), c)
             .await?
+            .claims
             .is_empty()
     );
-    store.wake(t, c).await?;
+    store
+        .wake(t, &ResourceSet::empty((t).scope().tenant()), c)
+        .await?;
     let awake = claim(store, t, Duration::from_secs(2), c).await?;
     assert_eq!(awake.failures(), 0);
     store.finish(&awake, Completion::Converged, c).await?;
@@ -102,8 +122,12 @@ async fn isolation(
 ) -> anyhow::Result<()> {
     let a = target("isolation", TENANT)?;
     let b = target("isolation", OTHER)?;
-    store.wake(&a, c).await?;
-    store.wake(&b, c).await?;
+    store
+        .wake(&a, &ResourceSet::empty(a.scope().tenant()), c)
+        .await?;
+    store
+        .wake(&b, &ResourceSet::empty(b.scope().tenant()), c)
+        .await?;
     raw_isolation(pool).await?;
     let ca = claim(store, &a, Duration::from_secs(2), c).await?;
     let cb = claim(store, &b, Duration::from_secs(2), c).await?;
@@ -121,11 +145,13 @@ async fn isolation(
 }
 async fn fencing(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     let t = target("fencing", TENANT)?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     let old = claim(store, &t, Duration::from_millis(15), c).await?;
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
-        matches!(store.protect(&old,c, (),|_, tx|Box::pin(async move {effect(tx,"expired".into()).await})).await,Err(e) if e.kind()==ErrorKind::Fenced)
+        matches!(store.protect(&old,c, (),|_, tx|Box::pin(async move { (async move {effect(tx,"expired".into()).await}).await.map(rss_reconcile_postgres::ProtectedStep::Ready) })).await,Err(e) if e.kind()==ErrorKind::Fenced)
     );
     let fresh = claim(store, &t, Duration::from_secs(2), c).await?;
     assert!(fresh.epoch() > old.epoch());
@@ -140,7 +166,11 @@ async fn commits_current(
 ) -> anyhow::Result<()> {
     store
         .protect(fresh, c, (), |_, tx| {
-            Box::pin(async move { effect(tx, "fresh".into()).await })
+            Box::pin(async move {
+                effect(tx, "fresh".into())
+                    .await
+                    .map(rss_reconcile_postgres::ProtectedStep::Ready)
+            })
         })
         .await?;
     assert_eq!(count(owner, "stale").await?, 0);
@@ -151,16 +181,22 @@ async fn commits_current(
 }
 async fn atomicity(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     let t = target("atomic", TENANT)?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     let token = claim(store, &t, Duration::from_millis(40), c).await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let signal = entered.clone();
     let writer = store.protect(&token, c, (), move |_, tx| {
         Box::pin(async move {
-            effect(tx, "rolled-back".into()).await?;
-            signal.notify_one();
-            tokio::time::sleep(Duration::from_millis(60)).await;
-            Ok(())
+            (async move {
+                effect(tx, "rolled-back".into()).await?;
+                signal.notify_one();
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                Ok(())
+            })
+            .await
+            .map(rss_reconcile_postgres::ProtectedStep::Ready)
         })
     });
     let contender = async {
@@ -169,6 +205,7 @@ async fn atomicity(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> a
             store
                 .claim_due(t.scope(), 1, Duration::from_secs(1), c)
                 .await?
+                .claims
                 .is_empty()
         );
         Ok::<(), Error>(())
@@ -181,8 +218,12 @@ async fn atomicity(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> a
     store
         .protect(&retry, c, (), |_, tx| {
             Box::pin(async move {
-                effect(tx, "atomic".into()).await?;
-                Err::<(), _>(PgOperationError::rejected())
+                (async move {
+                    effect(tx, "atomic".into()).await?;
+                    Err::<(), _>(PgOperationError::rejected())
+                })
+                .await
+                .map(rss_reconcile_postgres::ProtectedStep::Ready)
             })
         })
         .await
@@ -198,12 +239,18 @@ async fn interruption(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let t = target("unknown", TENANT)?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     let token = claim(store, &t, Duration::from_secs(2), c).await?;
     store.inject_next_fault(PgFault::CommitUnknownAfterAck);
     let result = store
         .protect(&token, c, (), |_, tx| {
-            Box::pin(async move { effect(tx, "unknown".into()).await })
+            Box::pin(async move {
+                effect(tx, "unknown".into())
+                    .await
+                    .map(rss_reconcile_postgres::ProtectedStep::Ready)
+            })
         })
         .await;
     assert!(matches!(result,Err(e) if e.kind()==ErrorKind::CommitUnknown));
@@ -220,7 +267,11 @@ async fn uncertain_cleanup(
     store.inject_next_fault(PgFault::CommitPending);
     let result = store
         .protect(token, &child, (), |_, tx| {
-            Box::pin(async move { effect(tx, "pending".into()).await })
+            Box::pin(async move {
+                effect(tx, "pending".into())
+                    .await
+                    .map(rss_reconcile_postgres::ProtectedStep::Ready)
+            })
         })
         .await;
     assert!(matches!(result,Err(e) if e.kind()==ErrorKind::CommitUnknown));
@@ -228,7 +279,11 @@ async fn uncertain_cleanup(
     store.inject_next_fault(PgFault::RollbackFailedAfterAck);
     let result = store
         .protect(token, c, (), |_, _| {
-            Box::pin(async { Err::<(), _>(PgOperationError::rejected()) })
+            Box::pin(async move {
+                (async { Err::<(), _>(PgOperationError::rejected()) })
+                    .await
+                    .map(rss_reconcile_postgres::ProtectedStep::Ready)
+            })
         })
         .await;
     assert!(matches!(result,Err(e) if e.kind()==ErrorKind::RollbackFailed));
@@ -241,7 +296,7 @@ async fn admission(pool: &PgPool, owner: &PgPool, c: &Control<'_, Clock>) -> any
     assert!(
         matches!(PgStore::new(pool.clone(),c).await,Err(e) if e.kind()==ErrorKind::StorageContract)
     );
-    sqlx::raw_sql("COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:1'; GRANT UPDATE ON rss_reconcile.targets TO reconcile_runtime;").execute(owner).await?;
+    sqlx::raw_sql("COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:2'; GRANT UPDATE ON rss_reconcile.targets TO reconcile_runtime;").execute(owner).await?;
     assert!(PgStore::new(pool.clone(), c).await.is_err());
     sqlx::raw_sql("REVOKE UPDATE ON rss_reconcile.targets FROM reconcile_runtime")
         .execute(owner)
@@ -271,7 +326,7 @@ async fn raw_isolation(pool: &PgPool) -> anyhow::Result<()> {
         0
     );
     assert!(
-        sqlx::query("SELECT rss_reconcile.wake($1::uuid,'isolation','bad')")
+        sqlx::query("SELECT rss_reconcile.wake($1::uuid,'isolation','bad','{}'::text[])")
             .bind(OTHER)
             .execute(&mut *tx)
             .await
@@ -298,9 +353,14 @@ async fn rejects_stale(
         store.finish(old, Completion::Converged, c).await,
         store
             .protect(old, c, (), |_, tx| {
-                Box::pin(async move { effect(tx, "stale".into()).await })
+                Box::pin(async move {
+                    effect(tx, "stale".into())
+                        .await
+                        .map(rss_reconcile_postgres::ProtectedStep::Ready)
+                })
             })
-            .await,
+            .await
+            .map(|_| ()),
     ] {
         assert!(matches!(result,Err(e) if e.kind()==ErrorKind::Fenced));
     }
@@ -318,9 +378,9 @@ async fn policy_admission(
     .execute(owner)
     .await?;
     assert!(PgStore::new(pool.clone(), c).await.is_err());
-    sqlx::raw_sql("ALTER POLICY tenant_scope ON rss_reconcile.targets USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); ALTER FUNCTION rss_reconcile.lock_claim(uuid,text,text,uuid,bigint) SET search_path=public").execute(owner).await?;
+    sqlx::raw_sql("ALTER POLICY tenant_scope ON rss_reconcile.targets USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); ALTER FUNCTION rss_reconcile.lock_execution(uuid,text,text,uuid,bigint,bigint) SET search_path=public").execute(owner).await?;
     assert!(PgStore::new(pool.clone(), c).await.is_err());
-    sqlx::raw_sql("ALTER FUNCTION rss_reconcile.lock_claim(uuid,text,text,uuid,bigint) SET search_path=pg_catalog,rss_reconcile").execute(owner).await?;
+    sqlx::raw_sql("ALTER FUNCTION rss_reconcile.lock_execution(uuid,text,text,uuid,bigint,bigint) SET search_path=pg_catalog,rss_reconcile").execute(owner).await?;
     Ok(())
 }
 
@@ -335,8 +395,8 @@ async fn readmission(pool: &PgPool, owner: &PgPool, c: &Control<'_, Clock>) -> a
             "ALTER POLICY tenant_scope ON rss_reconcile.targets USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid)",
         ),
         (
-            "ALTER FUNCTION rss_reconcile.lock_claim(uuid,text,text,uuid,bigint) SET search_path=public",
-            "ALTER FUNCTION rss_reconcile.lock_claim(uuid,text,text,uuid,bigint) SET search_path=pg_catalog,rss_reconcile",
+            "ALTER FUNCTION rss_reconcile.lock_execution(uuid,text,text,uuid,bigint,bigint) SET search_path=public",
+            "ALTER FUNCTION rss_reconcile.lock_execution(uuid,text,text,uuid,bigint,bigint) SET search_path=pg_catalog,rss_reconcile",
         ),
     ] {
         sqlx::raw_sql(change).execute(owner).await?;

@@ -2,11 +2,11 @@ WITH reachable AS MATERIALIZED (
     SELECT * FROM pg_roles WHERE rolname = current_user OR pg_has_role(current_user, oid, 'SET')
 ), relations AS (
     SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname='rss_reconcile' AND c.relname IN ('targets')
+    WHERE n.nspname='rss_reconcile' AND c.relname IN ('targets','resources','target_resources','scans')
 )
 SELECT
     session_user = current_user
-    AND (SELECT count(*)=1 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM relations)
+    AND (SELECT count(*)=4 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM relations)
     AND NOT EXISTS (
         SELECT FROM reachable r WHERE r.rolsuper OR r.rolbypassrls OR r.rolcreaterole
     )
@@ -32,12 +32,18 @@ SELECT
             CASE WHEN a.grantee=0 THEN true ELSE
                 EXISTS(SELECT FROM reachable r WHERE r.oid=a.grantee OR pg_has_role(r.oid,a.grantee,'USAGE')) END
     )
-    AND (SELECT count(*)=1 AND bool_and(polcmd='*' AND polpermissive AND polroles=ARRAY[0::oid]
-         AND pg_get_expr(polqual,polrelid)=pg_get_expr(polwithcheck,polrelid)
-         AND pg_get_expr(polqual,polrelid) = '(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)')
-         FROM pg_policy WHERE polrelid='rss_reconcile.targets'::regclass)
+    AND NOT EXISTS (
+        SELECT FROM relations c LEFT JOIN pg_policy p ON p.polrelid=c.oid
+        GROUP BY c.oid HAVING count(p.oid)<>1 OR bool_and(p.polcmd='*' AND p.polpermissive AND p.polroles=ARRAY[0::oid]
+          AND pg_get_expr(p.polqual,p.polrelid)=pg_get_expr(p.polwithcheck,p.polrelid)
+          AND pg_get_expr(p.polqual,p.polrelid)='(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)') IS NOT TRUE
+    )
+    AND NOT EXISTS (
+        SELECT FROM reachable r JOIN pg_class c ON c.relkind='S' JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='rss_reconcile' AND (c.relowner=r.oid OR has_sequence_privilege(r.oid,c.oid,'USAGE,UPDATE'))
+    )
     AND has_schema_privilege(current_user,'rss_reconcile','USAGE')
-    AND has_table_privilege(current_user,'rss_reconcile.targets','SELECT')
+    AND NOT EXISTS (SELECT FROM relations c WHERE NOT has_table_privilege(current_user,c.oid,'SELECT'))
     AND NOT EXISTS (
         SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname='rss_reconcile' AND (

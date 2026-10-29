@@ -6,20 +6,28 @@ impl<C: Claim> Reconciler<C> for Business {
         &self,
         _: &C,
         _: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<u8>, Error> {
+    ) -> Result<ReconcileStep<ReconcileDiff<u8>>, Error> {
+        let observed = async {
         Ok(ReconcileDiff::between(
             DesiredState::present(1),
             ActualState::present(1),
         ))
+
+        }.await;
+        observed.map(ReconcileStep::Ready)
     }
     async fn apply<T: Timer>(
         &self,
         _: &C,
         _: ReconcileDiff<u8>,
         _: &Control<'_, T>,
-    ) -> Result<(), Error> {
+    ) -> Result<ReconcileStep<()>, Error> {
+        let applied: Result<(), Error> = async {
         // reason: already-converged core probe has no external effect provider.
         Ok(())
+
+        }.await;
+        applied.map(ReconcileStep::Ready)
     }
 }
 fn main() -> anyhow::Result<()> {

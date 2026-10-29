@@ -1,4 +1,7 @@
-use crate::{Completion, Control, Error, ReconcileDiff, Scope, Target, Timer};
+use crate::{
+    ClaimBatch, Completion, Control, Error, ReconcileDiff, ReconcileStep, ResourceSet, Scope,
+    Target, Timer,
+};
 use std::{future::Future, time::Duration};
 /// Provider-owned authority. Concrete claims must hide their token and cannot be cloned.
 /// This trait reports metadata; only the provider's write path establishes fencing.
@@ -16,6 +19,14 @@ pub trait DurableStore: Send + Sync {
     fn wake<T: Timer>(
         &self,
         target: &Target,
+        resources: &ResourceSet,
+        control: &Control<'_, T>,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Replace resource declarations without waking, resetting failures or changing deadlines.
+    fn bind_resources<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
     /// Atomically claim due or expired unfinished work. Return at most limit unique targets
@@ -26,7 +37,7 @@ pub trait DurableStore: Send + Sync {
         limit: usize,
         lease: Duration,
         control: &Control<'_, T>,
-    ) -> impl Future<Output = Result<Vec<Self::Claim>, Error>> + Send;
+    ) -> impl Future<Output = Result<ClaimBatch<Self::Claim>, Error>> + Send;
     /// Renew only an unexpired matching token and epoch; failure cancels its callback.
     fn renew<T: Timer>(
         &self,
@@ -57,7 +68,7 @@ pub trait Reconciler<C: Claim>: Send + Sync {
         &self,
         claim: &C,
         control: &Control<'_, T>,
-    ) -> impl Future<Output = Result<ReconcileDiff<Self::State>, Error>> + Send;
+    ) -> impl Future<Output = Result<ReconcileStep<ReconcileDiff<Self::State>>, Error>> + Send;
     /// Apply a drift. Success acknowledges submission, never convergence. Implementations
     /// must use stable business idempotency identities across attempts, and provider fencing
     /// for protected database writes. Remote effects remain at-least-once unless the remote
@@ -67,5 +78,5 @@ pub trait Reconciler<C: Claim>: Send + Sync {
         claim: &C,
         diff: ReconcileDiff<Self::State>,
         control: &Control<'_, T>,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    ) -> impl Future<Output = Result<ReconcileStep<()>, Error>> + Send;
 }

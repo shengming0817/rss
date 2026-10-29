@@ -90,15 +90,21 @@ async fn commit_cut(
         .await?;
     let (store, pool) = isolated(options, c).await?;
     let t = target("transport-commit", TENANT)?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     let claim = claim(&store, &t, Duration::from_secs(3), c).await?;
     let (send, receive) = oneshot::channel();
     let control = c.child(Duration::from_secs(4));
     let write = store.protect(&claim, &control, (), move |_, tx| {
         Box::pin(async move {
-            let pid = staged(tx, "transport-commit").await?;
-            send.send(pid).map_err(|_| PgOperationError::rejected())?;
-            Ok(())
+            (async move {
+                let pid = staged(tx, "transport-commit").await?;
+                send.send(pid).map_err(|_| PgOperationError::rejected())?;
+                Ok(())
+            })
+            .await
+            .map(rss_reconcile_postgres::ProtectedStep::Ready)
         })
     });
     let (outcome, killed) = tokio::join!(write, kill_when(owner, receive, "COMMIT"));
@@ -124,29 +130,35 @@ async fn rollback_cut(
 ) -> anyhow::Result<()> {
     let (store, pool) = isolated(options, c).await?;
     let t = target("transport-rollback", TENANT)?;
-    store.wake(&t, c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), c)
+        .await?;
     let claim = claim(&store, &t, Duration::from_secs(3), c).await?;
     let (send, receive) = oneshot::channel();
     let control = c.child(Duration::from_secs(4));
     let write = store.protect(&claim, &control, (), move |_, tx| {
         Box::pin(async move {
-            let pid = staged(tx, "transport-rollback").await?;
-            let pending = tx.with_connection(|conn| {
-                Box::pin(async move {
-                    sqlx::query("SELECT pg_sleep(60)").execute(conn).await?;
-                    Ok(())
-                })
-            });
-            // Drop the query future with a genuine server response still outstanding. Returning
-            // the callback error makes rollback wait on the actual connection's protocol I/O.
-            if tokio::time::timeout(Duration::from_millis(20), pending)
-                .await
-                .is_ok()
-            {
-                return Err(PgOperationError::rejected());
-            }
-            send.send(pid).map_err(|_| PgOperationError::rejected())?;
-            Err::<(), _>(PgOperationError::rejected())
+            (async move {
+                let pid = staged(tx, "transport-rollback").await?;
+                let pending = tx.with_connection(|conn| {
+                    Box::pin(async move {
+                        sqlx::query("SELECT pg_sleep(60)").execute(conn).await?;
+                        Ok(())
+                    })
+                });
+                // Drop the query future with a genuine server response still outstanding. Returning
+                // the callback error makes rollback wait on the actual connection's protocol I/O.
+                if tokio::time::timeout(Duration::from_millis(20), pending)
+                    .await
+                    .is_ok()
+                {
+                    return Err(PgOperationError::rejected());
+                }
+                send.send(pid).map_err(|_| PgOperationError::rejected())?;
+                Err::<(), _>(PgOperationError::rejected())
+            })
+            .await
+            .map(rss_reconcile_postgres::ProtectedStep::Ready)
         })
     });
     // Both futures are polled by this task: after send the write branch enters rollback
@@ -202,8 +214,8 @@ async fn bounded_close(
     Ok(())
 }
 
-async fn verify_cut(
-    outcome: Result<(), Error>,
+async fn verify_cut<T>(
+    outcome: Result<T, Error>,
     kind: ErrorKind,
     owner: &PgPool,
     id: &str,

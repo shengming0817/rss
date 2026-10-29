@@ -10,6 +10,8 @@ pub enum ErrorKind {
     Permanent,
     Invariant,
     Fenced,
+    /// Claim authority remains, but its resource declaration changed; yield and reobserve.
+    BindingChanged,
     Cancelled,
     Deadline,
     CommitUnknown,
@@ -50,7 +52,7 @@ impl Error {
         self
     }
 }
-fn name(value: String) -> Result<String, Error> {
+pub(crate) fn name(value: String) -> Result<String, Error> {
     if value.is_empty()
         || value.len() > 128
         || !value
@@ -124,6 +126,8 @@ pub enum Completion {
     Converged,
     /// Action submitted; re-observe after a bounded positive delay.
     Reobserve(Duration),
+    /// Normal resource contention; retain the prior failures and pending identity.
+    Deferred(Duration),
     /// Retry a failed attempt, retaining its failure count across restart.
     Retry { after: Duration, failures: u32 },
     /// No automatic retries until a new durable wake.

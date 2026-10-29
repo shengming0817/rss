@@ -72,7 +72,13 @@ impl Store {
 }
 impl DurableStore for Store {
     type Claim = Token;
-    async fn wake<T: Timer>(&self, target: &Target, _: &Control<'_, T>) -> Result<(), Error> {
+    async fn wake<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        _: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        assert_eq!(target.scope().tenant(), resources.tenant());
         let mut rows = self.lock();
         if let Some(row) = rows.iter_mut().find(|r| r.target == *target) {
             row.wake += 1;
@@ -92,13 +98,25 @@ impl DurableStore for Store {
         }
         Ok(())
     }
+    async fn bind_resources<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        // This runner fixture models scheduling only; resource exclusion is proved by real PG.
+        let _ = c;
+        assert_eq!(target.scope().tenant(), resources.tenant());
+        Ok(())
+    }
+
     async fn claim_due<T: Timer>(
         &self,
         scope: &Scope,
         limit: usize,
         _: Duration,
         _: &Control<'_, T>,
-    ) -> Result<Vec<Token>, Error> {
+    ) -> Result<ClaimBatch<Token>, Error> {
         let scan = self.scans.fetch_add(1, Ordering::SeqCst);
         if let Some(kind) = self.scan_failure
             && scan >= self.scan_failure_after
@@ -128,7 +146,10 @@ impl DurableStore for Store {
         {
             tokio::time::sleep(delay).await;
         }
-        Ok(claims)
+        Ok(ClaimBatch {
+            claims,
+            more: false,
+        })
     }
     async fn renew<T: Timer>(
         &self,
@@ -163,6 +184,9 @@ impl DurableStore for Store {
         }
         match out {
             Completion::Converged => r.suspended = true,
+            Completion::Deferred(d) => {
+                r.due = self.clock.now() + d;
+            }
             Completion::Reobserve(d) => {
                 r.due = self.clock.now() + d;
                 r.failures = 0;
@@ -203,12 +227,16 @@ impl Reconciler<Token> for Business {
         &self,
         _: &Token,
         _: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<usize>, Error> {
-        let n = self.observed.fetch_add(1, Ordering::SeqCst);
-        Ok(ReconcileDiff::between(
-            DesiredState::present(1),
-            ActualState::present(usize::from(n > 1)),
-        ))
+    ) -> Result<ReconcileStep<ReconcileDiff<usize>>, Error> {
+        let observed = async {
+            let n = self.observed.fetch_add(1, Ordering::SeqCst);
+            Ok(ReconcileDiff::between(
+                DesiredState::present(1),
+                ActualState::present(usize::from(n > 1)),
+            ))
+        }
+        .await;
+        observed.map(ReconcileStep::Ready)
     }
     #[allow(clippy::panic)]
     async fn apply<T: Timer>(
@@ -216,29 +244,33 @@ impl Reconciler<Token> for Business {
         _: &Token,
         _: ReconcileDiff<usize>,
         control: &Control<'_, T>,
-    ) -> Result<(), Error> {
-        self.applied.fetch_add(1, Ordering::SeqCst);
-        let n = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak.fetch_max(n, Ordering::SeqCst);
-        let _guard = Active(&self.active);
-        match self.behavior {
-            1 => Err(Error::new(ErrorKind::Transient)),
-            2 => {
-                control.sleep(Duration::from_secs(20)).await;
-                Ok(())
-            }
-            3 => panic!("callback panic"),
-            4 => Err(Error::new(ErrorKind::CommitUnknown)),
-            5 => Err(Error::new(ErrorKind::RollbackFailed)),
-            6 => Err(Error::provider(
-                ErrorKind::Transient,
-                std::io::Error::other("private-business-detail"),
-            )),
-            _ => {
-                control.sleep(Duration::from_millis(3)).await;
-                Ok(())
+    ) -> Result<ReconcileStep<()>, Error> {
+        let applied: Result<(), Error> = async {
+            self.applied.fetch_add(1, Ordering::SeqCst);
+            let n = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(n, Ordering::SeqCst);
+            let _guard = Active(&self.active);
+            match self.behavior {
+                1 => Err(Error::new(ErrorKind::Transient)),
+                2 => {
+                    control.sleep(Duration::from_secs(20)).await;
+                    Ok(())
+                }
+                3 => panic!("callback panic"),
+                4 => Err(Error::new(ErrorKind::CommitUnknown)),
+                5 => Err(Error::new(ErrorKind::RollbackFailed)),
+                6 => Err(Error::provider(
+                    ErrorKind::Transient,
+                    std::io::Error::other("private-business-detail"),
+                )),
+                _ => {
+                    control.sleep(Duration::from_millis(3)).await;
+                    Ok(())
+                }
             }
         }
+        .await;
+        applied.map(ReconcileStep::Ready)
     }
 }
 fn business(behavior: u8) -> Business {
@@ -293,7 +325,11 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
     };
     let scope = scope()?;
     store
-        .wake(&Target::new(scope.clone(), "one")?, &control)
+        .wake(
+            &Target::new(scope.clone(), "one")?,
+            &ResourceSet::empty(scope.tenant()),
+            &control,
+        )
         .await?;
     let business = business(0);
     let report = run(
@@ -333,7 +369,11 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
     let scope = scope()?;
     for i in 0..4 {
         store
-            .wake(&Target::new(scope.clone(), format!("e{i}"))?, &control)
+            .wake(
+                &Target::new(scope.clone(), format!("e{i}"))?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await?;
     }
     let business = business(2);
@@ -372,17 +412,31 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
     };
     let scope = scope()?;
     let target = Target::new(scope.clone(), "one")?;
-    store.wake(&target, &control).await?;
+    store
+        .wake(
+            &target,
+            &ResourceSet::empty(target.scope().tenant()),
+            &control,
+        )
+        .await?;
     let c = store
         .claim_due(&scope, 1, policy()?.lease(), &control)
         .await?
+        .claims
         .remove(0);
-    store.wake(&target, &control).await?;
+    store
+        .wake(
+            &target,
+            &ResourceSet::empty(target.scope().tenant()),
+            &control,
+        )
+        .await?;
     store.finish(&c, Completion::Converged, &control).await?;
     assert_eq!(
         store
             .claim_due(&scope, 1, policy()?.lease(), &control)
             .await?
+            .claims
             .len(),
         1
     );
@@ -414,7 +468,9 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
         };
         let scope = scope()?;
         let t = Target::new(scope.clone(), "retry")?;
-        store.wake(&t, &control).await?;
+        store
+            .wake(&t, &ResourceSet::empty(t.scope().tenant()), &control)
+            .await?;
         let business = business(1);
         let report = run(
             &store,
@@ -461,7 +517,9 @@ async fn idle_worker_recovers_a_durable_wake_without_notification() -> anyhow::R
         while store.scans.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-        store.wake(&target, &c).await
+        store
+            .wake(&target, &ResourceSet::empty(target.scope().tenant()), &c)
+            .await
     };
     let (report, wake) = tokio::join!(
         run_with_notify(
@@ -503,7 +561,11 @@ async fn delayed_claim_is_renewed_before_any_business_callback() -> anyhow::Resu
     };
     let scope = scope()?;
     store
-        .wake(&Target::new(scope.clone(), "expired-on-return")?, &c)
+        .wake(
+            &Target::new(scope.clone(), "expired-on-return")?,
+            &ResourceSet::empty(scope.tenant()),
+            &c,
+        )
         .await?;
     let business = business(0);
     let report = run(&store, &business, &scope, policy()?, &c, &stop, |_| {}).await?;
@@ -558,27 +620,35 @@ impl Reconciler<Token> for AdmissionProbe {
         &self,
         c: &Token,
         _: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<usize>, Error> {
-        if c.target.entity() == "d" {
-            self.0.fetch_add(1, Ordering::SeqCst);
+    ) -> Result<ReconcileStep<ReconcileDiff<usize>>, Error> {
+        let observed = async {
+            if c.target.entity() == "d" {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(ReconcileDiff::between(
+                DesiredState::present(1),
+                ActualState::missing(),
+            ))
         }
-        Ok(ReconcileDiff::between(
-            DesiredState::present(1),
-            ActualState::missing(),
-        ))
+        .await;
+        observed.map(ReconcileStep::Ready)
     }
     async fn apply<T: Timer>(
         &self,
         c: &Token,
         _: ReconcileDiff<usize>,
         control: &Control<'_, T>,
-    ) -> Result<(), Error> {
-        match c.target.entity() {
-            "a" => control.sleep(Duration::from_millis(10)).await,
-            "b" => control.sleep(Duration::from_millis(20)).await,
-            _ => std::future::pending().await,
+    ) -> Result<ReconcileStep<()>, Error> {
+        let applied: Result<(), Error> = async {
+            match c.target.entity() {
+                "a" => control.sleep(Duration::from_millis(10)).await,
+                "b" => control.sleep(Duration::from_millis(20)).await,
+                _ => std::future::pending().await,
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        applied.map(ReconcileStep::Ready)
     }
 }
 #[tokio::test(start_paused = true)]
@@ -603,7 +673,13 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
     };
     let scope = scope()?;
     for id in ["a", "b", "c", "d"] {
-        store.wake(&Target::new(scope.clone(), id)?, &c).await?;
+        store
+            .wake(
+                &Target::new(scope.clone(), id)?,
+                &ResourceSet::empty(scope.tenant()),
+                &c,
+            )
+            .await?;
     }
     let p = Policy::try_from(rss_reconcile::PolicyConfig {
         concurrency: 2,
@@ -643,7 +719,11 @@ async fn panic_payload_escapes_run_without_settling_claim() -> anyhow::Result<()
     };
     let scope = scope()?;
     store
-        .wake(&Target::new(scope.clone(), "panic")?, &c)
+        .wake(
+            &Target::new(scope.clone(), "panic")?,
+            &ResourceSet::empty(scope.tenant()),
+            &c,
+        )
         .await?;
     let business = business(3);
     let result =
@@ -684,7 +764,9 @@ async fn uncertain_execution_preserves_claim_and_emits_target_failure() -> anyho
         };
         let scope = scope()?;
         let t = Target::new(scope.clone(), "unknown-action")?;
-        store.wake(&t, &c).await?;
+        store
+            .wake(&t, &ResourceSet::empty(t.scope().tenant()), &c)
+            .await?;
         let mut observations = vec![];
         let report = run(
             &store,
@@ -728,7 +810,9 @@ async fn scheduled_retry_retains_typed_redacted_diagnostic() -> anyhow::Result<(
     };
     let scope = scope()?;
     let t = Target::new(scope.clone(), "diagnostic")?;
-    store.wake(&t, &c).await?;
+    store
+        .wake(&t, &ResourceSet::empty(t.scope().tenant()), &c)
+        .await?;
     let mut observations = vec![];
     let report = run(&store, &business(6), &scope, policy()?, &c, &stop, |o| {
         observations.push(o)
@@ -782,7 +866,9 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
         while store.scans.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-        store.wake(&t, &c).await?;
+        store
+            .wake(&t, &ResourceSet::empty(t.scope().tenant()), &c)
+            .await?;
         notify.notify_one();
         Ok::<(), Error>(())
     };
@@ -879,7 +965,11 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
             max_attempts: 2,
         })?;
         store
-            .wake(&Target::new(scope.clone(), "work")?, &control)
+            .wake(
+                &Target::new(scope.clone(), "work")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await?;
         let report = run(
             &store,
@@ -944,13 +1034,21 @@ async fn lost_notification_recovers_in_a_free_slot_while_another_task_runs() -> 
     let store = idle_store();
     let scope = scope()?;
     store
-        .wake(&Target::new(scope.clone(), "long")?, &control)
+        .wake(
+            &Target::new(scope.clone(), "long")?,
+            &ResourceSet::empty(scope.tenant()),
+            &control,
+        )
         .await?;
     let business = business(2);
     let late = async {
         control.sleep(Duration::from_millis(5)).await;
         store
-            .wake(&Target::new(scope.clone(), "lost-hint")?, &control)
+            .wake(
+                &Target::new(scope.clone(), "lost-hint")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await
     };
     let (result, wake) = tokio::join!(
@@ -984,7 +1082,11 @@ async fn future_reobservation_survives_early_notifications_and_slow_scans() -> a
         }
         let scope = scope()?;
         store
-            .wake(&Target::new(scope.clone(), "work")?, &control)
+            .wake(
+                &Target::new(scope.clone(), "work")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await?;
         let business = business(0);
         let notify = tokio::sync::Notify::new();
@@ -1024,28 +1126,39 @@ async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Re
             &self,
             claim: &Token,
             control: &Control<'_, T>,
-        ) -> Result<ReconcileDiff<bool>, Error> {
-            if self.observations.fetch_add(1, Ordering::SeqCst) == 0 {
-                // The durable wake happens while the original claim is held.
-                // Do not send a Notify: completion must drive its own discovery.
-                self.store.wake(claim.target(), control).await?;
-                control.sleep(Duration::from_millis(3)).await;
-                if self.suspend {
-                    return Err(Error::new(ErrorKind::Permanent));
+        ) -> Result<ReconcileStep<ReconcileDiff<bool>>, Error> {
+            let observed = async {
+                if self.observations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // The durable wake happens while the original claim is held.
+                    // Do not send a Notify: completion must drive its own discovery.
+                    self.store
+                        .wake(
+                            claim.target(),
+                            &ResourceSet::empty((claim.target()).scope().tenant()),
+                            control,
+                        )
+                        .await?;
+                    control.sleep(Duration::from_millis(3)).await;
+                    if self.suspend {
+                        return Err(Error::new(ErrorKind::Permanent));
+                    }
                 }
+                Ok(ReconcileDiff::between(
+                    DesiredState::present(true),
+                    ActualState::present(true),
+                ))
             }
-            Ok(ReconcileDiff::between(
-                DesiredState::present(true),
-                ActualState::present(true),
-            ))
+            .await;
+            observed.map(ReconcileStep::Ready)
         }
         async fn apply<T: Timer>(
             &self,
             _: &Token,
             _: ReconcileDiff<bool>,
             _: &Control<'_, T>,
-        ) -> Result<(), Error> {
-            Err(Error::new(ErrorKind::Invariant))
+        ) -> Result<ReconcileStep<()>, Error> {
+            let applied: Result<(), Error> = async { Err(Error::new(ErrorKind::Invariant)) }.await;
+            applied.map(ReconcileStep::Ready)
         }
     }
     for suspend in [false, true] {
@@ -1061,7 +1174,11 @@ async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Re
                 }
                 let scope = scope()?;
                 store
-                    .wake(&Target::new(scope.clone(), "newer")?, &control)
+                    .wake(
+                        &Target::new(scope.clone(), "newer")?,
+                        &ResourceSet::empty(scope.tenant()),
+                        &control,
+                    )
                     .await?;
                 let reconciler = Waking {
                     store: &store,
@@ -1107,21 +1224,29 @@ impl Reconciler<Token> for PausedApply {
         &self,
         _: &Token,
         _: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<bool>, Error> {
-        Ok(ReconcileDiff::between(
-            DesiredState::present(true),
-            ActualState::present(false),
-        ))
+    ) -> Result<ReconcileStep<ReconcileDiff<bool>>, Error> {
+        let observed = async {
+            Ok(ReconcileDiff::between(
+                DesiredState::present(true),
+                ActualState::present(false),
+            ))
+        }
+        .await;
+        observed.map(ReconcileStep::Ready)
     }
     async fn apply<T: Timer>(
         &self,
         _: &Token,
         _: ReconcileDiff<bool>,
         _: &Control<'_, T>,
-    ) -> Result<(), Error> {
-        self.entered.notify_one();
-        self.resume.notified().await;
-        Ok(())
+    ) -> Result<ReconcileStep<()>, Error> {
+        let applied: Result<(), Error> = async {
+            self.entered.notify_one();
+            self.resume.notified().await;
+            Ok(())
+        }
+        .await;
+        applied.map(ReconcileStep::Ready)
     }
 }
 
@@ -1136,7 +1261,11 @@ async fn stop_drains_apply_and_settlement_without_claiming_the_next_target() -> 
     let scope = scope()?;
     for name in ["first", "next"] {
         store
-            .wake(&Target::new(scope.clone(), name)?, &control)
+            .wake(
+                &Target::new(scope.clone(), name)?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await?;
     }
     let work = PausedApply {
@@ -1197,7 +1326,11 @@ async fn draining_preserves_uncertain_finish_and_bounds_a_stalled_finish() -> an
         }
         let scope = scope()?;
         store
-            .wake(&Target::new(scope.clone(), "settlement")?, &control)
+            .wake(
+                &Target::new(scope.clone(), "settlement")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await?;
         let work = PausedApply {
             entered: Default::default(),
@@ -1234,7 +1367,11 @@ async fn forced_cancellation_during_drain_is_not_success() -> anyhow::Result<()>
     let store = idle_store();
     let scope = scope()?;
     store
-        .wake(&Target::new(scope.clone(), "active")?, &control)
+        .wake(
+            &Target::new(scope.clone(), "active")?,
+            &ResourceSet::empty(scope.tenant()),
+            &control,
+        )
         .await?;
     let work = PausedApply {
         entered: Default::default(),
@@ -1261,7 +1398,11 @@ async fn stop_keeps_an_inflight_claim_until_its_acquired_work_is_settled() -> an
     let scope = scope()?;
     for name in ["claimed", "not-claimed"] {
         store
-            .wake(&Target::new(scope.clone(), name)?, &control)
+            .wake(
+                &Target::new(scope.clone(), name)?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await?;
     }
     let policy = Policy::try_from(PolicyConfig {
@@ -1303,7 +1444,11 @@ async fn fatal_claim_error_is_observed_before_a_forced_drain_interruption() -> a
     store.scan_failure_after = 1;
     let scope = scope()?;
     store
-        .wake(&Target::new(scope.clone(), "active")?, &control)
+        .wake(
+            &Target::new(scope.clone(), "active")?,
+            &ResourceSet::empty(scope.tenant()),
+            &control,
+        )
         .await?;
     let work = PausedApply {
         entered: Default::default(),
@@ -1354,7 +1499,11 @@ async fn concurrent_failures_persist_separate_bounded_retry_times() -> anyhow::R
         let scope = scope()?;
         for entity in ["first", "second"] {
             store
-                .wake(&Target::new(scope.clone(), entity)?, &control)
+                .wake(
+                    &Target::new(scope.clone(), entity)?,
+                    &ResourceSet::empty(scope.tenant()),
+                    &control,
+                )
                 .await?;
         }
         let policy = Policy::try_from(PolicyConfig {
@@ -1394,6 +1543,199 @@ async fn concurrent_failures_persist_separate_bounded_retry_times() -> anyhow::R
     Ok(())
 }
 
+struct DeferredBusiness(bool);
+impl Reconciler<Token> for DeferredBusiness {
+    type State = bool;
+    async fn observe<T: Timer>(
+        &self,
+        _: &Token,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileStep<ReconcileDiff<bool>>, Error> {
+        if self.0 {
+            Ok(ReconcileStep::Deferred(Duration::from_millis(20)))
+        } else {
+            Ok(ReconcileStep::Ready(ReconcileDiff::between(
+                DesiredState::present(true),
+                ActualState::present(false),
+            )))
+        }
+    }
+    async fn apply<T: Timer>(
+        &self,
+        _: &Token,
+        _: ReconcileDiff<bool>,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileStep<()>, Error> {
+        Ok(ReconcileStep::Deferred(Duration::from_millis(20)))
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn normal_waiting_in_observe_and_apply_preserves_failure_budget() -> anyhow::Result<()> {
+    for during_observe in [true, false] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let c = Control::new(&clock, Duration::from_secs(1), &cancel);
+        let store = idle_store();
+        let scope = scope()?;
+        let target = Target::new(scope.clone(), "busy")?;
+        store
+            .wake(&target, &ResourceSet::empty(scope.tenant()), &c)
+            .await?;
+        store.lock()[0].failures = 5;
+        let mut waited = 0;
+        let report = run(
+            &store,
+            &DeferredBusiness(during_observe),
+            &scope,
+            policy()?,
+            &c,
+            &stop,
+            |event| {
+                assert!(matches!(event, Observation::Deferred { .. }));
+                waited += 1;
+                if waited == 2 {
+                    stop.cancel();
+                }
+            },
+        )
+        .await?;
+        assert_eq!(report.deferred, 2);
+        assert_eq!(
+            report.retried + report.suspended + report.execution_failed + report.reobserve,
+            0
+        );
+        let rows = store.lock();
+        assert_eq!(rows[0].failures, 5);
+        assert!(!rows[0].leased && !rows[0].suspended);
+        assert!(rows[0].due > clock.now());
+    }
+    Ok(())
+}
+
+struct CallbackGuard<'a>(&'a std::sync::atomic::AtomicBool);
+impl Drop for CallbackGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+struct GuardedObservation<'a>(&'a std::sync::atomic::AtomicBool);
+impl Reconciler<Token> for GuardedObservation<'_> {
+    type State = ();
+    async fn observe<T: Timer>(
+        &self,
+        _: &Token,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileStep<ReconcileDiff<()>>, Error> {
+        let _guard = CallbackGuard(self.0);
+        std::future::pending().await
+    }
+    async fn apply<T: Timer>(
+        &self,
+        _: &Token,
+        _: ReconcileDiff<()>,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileStep<()>, Error> {
+        Err(Error::new(ErrorKind::Invariant))
+    }
+}
+struct ReboundStore<'a> {
+    inner: &'a Store,
+    dropped: &'a std::sync::atomic::AtomicBool,
+    stop: &'a CancellationToken,
+}
+impl DurableStore for ReboundStore<'_> {
+    type Claim = Token;
+    async fn wake<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.inner.wake(target, resources, c).await
+    }
+    async fn bind_resources<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.inner.bind_resources(target, resources, c).await
+    }
+    async fn claim_due<T: Timer>(
+        &self,
+        scope: &Scope,
+        limit: usize,
+        lease: Duration,
+        c: &Control<'_, T>,
+    ) -> Result<ClaimBatch<Token>, Error> {
+        self.inner.claim_due(scope, limit, lease, c).await
+    }
+    async fn renew<T: Timer>(
+        &self,
+        _: &Token,
+        _: Duration,
+        _: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        Err(Error::new(ErrorKind::BindingChanged))
+    }
+    async fn release<T: Timer>(&self, claim: &Token, c: &Control<'_, T>) -> Result<(), Error> {
+        self.inner.release(claim, c).await
+    }
+    async fn finish<T: Timer>(
+        &self,
+        claim: &Token,
+        completion: Completion,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        assert!(
+            self.dropped.load(Ordering::SeqCst),
+            "old callback must be destroyed before settlement starts"
+        );
+        assert!(matches!(completion, Completion::Deferred(_)));
+        self.inner.finish(claim, completion, c).await?;
+        self.stop.cancel();
+        c.sleep(Duration::from_millis(20)).await; // committed finish with a delayed receipt
+        assert!(self.dropped.load(Ordering::SeqCst));
+        Ok(())
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn binding_change_drops_callback_before_deferred_settlement() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(1), &cancel);
+    let inner = idle_store();
+    let scope = scope()?;
+    inner
+        .wake(
+            &Target::new(scope.clone(), "held")?,
+            &ResourceSet::empty(scope.tenant()),
+            &c,
+        )
+        .await?;
+    let dropped = std::sync::atomic::AtomicBool::new(false);
+    let store = ReboundStore {
+        inner: &inner,
+        dropped: &dropped,
+        stop: &stop,
+    };
+    let report = run(
+        &store,
+        &GuardedObservation(&dropped),
+        &scope,
+        policy()?,
+        &c,
+        &stop,
+        |_| {},
+    )
+    .await?;
+    assert_eq!(report.deferred, 1);
+    assert_eq!(report.execution_failed, 0);
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn capped_retries_survive_runner_restart_and_early_notifications() -> anyhow::Result<()> {
     let clock = Clock::new();
@@ -1403,7 +1745,11 @@ async fn capped_retries_survive_runner_restart_and_early_notifications() -> anyh
     let scope = scope()?;
     for entity in ["first", "second"] {
         store
-            .wake(&Target::new(scope.clone(), entity)?, &control)
+            .wake(
+                &Target::new(scope.clone(), entity)?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
             .await?;
     }
     for row in store.lock().iter_mut() {

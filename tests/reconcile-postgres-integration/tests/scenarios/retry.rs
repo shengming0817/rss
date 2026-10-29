@@ -8,17 +8,22 @@ impl Reconciler<PgClaim> for Failing {
         &self,
         _: &PgClaim,
         _: &Control<'_, T>,
-    ) -> Result<ReconcileDiff<()>, Error> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Err(Error::new(ErrorKind::Transient))
+    ) -> Result<ReconcileStep<ReconcileDiff<()>>, Error> {
+        let observed = async {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(Error::new(ErrorKind::Transient))
+        }
+        .await;
+        observed.map(ReconcileStep::Ready)
     }
     async fn apply<T: Timer>(
         &self,
         _: &PgClaim,
         _: ReconcileDiff<()>,
         _: &Control<'_, T>,
-    ) -> Result<(), Error> {
-        Err(Error::new(ErrorKind::Invariant))
+    ) -> Result<ReconcileStep<()>, Error> {
+        let applied: Result<(), Error> = async { Err(Error::new(ErrorKind::Invariant)) }.await;
+        applied.map(ReconcileStep::Ready)
     }
 }
 
@@ -35,11 +40,18 @@ pub(super) async fn run(
 ) -> anyhow::Result<()> {
     let scope = Scope::new(TenantId::parse(TENANT)?, "capped-retry")?;
     for entity in ["first", "second"] {
-        store.wake(&Target::new(scope.clone(), entity)?, c).await?;
+        store
+            .wake(
+                &Target::new(scope.clone(), entity)?,
+                &ResourceSet::empty(scope.tenant()),
+                c,
+            )
+            .await?;
     }
     for claim in store
         .claim_due(&scope, 2, Duration::from_secs(1), c)
         .await?
+        .claims
     {
         store
             .finish(
@@ -124,6 +136,7 @@ async fn verify_restart(
         restarted
             .claim_due(scope, 2, Duration::from_secs(1), c)
             .await?
+            .claims
             .is_empty()
     );
     let still_future: bool = sqlx::query_scalar("SELECT bool_and(next_run>clock_timestamp()) FROM rss_reconcile.targets WHERE reconciler='capped-retry'")
