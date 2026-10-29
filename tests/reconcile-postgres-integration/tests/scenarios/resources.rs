@@ -40,6 +40,7 @@ pub(super) async fn run(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     parallel_effects(store, owner, c).await?;
+    expired_transaction_keeps_conflicting_resources_locked(store, owner, c).await?;
     fairness(store, owner, c).await?;
     rebinding(store, owner, c).await?;
     bounded_pages(store, c).await?;
@@ -338,5 +339,59 @@ async fn parallel_effects(
     for claim in &claims {
         store.finish(claim, Completion::Converged, c).await?;
     }
+    Ok(())
+}
+
+async fn expired_transaction_keeps_conflicting_resources_locked(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let t = wake(
+        store,
+        &scope("expired-resource-holder")?,
+        "holder",
+        &["expired:shared"],
+        c,
+    )
+    .await?;
+    let other = wake(
+        store,
+        &scope("expired-resource-contender")?,
+        "contender",
+        &["expired:shared"],
+        c,
+    )
+    .await?;
+    let held = claim(store, &t, Duration::from_millis(150), c).await?;
+    let entered = tokio::sync::Notify::new();
+    let resume = tokio::sync::Notify::new();
+    let write = store.protect(&held, c, (&entered, &resume), |state, tx| {
+        Box::pin(async move {
+            effect(tx, "expired-resource-write".into()).await?;
+            state.0.notify_one();
+            state.1.notified().await;
+            Ok(ProtectedStep::Ready(()))
+        })
+    });
+    let contend = async {
+        entered.notified().await;
+        loop {
+            let expired: bool=sqlx::query_scalar("SELECT lease_until<=clock_timestamp() FROM rss_reconcile.targets WHERE reconciler='expired-resource-holder'").fetch_one(owner).await?;
+            if expired {
+                break;
+            }
+            c.sleep(Duration::from_millis(5)).await;
+        }
+        blocked(store, other.scope(), c).await?;
+        resume.notify_one();
+        Ok::<(), anyhow::Error>(())
+    };
+    let (write, contend) = tokio::join!(write, contend);
+    contend?;
+    assert!(matches!(write,Err(e) if e.kind()==ErrorKind::Fenced));
+    assert_eq!(count(owner, "expired-resource-write").await?, 0);
+    let fresh = claim(store, &other, Duration::from_secs(2), c).await?;
+    store.finish(&fresh, Completion::Converged, c).await?;
     Ok(())
 }

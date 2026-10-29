@@ -1626,3 +1626,126 @@ async fn normal_waiting_in_observe_and_apply_preserves_failure_budget() -> anyho
     }
     Ok(())
 }
+
+struct CallbackGuard<'a>(&'a std::sync::atomic::AtomicBool);
+impl Drop for CallbackGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+struct GuardedObservation<'a>(&'a std::sync::atomic::AtomicBool);
+impl Reconciler<Token> for GuardedObservation<'_> {
+    type State = ();
+    async fn observe<T: Timer>(
+        &self,
+        _: &Token,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileStep<ReconcileDiff<()>>, Error> {
+        let _guard = CallbackGuard(self.0);
+        std::future::pending().await
+    }
+    async fn apply<T: Timer>(
+        &self,
+        _: &Token,
+        _: ReconcileDiff<()>,
+        _: &Control<'_, T>,
+    ) -> Result<ReconcileStep<()>, Error> {
+        Err(Error::new(ErrorKind::Invariant))
+    }
+}
+struct ReboundStore<'a> {
+    inner: &'a Store,
+    dropped: &'a std::sync::atomic::AtomicBool,
+    stop: &'a CancellationToken,
+}
+impl DurableStore for ReboundStore<'_> {
+    type Claim = Token;
+    async fn wake<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.inner.wake(target, resources, c).await
+    }
+    async fn bind_resources<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.inner.bind_resources(target, resources, c).await
+    }
+    async fn claim_due<T: Timer>(
+        &self,
+        scope: &Scope,
+        limit: usize,
+        lease: Duration,
+        c: &Control<'_, T>,
+    ) -> Result<ClaimBatch<Token>, Error> {
+        self.inner.claim_due(scope, limit, lease, c).await
+    }
+    async fn renew<T: Timer>(
+        &self,
+        _: &Token,
+        _: Duration,
+        _: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        Err(Error::new(ErrorKind::BindingChanged))
+    }
+    async fn release<T: Timer>(&self, claim: &Token, c: &Control<'_, T>) -> Result<(), Error> {
+        self.inner.release(claim, c).await
+    }
+    async fn finish<T: Timer>(
+        &self,
+        claim: &Token,
+        completion: Completion,
+        c: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        assert!(
+            self.dropped.load(Ordering::SeqCst),
+            "old callback must be destroyed before settlement starts"
+        );
+        assert!(matches!(completion, Completion::Deferred(_)));
+        self.inner.finish(claim, completion, c).await?;
+        self.stop.cancel();
+        c.sleep(Duration::from_millis(20)).await; // committed finish with a delayed receipt
+        assert!(self.dropped.load(Ordering::SeqCst));
+        Ok(())
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn binding_change_drops_callback_before_deferred_settlement() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(1), &cancel);
+    let inner = idle_store();
+    let scope = scope()?;
+    inner
+        .wake(
+            &Target::new(scope.clone(), "held")?,
+            &ResourceSet::empty(scope.tenant()),
+            &c,
+        )
+        .await?;
+    let dropped = std::sync::atomic::AtomicBool::new(false);
+    let store = ReboundStore {
+        inner: &inner,
+        dropped: &dropped,
+        stop: &stop,
+    };
+    let report = run(
+        &store,
+        &GuardedObservation(&dropped),
+        &scope,
+        policy()?,
+        &c,
+        &stop,
+        |_| {},
+    )
+    .await?;
+    assert_eq!(report.deferred, 1);
+    assert_eq!(report.execution_failed, 0);
+    Ok(())
+}

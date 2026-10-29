@@ -406,12 +406,14 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
         }
     }
     let control = outer.child(policy.attempt);
-    let action = action(reconciler, &claim, policy, &control);
-    tokio::pin!(action);
-    let outcome = loop {
-        tokio::select! {
-            result=&mut action=>break result,
-            renewed=async {outer.sleep_until(renew_at).await;renew_lease(store,&claim,policy,outer).await}=>match renewed {Ok(at)=>renew_at=at,Err(e) if e.kind()==ErrorKind::BindingChanged=>break Ok(Completion::Deferred(policy.scan)),Err(e)=>return Outcome::failed(Stage::Renew,e)},
+    let outcome = {
+        let action = action(reconciler, &claim, policy, &control);
+        tokio::pin!(action);
+        loop {
+            tokio::select! {
+                result=&mut action=>break result,
+                renewed=async {outer.sleep_until(renew_at).await;renew_lease(store,&claim,policy,outer).await}=>match renewed {Ok(at)=>renew_at=at,Err(e) if e.kind()==ErrorKind::BindingChanged=>break Ok(Completion::Deferred(policy.scan)),Err(e)=>return Outcome::failed(Stage::Renew,e)},
+            }
         }
     };
     let finish = settle(store, &claim, policy, outer, outcome);
