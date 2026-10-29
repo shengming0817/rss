@@ -243,7 +243,10 @@ async fn worker_child() -> anyhow::Result<()> {
                 sqlx::query_scalar::<_, String>("SELECT next_run::text FROM rss_reconcile.targets WHERE reconciler='crash-retry-finished'").fetch_one(conn).await
             })).await
         })).await?;
-        std::fs::write(&marker, deadline)?;
+        // The parent may kill us as soon as marker exists: publish complete contents.
+        let pending = std::path::Path::new(&marker).with_extension("pending");
+        std::fs::write(&pending, deadline)?;
+        std::fs::rename(pending, &marker)?;
         std::future::pending::<()>().await;
     }
     let id = t.scope().reconciler().to_owned();
