@@ -356,7 +356,6 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
 async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
-    let stop = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(1), &cancel);
     let store = Store {
         rows: Mutex::new(vec![]),
