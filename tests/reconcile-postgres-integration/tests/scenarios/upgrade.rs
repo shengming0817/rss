@@ -25,6 +25,16 @@ pub(super) async fn verify(
     assert!(
         matches!(store.claim_due(&scope,2,Duration::from_secs(1),c).await,Err(e) if e.kind()==ErrorKind::StorageContract)
     );
+    bind_pending(store, &scope, c).await?;
+    let after: Vec<(String,String,i64,i64,i64)> = sqlx::query_as("SELECT entity,next_run::text,failures,epoch,wake_version FROM rss_reconcile.targets WHERE reconciler='upgrade' ORDER BY entity").fetch_all(owner).await?;
+    assert_eq!(before, after);
+    claim_bound(store, owner, &scope, c).await
+}
+async fn bind_pending(
+    store: &PgStore,
+    scope: &Scope,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     for entity in ["future", "past"] {
         store
             .bind_resources(
@@ -35,15 +45,19 @@ pub(super) async fn verify(
             .await?;
         if entity == "future" {
             assert!(
-                matches!(store.claim_due(&scope,2,Duration::from_secs(1),c).await,Err(e) if e.kind()==ErrorKind::StorageContract)
+                matches!(store.claim_due(scope,2,Duration::from_secs(1),c).await,Err(e) if e.kind()==ErrorKind::StorageContract)
             );
         }
     }
-    let after: Vec<(String,String,i64,i64,i64)> = sqlx::query_as("SELECT entity,next_run::text,failures,epoch,wake_version FROM rss_reconcile.targets WHERE reconciler='upgrade' ORDER BY entity").fetch_all(owner).await?;
-    assert_eq!(before, after);
-    let batch = store
-        .claim_due(&scope, 2, Duration::from_secs(2), c)
-        .await?;
+    Ok(())
+}
+async fn claim_bound(
+    store: &PgStore,
+    owner: &PgPool,
+    scope: &Scope,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let batch = store.claim_due(scope, 2, Duration::from_secs(2), c).await?;
     assert_eq!(batch.claims.len(), 1);
     assert_eq!(batch.claims[0].target().entity(), "past");
     assert_eq!(batch.claims[0].failures(), 5);

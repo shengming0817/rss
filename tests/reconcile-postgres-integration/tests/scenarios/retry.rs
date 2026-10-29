@@ -43,7 +43,7 @@ pub(super) async fn run(
         store
             .wake(
                 &Target::new(scope.clone(), entity)?,
-                &ResourceSet::empty((&Target::new(scope.clone(), entity)?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 c,
             )
             .await?;

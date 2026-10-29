@@ -327,7 +327,7 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
     store
         .wake(
             &Target::new(scope.clone(), "one")?,
-            &ResourceSet::empty((&Target::new(scope.clone(), "one")?).scope().tenant()),
+            &ResourceSet::empty(scope.tenant()),
             &control,
         )
         .await?;
@@ -371,11 +371,7 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
         store
             .wake(
                 &Target::new(scope.clone(), format!("e{i}"))?,
-                &ResourceSet::empty(
-                    (&Target::new(scope.clone(), format!("e{i}"))?)
-                        .scope()
-                        .tenant(),
-                ),
+                &ResourceSet::empty(scope.tenant()),
                 &control,
             )
             .await?;
@@ -567,11 +563,7 @@ async fn delayed_claim_is_renewed_before_any_business_callback() -> anyhow::Resu
     store
         .wake(
             &Target::new(scope.clone(), "expired-on-return")?,
-            &ResourceSet::empty(
-                (&Target::new(scope.clone(), "expired-on-return")?)
-                    .scope()
-                    .tenant(),
-            ),
+            &ResourceSet::empty(scope.tenant()),
             &c,
         )
         .await?;
@@ -684,7 +676,7 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
         store
             .wake(
                 &Target::new(scope.clone(), id)?,
-                &ResourceSet::empty((&Target::new(scope.clone(), id)?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 &c,
             )
             .await?;
@@ -729,7 +721,7 @@ async fn panic_payload_escapes_run_without_settling_claim() -> anyhow::Result<()
     store
         .wake(
             &Target::new(scope.clone(), "panic")?,
-            &ResourceSet::empty((&Target::new(scope.clone(), "panic")?).scope().tenant()),
+            &ResourceSet::empty(scope.tenant()),
             &c,
         )
         .await?;
@@ -975,7 +967,7 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
         store
             .wake(
                 &Target::new(scope.clone(), "work")?,
-                &ResourceSet::empty((&Target::new(scope.clone(), "work")?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 &control,
             )
             .await?;
@@ -1044,7 +1036,7 @@ async fn lost_notification_recovers_in_a_free_slot_while_another_task_runs() -> 
     store
         .wake(
             &Target::new(scope.clone(), "long")?,
-            &ResourceSet::empty((&Target::new(scope.clone(), "long")?).scope().tenant()),
+            &ResourceSet::empty(scope.tenant()),
             &control,
         )
         .await?;
@@ -1054,7 +1046,7 @@ async fn lost_notification_recovers_in_a_free_slot_while_another_task_runs() -> 
         store
             .wake(
                 &Target::new(scope.clone(), "lost-hint")?,
-                &ResourceSet::empty((&Target::new(scope.clone(), "lost-hint")?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 &control,
             )
             .await
@@ -1092,7 +1084,7 @@ async fn future_reobservation_survives_early_notifications_and_slow_scans() -> a
         store
             .wake(
                 &Target::new(scope.clone(), "work")?,
-                &ResourceSet::empty((&Target::new(scope.clone(), "work")?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 &control,
             )
             .await?;
@@ -1184,9 +1176,7 @@ async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Re
                 store
                     .wake(
                         &Target::new(scope.clone(), "newer")?,
-                        &ResourceSet::empty(
-                            (&Target::new(scope.clone(), "newer")?).scope().tenant(),
-                        ),
+                        &ResourceSet::empty(scope.tenant()),
                         &control,
                     )
                     .await?;
@@ -1273,7 +1263,7 @@ async fn stop_drains_apply_and_settlement_without_claiming_the_next_target() -> 
         store
             .wake(
                 &Target::new(scope.clone(), name)?,
-                &ResourceSet::empty((&Target::new(scope.clone(), name)?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 &control,
             )
             .await?;
@@ -1338,11 +1328,7 @@ async fn draining_preserves_uncertain_finish_and_bounds_a_stalled_finish() -> an
         store
             .wake(
                 &Target::new(scope.clone(), "settlement")?,
-                &ResourceSet::empty(
-                    (&Target::new(scope.clone(), "settlement")?)
-                        .scope()
-                        .tenant(),
-                ),
+                &ResourceSet::empty(scope.tenant()),
                 &control,
             )
             .await?;
@@ -1383,7 +1369,7 @@ async fn forced_cancellation_during_drain_is_not_success() -> anyhow::Result<()>
     store
         .wake(
             &Target::new(scope.clone(), "active")?,
-            &ResourceSet::empty((&Target::new(scope.clone(), "active")?).scope().tenant()),
+            &ResourceSet::empty(scope.tenant()),
             &control,
         )
         .await?;
@@ -1414,7 +1400,7 @@ async fn stop_keeps_an_inflight_claim_until_its_acquired_work_is_settled() -> an
         store
             .wake(
                 &Target::new(scope.clone(), name)?,
-                &ResourceSet::empty((&Target::new(scope.clone(), name)?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 &control,
             )
             .await?;
@@ -1460,7 +1446,7 @@ async fn fatal_claim_error_is_observed_before_a_forced_drain_interruption() -> a
     store
         .wake(
             &Target::new(scope.clone(), "active")?,
-            &ResourceSet::empty((&Target::new(scope.clone(), "active")?).scope().tenant()),
+            &ResourceSet::empty(scope.tenant()),
             &control,
         )
         .await?;
@@ -1515,7 +1501,7 @@ async fn concurrent_failures_persist_separate_bounded_retry_times() -> anyhow::R
             store
                 .wake(
                     &Target::new(scope.clone(), entity)?,
-                    &ResourceSet::empty((&Target::new(scope.clone(), entity)?).scope().tenant()),
+                    &ResourceSet::empty(scope.tenant()),
                     &control,
                 )
                 .await?;

@@ -52,6 +52,11 @@ async fn fairness(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> an
     let held = claim(store, &holder, Duration::from_secs(5), c).await?;
     let old = wake(store, &scope("fair-old")?, "old", &["fair:a", "fair:b"], c).await?;
     blocked(store, old.scope(), c).await?; // durable queue head despite B being busy
+    let young = queued_young(store, c).await?;
+    store.release(&held, c).await?;
+    finish_fair_turn(store, owner, c, old, young).await
+}
+async fn queued_young(store: &PgStore, c: &Control<'_, Clock>) -> anyhow::Result<Target> {
     let young_scope = scope("fair-young")?;
     let young = wake(store, &young_scope, "young", &["fair:a"], c).await?;
     let separate = wake(store, &young_scope, "separate", &["fair:c"], c).await?;
@@ -67,11 +72,19 @@ async fn fairness(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> an
         wake(store, &young_scope, &format!("new-{n}"), &["fair:a"], c).await?;
     }
     blocked(store, &young_scope, c).await?;
-    store.release(&held, c).await?;
+    Ok(young)
+}
+async fn finish_fair_turn(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    old: Target,
+    young: Target,
+) -> anyhow::Result<()> {
     let old_claim = claim(store, &old, Duration::from_secs(5), c).await?;
     assert_eq!(owners(owner, "fair:a").await?, 1);
     assert_eq!(owners(owner, "fair:b").await?, 1);
-    blocked(store, &young_scope, c).await?;
+    blocked(store, young.scope(), c).await?;
     store
         .finish(&old_claim, Completion::Deferred(Duration::from_secs(30)), c)
         .await?;
@@ -100,8 +113,17 @@ async fn rebinding(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> a
         1,
         "rebind does not release the old claim early"
     );
+    reject_old_binding(store, owner, c, &old).await?;
+    release_and_reacquire(store, owner, c, t, old).await
+}
+async fn reject_old_binding(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    old: &PgClaim,
+) -> anyhow::Result<()> {
     let rejected = store
-        .protect(&old, c, (), |_, tx| {
+        .protect(old, c, (), |_, tx| {
             Box::pin(async {
                 effect(tx, "stale-rebind".into()).await?;
                 Ok(ProtectedStep::Ready(()))
@@ -111,15 +133,23 @@ async fn rebinding(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> a
     assert!(matches!(rejected, Err(e) if e.kind()==ErrorKind::BindingChanged));
     assert_eq!(count(owner, "stale-rebind").await?, 0);
     assert!(
-        matches!(store.renew(&old, Duration::from_secs(5), c).await, Err(e) if e.kind()==ErrorKind::BindingChanged)
+        matches!(store.renew(old, Duration::from_secs(5), c).await, Err(e) if e.kind()==ErrorKind::BindingChanged)
     );
+    Ok(())
+}
+async fn release_and_reacquire(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    t: Target,
+    old: PgClaim,
+) -> anyhow::Result<()> {
     store
         .finish(&old, Completion::Deferred(Duration::from_millis(1)), c)
         .await?;
     assert_eq!(owners(owner, "rebind:a").await?, 0);
     c.sleep(Duration::from_millis(2)).await;
     let new = claim(store, &t, Duration::from_secs(5), c).await?;
-    assert_eq!(owners(owner, "rebind:b").await?, 1);
     assert!(matches!(store.release(&old, c).await, Err(e) if e.kind()==ErrorKind::Fenced));
     assert_eq!(owners(owner, "rebind:b").await?, 1);
     store
@@ -132,9 +162,17 @@ async fn rebinding(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> a
             c,
         )
         .await?;
+    preserve_schedule_binding(store, owner, c, &t).await
+}
+async fn preserve_schedule_binding(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    t: &Target,
+) -> anyhow::Result<()> {
     let before: (String,i64,i64) = sqlx::query_as("SELECT next_run::text,failures,wake_version FROM rss_reconcile.targets WHERE reconciler='rebind'").fetch_one(owner).await?;
     store
-        .bind_resources(&t, &ResourceSet::new(t.scope().tenant(), ["rebind:c"])?, c)
+        .bind_resources(t, &ResourceSet::new(t.scope().tenant(), ["rebind:c"])?, c)
         .await?;
     let after: (String,i64,i64) = sqlx::query_as("SELECT next_run::text,failures,wake_version FROM rss_reconcile.targets WHERE reconciler='rebind'").fetch_one(owner).await?;
     assert_eq!(before, after);
@@ -160,7 +198,16 @@ async fn bounded_pages(store: &PgStore, c: &Control<'_, Clock>) -> anyhow::Resul
     store
         .finish(&second.claims[0], Completion::Converged, c)
         .await?;
-    let work = wake(store, &queued, "free-runner", &["page:other"], c).await?;
+    runner_continues_page(store, c, &queued).await?;
+    store.release(&held, c).await?;
+    Ok(())
+}
+async fn runner_continues_page(
+    store: &PgStore,
+    c: &Control<'_, Clock>,
+    queued: &Scope,
+) -> anyhow::Result<()> {
+    let work = wake(store, queued, "free-runner", &["page:other"], c).await?;
     let stop = CancellationToken::new();
     let observer = StopOnObserve(&stop);
     let policy = Policy::try_from(PolicyConfig {
@@ -188,9 +235,9 @@ async fn bounded_pages(store: &PgStore, c: &Control<'_, Clock>) -> anyhow::Resul
         report.converged, 1,
         "runner must continue the scan before its 30s idle timer"
     );
-    store.release(&held, c).await?;
     Ok(())
 }
+
 struct StopOnObserve<'a>(&'a CancellationToken);
 impl Reconciler<PgClaim> for StopOnObserve<'_> {
     type State = ();
@@ -244,9 +291,17 @@ async fn uncertainty(
     blocked(store, other.scope(), c).await?;
     c.sleep(Duration::from_millis(110)).await;
     let recovered = claim(store, &other, Duration::from_secs(2), c).await?;
+    uncertain_settlement(store, owner, c, &recovered).await
+}
+async fn uncertain_settlement(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    recovered: &PgClaim,
+) -> anyhow::Result<()> {
     store.inject_next_fault(PgFault::RollbackFailedAfterAck);
     let rollback: Result<ReconcileStep<()>, Error> = store
-        .protect(&recovered, c, (), |_, _| {
+        .protect(recovered, c, (), |_, _| {
             Box::pin(async {
                 Err(PgOperationError::unavailable(std::io::Error::other(
                     "rollback probe",
@@ -258,7 +313,7 @@ async fn uncertainty(
     assert_eq!(owners(owner, "unknown:shared").await?, 1);
     store.inject_next_fault(PgFault::CommitUnknownAfterAck);
     assert!(
-        matches!(store.finish(&recovered,Completion::Converged,c).await,Err(e) if e.kind()==ErrorKind::CommitUnknown)
+        matches!(store.finish(recovered,Completion::Converged,c).await,Err(e) if e.kind()==ErrorKind::CommitUnknown)
     );
     assert_eq!(owners(owner, "unknown:shared").await?, 0);
     Ok(())
@@ -286,6 +341,13 @@ async fn isolation_and_admission(
     );
     store.finish(&ca, Completion::Converged, c).await?;
     store.finish(&cb, Completion::Converged, c).await?;
+    resource_admission(pool, owner, c).await
+}
+async fn resource_admission(
+    pool: &PgPool,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     for table in ["resources", "target_resources", "scans"] {
         // Static fixture table names; this deliberately violates the runtime boundary.
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(

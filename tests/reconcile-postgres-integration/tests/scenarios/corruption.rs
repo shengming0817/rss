@@ -13,7 +13,7 @@ pub(super) async fn run(
         store
             .wake(
                 &Target::new(scope.clone(), entity)?,
-                &ResourceSet::empty((&Target::new(scope.clone(), entity)?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 c,
             )
             .await?;
@@ -198,7 +198,7 @@ async fn recovery(
     // Observe durable finish, using the existing caller budget rather than a performance cutoff.
     let stop = CancellationToken::new();
     tokio::select! {
-        result = rss_reconcile::run(&restarted, &business, scope, policy()?, c, &stop, |_| {}) => {
+        result = rss_reconcile::run(&restarted, &business, scope, policy()?, c, &stop, |event| eprintln!("corruption recovery: {event:?}")) => {
             anyhow::bail!("worker stopped before durable recovery: {:?}", result?);
         }
         result = tokio::time::timeout(c.remaining(), wait_for_recovery(owner, scope, c)) => { result??; }
@@ -214,7 +214,7 @@ async fn recovery(
     restarted
         .wake(
             &Target::new(scope.clone(), "c-later")?,
-            &ResourceSet::empty((&Target::new(scope.clone(), "c-later")?).scope().tenant()),
+            &ResourceSet::empty(scope.tenant()),
             c,
         )
         .await?;
@@ -255,7 +255,7 @@ async fn exhausted_epoch(
         store
             .wake(
                 &Target::new(scope.clone(), entity)?,
-                &ResourceSet::empty((&Target::new(scope.clone(), entity)?).scope().tenant()),
+                &ResourceSet::empty(scope.tenant()),
                 c,
             )
             .await?;

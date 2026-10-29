@@ -47,6 +47,49 @@ async fn crash(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()?;
+    stop_child(&mut child, &marker, mode, fixture, c).await?;
+    tokio::time::sleep(if mode == "resource" {
+        Duration::from_millis(2100)
+    } else {
+        Duration::from_millis(180)
+    })
+    .await;
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options(fixture))
+        .await?;
+    let store = Arc::new(PgStore::new(pool, c).await?);
+    let t = target(&format!("crash-{mode}"), TENANT)?;
+    if mode == "retry-finished" {
+        let deadline: String = sqlx::query_scalar(
+            "SELECT next_run::text FROM rss_reconcile.targets WHERE reconciler=$1",
+        )
+        .bind(t.scope().reconciler())
+        .fetch_one(owner)
+        .await?;
+        assert_eq!(deadline, std::fs::read_to_string(&marker)?);
+    }
+    if mode == "resource" {
+        // Keep both scopes progressing: an abandoned older waiter correctly blocks reobserve.
+        let contender = Target::new(
+            Scope::new(TenantId::parse(TENANT)?, "process-contender")?,
+            "blocked",
+        )?;
+        let recovered = claim(&store, &contender, Duration::from_secs(2), c).await?;
+        store.finish(&recovered, Completion::Converged, c).await?;
+    }
+    recover(mode, owner, c, &store, &t).await?;
+    assert_eq!(store.close(c).await, CloseOutcome::Drained);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+async fn stop_child(
+    child: &mut std::process::Child,
+    marker: &std::path::Path,
+    mode: &str,
+    fixture: &testkit::PgTlsFixture,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     let ready = tokio::time::timeout(Duration::from_secs(20), async {
         while !marker.exists() {
             anyhow::ensure!(
@@ -69,32 +112,9 @@ async fn crash(
     child.wait()?;
     ready??;
     resource_check?;
-    tokio::time::sleep(if mode == "resource" {
-        Duration::from_millis(2100)
-    } else {
-        Duration::from_millis(180)
-    })
-    .await;
-    let pool = PgPoolOptions::new()
-        .max_connections(3)
-        .connect_with(options(fixture))
-        .await?;
-    let store = Arc::new(PgStore::new(pool, c).await?);
-    let t = target(&format!("crash-{mode}"), TENANT)?;
-    if mode == "retry-finished" {
-        let deadline: String = sqlx::query_scalar(
-            "SELECT next_run::text FROM rss_reconcile.targets WHERE reconciler=$1",
-        )
-        .bind(t.scope().reconciler())
-        .fetch_one(owner)
-        .await?;
-        assert_eq!(deadline, std::fs::read_to_string(&marker)?);
-    }
-    recover(mode, owner, c, &store, &t).await?;
-    assert_eq!(store.close(c).await, CloseOutcome::Drained);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
 async fn recover(
     mode: &str,
     owner: &PgPool,
@@ -521,6 +541,6 @@ async fn cross_process_blocked(
     );
     assert_eq!(claims[0].target().entity(), "independent");
     store.finish(&claims[0], Completion::Converged, c).await?;
-    store.close(c).await;
+    assert_eq!(store.close(c).await, CloseOutcome::Drained);
     Ok(())
 }

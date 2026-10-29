@@ -10,12 +10,19 @@ pub async fn run(
     owner: &PgPool,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    eprintln!("reconcile scenario: upgrade");
     upgrade::verify(store, owner, c).await?;
+    eprintln!("reconcile scenario: discovery");
     discovery::run(store, pool, owner, c).await?;
+    eprintln!("reconcile scenario: corruption");
     corruption::run(store, pool, owner, c).await?;
+    eprintln!("reconcile scenario: application lock timeout");
     application_lock_timeout_rolls_back(store, owner, c).await?;
+    eprintln!("reconcile scenario: scheduling");
     scheduling(store, owner, c).await?;
+    eprintln!("reconcile scenario: retry");
     retry::run(store, pool, owner, c).await?;
+    eprintln!("reconcile scenario: resources");
     resources::run(store, pool, owner, c).await?;
     isolation(store, pool, owner, c).await?;
     fencing(store, owner, c).await?;

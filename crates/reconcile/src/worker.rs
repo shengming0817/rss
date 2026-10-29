@@ -389,33 +389,13 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
     claimed_at: Duration,
 ) -> Outcome {
     let mut renew_at = claimed_at.saturating_add(policy.lease / 3);
-    if outer.elapsed() >= renew_at {
-        match renew_lease(store, &claim, policy, outer).await {
-            Ok(at) => renew_at = at,
-            Err(e) if e.kind() == ErrorKind::BindingChanged => {
-                return settle(
-                    store,
-                    &claim,
-                    policy,
-                    outer,
-                    Ok(Completion::Deferred(policy.scan)),
-                )
-                .await;
-            }
-            Err(e) => return Outcome::failed(Stage::Renew, e),
-        }
+    let outcome =
+        attempt_with_renewal(store, reconciler, &claim, policy, outer, &mut renew_at).await;
+    if let Err(failure) = &outcome
+        && failure.stage == Stage::Renew
+    {
+        return Outcome::failed(Stage::Renew, failure.error.clone());
     }
-    let control = outer.child(policy.attempt);
-    let outcome = {
-        let action = action(reconciler, &claim, policy, &control);
-        tokio::pin!(action);
-        loop {
-            tokio::select! {
-                result=&mut action=>break result,
-                renewed=async {outer.sleep_until(renew_at).await;renew_lease(store,&claim,policy,outer).await}=>match renewed {Ok(at)=>renew_at=at,Err(e) if e.kind()==ErrorKind::BindingChanged=>break Ok(Completion::Deferred(policy.scan)),Err(e)=>return Outcome::failed(Stage::Renew,e)},
-            }
-        }
-    };
     let finish = settle(store, &claim, policy, outer, outcome);
     tokio::pin!(finish);
     loop {
@@ -433,6 +413,42 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
                     }
                     return outcome;
                 }
+            },
+        }
+    }
+}
+async fn attempt_with_renewal<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
+    store: &S,
+    reconciler: &R,
+    claim: &S::Claim,
+    policy: Policy,
+    outer: &Control<'_, T>,
+    renew_at: &mut Duration,
+) -> Result<Completion, Failure> {
+    if outer.elapsed() >= *renew_at {
+        match renew_lease(store, claim, policy, outer).await {
+            Ok(at) => *renew_at = at,
+            Err(error) if error.kind() == ErrorKind::BindingChanged => {
+                return Ok(Completion::Deferred(policy.scan));
+            }
+            Err(error) => {
+                return Err(Failure {
+                    stage: Stage::Renew,
+                    error,
+                });
+            }
+        }
+    }
+    let control = outer.child(policy.attempt);
+    let action = action(reconciler, claim, policy, &control);
+    tokio::pin!(action);
+    loop {
+        tokio::select! {
+            result=&mut action=>return result,
+            renewed=async {outer.sleep_until(*renew_at).await;renew_lease(store,claim,policy,outer).await}=>match renewed {
+                Ok(at)=>*renew_at=at,
+                Err(error) if error.kind()==ErrorKind::BindingChanged=>return Ok(Completion::Deferred(policy.scan)),
+                Err(error)=>return Err(Failure { stage: Stage::Renew,error }),
             },
         }
     }

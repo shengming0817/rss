@@ -535,6 +535,16 @@ async fn resource_decisions(
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     assert!(matches!(decision, ReconcileStep::Deferred(_)));
+    deferred_message_binding(store, owner, c, &composition, &old).await?;
+    externally_rebind_message(store, runtime, c, &composition, &t).await
+}
+async fn deferred_message_binding(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    composition: &rss_reconcile_postgres::PgMessagingStore,
+    old: &PgClaim,
+) -> anyhow::Result<()> {
     let result: String = sqlx::query_scalar(
         "SELECT result FROM rss_reconcile.targets WHERE reconciler='messaging-rebind'",
     )
@@ -545,7 +555,7 @@ async fn resource_decisions(
         "rebind cannot manufacture an applied effect"
     );
     let skipped = composition
-        .protect(&old, c, (), |_, _| {
+        .protect(old, c, (), |_, _| {
             Box::pin(async { Err::<ProtectedStep<()>, _>(PgError::from(sqlx::Error::RowNotFound)) })
         })
         .await
@@ -555,16 +565,25 @@ async fn resource_decisions(
         "stale binding skips the callback without aborting the owner transaction"
     );
     store
-        .finish(&old, Completion::Deferred(Duration::from_millis(1)), c)
+        .finish(old, Completion::Deferred(Duration::from_millis(1)), c)
         .await?;
     c.sleep(Duration::from_millis(2)).await;
-    let new = claim(store, &t, Duration::from_secs(5), c).await?;
+    Ok(())
+}
+async fn externally_rebind_message(
+    store: &PgStore,
+    runtime: &Arc<PgRuntime>,
+    c: &Control<'_, Clock>,
+    composition: &rss_reconcile_postgres::PgMessagingStore,
+    t: &Target,
+) -> anyhow::Result<()> {
+    let new = claim(store, t, Duration::from_secs(5), c).await?;
     let resources = ResourceSet::new(t.scope().tenant(), ["messaging:c"])?;
     runtime
         .local_tx_with_context(
             t.scope().tenant(),
             rss_transactional_messaging::policy::OperationDeadline::from_remaining(c.remaining()),
-            (&composition, &t, &resources),
+            (composition, t, &resources),
             |state, tx| Box::pin(async move { state.0.bind_in(tx, state.1, state.2).await }),
         )
         .await
