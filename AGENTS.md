@@ -24,10 +24,12 @@ ship / fix 流程要求的 `turns=none` 独立 branch 会话，采用以下方�
 `<PR_URL>` 必须使用目标 PR 的完整 URL，首审与后续复审使用同一 PR URL。
 
 1. 使用 `create_thread` 创建不继承实施会话历史的独立审查会话，
+   显式设置 `model="gpt-6.1-sol"`、`thinking="high"`；
    初始 prompt 为 `/pr-review <PR_URL>`；创建前用 `list_projects` 确认目标仓库对应的 project。
 2. 保存返回的 `threadId` 和 `hostId`，使用 `wait_threads` 静默等待审查结果。
 3. 修复由原实施会话完成；提交并推送后，使用 `send_message_to_thread`
-   向同一 `threadId` 发送 `/pr-review <PR_URL> --check`。
+   向同一 `threadId` 发送 `/pr-review <PR_URL> --check`，
+   显式设置 `model="gpt-6.1-sol"`、`thinking="high"`。
 4. 再次使用 `wait_threads` 静默等待，必要时使用 `read_thread`
    读取结果。同一 PR 后续各轮持续复用该审查会话。
 
