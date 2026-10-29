@@ -16,15 +16,10 @@ pub(super) async fn run(
         .claim_due(scope, 2, Duration::from_secs(1), control)
         .await;
     let startup = PgStore::new(pool.clone(), control).await;
-    // The separately privileged fixture creates work while the admitted handle is idle.
-    sqlx::query(
-        "INSERT INTO rss_reconcile.targets(tenant_id,reconciler,entity) VALUES($1::uuid,$2,$3)",
-    )
-    .bind(TENANT)
-    .bind(scope.reconciler())
-    .bind(target.entity())
-    .execute(owner)
-    .await?;
+    // Work is registered through the already admitted public boundary while catalog drift exists.
+    store
+        .wake(&target, &ResourceSet::empty(scope.tenant()), control)
+        .await?;
     let due = store
         .claim_due(scope, 2, Duration::from_secs(1), control)
         .await;
@@ -32,14 +27,14 @@ pub(super) async fn run(
         .execute(owner)
         .await?;
     assert!(
-        empty?.is_empty(),
+        empty?.claims.is_empty(),
         "empty discovery must not run the full structure probe"
     );
     assert_eq!(
         startup.err().map(|e| e.kind()),
         Some(ErrorKind::StorageContract)
     );
-    let mut due = due?;
+    let mut due = due?.claims;
     assert_eq!(due.len(), 1, "admitted operations do not revalidate DDL");
     let claimed = due.remove(0);
     store
@@ -94,6 +89,7 @@ async fn safety(
         store
             .claim_due(scope, 1, Duration::from_secs(1), control)
             .await?
+            .claims
             .is_empty()
     );
     Ok(())

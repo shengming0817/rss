@@ -826,3 +826,27 @@ _azure_subissue_link() { # <parent> <child>
     _dry "${cmd[@]}" && return 0
     "${cmd[@]}" >/dev/null
 }
+
+# Native predecessor relation, not PBI parentage. Reads/writes stay in the forge adapter.
+# ref: learn.microsoft.com/cli/azure/boards/work-item/relation
+_azure_issue_blocked_by() {
+    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]] || return 64
+    az boards work-item show --id "$1" --org "${ADO_ORG}" --output json |
+        jq -ce '[.relations[]? | select(.rel=="System.LinkTypes.Dependency-Reverse") | .url | capture("/(?<id>[0-9]+)$").id | tonumber] | unique'
+}
+_azure_issue_link_blocker() {
+    if [ "$#" -ne 2 ] || ! [[ "$1" =~ ^[1-9][0-9]*$ && "$2" =~ ^[1-9][0-9]*$ ]] || [ "$1" = "$2" ]; then
+        echo 'forge issue-link-blocker: expected distinct blocked and predecessor IDs' >&2; return 64
+    fi
+    if _dry "az boards work-item relation add --id $1 --relation-type predecessor --target-id $2 --org ${ADO_ORG}; read back native predecessor"; then return 0; fi
+    local existing
+    existing="$(_azure_issue_blocked_by "$1")" || return 1
+    if ! jq -e --argjson id "$2" 'index($id)!=null' <<< "$existing" >/dev/null; then
+        az boards work-item relation add --id "$1" --relation-type predecessor --target-id "$2" --org "${ADO_ORG}" --output json >/dev/null || return 1
+    fi
+    existing="$(_azure_issue_blocked_by "$1")" || return 1
+    jq -e --argjson id "$2" 'index($id)!=null' <<< "$existing" >/dev/null || {
+        echo 'forge issue-link-blocker: predecessor read-back failed' >&2; return 1;
+    }
+    printf '%s\n' "$existing"
+}

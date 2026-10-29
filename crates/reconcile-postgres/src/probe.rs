@@ -58,12 +58,13 @@ async fn validate_runtime(conn: &mut PgConnection) -> Result<(), Error> {
 }
 async fn validate_structure(conn: &mut PgConnection) -> Result<(), Error> {
     check(conn, STRUCTURE).await?;
+    check(conn, include_str!("resource-admission.sql")).await?;
     functions(conn).await
 }
 // The shipped SQL is the sole function definition source, compared with the actual provider.
 async fn functions(conn: &mut PgConnection) -> Result<(), Error> {
     let rows=sqlx::query("SELECT proname,prosrc,prosecdef,proconfig,pg_get_function_identity_arguments(p.oid) AS args,has_function_privilege(p.oid,'EXECUTE') AS executable,EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE') AS public_execute FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='rss_reconcile'").fetch_all(conn).await.map_err(crate::transaction::map_sql)?;
-    let definitions: Vec<_> = crate::MIGRATION_SQL
+    let definitions: Vec<_> = crate::UPGRADE_SQL
         .split("CREATE FUNCTION rss_reconcile.")
         .skip(1)
         .collect();

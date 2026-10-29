@@ -1,7 +1,7 @@
 //! ref: kube-rs kube-runtime/src/controller/mod.rs@f2774b13d66910a8a0fe456cc8e6e52414eb1d0e
 use crate::{
-    Claim, Completion, Control, DriftKind, DurableStore, Error, ErrorKind, Policy, Reconciler,
-    Scope, Target, Timer,
+    Claim, ClaimBatch, Completion, Control, DriftKind, DurableStore, Error, ErrorKind, Policy,
+    ReconcileStep, Reconciler, Scope, Target, Timer,
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::{
@@ -27,6 +27,8 @@ pub enum Observation {
         stage: Stage,
         error: Error,
     },
+    /// Normal waiting, emitted only after the deferred schedule is durably acknowledged.
+    Deferred { target: Target },
     /// A scan operation failed; its scope is known, its possibly committed claim count is not.
     ScanFailed { scope: Scope, error: Error },
 }
@@ -35,6 +37,7 @@ pub enum Observation {
 pub struct Report {
     pub converged: u64,
     pub reobserve: u64,
+    pub deferred: u64,
     pub retried: u64,
     pub suspended: u64,
     pub fenced: u64,
@@ -82,7 +85,11 @@ impl<F: FnMut(Observation)> Active<'_, F> {
         Ok(())
     }
     fn record(&mut self, target: Target, outcome: Outcome, now: Duration) {
-        if let Ok(Completion::Reobserve(after) | Completion::Retry { after, .. }) = &outcome.result
+        if let Ok(
+            Completion::Reobserve(after)
+            | Completion::Deferred(after)
+            | Completion::Retry { after, .. },
+        ) = &outcome.result
         {
             self.schedule(now, *after);
         }
@@ -93,6 +100,10 @@ impl<F: FnMut(Observation)> Active<'_, F> {
         match outcome.result {
             Ok(Completion::Converged) => self.report.converged += 1,
             Ok(Completion::Reobserve(_)) => self.report.reobserve += 1,
+            Ok(Completion::Deferred(_)) => {
+                self.report.deferred += 1;
+                (self.observe)(Observation::Deferred { target });
+            }
             Ok(Completion::Retry { .. }) => self.report.retried += 1,
             Ok(Completion::Suspended { .. }) => self.report.suspended += 1,
             Err(failure) => {
@@ -240,8 +251,11 @@ async fn run_inner<
             let batch = claim_round(store, scope, available, policy, control, &mut active).await;
             active.scanned_through(started);
             let freed = active.tasks.len() < before;
+            let mut more = false;
             match batch {
-                Ok(claims) => {
+                Ok(batch) => {
+                    more = batch.more;
+                    let claims = batch.claims;
                     if claims.len() > available {
                         active.drain(control).await?;
                         return Err(Error::new(ErrorKind::Invariant));
@@ -284,7 +298,8 @@ async fn run_inner<
                     return Err(e);
                 }
             }
-            if freed && active.tasks.len() < policy.concurrency {
+            if (freed || more) && active.tasks.len() < policy.concurrency {
+                tokio::task::yield_now().await;
                 continue;
             }
         }
@@ -322,7 +337,7 @@ async fn claim_round<S: DurableStore, T: Timer, F: FnMut(Observation) + Send>(
     policy: Policy,
     control: &Control<'_, T>,
     active: &mut Active<'_, F>,
-) -> Result<Vec<S::Claim>, Error> {
+) -> Result<ClaimBatch<S::Claim>, Error> {
     let scan_control = control.child(policy.attempt);
     let scan = scan_control.run(store.claim_due(scope, available, policy.lease, &scan_control));
     tokio::pin!(scan);
@@ -346,17 +361,24 @@ async fn action<C: Claim, R: Reconciler<C>, T: Timer>(
             stage: Stage::Observe,
             error,
         })?;
+    let diff = match diff {
+        ReconcileStep::Ready(diff) => diff,
+        ReconcileStep::Deferred(after) => return Ok(Completion::Deferred(after)),
+    };
     if diff.drift() == DriftKind::Converged {
         return Ok(Completion::Converged);
     }
-    control
+    let applied = control
         .run(reconciler.apply(claim, diff, control))
         .await
         .map_err(|error| Failure {
             stage: Stage::Apply,
             error,
         })?;
-    Ok(Completion::Reobserve(policy.scan))
+    Ok(match applied {
+        ReconcileStep::Ready(()) => Completion::Reobserve(policy.scan),
+        ReconcileStep::Deferred(after) => Completion::Deferred(after),
+    })
 }
 async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
     store: &S,
@@ -370,6 +392,16 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
     if outer.elapsed() >= renew_at {
         match renew_lease(store, &claim, policy, outer).await {
             Ok(at) => renew_at = at,
+            Err(e) if e.kind() == ErrorKind::BindingChanged => {
+                return settle(
+                    store,
+                    &claim,
+                    policy,
+                    outer,
+                    Ok(Completion::Deferred(policy.scan)),
+                )
+                .await;
+            }
             Err(e) => return Outcome::failed(Stage::Renew, e),
         }
     }
@@ -379,7 +411,7 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
     let outcome = loop {
         tokio::select! {
             result=&mut action=>break result,
-            renewed=async {outer.sleep_until(renew_at).await;renew_lease(store,&claim,policy,outer).await}=>match renewed {Ok(at)=>renew_at=at,Err(e)=>return Outcome::failed(Stage::Renew,e)},
+            renewed=async {outer.sleep_until(renew_at).await;renew_lease(store,&claim,policy,outer).await}=>match renewed {Ok(at)=>renew_at=at,Err(e) if e.kind()==ErrorKind::BindingChanged=>break Ok(Completion::Deferred(policy.scan)),Err(e)=>return Outcome::failed(Stage::Renew,e)},
         }
     };
     let finish = settle(store, &claim, policy, outer, outcome);
@@ -394,7 +426,7 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
                     // A committed finish releases its token before the receipt may arrive.
                     // Never discard that receipt in response to a concurrent renewal failure.
                     let mut outcome = finish.await;
-                    if outcome.result.is_err() {
+                    if outcome.result.is_err() && error.kind() != ErrorKind::BindingChanged {
                         outcome.prior.push(Failure { stage: Stage::Renew, error });
                     }
                     return outcome;
@@ -410,8 +442,11 @@ async fn settle<S: DurableStore, T: Timer>(
     control: &Control<'_, T>,
     outcome: Result<Completion, Failure>,
 ) -> Outcome {
-    let (completion, prior) = match outcome {
+    let (mut completion, prior) = match outcome {
         Ok(completion) => (completion, Vec::new()),
+        Err(failure) if failure.error.kind() == ErrorKind::BindingChanged => {
+            (Completion::Deferred(policy.scan), Vec::new())
+        }
         Err(failure)
             if matches!(
                 failure.error.kind(),
@@ -447,15 +482,24 @@ async fn settle<S: DurableStore, T: Timer>(
         }
     };
     let settlement = control.child(policy.attempt);
-    let result = settlement
+    let mut result = settlement
         .run(store.finish(claim, completion, &settlement))
         .await
-        .map_err(Error::uncertain)
-        .map(|()| completion)
-        .map_err(|error| Failure {
-            stage: Stage::Finish,
-            error,
-        });
+        .map_err(Error::uncertain);
+    if result
+        .as_ref()
+        .is_err_and(|e| e.kind() == ErrorKind::BindingChanged)
+    {
+        completion = Completion::Deferred(policy.scan);
+        result = settlement
+            .run(store.finish(claim, completion, &settlement))
+            .await
+            .map_err(Error::uncertain);
+    }
+    let result = result.map(|()| completion).map_err(|error| Failure {
+        stage: Stage::Finish,
+        error,
+    });
     Outcome { result, prior }
 }
 async fn renew_lease<S: DurableStore, T: Timer>(

@@ -115,6 +115,7 @@ usage: forge.sh [--dry-run] <verb> [args...]
          issue-view <n> | issue-edit-labels <n> --add a,b --remove c,d
          issue-close <n> <reason> <comment> | issue-list <search> <state>
          issue-comment <n> <body-file> | subissue-link <parent> <child>
+         issue-blocked-by <n> | issue-link-blocker <blocked> <predecessor>
 Active forge from RSS_FORGE env or forge.conf DEFAULT_FORGE.
 EOF
 }

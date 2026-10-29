@@ -45,7 +45,7 @@ async fn claim(
     lease: Duration,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<PgClaim> {
-    let mut batch = store.claim_due(t.scope(), 1, lease, c).await?;
+    let mut batch = store.claim_due(t.scope(), 1, lease, c).await?.claims;
     anyhow::ensure!(
         batch.len() == 1,
         "expected one due claim for {}",
@@ -79,7 +79,7 @@ async fn reconcile_postgres_suite() -> anyhow::Result<()> {
         let clock=Clock::new();let cancel=CancellationToken::new();let control=Control::new(&clock,Duration::from_secs(210),&cancel);
         assert!(matches!(PgStore::new(pool.clone(),&control).await,Err(e) if e.kind()==ErrorKind::StorageContract));
         let mut migration=owner.acquire().await?;sqlx::raw_sql("SET ROLE reconcile_owner").execute(&mut *migration).await?;
-        sqlx::raw_sql(MIGRATION_SQL).execute(&mut *migration).await?;
+        scenarios::upgrade::install(&mut migration).await?;
         sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_reconcile TO reconcile_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_reconcile TO reconcile_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_reconcile TO reconcile_runtime;").execute(&mut *migration).await?;drop(migration);
         sqlx::raw_sql("CREATE TABLE public.effects(tenant_id uuid NOT NULL,id text NOT NULL,n bigint NOT NULL,PRIMARY KEY(tenant_id,id)); ALTER TABLE public.effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT,UPDATE ON public.effects TO reconcile_runtime;").execute(&owner).await?;
         let absent:Option<String>=sqlx::query_scalar("SELECT to_regnamespace('rss_transactional_messaging')::text").fetch_one(&owner).await?;assert!(absent.is_none());
