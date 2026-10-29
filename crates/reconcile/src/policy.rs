@@ -22,7 +22,7 @@ pub struct PolicyConfig {
     pub scan_interval: Duration,
     /// Recovery scan interval when no known target is due sooner.
     pub idle_scan_interval: Duration,
-    /// Initial retry floor; independent targets spread within the remaining bounded delay.
+    /// Absolute retry floor. Equal to max_backoff selects a fixed delay.
     pub initial_backoff: Duration,
     /// Ceiling including retry jitter.
     pub max_backoff: Duration,
@@ -70,31 +70,23 @@ impl TryFrom<PolicyConfig> for Policy {
     }
 }
 impl Policy {
-    /// Saturating capped exponential backoff; first failure uses the base duration.
-    pub fn backoff(&self, failures: u32) -> Duration {
-        self.backoff
-            .saturating_mul(
-                1u32.checked_shl(failures.saturating_sub(1))
-                    .unwrap_or(u32::MAX),
-            )
-            .min(self.cap)
-    }
-    // ref: tower-rs/tower tower/src/retry/backoff.rs (capped additive jitter).
-    // The claim identity and failure count spread a retry wave without new RNG/config
-    // state. Persisted next_run remains authoritative across restart and notification.
+    // ref: tower-rs/tower tower/src/retry/backoff.rs@7dc533ef86b02f89f3dc5fe64644dd1a5dc3b37d
+    // Unlike additive jitter, this window retains room at the cap. The absolute
+    // floor remains intact; persisted next_run, not the hash, owns restart recovery.
     pub(crate) fn retry_delay(&self, target: &crate::Target, failures: u32) -> Duration {
         use std::hash::{Hash, Hasher};
-        let base = self.backoff(failures);
-        let room = base.min(self.cap - base);
-        // Validation bounds all policy durations to one day and whole milliseconds.
-        let room = room.as_secs() * 1000 + u64::from(room.subsec_millis());
-        if room == 0 {
-            return base;
-        }
+        let upper = self
+            .backoff
+            .saturating_mul(1u32.checked_shl(failures.max(1)).unwrap_or(u32::MAX))
+            .min(self.cap);
+        // Validation bounds durations to one day and positive whole milliseconds.
+        let upper = upper.as_secs() * 1000 + u64::from(upper.subsec_millis());
+        let floor = self.backoff.as_secs() * 1000 + u64::from(self.backoff.subsec_millis());
+        let lower = floor.max(upper.div_ceil(2));
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         target.hash(&mut hash);
         failures.hash(&mut hash);
-        base + Duration::from_millis(hash.finish() % (room + 1))
+        Duration::from_millis(lower + hash.finish() % (upper - lower + 1))
     }
     /// Maximum concurrent entity executions.
     pub const fn concurrency(&self) -> usize {
@@ -105,3 +97,6 @@ impl Policy {
         self.lease
     }
 }
+
+#[cfg(test)]
+mod tests;

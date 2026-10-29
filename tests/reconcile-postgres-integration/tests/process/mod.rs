@@ -7,7 +7,14 @@ pub async fn run(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     graceful_stop(store, owner, c).await?;
-    for mode in ["claim", "staged", "applied", "finished", "resource"] {
+    for mode in [
+        "claim",
+        "staged",
+        "applied",
+        "finished",
+        "retry-finished",
+        "resource",
+    ] {
         crash(mode, owner, fixture, c).await?;
     }
     Ok(())
@@ -74,6 +81,15 @@ async fn crash(
         .await?;
     let store = Arc::new(PgStore::new(pool, c).await?);
     let t = target(&format!("crash-{mode}"), TENANT)?;
+    if mode == "retry-finished" {
+        let deadline: String = sqlx::query_scalar(
+            "SELECT next_run::text FROM rss_reconcile.targets WHERE reconciler=$1",
+        )
+        .bind(t.scope().reconciler())
+        .fetch_one(owner)
+        .await?;
+        assert_eq!(deadline, std::fs::read_to_string(&marker)?);
+    }
     recover(mode, owner, c, &store, &t).await?;
     assert_eq!(store.close(c).await, CloseOutcome::Drained);
     std::fs::remove_dir_all(root)?;
@@ -88,7 +104,7 @@ async fn recover(
 ) -> anyhow::Result<()> {
     let expected = i64::from(matches!(mode, "applied" | "finished"));
     assert_eq!(count(owner, t.scope().reconciler()).await?, expected);
-    if mode == "finished" {
+    if matches!(mode, "finished" | "retry-finished") {
         assert!(
             store
                 .claim_due(t.scope(), 1, Duration::from_secs(1), c)
@@ -256,6 +272,28 @@ async fn worker_child() -> anyhow::Result<()> {
     .await?;
     if matches!(mode.as_str(), "claim" | "resource") {
         std::fs::write(&marker, b"claimed")?;
+        std::future::pending::<()>().await;
+    }
+    if mode == "retry-finished" {
+        store
+            .finish(
+                &claim,
+                Completion::Retry {
+                    after: Duration::from_secs(60),
+                    failures: 5,
+                },
+                &control,
+            )
+            .await?;
+        let deadline = store.local_tx(t.scope(), &control, |tx| Box::pin(async move {
+            tx.with_connection(|conn| Box::pin(async move {
+                sqlx::query_scalar::<_, String>("SELECT next_run::text FROM rss_reconcile.targets WHERE reconciler='crash-retry-finished'").fetch_one(conn).await
+            })).await
+        })).await?;
+        // The parent may kill us as soon as marker exists: publish complete contents.
+        let pending = std::path::Path::new(&marker).with_extension("pending");
+        std::fs::write(&pending, deadline)?;
+        std::fs::rename(pending, &marker)?;
         std::future::pending::<()>().await;
     }
     let id = t.scope().reconciler().to_owned();

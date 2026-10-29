@@ -17,7 +17,7 @@ fn diff_truth_table_and_redaction() {
     }
 }
 #[test]
-fn bounded_policy_and_saturating_backoff() -> Result<(), rss_reconcile::Error> {
+fn bounded_policy() -> Result<(), rss_reconcile::Error> {
     let make = |n| {
         Policy::try_from(rss_reconcile::PolicyConfig {
             concurrency: n,
@@ -32,9 +32,7 @@ fn bounded_policy_and_saturating_backoff() -> Result<(), rss_reconcile::Error> {
     };
     assert!(make(0).is_err());
     assert!(make(65).is_err());
-    let p = make(2)?;
-    assert_eq!(p.backoff(1), Duration::from_millis(2));
-    assert_eq!(p.backoff(u32::MAX), Duration::from_millis(8));
+    assert_eq!(make(2)?.concurrency(), 2);
     Ok(())
 }
 

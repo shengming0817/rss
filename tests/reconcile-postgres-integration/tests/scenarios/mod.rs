@@ -2,6 +2,7 @@ use super::*;
 mod corruption;
 mod discovery;
 mod resources;
+mod retry;
 pub(crate) mod upgrade;
 pub async fn run(
     store: &PgStore,
@@ -14,6 +15,7 @@ pub async fn run(
     corruption::run(store, pool, owner, c).await?;
     application_lock_timeout_rolls_back(store, owner, c).await?;
     scheduling(store, owner, c).await?;
+    retry::run(store, pool, owner, c).await?;
     resources::run(store, pool, owner, c).await?;
     isolation(store, pool, owner, c).await?;
     fencing(store, owner, c).await?;
