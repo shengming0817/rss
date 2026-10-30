@@ -13,10 +13,11 @@ identity. Every tenant table has ENABLE/FORCE RLS. Grant the runtime role schema
 SELECT and function EXECUTE; no direct DML, schema CREATE, owner membership or bypass privileges.
 Fixed function search paths and revoked PUBLIC execution restrict the SQL seam. The component schema
 allows its dedicated migration owner and the complete explicit `CallerRoles` set of independent
-runtime database logins. One or many application instances may share each login. Every declared
+runtime database logins. Callers must not hold role-administration privileges, including ADMIN-only
+memberships that could self-enable SET/INHERIT. One or many application instances may share each login. Every declared
 login must have the same component privileges; callers cannot inherit or SET ROLE to one another.
 Additional ACL principals, effective access by undeclared roles (including NOLOGIN bridges and
-mixed SET/INHERIT paths), and extra functions are rejected. Database administrators remain product-owned trusted operators.
+mixed SET/INHERIT and role-administration paths), and extra functions are rejected. Database administrators remain product-owned trusted operators.
 Admission checks exact policy predicates, roles and function signatures/ACLs, and rejects
 additional permissive policies or changed function search paths. All five function definitions
 are derived from the bundled migration: admission verifies their bodies, parameter names/types,

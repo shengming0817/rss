@@ -10,10 +10,12 @@ reachable AS (SELECT r.* FROM pg_roles r WHERE r.oid IN(SELECT role FROM caller_
 -- SET and INHERIT follow different graph edges. Effective privilege checks below also
 -- account for a SET target's inherited privileges (including multi-hop combinations).
 external_reachable AS (
- SELECT DISTINCT active.oid FROM pg_roles outsider CROSS JOIN pg_roles active CROSS JOIN namespace n
+ SELECT DISTINCT active.oid FROM pg_roles outsider CROSS JOIN pg_roles managed
+ CROSS JOIN pg_roles active CROSS JOIN namespace n
  WHERE outsider.rolcanlogin AND NOT outsider.rolsuper AND outsider.oid<>n.nspowner
  AND outsider.oid NOT IN(SELECT oid FROM callers)
- AND (active.oid=outsider.oid OR pg_has_role(outsider.oid,active.oid,'SET'))
+ AND (managed.oid=outsider.oid OR pg_has_role(outsider.oid,managed.oid,'MEMBER WITH ADMIN OPTION'))
+ AND (active.oid=managed.oid OR pg_has_role(managed.oid,active.oid,'SET'))
 ),
 rels AS (SELECT c.* FROM pg_class c JOIN namespace n ON n.oid=c.relnamespace WHERE c.relname IN ('commands','authorities')),
 functions AS (SELECT p.* FROM pg_proc p JOIN namespace n ON n.oid=p.pronamespace),
@@ -40,6 +42,10 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
     AND EXISTS(SELECT FROM callers WHERE rolname=current_user)),
  (4,'runtime_role',session_user=current_user
     AND NOT EXISTS(SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication)
+    -- Ordinary callers cannot manage role membership, including ADMIN-only grants and
+    -- inherited/indirect administrators. Otherwise they could add SET/INHERIT themselves.
+    AND NOT EXISTS(SELECT FROM callers c CROSS JOIN pg_roles managed
+        WHERE pg_has_role(c.oid,managed.oid,'MEMBER WITH ADMIN OPTION'))
     AND NOT EXISTS(SELECT FROM reachable r CROSS JOIN namespace n WHERE pg_has_role(r.oid,n.nspowner,'USAGE'))
     AND NOT EXISTS(SELECT FROM caller_reachable r JOIN callers c ON c.oid<>r.caller
         WHERE pg_has_role(r.role,c.oid,'USAGE'))),
@@ -58,8 +64,8 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
     -- mistake PostgreSQL's ungranted built-in administrative roles for application logins.
     AND NOT EXISTS(SELECT FROM pg_roles r CROSS JOIN namespace n
         WHERE NOT r.rolsuper AND r.oid<>n.nspowner AND r.oid NOT IN(SELECT oid FROM callers)
-        AND (pg_has_role(r.oid,n.nspowner,'USAGE') OR pg_has_role(r.oid,n.nspowner,'SET')
-            OR EXISTS(SELECT FROM callers c WHERE pg_has_role(r.oid,c.oid,'USAGE') OR pg_has_role(r.oid,c.oid,'SET'))))
+        AND (pg_has_role(r.oid,n.nspowner,'USAGE') OR pg_has_role(r.oid,n.nspowner,'SET') OR pg_has_role(r.oid,n.nspowner,'MEMBER WITH ADMIN OPTION')
+            OR EXISTS(SELECT FROM callers c WHERE pg_has_role(r.oid,c.oid,'USAGE') OR pg_has_role(r.oid,c.oid,'SET') OR pg_has_role(r.oid,c.oid,'MEMBER WITH ADMIN OPTION'))))
     AND NOT EXISTS(SELECT FROM external_reachable r CROSS JOIN namespace n
         WHERE has_schema_privilege(r.oid,n.oid,'USAGE') AND (
             EXISTS(SELECT FROM rels c WHERE has_table_privilege(r.oid,c.oid,'SELECT') OR has_any_column_privilege(r.oid,c.oid,'SELECT'))

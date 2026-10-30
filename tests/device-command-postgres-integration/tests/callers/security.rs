@@ -116,6 +116,14 @@ pub(super) async fn catalog(f: &Fixture) -> anyhow::Result<()> {
 async fn membership(f: &Fixture) -> anyhow::Result<()> {
     for (grant, revoke) in [
         (
+            "GRANT device_runtime TO device_peer WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            "REVOKE device_runtime FROM device_peer",
+        ),
+        (
+            "GRANT device_owner TO device_peer WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            "REVOKE device_owner FROM device_peer",
+        ),
+        (
             "GRANT device_runtime TO device_peer WITH INHERIT TRUE, SET FALSE",
             "REVOKE device_runtime FROM device_peer",
         ),
@@ -138,6 +146,14 @@ async fn membership(f: &Fixture) -> anyhow::Result<()> {
         .execute(&f.owner)
         .await?;
     for (change, restore) in [
+        (
+            "GRANT device_runtime TO command_bridge WITH ADMIN TRUE, INHERIT FALSE, SET FALSE; GRANT command_bridge TO device_peer WITH INHERIT FALSE, SET TRUE",
+            "REVOKE command_bridge FROM device_peer; REVOKE device_runtime FROM command_bridge",
+        ),
+        (
+            "GRANT command_privileged TO device_peer WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            "REVOKE command_privileged FROM device_peer",
+        ),
         (
             "GRANT device_runtime TO command_bridge WITH INHERIT TRUE, SET FALSE; GRANT command_bridge TO device_peer WITH INHERIT FALSE, SET TRUE",
             "REVOKE command_bridge FROM device_peer; REVOKE device_runtime FROM command_bridge",
@@ -162,6 +178,22 @@ async fn membership(f: &Fixture) -> anyhow::Result<()> {
 async fn outsider(f: &Fixture) -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE ROLE command_outsider LOGIN; CREATE ROLE command_bridge NOLOGIN; CREATE ROLE command_hop NOLOGIN").execute(&f.owner).await?;
     for (change, restore) in [
+        (
+            "GRANT device_peer TO command_outsider WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            "REVOKE device_peer FROM command_outsider",
+        ),
+        (
+            "GRANT device_owner TO command_outsider WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            "REVOKE device_owner FROM command_outsider",
+        ),
+        (
+            "GRANT device_peer TO command_bridge WITH ADMIN TRUE, INHERIT FALSE, SET FALSE; GRANT command_bridge TO command_outsider WITH INHERIT FALSE, SET TRUE",
+            "REVOKE command_bridge FROM command_outsider; REVOKE device_peer FROM command_bridge",
+        ),
+        (
+            "GRANT pg_read_all_data TO command_bridge WITH INHERIT FALSE, SET TRUE; GRANT command_bridge TO command_outsider WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            "REVOKE command_bridge FROM command_outsider; REVOKE pg_read_all_data FROM command_bridge",
+        ),
         (
             "GRANT USAGE ON SCHEMA rss_device_command TO command_outsider",
             "REVOKE USAGE ON SCHEMA rss_device_command FROM command_outsider",
