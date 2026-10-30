@@ -38,8 +38,8 @@ async fn explicit_callers_keep_closed_admission_and_atomic_transactions() -> any
         }
         security::declarations(&first).await?;
         security::catalog(&first).await?;
-        atomic(&first, "first-caller").await?;
-        atomic(&second, "second-caller").await?;
+        atomic(&first, "first-caller", PAIR).await?;
+        atomic(&second, "second-caller", PAIR).await?;
         foreign(&first, &second).await?;
         foreign(&second, &first).await?;
         // A third exact catalog name extends the declaration without adding an API/profile.
@@ -52,7 +52,7 @@ async fn explicit_callers_keep_closed_admission_and_atomic_transactions() -> any
             assert!(admit(fixture, CallerRoles::new(THREE)?).await?);
         }
         let third = paired(config(&postgres, "Device Third")?, &original.owner, THREE).await?;
-        atomic(&third, "third-caller").await?;
+        atomic(&third, "third-caller", THREE).await?;
         for fixture in [&first, &second, &third] {
             fixture.runtime.close().await;
         }
@@ -146,42 +146,15 @@ async fn reject_change(f: &Fixture, change: &str, restore: &str) -> anyhow::Resu
     Ok(())
 }
 
-async fn atomic(f: &Fixture, name: &str) -> anyhow::Result<()> {
+async fn atomic(f: &Fixture, name: &str, roles: &[&str]) -> anyhow::Result<()> {
     let s = scope(TENANT)?;
     let c = Coordinate::new(1, 1)?;
     f.initialize(s, c).await?;
-    let rollback = format!("{name}-rollback");
-    let store = f.store.clone();
-    let request = spec(&rollback, s, c)?;
-    let msg = message(&rollback, s.tenant())?;
-    let attempt = f
-        .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
-            Box::pin(async move {
-                store.queue(tx, request, msg).await?;
-                Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
-            })
-        })
-        .await;
-    assert_eq!(status(attempt), "rolled-back");
-    assert_eq!(f.count("commands", &rollback).await?, 0);
-    assert_eq!(f.count("outbox", &format!("dispatch.{rollback}")).await?, 0);
+    rollback(f, &format!("{name}-rollback"), s, c).await?;
     f.queue(name, s, c).await?;
     let unknown = format!("{name}-unknown");
-    let request = spec(&unknown, s, c)?;
-    let msg = message(&unknown, s.tenant())?;
-    let store = f.store.clone();
-    f.runtime
-        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
-    let attempt = f
-        .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
-            Box::pin(async move { store.queue(tx, request, msg).await })
-        })
-        .await;
-    assert_eq!(status(attempt), "unknown");
+    commit_unknown(f, &unknown, s, c).await?;
     // A fresh, paired store reloads and exactly replays the original durable identity.
-    let roles = if name == "third-caller" { THREE } else { PAIR };
     let reopened = paired(f.config.clone(), &f.owner, roles).await?;
     let stored = reopened
         .load(&unknown, s)
@@ -189,8 +162,7 @@ async fn atomic(f: &Fixture, name: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("committed command missing"))?;
     assert_eq!(reopened.queue(&unknown, s, c).await?, stored);
     for id in [name, unknown.as_str()] {
-        assert_eq!(f.count("commands", id).await?, 1);
-        assert_eq!(f.count("outbox", &format!("dispatch.{id}")).await?, 1);
+        assert_single(f, id).await?;
     }
     reopened.publish().await?;
     assert!(
@@ -203,6 +175,47 @@ async fn atomic(f: &Fixture, name: &str) -> anyhow::Result<()> {
                 && command.status() == Status::Published)
     );
     reopened.runtime.close().await;
+    Ok(())
+}
+
+async fn rollback(f: &Fixture, name: &str, s: Scope, c: Coordinate) -> anyhow::Result<()> {
+    let store = f.store.clone();
+    let request = spec(name, s, c)?;
+    let msg = message(name, s.tenant())?;
+    let attempt = f
+        .runtime
+        .local_tx(s.tenant(), budget()?, move |tx| {
+            Box::pin(async move {
+                store.queue(tx, request, msg).await?;
+                Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
+            })
+        })
+        .await;
+    assert_eq!(status(attempt), "rolled-back");
+    assert_eq!(f.count("commands", name).await?, 0);
+    assert_eq!(f.count("outbox", &format!("dispatch.{name}")).await?, 0);
+    Ok(())
+}
+
+async fn commit_unknown(f: &Fixture, name: &str, s: Scope, c: Coordinate) -> anyhow::Result<()> {
+    let request = spec(name, s, c)?;
+    let msg = message(name, s.tenant())?;
+    let store = f.store.clone();
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    let attempt = f
+        .runtime
+        .local_tx(s.tenant(), budget()?, move |tx| {
+            Box::pin(async move { store.queue(tx, request, msg).await })
+        })
+        .await;
+    assert_eq!(status(attempt), "unknown");
+    Ok(())
+}
+
+async fn assert_single(f: &Fixture, name: &str) -> anyhow::Result<()> {
+    assert_eq!(f.count("commands", name).await?, 1);
+    assert_eq!(f.count("outbox", &format!("dispatch.{name}")).await?, 1);
     Ok(())
 }
 
