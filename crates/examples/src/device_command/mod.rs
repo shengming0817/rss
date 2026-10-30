@@ -1,7 +1,7 @@
 //! Public command/outbox composition with explicit publication and device report facts.
 pub mod compose;
 use rss_device_command::*;
-use rss_device_command_postgres::PgStore;
+use rss_device_command_postgres::{CallerRoles, PgStore};
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::{message::*, outbox::*, policy::*, transaction::LocalTxAttempt};
 use rss_transactional_messaging_postgres::{
@@ -94,12 +94,21 @@ fn committed<T>(attempt: LocalTxAttempt<T, PgError>) -> anyhow::Result<T> {
 pub struct Input {
     #[serde(flatten)]
     pub pg: crate::pg::Input,
+    /// Exact complete caller set supplied by the deployment, including this login.
+    pub caller_roles: Vec<String>,
     pub target: [u8; 16],
     pub lineage: [u8; 16],
     pub epoch: i64,
 }
 pub async fn run(input: Input) -> anyhow::Result<()> {
     use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    let callers = CallerRoles::new(
+        &input
+            .caller_roles
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )?;
     let s = scope(&input.pg.tenant)?;
     let authority = ExecutionBinding::new(
         StorageIdentity::new(input.target, input.lineage)?,
@@ -124,7 +133,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
             Duration::from_secs(5),
         )?,
     )?);
-    let result = scenario(&runtime, outbox, s).await;
+    let result = scenario(&runtime, outbox, s, callers).await;
     runtime.close().await;
     result
 }
@@ -132,9 +141,20 @@ async fn scenario(
     runtime: &PgRuntime,
     outbox: Arc<PgOutboxStore<()>>,
     s: Scope,
+    callers: CallerRoles,
 ) -> anyhow::Result<()> {
     let coordinate = Coordinate::new(2, 3)?;
-    committed(compose::bootstrap(runtime, outbox.clone(), s, coordinate, budget()?).await)?;
+    committed(
+        compose::bootstrap(
+            runtime,
+            outbox.clone(),
+            s,
+            coordinate,
+            budget()?,
+            callers.clone(),
+        )
+        .await,
+    )?;
     let command = committed(
         compose::enqueue(
             runtime,
@@ -142,6 +162,7 @@ async fn scenario(
             spec("example", s, coordinate)?,
             message("example", s.tenant())?,
             budget()?,
+            callers.clone(),
         )
         .await,
     )?;
@@ -158,6 +179,7 @@ async fn scenario(
                         tx,
                         selected,
                         rss_device_command_postgres::CommandClock::Postgres,
+                        &callers,
                     )
                     .await
                 })

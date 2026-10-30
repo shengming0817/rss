@@ -11,7 +11,7 @@ reachable AS (SELECT r.* FROM pg_roles r WHERE r.oid IN(SELECT role FROM caller_
 -- account for a SET target's inherited privileges (including multi-hop combinations).
 external_reachable AS (
  SELECT DISTINCT active.oid FROM pg_roles outsider CROSS JOIN pg_roles active CROSS JOIN namespace n
- WHERE NOT outsider.rolsuper AND outsider.oid<>n.nspowner
+ WHERE outsider.rolcanlogin AND NOT outsider.rolsuper AND outsider.oid<>n.nspowner
  AND outsider.oid NOT IN(SELECT oid FROM callers)
  AND (active.oid=outsider.oid OR pg_has_role(outsider.oid,active.oid,'SET'))
 ),
@@ -54,6 +54,12 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
     AND NOT EXISTS(SELECT FROM acl a WHERE
         (a.grantee<>a.owner AND a.grantee NOT IN(SELECT oid FROM callers))
         OR (a.grantee IN(SELECT oid FROM callers) AND (a.is_grantable OR a.privilege_type NOT IN ('USAGE','SELECT','EXECUTE'))))
+    -- Non-login bridge roles must not acquire caller/owner capabilities either. Do not
+    -- mistake PostgreSQL's ungranted built-in administrative roles for application logins.
+    AND NOT EXISTS(SELECT FROM pg_roles r CROSS JOIN namespace n
+        WHERE NOT r.rolsuper AND r.oid<>n.nspowner AND r.oid NOT IN(SELECT oid FROM callers)
+        AND (pg_has_role(r.oid,n.nspowner,'USAGE') OR pg_has_role(r.oid,n.nspowner,'SET')
+            OR EXISTS(SELECT FROM callers c WHERE pg_has_role(r.oid,c.oid,'USAGE') OR pg_has_role(r.oid,c.oid,'SET'))))
     AND NOT EXISTS(SELECT FROM external_reachable r CROSS JOIN namespace n
         WHERE has_schema_privilege(r.oid,n.oid,'USAGE') AND (
             EXISTS(SELECT FROM rels c WHERE has_table_privilege(r.oid,c.oid,'SELECT') OR has_any_column_privilege(r.oid,c.oid,'SELECT'))

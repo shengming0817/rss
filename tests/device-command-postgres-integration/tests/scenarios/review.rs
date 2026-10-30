@@ -224,6 +224,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
         rss_device_command_postgres::CommandClock::Postgres,
     )
     .await?;
+    let callers = CallerRoles::new(&["device_runtime"])?;
     let foreign = committed(
         f.runtime
             .local_tx(s.tenant(), budget()?, move |tx| {
@@ -232,6 +233,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
                         tx,
                         other_outbox,
                         rss_device_command_postgres::CommandClock::Postgres,
+                        &callers,
                     )
                     .await
                 })
@@ -277,6 +279,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
             Duration::from_secs(5),
         )?,
     )?);
+    let callers = CallerRoles::new(&["device_runtime"])?;
     let selected = alternate.clone();
     let other = committed(
         f.runtime
@@ -286,6 +289,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
                         tx,
                         selected,
                         rss_device_command_postgres::CommandClock::Postgres,
+                        &callers,
                     )
                     .await
                 })

@@ -12,9 +12,11 @@ The fresh `rss_device_command` schema contains only authorities and commands wit
 identity. Every tenant table has ENABLE/FORCE RLS. Grant the runtime role schema USAGE, table
 SELECT and function EXECUTE; no direct DML, schema CREATE, owner membership or bypass privileges.
 Fixed function search paths and revoked PUBLIC execution restrict the SQL seam. The component schema
-allows its dedicated migration owner and one runtime database login shared by application
-instances. Additional ACL principals, inherited access by other application logins and extra
-functions are rejected. Database administrators remain product-owned trusted operators.
+allows its dedicated migration owner and the complete explicit `CallerRoles` set of independent
+runtime database logins. One or many application instances may share each login. Every declared
+login must have the same component privileges; callers cannot inherit or SET ROLE to one another.
+Additional ACL principals, effective access by undeclared roles (including NOLOGIN bridges and
+mixed SET/INHERIT paths), and extra functions are rejected. Database administrators remain product-owned trusted operators.
 Admission checks exact policy predicates, roles and function signatures/ACLs, and rejects
 additional permissive policies or changed function search paths. All five function definitions
 are derived from the bundled migration: admission verifies their bodies, parameter names/types,
@@ -29,9 +31,19 @@ Install the separately versioned messaging schema with its own documented runtim
 component installations never read, modify, migrate or adopt historical `device_commands` rows.
 Future changes to this component's persisted format require append-only upgrades.
 
-`PgStore::new(tx, outbox, CommandClock::Postgres)` checks its schema revision, RLS and runtime privilege boundary using
+Construct `CallerRoles::new(&["command_runtime", "policy_runtime"])?` from deployment intent;
+single-caller deployments use the same API with a one-element set. Names are exact catalog names,
+not quoted SQL identifiers. Empty sets, empty/NUL-containing names and duplicates are rejected;
+unknown or non-login roles and a set missing the active login are rejected by database admission.
+The immutable declaration owns its names and can be cloned across startup paths. It is not an
+admission proof or a runtime capability. Adding another independent caller requires updating the
+complete declaration and provisioning its grants; it does not require a different API or a product
+role enum. Different operation profiles and live privilege reconfiguration are not provided.
+
+`PgStore::new(tx, outbox, CommandClock::Postgres, &callers)` checks its schema revision, RLS and every
+declared caller's effective privileges using
 an existing tenant-bound transaction. Rejections log structured `phase="probe"` and a closed
-`reason` (`revision`, `relations`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
+`reason` (`revision`, `relations`, `caller_roles`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
 `unknown`), without database names, credentials or role names. Every constructor and operation validates the transaction's private runtime provenance against
 its Outbox owner. Distinct PgRuntime instances are rejected even for the same database; share
 the original Arc or construct a new paired store after reconnecting. `PgRuntime` remains the connection/TLS/deadline/quarantine owner. Companion SQL is
@@ -110,7 +122,7 @@ ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
 两种模式实际运行公共 API 场景，正式验收绑定同一 clean revision、版本和 archive digest；
 完整故障矩阵仍归本组件 T1/T2，不把示例通过解释为生产验收或实际发布。
 
-ref: postgres src/backend/utils/adt/acl.c@REL_16_STABLE
+ref: postgres src/backend/utils/adt/acl.c@REL_16_10
 
 Command composition explicitly separates `bootstrap` from `enqueue`. Bootstrap initializes device
 authority once; enqueue only queues or exactly replays the original spec/message. After authority

@@ -11,6 +11,7 @@ async fn example_consumer() -> anyhow::Result<()> {
         input["target"] = serde_json::json!(([1u8;16]));
         input["lineage"] = serde_json::json!(([2u8;16]));
         input["epoch"] = serde_json::json!(1);
+        input["caller_roles"] = serde_json::json!(["device_runtime"]);
         match std::env::var("RSS_DEVICE_COMMAND_EXAMPLE") {
             Ok(binary) => {
                 anyhow::ensure!(!binary.is_empty(), "empty external example selection");

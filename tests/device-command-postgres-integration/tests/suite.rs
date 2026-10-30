@@ -1,3 +1,4 @@
+mod callers;
 mod examples;
 use rss_examples::device_command::compose;
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
@@ -6,7 +7,7 @@ mod crash;
 mod fence_fixture;
 mod scenarios;
 use rss_device_command::*;
-use rss_device_command_postgres::PgStore;
+use rss_device_command_postgres::{CallerRoles, PgStore};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::{message::*, outbox::*, policy::*, transaction::LocalTxAttempt};
 use rss_transactional_messaging_postgres::{
@@ -124,6 +125,13 @@ async fn stores(
     config: PgConfig,
     clock: rss_device_command_postgres::CommandClock,
 ) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore<()>>, Arc<PgOutboxStore<()>>)> {
+    stores_for(config, clock, CallerRoles::new(&["device_runtime"])?).await
+}
+async fn stores_for(
+    config: PgConfig,
+    clock: rss_device_command_postgres::CommandClock,
+    callers: CallerRoles,
+) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore<()>>, Arc<PgOutboxStore<()>>)> {
     let runtime =
         Arc::new(PgRuntime::connect(config, Timer::new(), fence_fixture::binding()).await?);
     let outbox = Arc::new(PgOutboxStore::new(
@@ -140,7 +148,7 @@ async fn stores(
     let store = Arc::new(committed(
         runtime
             .local_tx(TenantId::parse(TENANT)?, budget()?, move |tx| {
-                Box::pin(async move { PgStore::new(tx, selected, clock).await })
+                Box::pin(async move { PgStore::new(tx, selected, clock, &callers).await })
             })
             .await,
     )?);
@@ -179,7 +187,7 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
         .execute(&mut *install)
         .await?;
     install.commit().await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging,rss_device_command TO device_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO device_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO device_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO device_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO device_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO device_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_device_command TO device_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_device_command TO device_runtime;").execute(&owner).await?;
+    grant_runtime(&owner, "device_runtime").await?;
     let config = PgConfig::new(
         &p.host,
         p.port,
@@ -202,6 +210,16 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
         config,
     })
 }
+// Test-owned provisioning, shared by single- and multi-login fixtures.
+async fn grant_runtime(owner: &PgPool, role: &str) -> anyhow::Result<()> {
+    let sql = "GRANT USAGE ON SCHEMA rss_transactional_messaging,rss_device_command TO device_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO device_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO device_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO device_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO device_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO device_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_device_command TO device_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_device_command TO device_runtime;";
+    let quoted = format!("\"{}\"", role.replace('"', "\"\""));
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.replace("device_runtime", &quoted)))
+        .execute(owner)
+        .await?;
+    Ok(())
+}
+
 impl Fixture {
     async fn controlled(
         &self,
