@@ -17,6 +17,7 @@ default = []
 integration = []
 
 [dependencies]
+thiserror.workspace = true
 tracing.workspace = true
 rss-device-command.workspace = true
 rss-request-context.workspace = true

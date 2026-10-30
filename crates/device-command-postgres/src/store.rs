@@ -13,13 +13,15 @@ pub struct PgStore<R> {
 impl<R: Send> PgStore<R> {
     /// Validate component storage/role on the caller's configured transaction.
     /// All later transactions must use this same database and runtime role.
+    /// `callers` declares the complete component caller set, including this runtime's login.
     pub async fn new(
         tx: &mut PgTransaction<'_>,
         outbox: Arc<PgOutboxStore<R>>,
         clock: crate::CommandClock,
+        callers: &crate::CallerRoles,
     ) -> Result<Self, PgError> {
         outbox.validate_transaction(tx)?;
-        crate::probe::validate(tx).await?;
+        crate::probe::validate(tx, callers).await?;
         Ok(Self { outbox, clock })
     }
     /// Read this store's authoritative command time in Unix microseconds.

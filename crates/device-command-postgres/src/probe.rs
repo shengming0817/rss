@@ -4,11 +4,16 @@ use rss_device_command::Error;
 use rss_transactional_messaging_postgres::{PgError, PgTransaction};
 use sqlx::{PgConnection, Row};
 
-pub(crate) async fn validate(tx: &mut PgTransaction<'_>) -> Result<(), PgError> {
+pub(crate) async fn validate(
+    tx: &mut PgTransaction<'_>,
+    callers: &crate::CallerRoles,
+) -> Result<(), PgError> {
+    let callers = callers.clone();
     let failure = tx
-        .with_connection(|conn| {
+        .with_connection(move |conn| {
             Box::pin(async move {
                 let failure: Option<String> = sqlx::query_scalar(include_str!("probe.sql"))
+                    .bind(callers.names())
                     .fetch_optional(&mut *conn)
                     .await?;
                 if failure.is_some() {
@@ -23,6 +28,7 @@ pub(crate) async fn validate(tx: &mut PgTransaction<'_>) -> Result<(), PgError> 
             "revision" => "revision",
             "relations" => "relations",
             "runtime_role" => "runtime_role",
+            "caller_roles" => "caller_roles",
             "runtime_acl" => "runtime_acl",
             "rls_policy" => "rls_policy",
             "functions" => "functions",
@@ -52,8 +58,7 @@ SELECT p.proname, p.prosrc, pg_get_function_identity_arguments(p.oid) AS argumen
     p.prosecdef AND p.prokind='f' AND l.lanname='sql'
         AND NOT p.proisstrict AND p.provolatile='v' AND p.proparallel='u' AND NOT p.proleakproof
         AND NOT owner.rolsuper AND NOT owner.rolbypassrls AND p.proowner=n.nspowner
-        AND p.proconfig=ARRAY['search_path=pg_catalog, rss_device_command']::text[]
-        AND has_function_privilege(current_user,p.oid,'EXECUTE') AS safe
+        AND p.proconfig=ARRAY['search_path=pg_catalog, rss_device_command']::text[] AS safe
 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
 JOIN pg_roles owner ON owner.oid=p.proowner JOIN pg_language l ON l.oid=p.prolang
 LEFT JOIN expected e ON p.oid=to_regprocedure(e.signature)
