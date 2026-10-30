@@ -2,7 +2,7 @@
 use rss_device_command::{
     BatchLimit, Command, CommandId, CommandSpec, Coordinate, DeviceReport, Outcome, Scope, Store,
 };
-use rss_device_command_postgres::PgStore;
+use rss_device_command_postgres::{CallerRoles, PgStore};
 use rss_transactional_messaging::{
     outbox::PendingMessage,
     policy::OperationDeadline,
@@ -20,6 +20,7 @@ pub async fn bootstrap(
     scope: Scope,
     coordinate: Coordinate,
     deadline: OperationDeadline,
+    callers: CallerRoles,
 ) -> LocalTxAttempt<(), PgError> {
     runtime
         .local_tx(scope.tenant(), deadline, move |tx| {
@@ -28,6 +29,7 @@ pub async fn bootstrap(
                     tx,
                     outbox,
                     rss_device_command_postgres::CommandClock::Postgres,
+                    &callers,
                 )
                 .await?;
                 store.initialize(tx, scope, coordinate).await
@@ -42,6 +44,7 @@ pub async fn enqueue(
     spec: CommandSpec,
     message: PendingMessage<Vec<u8>>,
     deadline: OperationDeadline,
+    callers: CallerRoles,
 ) -> LocalTxAttempt<Command, PgError> {
     runtime
         .local_tx(spec.scope().tenant(), deadline, move |tx| {
@@ -50,6 +53,7 @@ pub async fn enqueue(
                     tx,
                     outbox,
                     rss_device_command_postgres::CommandClock::Postgres,
+                    &callers,
                 )
                 .await?;
                 store.queue(tx, spec, message).await

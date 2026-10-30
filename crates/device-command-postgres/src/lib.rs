@@ -1,10 +1,12 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+mod callers;
 mod clock;
 mod persistence;
 mod probe;
 mod store;
+pub use callers::{CallerRoles, CallerRolesError};
 pub use clock::CommandClock;
 #[cfg(feature = "integration")]
 pub use clock::IntegrationClock;

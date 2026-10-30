@@ -3555,6 +3555,7 @@ dependencies = [
  "rss-transactional-messaging",
  "rss-transactional-messaging-postgres",
  "sqlx",
+ "thiserror",
  "tracing",
 ]
 

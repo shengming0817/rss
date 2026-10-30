@@ -87,7 +87,7 @@ PR/issue 的验收记录需指向实际 revision、环境和这些运行结果�
 
 四个 bin 分别由 `reconcile-pg`、`device-command-pg`、`projection-pg`、`saga-pg` 启用。
 它们从 stdin 接收短命 fixture JSON（TLS host/port/database、受限 username/password、CA PEM、tenant）；
-Device Command 额外要求独立提供 target/lineage/epoch。数据不写入 argv 或日志。
+Device Command 额外要求独立提供 target/lineage/epoch，以及包含当前登录身份的完整 `caller_roles` 数组。数据不写入 argv 或日志。
 各组件 integration package 负责安装公开 migration、测试业务表和最小角色，运行结束清理临时后端。
 需要可用 Docker；以下仓内命令直接运行进程内场景，验证业务行为。下方 package-proof 命令则构建并启动独立 bin，额外验证 stdin 合同和子进程边界。均从仓库根目录运行，不需要自行部署或配置生产数据库：
 

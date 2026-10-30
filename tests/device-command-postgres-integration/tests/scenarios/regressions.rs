@@ -324,7 +324,17 @@ async fn compose_replay_case(
     use rss_examples::device_command::compose;
     let s = Scope::new(TenantId::parse(TENANT)?, DeviceId::parse(device)?);
     let c = Coordinate::new(1, 1)?;
-    committed(compose::bootstrap(&f.runtime, f.outbox.clone(), s, c, budget()?).await)?;
+    committed(
+        compose::bootstrap(
+            &f.runtime,
+            f.outbox.clone(),
+            s,
+            c,
+            budget()?,
+            CallerRoles::new(&["device_runtime"])?,
+        )
+        .await,
+    )?;
     if unknown {
         f.runtime
             .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
@@ -335,6 +345,7 @@ async fn compose_replay_case(
         spec(name, s, c)?,
         message(name, s.tenant())?,
         budget()?,
+        CallerRoles::new(&["device_runtime"])?,
     )
     .await;
     assert_eq!(
@@ -381,6 +392,7 @@ async fn assert_compose_replay(
             spec(name, s, c)?,
             message(name, s.tenant())?,
             budget()?,
+            CallerRoles::new(&["device_runtime"])?,
         )
         .await,
     )?;
@@ -394,6 +406,7 @@ async fn assert_compose_replay(
         spec(&fresh, s, c)?,
         message(&fresh, s.tenant())?,
         budget()?,
+        CallerRoles::new(&["device_runtime"])?,
     )
     .await;
     assert_eq!(
