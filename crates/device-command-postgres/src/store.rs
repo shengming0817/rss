@@ -30,6 +30,48 @@ impl<R: Send> PgStore<R> {
         self.outbox.validate_transaction(tx)?;
         self.clock.now(tx).await
     }
+    async fn recover_stored(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        current: Coordinate,
+        mut row: Stored,
+    ) -> Result<Command, PgError> {
+        // reason: terminal snapshots remain immutable even after authority advances.
+        if row.command.status().is_terminal() {
+            return Ok(row.command);
+        }
+        let previous = row.command.version();
+        let mut time = self.now(tx).await?;
+        let event = if current != row.command.spec().coordinate() {
+            Event::Supersede
+        } else if time >= row.command.spec().deadline() {
+            Event::Expire
+        } else if row.command.status() == Status::Queued {
+            let published = self
+                .outbox
+                .is_published(tx, &row.domain, &row.message_id, row.fingerprint)
+                .await?;
+            // Confirmation can block across expiry. The reducer receives the final
+            // provider sample, never the pre-confirmation time.
+            time = self.now(tx).await?;
+            if published {
+                Event::Published
+            } else {
+                Event::Expire
+            }
+        } else {
+            Event::Expire
+        }; // reason: Expire before the deadline is the reducer's explicit no-op.
+        let outcome = row
+            .command
+            .transition(event, current, time)
+            .map_err(error)?;
+        if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
+            return Err(error(Error::InvalidSnapshot));
+        }
+        save(tx, &row.command, previous).await?;
+        Ok(row.command)
+    }
     async fn mutate(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -272,40 +314,24 @@ impl<R: Send> Store for PgStore<R> {
         let current = authority(tx, s).await?;
         let rows = page(tx, s, after, i64::from(limit.get())).await?;
         let mut commands = Vec::with_capacity(rows.len());
-        for mut row in rows {
-            let previous = row.command.version();
-            let mut time = self.now(tx).await?;
-            let event = if current != row.command.spec().coordinate() {
-                Event::Supersede
-            } else if time >= row.command.spec().deadline() {
-                Event::Expire
-            } else if row.command.status() == Status::Queued {
-                let published = self
-                    .outbox
-                    .is_published(tx, &row.domain, &row.message_id, row.fingerprint)
-                    .await?;
-                // Confirmation can block across expiry. The reducer receives the final
-                // provider sample, never the pre-confirmation time.
-                time = self.now(tx).await?;
-                if published {
-                    Event::Published
-                } else {
-                    Event::Expire
-                }
-            } else {
-                Event::Expire
-            }; // reason: Expire before the deadline is the reducer's explicit no-op.
-            let outcome = row
-                .command
-                .transition(event, current, time)
-                .map_err(error)?;
-            if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
-                return Err(error(Error::InvalidSnapshot));
-            }
-            save(tx, &row.command, previous).await?;
-            commands.push(row.command);
+        for row in rows {
+            commands.push(self.recover_stored(tx, current, row).await?);
         }
         let after = commands.last().map(|c| c.spec().id().clone());
         Ok(RecoveryPage { commands, after })
+    }
+    async fn recover_exact(
+        &self,
+        tx: &mut Self::Transaction<'_>,
+        s: Scope,
+        id: &CommandId,
+    ) -> Result<Option<Command>, PgError> {
+        self.outbox.validate_transaction(tx)?;
+        let current = authority(tx, s).await?;
+        match read(tx, s, id).await? {
+            Some(row) => self.recover_stored(tx, current, row).await.map(Some),
+            // reason: an absent identity is distinct from an invalid scope or corrupt snapshot.
+            None => Ok(None),
+        }
     }
 }

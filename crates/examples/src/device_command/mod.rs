@@ -197,18 +197,17 @@ async fn scenario(
             .settle(claim, OutboxSettlement::Published(()), budget()?)
             .await?;
     }
-    let page = committed(
-        compose::recover(
-            runtime,
-            store.clone(),
-            s,
-            BatchLimit::new(10)?,
-            None,
-            budget()?,
-        )
-        .await,
+    // The application already owns this exact durable command identity.
+    let selected = store.clone();
+    let id = CommandId::parse("example")?;
+    let recovered = committed(
+        runtime
+            .local_tx(s.tenant(), budget()?, move |tx| {
+                Box::pin(async move { selected.recover_exact(tx, s, &id).await })
+            })
+            .await,
     )?;
-    let _ = page;
+    anyhow::ensure!(recovered.is_some(), "queued command disappeared");
     anyhow::ensure!(
         load(runtime, store.clone(), s).await?.status() == Status::Published,
         "publication not distinct"

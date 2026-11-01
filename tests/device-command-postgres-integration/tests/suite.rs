@@ -306,6 +306,17 @@ impl Fixture {
                 .await,
         )
     }
+    async fn recover_exact(&self, name: &str, s: Scope) -> anyhow::Result<Option<Command>> {
+        let id = CommandId::parse(name)?;
+        let store = self.store.clone();
+        committed(
+            self.runtime
+                .local_tx(s.tenant(), budget()?, move |tx| {
+                    Box::pin(async move { store.recover_exact(tx, s, &id).await })
+                })
+                .await,
+        )
+    }
     async fn publish(&self) -> anyhow::Result<()> {
         // A claim returns one tenant's committed batch; drain all ready fixture batches.
         // One inherited deadline bounds the whole drain without retrying failed operations.
@@ -369,7 +380,8 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
         scenarios::immutable_facts(&fixture).await?;
         scenarios::authority_rollback(&fixture).await?;
         scenarios::late_controls(&fixture).await?;
-        scenarios::delayed_publication_read(&fixture).await?;
+        Box::pin(scenarios::delayed_publication_read(&fixture)).await?;
+        Box::pin(scenarios::exact::recovery(&fixture)).await?;
         scenarios::catalog_drift(&fixture).await?;
         scenarios::closed_catalog(&fixture).await?;
         scenarios::diagnostic_classes(&fixture).await?;
