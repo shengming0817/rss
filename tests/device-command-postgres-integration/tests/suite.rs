@@ -380,8 +380,8 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
         scenarios::immutable_facts(&fixture).await?;
         scenarios::authority_rollback(&fixture).await?;
         scenarios::late_controls(&fixture).await?;
-        scenarios::delayed_publication_read(&fixture).await?;
-        scenarios::exact::recovery(&fixture).await?;
+        Box::pin(scenarios::delayed_publication_read(&fixture)).await?;
+        Box::pin(scenarios::exact::recovery(&fixture)).await?;
         scenarios::catalog_drift(&fixture).await?;
         scenarios::closed_catalog(&fixture).await?;
         scenarios::diagnostic_classes(&fixture).await?;

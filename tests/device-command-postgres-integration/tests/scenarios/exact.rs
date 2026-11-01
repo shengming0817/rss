@@ -8,6 +8,19 @@ pub(crate) async fn recovery(f: &Fixture) -> anyhow::Result<()> {
     );
     let coordinate = Coordinate::new(1, 1)?;
     f.initialize(s, coordinate).await?;
+    let expiring = queued_expiry(&f, s, coordinate).await?;
+    let queued = f.queue("exact-published", s, coordinate).await?;
+    assert_eq!(f.recover_exact("exact-published", s).await?, Some(queued));
+    f.publish().await?;
+    clock.advance_to(100)?;
+    selected_only(&f, s, expiring).await?;
+    isolation(&f, s, coordinate).await?;
+    settlement(&f, s, coordinate).await?;
+    f.runtime.close().await;
+    Ok(())
+}
+
+async fn queued_expiry(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Result<Command> {
     let request = CommandSpec::new(
         s,
         CommandId::parse("exact-expiry")?,
@@ -17,17 +30,16 @@ pub(crate) async fn recovery(f: &Fixture) -> anyhow::Result<()> {
     );
     let msg = message("exact-expiry", s.tenant())?;
     let store = f.store.clone();
-    let expiring = committed(
+    committed(
         f.runtime
             .local_tx(s.tenant(), budget()?, move |tx| {
                 Box::pin(async move { store.queue(tx, request, msg).await })
             })
             .await,
-    )?;
-    let queued = f.queue("exact-published", s, coordinate).await?;
-    assert_eq!(f.recover_exact("exact-published", s).await?, Some(queued));
-    f.publish().await?;
-    clock.advance_to(100)?;
+    )
+}
+
+async fn selected_only(f: &Fixture, s: Scope, expiring: Command) -> anyhow::Result<()> {
     let published = f
         .recover_exact("exact-published", s)
         .await?
@@ -44,9 +56,6 @@ pub(crate) async fn recovery(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(f.recover_exact("exact-expiry", s).await?, Some(expired));
     assert_eq!(f.recover_exact("exact-missing", s).await?, None);
     assert_eq!(f.load("exact-published", s).await?, Some(published));
-    isolation(&f, s, coordinate).await?;
-    settlement(&f, s, coordinate).await?;
-    f.runtime.close().await;
     Ok(())
 }
 
@@ -108,6 +117,12 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
 }
 
 async fn settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
+    rollback(f, s, coordinate).await?;
+    supersession(f, s, coordinate).await?;
+    unknown_settlement(f, s, Coordinate::new(2, 2)?).await
+}
+
+async fn rollback(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
     let original = f.queue("exact-rollback", s, coordinate).await?;
     f.publish().await?;
     let id = CommandId::parse("exact-rollback")?;
@@ -132,6 +147,10 @@ async fn settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Re
         f.count("outbox", "dispatch.exact-rollback-marker").await?,
         0
     );
+    Ok(())
+}
+
+async fn supersession(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
     // Authority advancement still supersedes every active command, not just an exact candidate.
     let store = f.store.clone();
     let next = Coordinate::new(2, 2)?;
@@ -152,7 +171,6 @@ async fn settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Re
         f.load("exact-published", s).await?.map(|c| c.status()),
         Some(Status::Superseded)
     );
-    unknown_settlement(f, s, next).await?;
     Ok(())
 }
 
