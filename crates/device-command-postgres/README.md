@@ -68,7 +68,7 @@ between payload and command intent remain product responsibilities.
   transaction partition set before command/authority mutations; repositories do not add locks incrementally.
 - Outbox append and command admission commit together. Broker publish itself is outside this
   transaction and remains at-least-once. Never mint a new message ID for an ambiguous attempt.
-- `recover` calls the messaging owner's `is_published` for the persisted domain/message/fingerprint. A scope may contain commands
+- `recover` and `recover_exact` share the same lifecycle implementation and call the messaging owner's `is_published` for the persisted domain/message/fingerprint. A scope may contain commands
   from several messaging domains; recovery never substitutes the current relay domain. Pending,
   in-flight and dead-lettered delivery are not device rejection. Missing dispatch or changed
   identity is an error. `published_at` is the database time this component observes durable
@@ -76,6 +76,8 @@ between payload and command intent remain product responsibilities.
 - Run bounded recovery pages under `PgRuntime::local_tx`; commit before using their cursor.
   Only `Committed(page)` advances the cursor to `page.after`; all other outcomes retain the
   original cursor. The example accepts that explicit cursor instead of restarting every page.
+  Consumers with their own durable candidates may instead call `recover_exact` inside that same
+  transaction. Only the selected identity is examined; terminal snapshots are returned unchanged.
   After commit ACK loss, reload exact commands/authority before deciding to retry. Preserve
   all `LocalTxAttempt` variants, including CommitUnknown and RollbackFailed. Dropped mutating
   futures quarantine their unresolved connection through the existing transaction owner.

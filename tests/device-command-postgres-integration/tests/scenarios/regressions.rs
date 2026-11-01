@@ -176,6 +176,10 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 pub(crate) async fn delayed_publication_read(f: &Fixture) -> anyhow::Result<()> {
+    delayed_confirmation(f, false).await?;
+    delayed_confirmation(f, true).await
+}
+async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     let (f, clock) = f.controlled().await?;
     let s = Scope::new(
         scope(TENANT)?.tenant(),
@@ -184,14 +188,19 @@ pub(crate) async fn delayed_publication_read(f: &Fixture) -> anyhow::Result<()> 
     let c = Coordinate::new(1, 1)?;
     f.initialize(s, c).await?;
     let expires = 100;
+    let name = if exact {
+        "slow-confirm-exact"
+    } else {
+        "slow-confirm"
+    };
     let request = CommandSpec::new(
         s,
-        CommandId::parse("slow-confirm")?,
+        CommandId::parse(name)?,
         c,
         StateDigest::from_bytes([7; 32]),
         expires,
     );
-    let msg = message("slow-confirm", s.tenant())?;
+    let msg = message(name, s.tenant())?;
     let store = f.store.clone();
     committed(
         f.runtime
@@ -223,12 +232,16 @@ pub(crate) async fn delayed_publication_read(f: &Fixture) -> anyhow::Result<()> 
         );
         Ok::<(), anyhow::Error>(())
     };
-    let (page, released) = tokio::join!(f.recover(s), release);
+    let recover = async {
+        if exact {
+            Ok::<_, anyhow::Error>(f.recover_exact(name, s).await?.map(|c| c.status()))
+        } else {
+            Ok(f.recover(s).await?.commands.first().map(Command::status))
+        }
+    };
+    let (recovered, released) = tokio::join!(recover, release);
     released?;
-    assert_eq!(
-        page?.commands.first().map(Command::status),
-        Some(Status::TimedOut)
-    );
+    assert_eq!(recovered?, Some(Status::TimedOut));
     f.runtime.close().await;
     Ok(())
 }

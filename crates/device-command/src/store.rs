@@ -104,4 +104,16 @@ pub trait Store: Send + Sync {
         limit: BatchLimit,
         after: Option<&CommandId>,
     ) -> impl Future<Output = Result<RecoveryPage, Self::Error>> + Send;
+    /// Recover one durable identity under its current authority, without inspecting other commands.
+    ///
+    /// Applies the same expiry, supersession and publication rules as [`Self::recover`]. A terminal
+    /// command returns its unchanged snapshot. An absent identity in an admitted scope returns
+    /// `None`; a tenant/runtime mismatch, another device's identity or missing authority is rejected.
+    /// The result is staged in the caller's transaction and does not prove a confirmed commit.
+    fn recover_exact(
+        &self,
+        tx: &mut Self::Transaction<'_>,
+        scope: Scope,
+        id: &CommandId,
+    ) -> impl Future<Output = Result<Option<Command>, Self::Error>> + Send;
 }
