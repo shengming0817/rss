@@ -9,6 +9,12 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 leak-timeout = "200ms"
 
 [[profile.default.overrides]]
+filter = 'package(=postgres-integration) & binary(=local_projection) & test(=outbox_partition_head_scale)'
+# This scenario seeds 45k records and completely drains two real consumer runs.
+# Its own 1200s bound must fire before nextest terminates the process and fixture cleanup.
+slow-timeout = { period = "60s", terminate-after = 21 }
+
+[[profile.default.overrides]]
 filter = 'package(/-integration$/)'
 # Live-provider assertions normally complete well within one minute, but container and broker
 # startup can cross that boundary under coverage load. Keep the fixture bounded without retrying.
