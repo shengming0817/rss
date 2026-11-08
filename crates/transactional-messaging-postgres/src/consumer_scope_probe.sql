@@ -29,3 +29,13 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
  ) e(relation,name,predicate) LEFT JOIN pg_policy p ON p.polrelid=to_regclass('rss_transactional_messaging.'||e.relation) AND p.polname=e.name
  WHERE p.oid IS NULL OR p.polpermissive OR p.polcmd<>'*' OR p.polroles<>ARRAY[0]::oid[]
  OR pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM e.predicate OR pg_get_expr(p.polwithcheck,p.polrelid) IS DISTINCT FROM e.predicate)
+
+ AND NOT EXISTS(SELECT FROM (VALUES
+  ('rss_transactional_messaging.outbox_candidates(uuid,text)',$5::text,false,'s','sql',NULL::text[]),
+  ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)',$6::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp'])
+ ) f(signature,body,definer,volatility,language,config)
+ LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
+ WHERE p.oid IS NULL OR p.prosrc IS DISTINCT FROM f.body OR p.prosecdef<>f.definer
+  OR p.provolatile::text<>f.volatility OR p.prolang<>(SELECT oid FROM pg_language WHERE lanname=f.language)
+  OR p.proconfig IS DISTINCT FROM f.config OR p.proowner<>'rss_tmsg_relay'::regrole
+  OR p.prorettype<>'record'::regtype OR NOT p.proretset)

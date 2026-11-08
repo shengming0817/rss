@@ -17,11 +17,11 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 
 Use an external migrator to provision a `rss_tmsg_relay` role with
 `NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION` and no membership
-in any other role, then execute the complete `MIGRATION_SQL` (0001–0014). The migrator must be able to transfer
+in any other role, then execute the complete `MIGRATION_SQL` (`migrations/install.sql`). The migrator must be able to transfer
 function ownership to that role. Do not run migrations through the application pool.
 
 Registry consumers obtain the same versioned SQL through
-`rss_transactional_messaging_postgres::MIGRATION_SQL`; the `.crate` also contains the migration
+`rss_transactional_messaging_postgres::MIGRATION_SQL`; the `.crate` also contains the installation
 file. Pin the adapter version in the external migrator (`rss-transactional-messaging-postgres =
 "=0.1.0"`) so its SQL and runtime come from the same release. The constant does not execute DDL.
 
@@ -137,12 +137,9 @@ Consumer effect savepoint rollback releases allocator changes and disables furth
 that view while allowing the legitimate rejection receipt/DLQ to commit. Successful release retains
 locks until outer transaction settlement.
 
-`OUTBOX_PARTITION_UPGRADE_SQL` installs 0009–0014 after 0008; `OUTBOX_MESSAGE_UPGRADE_SQL` installs
-0010–0014 after 0009. All upgrade constants include the current contract and require an empty Outbox.
-Existing ordered rows are rejected: their original commit order cannot be recovered by sorting `seq`.
-No backfill, old-schema runtime, advisory-lock fallback or dual ordering is provided. Use an empty
-ordered Outbox and replace the old runtime grants before reconnecting. The external operator owns
-installation and traffic isolation; no application call executes DDL or production data deletion.
+Only fresh installation is supported. `MIGRATION_SQL` contains each current object once;
+there is no historical upgrade chain, data backfill or old-schema runtime. The external owner
+installs into a new component schema, provisions roles, then admits the runtime.
 Schema admission checks allocator structure, collation, RLS, constraints, function signatures and
 least privileges. Existing runtimes must be replaced when provisioning changes.
 
@@ -280,7 +277,7 @@ Source: `baseline/pre-community-core-20260902`.
 | `inbox.rs`, `cotx/eventing.rs` | Adapt claim/reclaim, lease CAS and receipt to core identities and fingerprint. |
 | `outbox.rs`, `outbox/settlement.rs`, migrations 0057/0060/0064/0066 | Retain atomic claim, frozen retry window, partition head gate and closed settlement; dedicated schema and core digest replace product metadata. |
 | `consumer_tx.rs` | Retain private commit proof and atomic effect/receipt; remove Audit/Settings handlers in favor of trusted static effect. |
-| Product migration execution, CDC, reconcile, fault-matrix product combinations | Exclude: products own deployment and production workflows; component upgrade SQL remains library-owned. |
+| Product migration execution, CDC, reconcile, fault-matrix product combinations | Exclude: products own deployment and production workflows; the current installation SQL remains library-owned. |
 
 Receipt retention must strictly exceed the 24-hour automatic window plus safety margin. No
 automatic cleanup or CDC is supplied. Explicit recovery supplies application DLQ, redrive and resolve. A dead-letter partition
@@ -308,9 +305,8 @@ roles do not receive these privileges automatically. Every operation consumes li
 product authorization. RLS remains forced; runtime/maintenance logins must not own tables, bypass
 RLS or inherit the relay role. Products provision roles and decide authorization.
 
-New installs execute `MIGRATION_SQL`. Existing component installations execute `RECOVERY_UPGRADE_SQL`
-once after the original schema. Runtime only accepts the latest schema; no old-schema fallback or
-legacy data importer exists. Migration execution and deployment sequencing remain external.
+Install the complete current schema through `MIGRATION_SQL`; role provisioning and execution
+remain external. Recovery operates on current-format durable records.
 
 New-ID replay preserves authored facts and appends at the partition tail, using the same canonical
 Outbox append logic. Transport authority/trace are omitted; the product's publisher/ingress adapters
@@ -333,30 +329,10 @@ observation. It performs one mutation and never resets the total budget.
 
 ## Consumer archive schema and role cutover (#2302)
 
-Fresh installation uses `MIGRATION_SQL` (0001–0014). Upgrade exactly once from the installed boundary:
-
-| Installed through | Remaining SQL |
-|---|---|
-| 0001 | `RECOVERY_UPGRADE_SQL` (0002–0014) |
-| 0003 | `ARCHIVE_UPGRADE_SQL` (0004–0014) |
-| 0004 or 0005 | Apply each remaining numbered migration in order, through 0014 |
-| 0006 | `DR_UPGRADE_SQL` (0007–0014) |
-| 0008 | `OUTBOX_PARTITION_UPGRADE_SQL` (0009–0014; empty Outbox) |
-| 0009 | `OUTBOX_MESSAGE_UPGRADE_SQL` (0010–0014; empty Outbox) |
-| 0010 | Apply 0011, 0012, 0013, then 0014 |
-| 0011 | Apply `0012_scope_local_projection.sql`, then 0013 and 0014 |
-| 0012 | `BATCH_PROJECTION_UPGRADE_SQL` (0013–0014; existing Outbox supported) |
-| 0013 | `BOUNDED_CLAIM_UPGRADE_SQL` (0014; existing Outbox supported) |
-
-Stop old workers, apply the remaining schema, provision fixed LOGIN scopes where selected, and
-replace/admit runtimes before resuming traffic. Scope predicates are validated at startup for all
-profiles; a new runtime intentionally rejects an installation missing 0014.
-
-Do not rerun aggregate constants containing already applied DDL. Migration 0005 replaces
-`archive_fault` with `archive_fault(uuid,uuid,bytea,text)`; grant that signature after upgrading.
-The three-argument overload is removed. Every upgrade must complete the DR provisioning and role
-cutover below before admitting this version's runtime.
-Migration 0006 fixes all seven archive functions (including internal `archive_fence`) to
+Fresh installation uses the single `MIGRATION_SQL` artifact. Provision fixed LOGIN scopes where
+selected and complete the execution binding and grants below before admitting traffic.
+Runtime admission checks the current installation, including the canonical scope and Outbox
+candidate/claim definitions. Every archive function uses
 `search_path=pg_catalog,rss_transactional_messaging,pg_temp`, preventing temporary relation/type
 shadowing. The startup probe rejects unsafe paths, including drift of the internal helper.
 Current recovery probes require nullable HOT capsule content and reject the previous broad UPDATE
@@ -367,7 +343,7 @@ on `outbox` and SELECT/INSERT on `recovery_operations`, together with base read/
 Table-wide Outbox UPDATE, ordering-field UPDATE, INSERT and sequence privileges are rejected. No old-schema runtime mode exists.
 
 `PgArchiveRepository` uses a separate, private pool and an archive-only role. The external migrator
-owns tables/functions and executes upgrades. Give the workload role schema USAGE and SELECT on
+owns tables/functions and executes installation. Give the workload role schema USAGE and SELECT on
 `consumer_dead_letter`, `archive_jobs`, `archive_objects`; grant EXECUTE only on `archive_claim`,
 `archive_prepare`, `archive_record`, `archive_purge`, `archive_missing`, `archive_fault` with their
 migration-defined signatures. Do not grant `archive_fence`, schema CREATE, table writes, role-owner
@@ -404,8 +380,7 @@ single-tenant mode, automatic adoption of database values or legacy SQL overload
 fences only that tenant; a multi-tenant relay skips fenced tenants while serving its remaining scope.
 Reconstruct the affected runtime with a newly authorized binding after cutover.
 
-`DR_UPGRADE_SQL` applies migrations 0007–0014 after 0006, once, with traffic isolated and no existing Outbox rows. Fresh installs
-use `MIGRATION_SQL`. The external migrator must provision the singleton `storage_lineage` row with
+The external installer executes `MIGRATION_SQL` and must provision the singleton `storage_lineage` row with
 nonzero 16-byte target/lineage identifiers and each `tenant_epoch` row with a positive epoch before
 admitting traffic. Supply these values from independently verified restore/deployment evidence.
 During physical restore, install the externally selected new lineage before allowing workers back.
@@ -414,7 +389,7 @@ replace that external isolation and lineage installation step. These identifiers
 not authentication secrets; database credentials and the product authorizer remain trusted.
 
 All execution roles require `EXECUTE ON FUNCTION rss_transactional_messaging.check_execution()`.
-Replace Outbox grants with the current exact signatures:
+Grant the current Outbox signatures:
 
 ```sql
 GRANT EXECUTE ON FUNCTION
@@ -485,26 +460,23 @@ Create new runtime bindings for the committed epoch before resuming work. Normal
 then proceed because the old DR partition barrier has lost execution authority. The original
 same-ID deadline is never extended; product policy decides whether later new-ID recovery is needed.
 
-## Outbox capability migration (#2362)
+## Outbox writer and relay capabilities
 
-The mixed `OutboxStore` port is removed. Import `outbox::OutboxWriter` for append and
+Import `outbox::OutboxWriter` for append and
 `outbox::OutboxRelayStore` for delivery. The ports have no inheritance relationship; `Transaction`
 belongs only to the writer, and `Claim`, `PublishReceipt` and `DeliveryBudget` only to the relay port.
 `PgOutboxStore<R>` implements both for combined consumers; its private `PgOutboxWriter` owns the
 single admission path. Append-only consumers use `PgOutboxWriter` directly and remove receipt and
 budget parameters. There is no compatibility alias or deprecation bridge. Existing persisted rows,
-fingerprints, migrations, execution fencing and transaction outcomes are unchanged.
+fingerprints, execution fencing and transaction outcomes are unchanged.
 
 The `rss-examples` `outbox-writer` binary is a real producer-ACL consumer. It verifies business and
 Outbox commit/rollback through the public API. The independent source/artifact runner executes it
 without AMQP or messaging-runtime dependencies and separately compiles a relay-only provider.
 
-Migration `0010_verify_outbox_message_contract.sql` removes the unverified-digest function signature
-and its grants. It requires an empty Outbox: historical inputs were not verified and cannot be
-backfilled with trustworthy canonical bytes. Provision EXECUTE on `append_outbox(bytea,jsonb)`;
-no runtime role may execute the private frame reader/decoder. Startup rejects the legacy signature,
-missing decoder functions, changed ownership/search paths or leaked decoder EXECUTE. No extension,
-new crate, second fingerprint algorithm or compatibility writer is installed.
+Provision EXECUTE on `append_outbox(bytea,jsonb)`; no runtime role may execute the private
+frame reader/decoder. Startup rejects unverified append entrypoints, missing decoder functions,
+changed ownership/search paths or leaked decoder EXECUTE.
 
 
 ### Same-database local projection
