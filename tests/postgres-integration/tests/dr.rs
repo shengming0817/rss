@@ -2,6 +2,8 @@
 mod claim;
 #[path = "dr/consumer.rs"]
 mod consumer;
+#[path = "dr/fixture.rs"]
+mod fixture;
 #[path = "dr/permissions.rs"]
 mod permissions;
 #[path = "dr/states.rs"]
@@ -10,8 +12,6 @@ mod states;
 mod support;
 #[path = "dr/terminate.rs"]
 mod terminate;
-#[path = "dr/upgrade.rs"]
-mod upgrade;
 use rss_transactional_messaging::{
     fence::{Epoch, ExecutionBinding, StorageIdentity},
     outbox::*,
@@ -117,7 +117,7 @@ async fn run() -> anyhow::Result<()> {
         )
         .await?;
     sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE dr_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE dr_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS;").execute(&owner).await?;
-    let owner = Box::pin(upgrade::install_current(owner)).await?;
+    let owner = Box::pin(fixture::install_current(owner)).await?;
     let config = |role: &str| -> anyhow::Result<PgConfig> {
         Ok(PgConfig::new(
             &p.host,
@@ -171,7 +171,7 @@ async fn run() -> anyhow::Result<()> {
     )?);
     let one = std::num::NonZeroUsize::new(1).ok_or_else(|| anyhow::anyhow!("limit"))?;
     // Old Inbox and Outbox capabilities must not acquire authority from a newer runtime.
-    Box::pin(upgrade::publish_current(runtime.clone(), outbox.clone())).await?;
+    Box::pin(fixture::publish_current(runtime.clone(), outbox.clone())).await?;
     let inbox = PgInboxStore::new(
         runtime.clone(),
         rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
@@ -196,7 +196,7 @@ async fn run() -> anyhow::Result<()> {
             inbox.claim(&legacy_identity, deadline()).await?,
             IdempotencyDisposition::Terminal(_)
         ),
-        "pre-upgrade terminal receipt remains terminal"
+        "existing terminal receipt remains terminal"
     );
     let old_inbox = match inbox.claim(&identity, deadline()).await? {
         IdempotencyDisposition::Acquired(c) => c,

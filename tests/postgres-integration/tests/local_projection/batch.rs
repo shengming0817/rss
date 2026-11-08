@@ -461,3 +461,59 @@ async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
+    for name in [
+        "outbox_unfinished_partition",
+        "outbox_unpartitioned_candidates",
+    ] {
+        let original:String=sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE schemaname='rss_transactional_messaging' AND indexname=$1").bind(name).fetch_one(&f.owner).await?;
+        let drop = format!("DROP INDEX rss_transactional_messaging.{name}");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(drop))
+            .execute(&f.owner)
+            .await?;
+        let result =
+            PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+                .await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(original))
+            .execute(&f.owner)
+            .await?;
+        assert!(result.is_err(), "missing head index must reject admission");
+    }
+    for (signature, before, after) in [
+        (
+            "rss_transactional_messaging.outbox_candidates(uuid,text)",
+            "d.operation_id AS dr_operation",
+            "NULL::uuid AS dr_operation",
+        ),
+        (
+            "rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)",
+            "FOR UPDATE OF src SKIP LOCKED",
+            "FOR UPDATE OF src",
+        ),
+    ] {
+        let original: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
+            .bind(signature)
+            .fetch_one(&f.owner)
+            .await?;
+        assert!(original.contains(before));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(original.replace(before, after)))
+            .execute(&f.owner)
+            .await?;
+        let result =
+            PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+                .await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(original))
+            .execute(&f.owner)
+            .await?;
+        assert!(
+            result.is_err(),
+            "changed claim/candidate semantics must reject admission"
+        );
+    }
+    let restored =
+        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+            .await?;
+    restored.close().await;
+    Ok(())
+}

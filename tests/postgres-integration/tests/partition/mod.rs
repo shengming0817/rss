@@ -632,14 +632,6 @@ async fn cached_order(runtime: Arc<PgRuntime>, owner: &PgPool, raw: &PgPool) -> 
 
 #[allow(clippy::cognitive_complexity)] // reason: reversible catalog drift cases preserve restore-before-assert for every incompatible shape.
 async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()> {
-    let mut tx = owner.begin().await?;
-    let error = sqlx::raw_sql(OUTBOX_MESSAGE_UPGRADE_SQL)
-        .execute(&mut *tx)
-        .await
-        .expect_err("unverified historical rows cannot be backfilled");
-    assert_eq!(code(&error).as_deref(), Some("23514"));
-    tx.rollback().await?;
-
     for (grant, revoke) in [
         (
             "GRANT INSERT ON rss_transactional_messaging.outbox TO tmsg_runtime",
