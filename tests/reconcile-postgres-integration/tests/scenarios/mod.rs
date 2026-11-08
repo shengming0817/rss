@@ -3,15 +3,14 @@ mod corruption;
 mod discovery;
 mod resources;
 mod retry;
-pub(crate) mod upgrade;
+mod scan_progress;
 pub async fn run(
     store: &PgStore,
     pool: &PgPool,
     owner: &PgPool,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    eprintln!("reconcile scenario: upgrade");
-    upgrade::verify(store, owner, c).await?;
+    scan_progress::run(store, owner, c).await?;
     eprintln!("reconcile scenario: discovery");
     discovery::run(store, pool, owner, c).await?;
     eprintln!("reconcile scenario: corruption");

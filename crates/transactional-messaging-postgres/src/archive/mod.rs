@@ -123,8 +123,7 @@ mod tests {
     fn archive_size_projections_match_core() {
         let limit = rss_transactional_messaging_recovery::archive::MAX_OBJECT_BYTES;
         assert!(
-            crate::ARCHIVE_UPGRADE_SQL
-                .contains(&format!("octet_length(prepared) BETWEEN 1 AND {limit}"))
+            crate::MIGRATION_SQL.contains(&format!("octet_length(prepared) BETWEEN 1 AND {limit}"))
         );
         assert!(include_str!("probe.sql").contains(&format!("octet_length(prepared) <= {limit}")));
     }

@@ -59,7 +59,19 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
 ), expected_defaults(relation, name, expression) AS (VALUES
  ('outbox_partitions','last_sequence','0'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
  ('outbox','retry_count','0'), ('outbox','retry_after','clock_timestamp()')
+), head_indexes(name,columns,predicate) AS (VALUES
+ ('outbox_unfinished_partition',ARRAY['tenant_id','domain','partition_key','partition_seq']::name[],'((partition_key IS NOT NULL) AND (status <> ALL (ARRAY[''published''::text, ''resolved''::text])))'),
+ ('outbox_unpartitioned_candidates',ARRAY['tenant_id','domain','seq']::name[],'((partition_key IS NULL) AND (status = ANY (ARRAY[''pending''::text, ''publishing''::text])))')
 ), checks(reason, valid) AS (VALUES
+ ('constraints', NOT EXISTS(SELECT FROM head_indexes e LEFT JOIN pg_index i
+   ON i.indexrelid=to_regclass('rss_transactional_messaging.'||e.name)
+  LEFT JOIN pg_class c ON c.oid=i.indexrelid
+  WHERE i.indexrelid IS NULL OR i.indrelid<>'rss_transactional_messaging.outbox'::regclass
+   OR NOT i.indisvalid OR NOT i.indisready OR i.indisunique
+   OR c.relam<>(SELECT oid FROM pg_am WHERE amname='btree')
+   OR pg_get_expr(i.indpred,i.indrelid) IS DISTINCT FROM e.predicate
+   OR (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(num,ord)
+       JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num) IS DISTINCT FROM e.columns)),
  ('functions', to_regprocedure('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)') IS NULL),
  ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text)')
    AND NOT p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)

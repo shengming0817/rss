@@ -5,20 +5,21 @@ pub(crate) async fn verify_scope(
     runtime: &crate::PgRuntime,
     cutoff: rss_request_context::Deadline,
 ) -> Result<(), PgError> {
-    let scope = function_body(
-        include_str!("../migrations/0013_batch_projection_candidates.sql"),
-        "consumer_scope_domain",
-    )?;
-    let original = include_str!("../migrations/0012_scope_local_projection.sql");
+    let scope = function_body(crate::MIGRATION_SQL, "consumer_scope_domain")?;
+    let original = crate::MIGRATION_SQL;
     let inbox = function_body(original, "consumer_inbox_allowed")?;
     let matches = function_body(original, "projection_scope_matches")?;
     let dr = function_body(original, "local_projection_dr_status")?;
+    let candidates = function_body(crate::MIGRATION_SQL, "outbox_candidates")?;
+    let claim = function_body(crate::MIGRATION_SQL, "claim_outbox")?;
     let valid = rss_transactional_messaging::policy::within(&runtime.timer, cutoff, |_| async {
         sqlx::query_scalar::<_, bool>(include_str!("consumer_scope_probe.sql"))
             .bind(scope)
             .bind(inbox)
             .bind(matches)
             .bind(dr)
+            .bind(candidates)
+            .bind(claim)
             .fetch_one(&runtime.pool)
             .await
     })

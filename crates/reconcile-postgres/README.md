@@ -8,7 +8,7 @@ PostgreSQL 16+ 的独立 Reconcile adapter。默认只需要 `rss_reconcile` sch
 
 `MIGRATION_SQL` 是新 schema 的版本化安装定义，由独立 NOSUPERUSER NOBYPASSRLS schema owner 执行。应用给 runtime 角色 schema USAGE、表 SELECT、函数 EXECUTE；不要授予组件表直接写权限、schema CREATE、owner membership 或 BYPASSRLS。所有租户表启用 FORCE RLS，函数固定 search_path，PUBLIC 权限撤销。迁移执行、角色配置和业务表由产品拥有。
 
-当前支持 fresh install 和 `UPGRADE_SQL` 定义的单向升级，不读取、转换或接管历史 `public.reconcile_*`。历史表是否存在不参与新实现决策。后续组件 migration 只追加，维护新持久化 identity；不把“不兼容旧实现”解释为可以改写未来已发布存储格式。
+只支持全新安装：`MIGRATION_SQL` 包含 `migrations/install.sql` 的唯一最终定义，无历史升级入口，不读取、转换或接管既有 schema。独立 owner 在新 schema 安装后配置角色，再构造 store。
 
 目标表唯一持有 due time、wake version、失败状态、token 与递增 epoch。没有产品 snapshot、设备策略或历史审计账本。扫描用数据库时间和 `SKIP LOCKED`，claim、renew、release、finish 都限定 tenant/target/token/epoch。租户 setting 在可信应用内提供隔离，不认证持有数据库凭据的调用方。
 
@@ -74,7 +74,7 @@ Transient SQLSTATE classification uses an explicit allowlist. Undefined/duplicat
 and disk exhaustion (`53100`) require correction, rather than automatic retries based on their class.
 Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .
 
-## 资源协调与 v2 切换
+## 资源协调
 
 v2 使用 targets、target_resources（声明和可空等待票号）、resources（原 claim 的 owner）、scans 四张租户表。队列票号使用组件 sequence；运行角色不得直接使用/更新 sequence，也不得写组件表。只扩展已有 claim 事务，不增加每资源连接、线程或第二租约。
 
@@ -82,6 +82,8 @@ v2 使用 targets、target_resources（声明和可空等待票号）、resource
 
 `protect` / `protect_in` callback 返回 `ProtectedStep::Ready(value)`、`Deferred(after)` 或 `Rebind(resources, after)`。Ready 才标记 Applied；Rebind 在原事务改声明，确认提交后返回 `ReconcileStep::Deferred`，runner 仍唯一负责 finish。`wake_with` / `wake_in` 显式带资源；`bind_with` / `bind_in` 提供保留调度事实的原事务绑定。消息 protect 发现绑定已变化时跳过 callback，返回 1ms 的 Deferred；这是 staged 结果，必须先等待原事务 owner 的已确认提交。实际资源排队仍由 claim 阶段持有。
 
-`UPGRADE_SQL` 仅支持 v1 → v2。必须停止旧执行、排空并确认无有效 claim，再由独立 owner 执行；MIGRATION_SQL 为完整新安装。迁移保留 epoch、failures、wake version 和 next_run，旧记录 binding_revision=0 为未绑定。只要一个 Scope 有未绑定待办，claim 明确返回 StorageContract，不能把未知资源当空集合。产品通过 bind_resources/bind_with/bind_in 补齐全部待办映射后再启动新 runner；这些接口不使用 wake 回填，不清零失败或提前截止。旧 API/函数签名退出，新运行时只准入 v2。
+`binding_revision=0` 表示首次资源绑定尚未完成；正常 wake 在同一事务完成首次绑定。Scope 中出现不完整绑定的待办时，claim 返回 StorageContract。`bind_resources/bind_with/bind_in` 用于当前资源重绑定，保留失败次数、wake version 和调度时间。
+
+扫描最终游标和高水位没有变化时不 UPDATE `scans`，有实际窗口进展时仍持久化。扫描行锁及其可能产生的 WAL 保留。
 
 重绑定保留旧 acquired owner，直到 Deferred finish/release 或 TTL 接管；两次事务间崩溃仍由原恢复机制处理。CommitUnknown/RollbackFailed 没有成功的 Deferred 回执，不凭客户端猜测继续释放。全部新增关系的结构、约束、索引、FORCE RLS、ACL 与当前函数定义在构造时精确准入。

@@ -179,14 +179,6 @@ async fn run() -> anyhow::Result<()> {
         .await?;
     sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE recovery_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS;").execute(&owner).await?;
     sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
-    let fresh = schema_signature(&owner).await?;
-    sqlx::raw_sql("DROP SCHEMA rss_transactional_messaging CASCADE;")
-        .execute(&owner)
-        .await?;
-    let original = MIGRATION_SQL
-        .strip_suffix(RECOVERY_UPGRADE_SQL)
-        .ok_or_else(|| anyhow::anyhow!("ordered migrations"))?;
-    sqlx::raw_sql(original).execute(&owner).await?;
     let config = PgConfig::new(
         &params.host,
         params.port,
@@ -194,18 +186,6 @@ async fn run() -> anyhow::Result<()> {
         "recovery_runtime",
         PgPassword::new("fixture-only"),
         PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
-    );
-    assert!(
-        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
-            .await
-            .is_err(),
-        "old schema rejected"
-    );
-    sqlx::raw_sql(RECOVERY_UPGRADE_SQL).execute(&owner).await?;
-    assert_eq!(
-        fresh,
-        schema_signature(&owner).await?,
-        "fresh and upgraded schema agree"
     );
     base_grants(&owner).await?;
     sqlx::raw_sql("CREATE TABLE public.effect (id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect TO recovery_runtime;").execute(&owner).await?;
@@ -360,9 +340,6 @@ async fn run() -> anyhow::Result<()> {
 async fn base_grants(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
     Ok(())
-}
-async fn schema_signature(owner: &sqlx::PgPool) -> anyhow::Result<Vec<String>> {
-    Ok(sqlx::query_scalar("SELECT table_name||':'||column_name||':'||data_type||':'||is_nullable||':'||coalesce(column_default,'') FROM information_schema.columns WHERE table_schema='rss_transactional_messaging' UNION ALL SELECT c.relname||':'||con.conname||':'||pg_get_constraintdef(con.oid) FROM pg_constraint con JOIN pg_class c ON con.conrelid=c.oid JOIN pg_namespace n ON c.relnamespace=n.oid WHERE n.nspname='rss_transactional_messaging' UNION ALL SELECT indexname||':'||indexdef FROM pg_indexes WHERE schemaname='rss_transactional_messaging' ORDER BY 1").fetch_all(owner).await?)
 }
 #[allow(clippy::cognitive_complexity)] // reason: ordered real-database scenarios keep mutations adjacent to their durable assertions.
 async fn replay_scenarios(

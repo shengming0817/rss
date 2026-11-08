@@ -3,6 +3,8 @@
 mod batch;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
+#[path = "local_projection/scale.rs"]
+mod scale;
 #[path = "../../fixtures/message_recovery.rs"]
 mod support;
 use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
@@ -248,14 +250,14 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_projection_atomicity_scope_and_recovery() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(180), Box::pin(run())).await??;
+    tokio::time::timeout(Duration::from_secs(180), Box::pin(run(false))).await??;
     Ok(())
 }
 #[allow(
     clippy::cognitive_complexity,
     reason = "Keep each sequential provider fault, its durable assertions and cleanup in one scenario."
 )]
-async fn run() -> anyhow::Result<()> {
+async fn run(scale_only: bool) -> anyhow::Result<()> {
     let network = testkit::bridge_network("local-projection").await?;
     let pg = testkit::postgres_tls(
         testkit::NetworkAttachment {
@@ -285,10 +287,7 @@ async fn run() -> anyhow::Result<()> {
         .connect_with(options.clone())
         .await?;
     sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE projection_producer LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE projection_worker LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE projection_other LOGIN PASSWORD 'fixture-only' NOBYPASSRLS;").execute(&owner).await?;
-    let installed_0012 = MIGRATION_SQL
-        .strip_suffix(BATCH_PROJECTION_UPGRADE_SQL)
-        .ok_or_else(|| anyhow::anyhow!("ordered migration boundary"))?;
-    sqlx::raw_sql(installed_0012).execute(&owner).await?;
+    sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
     sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO projection_producer; GRANT SELECT ON rss_transactional_messaging.policy,rss_transactional_messaging.outbox TO projection_producer; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO projection_producer;").execute(&owner).await?;
     {
         let mut tx = owner.begin().await?;
@@ -298,7 +297,7 @@ async fn run() -> anyhow::Result<()> {
     }
     sqlx::raw_sql("GRANT projection_other TO projection_worker; GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO projection_worker,projection_other; CREATE TABLE public.effect_a(id text PRIMARY KEY); CREATE TABLE public.effect_b(id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect_a,public.effect_b TO projection_worker;").execute(&owner).await?;
     fence_fixture::provision(&owner).await?;
-    for id in ["upgrade-pending", "upgrade-published"] {
+    for id in ["existing-pending", "existing-published"] {
         let message = message(id, "orders")?;
         sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2)")
             .bind(message.canonical_bytes())
@@ -306,10 +305,7 @@ async fn run() -> anyhow::Result<()> {
             .execute(&owner)
             .await?;
     }
-    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id='upgrade-published'").execute(&owner).await?;
-    sqlx::raw_sql(BATCH_PROJECTION_UPGRADE_SQL)
-        .execute(&owner)
-        .await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id='existing-published'").execute(&owner).await?;
     let config = |user| -> anyhow::Result<PgConfig> {
         Ok(PgConfig::new(
             &params.host,
@@ -333,7 +329,10 @@ async fn run() -> anyhow::Result<()> {
         PgRuntime::connect_consumer(
             worker_config.clone(),
             Timer::new(),
-            fence_fixture::binding(),
+            rss_transactional_messaging::fence::ExecutionBinding::new(
+                fence_fixture::binding().storage(),
+                vec![(tenant(), rss_transactional_messaging::fence::Epoch::new(1)?)],
+            )?,
         )
         .await?,
     );
@@ -352,14 +351,14 @@ async fn run() -> anyhow::Result<()> {
         worker,
         config: worker_config,
     };
-    let upgraded = f
+    let projection = f
         .projection(Effect {
             gate: None,
             reject: false,
             fail: false,
         })
         .await?;
-    let items = collect_batch(upgraded.project_batch(
+    let items = collect_batch(projection.project_batch(
         &Validator,
         NonZeroUsize::try_from(2usize)?,
         deadline(),
@@ -367,22 +366,27 @@ async fn run() -> anyhow::Result<()> {
     ))
     .await?;
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].message_id().as_str(), "upgrade-pending");
+    assert_eq!(items[0].message_id().as_str(), "existing-pending");
     committed_projection(only(items)?)?;
-    assert_eq!(f.state("upgrade-published").await?.3, "published");
-    drop(upgraded);
-    Box::pin(batch::run(&f)).await?;
-    Box::pin(success_and_duplicate(&f)).await?;
-    Box::pin(ingress_rejection(&f)).await?;
-    Box::pin(rejected_and_failed(&f)).await?;
-    Box::pin(redrive_unknown(&f)).await?;
-    Box::pin(unknown_commit(&f)).await?;
-    Box::pin(unknown_rollback(&f)).await?;
-    Box::pin(renewal_and_expiry(&f)).await?;
-    Box::pin(cancellation_and_restart(&f)).await?;
-    Box::pin(pool_capacity(&f)).await?;
-    Box::pin(scoped_permissions(&f)).await?;
-    Box::pin(dr_recovery(&f)).await?;
+    assert_eq!(f.state("existing-published").await?.3, "published");
+    drop(projection);
+    if scale_only {
+        Box::pin(scale::run(&f)).await?;
+    } else {
+        Box::pin(batch::run(&f)).await?;
+        Box::pin(success_and_duplicate(&f)).await?;
+        Box::pin(ingress_rejection(&f)).await?;
+        Box::pin(rejected_and_failed(&f)).await?;
+        Box::pin(redrive_unknown(&f)).await?;
+        Box::pin(unknown_commit(&f)).await?;
+        Box::pin(unknown_rollback(&f)).await?;
+        Box::pin(renewal_and_expiry(&f)).await?;
+        Box::pin(cancellation_and_restart(&f)).await?;
+        Box::pin(pool_capacity(&f)).await?;
+        Box::pin(scoped_permissions(&f)).await?;
+        Box::pin(batch::head_admission(&f)).await?;
+        Box::pin(dr_recovery(&f)).await?;
+    }
     f.worker.close().await;
     f.producer.close().await;
     f.raw_worker.close().await;
@@ -1200,4 +1204,10 @@ async fn direct_scope_predicate(f: &Fixture) -> anyhow::Result<()> {
 fn only(mut batch: Vec<PgProjectionItem>) -> Result<PgProjectionOutcome, PgError> {
     assert_eq!(batch.len(), 1, "expected one admitted source");
     batch.remove(0).into_outcome()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outbox_partition_head_scale() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(1200), Box::pin(run(true))).await??;
+    Ok(())
 }

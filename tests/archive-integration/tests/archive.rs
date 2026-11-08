@@ -295,22 +295,6 @@ async fn run() -> anyhow::Result<()> {
     Box::pin(fault_receipt(&repository, &store, &owner)).await?;
     Box::pin(interrupted_fault_receipt(&repository, &store, &owner)).await?;
     adversarial_schema(&config, &owner).await?;
-    let upgrade_config = PgConfig::new(
-        &params.host,
-        params.port,
-        "archive_upgrade",
-        "archive_worker",
-        PgPassword::new("fixture-only"),
-        PgPrivateCa::from_pem(pg.ca_pem().as_bytes().to_vec())?,
-    );
-    Box::pin(dr::upgrade::run(
-        &repository,
-        &store,
-        &owner,
-        options,
-        upgrade_config,
-    ))
-    .await?;
     dr::run(&repository, &store, &owner, &config).await?;
     repository.close().await;
     Ok(())
