@@ -131,6 +131,21 @@ async fn resume_recorded(
     (id, r): (DeadLetterId, AuthorizedRequest),
 ) -> anyhow::Result<()> {
     assert!(next.receipt(&r, deadline()).await?.is_none());
+    reject_old_proof(owner, &r).await?;
+    let counted = CountInspection {
+        store,
+        count: AtomicUsize::new(0),
+    };
+    assert_eq!(settled(invoke(next, &counted, &r).await)?, Outcome::Purged);
+    assert!(
+        counted.count.load(Ordering::Relaxed) > 0,
+        "resume reinspects the exact durable object"
+    );
+    assert!(!is_hot(owner, id).await?);
+    Ok(())
+}
+
+async fn reject_old_proof(owner: &sqlx::PgPool, r: &AuthorizedRequest) -> anyhow::Result<()> {
     let (token, object): (String, serde_json::Value) = sqlx::query_as("SELECT j.lease_token::text,o.object FROM rss_transactional_messaging.archive_jobs j JOIN rss_transactional_messaging.archive_objects o USING(tenant_id,generation) WHERE j.operation_id=$1::uuid AND o.verified")
         .bind(r.request().operation().to_string()).fetch_one(owner).await?;
     let mut tx = owner.begin().await?;
@@ -150,15 +165,5 @@ async fn resume_recorded(
         matches!(denied, Err(sqlx::Error::Database(ref e)) if e.code().as_deref()==Some("PZ001")),
         "recorded proof and old lease do not authorize a new epoch"
     );
-    let counted = CountInspection {
-        store,
-        count: AtomicUsize::new(0),
-    };
-    assert_eq!(settled(invoke(next, &counted, &r).await)?, Outcome::Purged);
-    assert!(
-        counted.count.load(Ordering::Relaxed) > 0,
-        "resume reinspects the exact durable object"
-    );
-    assert!(!is_hot(owner, id).await?);
     Ok(())
 }

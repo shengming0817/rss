@@ -122,7 +122,7 @@ async fn run() -> anyhow::Result<()> {
         Ok(PgConfig::new(
             &p.host,
             p.port,
-            "partition_order_current",
+            &p.database,
             role,
             PgPassword::new("fixture-only"),
             PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,

@@ -555,7 +555,10 @@ LANGUAGE sql STABLE AS $f$
    greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until ELSE '-infinity'::timestamptz END)
   ELSE greatest(src.retry_after,CASE WHEN src.status='publishing' AND src.claim_epoch=g.epoch
    AND src.claim_lineage IS NOT DISTINCT FROM g.lineage THEN src.lease_until ELSE '-infinity'::timestamptz END) END AS eligible_at
- FROM sources h JOIN rss_transactional_messaging.outbox src ON src.seq=h.seq
+ -- Preserve per-head primary-key lookups even before table statistics catch up.
+ FROM sources h CROSS JOIN LATERAL (
+  SELECT row.* FROM rss_transactional_messaging.outbox row WHERE row.seq=h.seq OFFSET 0
+ ) src
  CROSS JOIN generation g LEFT JOIN current_dr d ON d.outbox_seq=src.seq
  WHERE (d.operation_id IS NULL AND src.status IN ('pending','publishing')) OR d.status IN ('pending','publishing')
 $f$;

@@ -45,7 +45,19 @@ pub(super) async fn run(
         .wake(&t, &ResourceSet::empty(scope.tenant()), c)
         .await?;
     let before = position(owner, scope).await?;
-    let current = claim(store, &t, Duration::from_secs(60), c).await?;
+    live_and_future(store, owner, c, &t, before).await?;
+    empty_and_locked(store, owner, c, &t).await?;
+    windows(store, owner, c).await
+}
+async fn live_and_future(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    t: &Target,
+    before: Position,
+) -> anyhow::Result<()> {
+    let scope = t.scope();
+    let current = claim(store, t, Duration::from_secs(60), c).await?;
     assert_ne!(
         position(owner, scope).await?,
         before,
@@ -73,10 +85,19 @@ pub(super) async fn run(
         "new future ticket advances the watermark without a claim"
     );
     unchanged(store, owner, scope, c).await?;
+    Ok(())
+}
+async fn empty_and_locked(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    t: &Target,
+) -> anyhow::Result<()> {
+    let scope = t.scope();
     store
-        .wake(&t, &ResourceSet::empty(scope.tenant()), c)
+        .wake(t, &ResourceSet::empty(scope.tenant()), c)
         .await?;
-    let current = claim(store, &t, Duration::from_secs(60), c).await?;
+    let current = claim(store, t, Duration::from_secs(60), c).await?;
     store.finish(&current, Completion::Converged, c).await?;
     assert!(
         store
@@ -104,9 +125,13 @@ pub(super) async fn run(
     assert!(skipped.claims.is_empty());
     held.rollback().await?;
     unchanged(store, owner, scope, c).await?;
-    windows(store, owner, c).await
+    Ok(())
 }
-async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
+async fn seed_window(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<Scope> {
     let scope = Scope::new(TenantId::parse(TENANT)?, "scan-window")?;
     for n in 0..65 {
         store
@@ -119,6 +144,10 @@ async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> any
     }
     sqlx::query("UPDATE rss_reconcile.targets SET next_run=clock_timestamp()+interval '1 hour' WHERE reconciler=$1")
         .bind(scope.reconciler()).execute(owner).await?;
+    Ok(scope)
+}
+async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
+    let scope = seed_window(store, owner, c).await?;
     let before = position(owner, &scope).await?;
     let first = store
         .claim_due(&scope, 1, Duration::from_secs(60), c)

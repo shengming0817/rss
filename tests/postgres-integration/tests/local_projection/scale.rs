@@ -1,7 +1,7 @@
 //! Consumer/RLS evidence for hot partitions, capacity locks and complete drain latency.
 use super::*;
+use rss_request_context::Clock;
 use rss_transactional_messaging::outbox::{OutboxRelayStore, OutboxSettlement};
-use std::time::Instant;
 
 async fn append(
     f: &Fixture,
@@ -58,7 +58,7 @@ async fn append(
     Ok(())
 }
 
-pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
+async fn prepare(f: &Fixture) -> anyhow::Result<()> {
     append(f, "scale-history", 0, 30_000, 100).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id LIKE 'scale-history-%'").execute(&f.owner).await?;
     append(f, "scale-hot", 0, 1_200, 1).await?;
@@ -75,7 +75,11 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
         .bind(tenant().to_string()).execute(&f.owner).await?;
     let empty = explain(f, "40,000 empty / 101 active partitions").await?;
     assert!(empty <= large * 2.0 + 100.0);
-    capacity(f).await?;
+    capacity(f).await
+}
+
+pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
+    prepare(f).await?;
     for limit in [32usize, 1] {
         if limit == 1 {
             sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='pending' WHERE message_id LIKE 'scale-hot-%' OR message_id LIKE 'scale-cold-%'").execute(&f.owner).await?;
@@ -175,69 +179,54 @@ async fn drain(f: &Fixture, limit: usize, expected: usize) -> anyhow::Result<()>
             Duration::from_secs(1),
         )?,
     )?;
-    let mut seen = std::collections::HashSet::new();
-    let mut last = std::collections::HashMap::new();
-    let mut cold = 0usize;
+    let mut progress = Progress::default();
+    let timer = Timer::new();
     let mut claims = Vec::new();
     let mut wakeups = Vec::new();
-    let started = Instant::now();
+    let started = timer.now();
     loop {
-        let at = Instant::now();
+        let at = timer.now();
         let wake = store.next_wakeup(deadline()).await?;
-        wakeups.push(at.elapsed().as_micros());
-        let at = Instant::now();
+        wakeups.push((timer.now() - at).as_micros());
+        let at = timer.now();
         let batch = store
             .claim_partition_heads(NonZeroUsize::try_from(limit)?, deadline())
             .await?;
-        claims.push(at.elapsed().as_micros());
+        claims.push((timer.now() - at).as_micros());
         if batch.is_empty() {
             assert!(!wake.due_now());
             break;
         }
         assert!(wake.due_now());
         for claim in batch {
-            let id = PgOutboxStore::<()>::message(&claim)
-                .message_id()
-                .as_str()
-                .to_owned();
-            if let Some(partition) = PgOutboxStore::<()>::message(&claim).partition() {
-                let ordinal: usize = id
-                    .rsplit('-')
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("fixture ordinal"))?
-                    .parse()?;
-                if let Some(previous) = last.insert(partition.key().as_str().to_owned(), ordinal) {
-                    assert!(ordinal > previous, "partition order");
-                }
-            }
-            if id.starts_with("scale-cold-") {
-                cold += 1;
-                if cold == 3_000 && limit == 32 {
-                    assert!(
-                        seen.len() < 15_000 - 1,
-                        "cold partitions drain while the hot partition still has backlog"
-                    );
-                }
-            }
-            assert!(seen.insert(id), "no duplicate settlement");
+            let message = PgOutboxStore::<()>::message(&claim);
+            progress.observe(
+                message.message_id().as_str(),
+                message.partition().map(|p| p.key().as_str()),
+                limit,
+            )?;
             store
                 .settle(claim, OutboxSettlement::Published(()), deadline())
                 .await?;
         }
     }
-    assert_eq!(seen.len(), expected);
+    assert_eq!(progress.seen.len(), expected);
     println!(
         "drain limit={limit} count={} elapsed_ms={}",
-        seen.len(),
-        started.elapsed().as_millis()
+        progress.seen.len(),
+        (timer.now() - started).as_millis()
     );
     distribution("claim", limit, &mut claims);
     distribution("wakeup", limit, &mut wakeups);
+    idle_latency(&store, limit).await
+}
+async fn idle_latency(store: &PgOutboxStore<()>, limit: usize) -> anyhow::Result<()> {
+    let timer = Timer::new();
     let mut idle = Vec::new();
     for _ in 0..20 {
-        let at = Instant::now();
+        let at = timer.now();
         assert!(!store.next_wakeup(deadline()).await?.due_now());
-        idle.push(at.elapsed().as_micros());
+        idle.push((timer.now() - at).as_micros());
     }
     distribution("idle-wakeup", limit, &mut idle);
     Ok(())
@@ -253,4 +242,36 @@ fn distribution(operation: &str, limit: usize, samples: &mut [u128]) {
         samples[(n - 1) * 99 / 100],
         samples[n - 1]
     );
+}
+
+#[derive(Default)]
+struct Progress {
+    seen: std::collections::HashSet<String>,
+    last: std::collections::HashMap<String, usize>,
+    cold: usize,
+}
+impl Progress {
+    fn observe(&mut self, id: &str, partition: Option<&str>, limit: usize) -> anyhow::Result<()> {
+        if let Some(partition) = partition {
+            let ordinal: usize = id
+                .rsplit('-')
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("fixture ordinal"))?
+                .parse()?;
+            if let Some(previous) = self.last.insert(partition.to_owned(), ordinal) {
+                assert!(ordinal > previous, "partition order");
+            }
+        }
+        if id.starts_with("scale-cold-") {
+            self.cold += 1;
+            if self.cold == 3_000 && limit == 32 {
+                assert!(
+                    self.seen.len() < 15_000 - 1,
+                    "cold partitions drain while the hot partition still has backlog"
+                );
+            }
+        }
+        assert!(self.seen.insert(id.to_owned()), "no duplicate settlement");
+        Ok(())
+    }
 }

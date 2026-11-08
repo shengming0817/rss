@@ -462,7 +462,7 @@ async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
+async fn index_admission(f: &Fixture) -> anyhow::Result<()> {
     for name in [
         "outbox_unfinished_partition",
         "outbox_unpartitioned_candidates",
@@ -480,6 +480,11 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
             .await?;
         assert!(result.is_err(), "missing head index must reject admission");
     }
+    Ok(())
+}
+
+pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
+    index_admission(f).await?;
     for (signature, before, after) in [
         (
             "rss_transactional_messaging.outbox_candidates(uuid,text)",
