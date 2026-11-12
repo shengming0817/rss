@@ -141,6 +141,7 @@ async fn projection_postgres_suite() -> anyhow::Result<()> {
         assert!(matches!(PgStore::new(owner.clone(), &control).await, Err(error) if error.kind() == rss_projection::ErrorKind::StorageContract));
         let store = PgStore::new(pool.clone(), &control).await?;
         scenarios::startup::verify(&owner, &runtime_options).await?;
+        scenarios::budget::verify(&owner, &runtime_options).await?;
         scenarios::definition_binding(&store, &owner, &control).await?;
         scenarios::rejects_dangerous_acl(&pool, &owner, &control).await?;
         scenarios::borrowed_timeout_rolls_back(&pool, &store, &control).await?;

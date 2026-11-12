@@ -1,15 +1,18 @@
 //! A source is the immutable receipt journal itself, never a second delivery queue.
 //! ref: EventStore/EventStoreDB-Client-Rust kurrentdb/src/types.rs@d76e58ba464b2dc77c196ffefbca330ce9df938d
-use crate::{PgStore, store::restore, transaction::sql_error};
+use crate::{
+    PgStore,
+    store::restore,
+    transaction::{Progress, runtime_budget, sql_error},
+};
 use futures::TryStreamExt;
 use rss_observation::{ApplicableRecord, Clock, Error, ErrorKind, Id, JournalReadGrant, Scope};
-use rss_projection::{BatchLimit, Event, Phase, Position, Source, SourceScope};
+use rss_projection::{BatchLimit, Control, Event, Phase, Position, Source, SourceScope, Timer};
 #[cfg(feature = "projection-postgres")]
 use rss_projection_postgres::PgTransaction;
-use rss_request_context::Deadline;
 use serde::Serialize;
 use sqlx::{Row, postgres::PgRow};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 const LOOKUP: &str = "SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
 const READ: &str = "SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND applicable AND ($2::bigint IS NULL OR log_position>$2) ORDER BY log_position LIMIT $3";
 /// Tenant-authorized immutable source. The adopted Observation store owns the pool lifecycle.
@@ -47,38 +50,80 @@ impl<C: Clock> PgSource<C> {
         }
         Ok(())
     }
-    fn deadline(&self) -> Deadline {
-        Deadline::at(self.store.clock.now() + Duration::from_secs(30))
+    async fn transact<T: Timer, R: Send, F>(
+        &self,
+        control: &Control<'_, T>,
+        operation: F,
+    ) -> Result<R, rss_projection::Error>
+    where
+        F: for<'a> FnOnce(
+                &'a mut sqlx::PgConnection,
+                &'a (dyn Fn() -> Result<std::time::Duration, BridgeError> + Sync),
+            ) -> futures::future::BoxFuture<'a, Result<R, BridgeError>>
+            + Send,
+    {
+        let budget = || {
+            control.check().map_err(BridgeError)?;
+            runtime_budget(control.remaining()).map_err(|error| {
+                BridgeError(rss_projection::Error::new(
+                    if error.kind() == ErrorKind::Deadline {
+                        rss_projection::ErrorKind::Deadline
+                    } else {
+                        rss_projection::ErrorKind::InvalidInput
+                    },
+                ))
+            })
+        };
+        budget().map_err(|error| error.0)?;
+        let progress = Progress::new();
+        control
+            .run(async {
+                self.store
+                    .transact_inner(
+                        self.grant.tenant(),
+                        self.store.take_fault(),
+                        &progress,
+                        &budget,
+                        |connection, _, budget| operation(connection, budget),
+                    )
+                    .await
+                    .map_err(|error| error.0)
+            })
+            .await
+            .map_err(|error| {
+                if matches!(
+                    error.kind(),
+                    rss_projection::ErrorKind::Cancelled | rss_projection::ErrorKind::Deadline
+                ) && progress.timed_out() != ErrorKind::Deadline
+                {
+                    source_error(Error::provider(progress.timed_out(), error))
+                } else {
+                    error
+                }
+            })
     }
     /// Resolve in an Observation-owned, caller-budgeted read transaction. Remote targets must
     /// resolve before sending and remain explicitly at least once with target-side deduplication.
-    pub async fn resolve(
+    pub async fn resolve<T: Timer>(
         &self,
         event: &Event,
-        deadline: Deadline,
+        control: &Control<'_, T>,
     ) -> Result<ApplicableRecord, rss_projection::Error> {
         self.check(event.source()).map_err(source_error)?;
         let event = event.clone();
         let tenant = self.grant.tenant();
-        self.store
-            .transact(
-                tenant,
-                deadline,
-                self.store.take_fault(),
-                move |connection, _| {
-                    Box::pin(async move {
-                        let row = sqlx::query(LOOKUP)
-                            .bind(tenant.to_string())
-                            .bind(event.position().get() as i64)
-                            .fetch_optional(connection)
-                            .await
-                            .map_err(sql_error)?;
-                        resolve_row(row, &event)
-                    })
-                },
-            )
-            .await
-            .map_err(|error: BridgeError| error.0)
+        self.transact(control, move |connection, _| {
+            Box::pin(async move {
+                let row = sqlx::query(LOOKUP)
+                    .bind(tenant.to_string())
+                    .bind(event.position().get() as i64)
+                    .fetch_optional(connection)
+                    .await
+                    .map_err(sql_error)?;
+                resolve_row(row, &event)
+            })
+        })
+        .await
     }
     /// Resolve on the same borrowed transaction as the read-model effect/checkpoint. Does not
     /// change tenant, watchdogs or settlement authority; the enclosing Projection Control applies.
@@ -94,73 +139,73 @@ impl<C: Clock> PgSource<C> {
         }
         let tenant = self.grant.tenant().to_string();
         let position = event.position().get() as i64;
-        let row = tx
-            .with_connection(move |connection| {
-                Box::pin(async move {
-                    // Keep the SQL result inside the callback value so the Observation
-                    // owner classifies its own static query before the application SQL wrapper.
-                    Ok(sqlx::query(LOOKUP)
+        let event = event.clone();
+        tx.with_connection(move |connection| {
+            Box::pin(async move {
+                // Keep the SQL result inside the callback value so the Observation
+                // owner classifies its own static query before the application SQL wrapper.
+                Ok(async {
+                    let row = sqlx::query(LOOKUP)
                         .bind(tenant)
                         .bind(position)
                         .fetch_optional(connection)
                         .await
-                        .map_err(sql_error))
-                })
+                        .map_err(sql_error)?;
+                    resolve_row(row, &event)
+                }
+                .await)
             })
-            .await
-            .map_err(rss_projection::Error::from)?
-            .map_err(source_error)?;
-        resolve_row(row, event).map_err(|error| error.0)
+        })
+        .await
+        .map_err(rss_projection::Error::from)?
+        .map_err(|error: BridgeError| error.0)
     }
 }
 impl<C: Clock> Source for PgSource<C> {
-    async fn high_water(
+    async fn high_water<T: Timer>(
         &self,
         scope: &SourceScope,
+        control: &Control<'_, T>,
     ) -> Result<Option<Position>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
-        self.store.transact(tenant, self.deadline(), 0, move |connection, _| Box::pin(async move {
+        self.transact(control, move |connection, _| Box::pin(async move {
             let value: Option<i64> = sqlx::query_scalar("SELECT max(log_position) FROM rss_observation.batches WHERE tenant_id=$1::uuid AND applicable")
                 .bind(tenant.to_string()).fetch_one(connection).await.map_err(sql_error)?;
-            value.map(position).transpose()
-        })).await.map_err(source_error)
+            value.map(position).transpose().map_err(BridgeError::from)
+        })).await
     }
-    async fn read(
+    async fn read<T: Timer>(
         &self,
         scope: &SourceScope,
         after: Option<Position>,
         limit: BatchLimit,
+        control: &Control<'_, T>,
     ) -> Result<Vec<Event>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
-        self.store
-            .transact(
-                tenant,
-                self.deadline(),
-                self.store.take_fault(),
-                move |connection, _| {
-                    Box::pin(async move {
-                        let mut rows = sqlx::query(READ)
-                            .bind(tenant.to_string())
-                            .bind(after.map(|p| p.get() as i64))
-                            .bind(i64::from(limit.get()))
-                            .fetch(connection);
-                        let mut events = Vec::new();
-                        while let Some(row) = rows.try_next().await.map_err(sql_error)? {
-                            let (pos, record) = restore_row(row)?;
-                            events.push(
-                                event_for(&scope, pos, &record)
-                                    .map_err(|e| restore_error(Some(pos), e))?,
-                            );
-                        }
-                        Ok(events)
-                    })
-                },
-            )
-            .await
-            .map_err(|error: BridgeError| error.0)
+        self.transact(control, move |connection, budget| {
+            Box::pin(async move {
+                let mut rows = sqlx::query(READ)
+                    .bind(tenant.to_string())
+                    .bind(after.map(|p| p.get() as i64))
+                    .bind(i64::from(limit.get()))
+                    .fetch(connection);
+                let mut events = Vec::new();
+                while let Some(row) = rows.try_next().await.map_err(sql_error)? {
+                    budget()?;
+                    let (pos, record) = restore_row(row)?;
+                    events.push(
+                        event_for(&scope, pos, &record).map_err(|e| restore_error(Some(pos), e))?,
+                    );
+                    budget()?;
+                    tokio::task::yield_now().await;
+                }
+                Ok(events)
+            })
+        })
+        .await
     }
 }
 // Only this adapter needs to carry projection diagnostics through Observation settlement.

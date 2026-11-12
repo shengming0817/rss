@@ -36,7 +36,10 @@ pub(super) async fn atomic_recovery(
         current.execute(None, &first, control).await,
         Err(Error::new(rss_projection::ErrorKind::CommitUnknown))
     );
-    assert_eq!(current.checkpoint().await?.position, Some(first.position()));
+    assert_eq!(
+        current.checkpoint(control).await?.position,
+        Some(first.position())
+    );
     assert_eq!(count(owner, &s).await?, 1);
     let position = duplicates(&current, owner, &s, &first, control).await?;
     rollback_cases(store, owner, &s, position, control).await
@@ -67,7 +70,7 @@ async fn duplicates(
         Err(Error::new(rss_projection::ErrorKind::Conflict))
     );
     assert_eq!(
-        current.checkpoint().await?.position,
+        current.checkpoint(control).await?.position,
         Some(duplicate.position())
     );
     assert_eq!(
@@ -92,7 +95,7 @@ async fn rollback_cases(
         Err(Error::new(ErrorKind::Rejected))
     );
     assert_eq!(count(owner, s).await?, 1);
-    assert_eq!(rejected.checkpoint().await?.position, Some(position));
+    assert_eq!(rejected.checkpoint(control).await?.position, Some(position));
     store.inject_next_fault(PgFault::RollbackFailedAfterAck);
     assert_eq!(
         rejected.execute(Some(position), &next, control).await,
@@ -208,7 +211,7 @@ pub(super) async fn ordered_append(
     });
     let second = async {
         entered.notified().await;
-        assert_eq!(store.high_water(s.source()).await?, None);
+        assert_eq!(store.high_water(s.source(), control).await?, None);
         let pending = append(store, &s, "second", b"2", control);
         tokio::pin!(pending);
         assert!(
@@ -224,7 +227,7 @@ pub(super) async fn ordered_append(
     assert_eq!(b?.get(), 1);
     assert_eq!(
         store
-            .read(s.source(), None, BatchLimit::new(10)?)
+            .read(s.source(), None, BatchLimit::new(10)?, control)
             .await?
             .len(),
         2
@@ -252,7 +255,10 @@ pub(super) async fn ordered_append(
         rolled_back,
         Err(Error::new(rss_projection::ErrorKind::Rejected))
     );
-    assert_eq!(store.high_water(s.source()).await?, Some(Position::new(1)?));
+    assert_eq!(
+        store.high_water(s.source(), control).await?,
+        Some(Position::new(1)?)
+    );
     Ok(())
 }
 pub(super) async fn replay(
@@ -263,7 +269,7 @@ pub(super) async fn replay(
     let s = scope("replay", TENANT)?;
     append(store, &s, "a", b"1", control).await?;
     append(store, &s, "b", b"2", control).await?;
-    let bound = ReplayBound::Through(store.high_water(s.source()).await?);
+    let bound = ReplayBound::Through(store.high_water(s.source(), control).await?);
     store
         .initialize(
             &s,
@@ -369,7 +375,7 @@ pub(super) async fn interruption(store: &PgStore, owner: &PgPool) -> anyhow::Res
             .await,
         Err(Error::new(rss_projection::ErrorKind::CommitUnknown))
     );
-    assert_eq!(projection.checkpoint().await?.position, None);
+    assert_eq!(projection.checkpoint(&control).await?.position, None);
     assert_eq!(count(owner, &s).await?, 0);
     projection
         .execute(None, &event(&s, 0, "x", b"x")?, &control)
@@ -436,9 +442,12 @@ pub(super) async fn takeover_waits_for_the_old_transaction(
     let (applied, claim) = tokio::join!(applying, taking);
     assert_eq!(applied?, ApplyOutcome::Applied);
     let next = store.projection(claim?, Counter)?;
-    assert_eq!(next.checkpoint().await?.position, Some(fact.position()));
     assert_eq!(
-        old.checkpoint().await,
+        next.checkpoint(control).await?.position,
+        Some(fact.position())
+    );
+    assert_eq!(
+        old.checkpoint(control).await,
         Err(Error::new(rss_projection::ErrorKind::Fenced))
     );
     assert_eq!(count(owner, &s).await?, 1);
@@ -481,7 +490,13 @@ pub(super) async fn cancel_after_apply_discards_the_transaction(
         result,
         Err(Error::new(rss_projection::ErrorKind::CommitUnknown))
     );
-    assert_eq!(projection.checkpoint().await?.position, None);
+    let recovery_cancel = CancellationToken::new();
+    let recovery = Control::new(
+        &clock,
+        clock.now() + Duration::from_secs(10),
+        &recovery_cancel,
+    );
+    assert_eq!(projection.checkpoint(&recovery).await?.position, None);
     assert_eq!(count(owner, &s).await?, 0);
     Ok(())
 }
@@ -504,7 +519,7 @@ pub(super) async fn borrowed_append_rolls_back(
         0
     );
     tx.rollback().await?;
-    assert_eq!(store.high_water(s.source()).await?, None);
+    assert_eq!(store.high_water(s.source(), control).await?, None);
     Ok(())
 }
 
@@ -589,9 +604,11 @@ async fn filtered_duplicate(
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(
-        execution.checkpoint().await?.position,
+        execution.checkpoint(control).await?.position,
         Some(Position::new(1)?)
     );
     assert_eq!(count(owner, s).await?, 0);
     Ok(())
 }
+
+pub(crate) mod budget;

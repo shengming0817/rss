@@ -82,7 +82,7 @@ impl Progress {
     pub fn set(&self, stage: Stage) {
         self.0.store(stage as u8, Ordering::SeqCst);
     }
-    fn timed_out(&self) -> ErrorKind {
+    pub(crate) fn timed_out(&self) -> ErrorKind {
         match self.0.load(Ordering::SeqCst) {
             0 => ErrorKind::Deadline,
             1 => ErrorKind::CommitUnknown,
@@ -101,6 +101,16 @@ pub(crate) async fn within<C: Clock, T>(
     tokio::time::timeout(remaining, future)
         .await
         .map_err(|_| Error::new(progress.timed_out()))
+}
+/// Validate runtime budgets before acquisition; startup probes retain their own admission policy.
+pub(crate) fn runtime_budget(remaining: Duration) -> Result<Duration, Error> {
+    if remaining.is_zero() {
+        return Err(ErrorKind::Deadline.into());
+    }
+    if remaining.as_nanos().div_ceil(1_000_000) > i32::MAX as u128 {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    Ok(remaining)
 }
 pub(crate) fn watchdog(remaining: Duration) -> String {
     format!("{}ms", remaining.as_millis().clamp(1, i32::MAX as u128))
@@ -151,6 +161,29 @@ pub(crate) async fn after_write_fault<T, E: From<Error>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_budgets_are_checked_without_clamping() {
+        assert_eq!(
+            runtime_budget(Duration::ZERO).err().map(|e| e.kind()),
+            Some(ErrorKind::Deadline)
+        );
+        for value in [
+            Duration::from_nanos(1),
+            Duration::from_secs(60),
+            Duration::from_millis(i32::MAX as u64),
+        ] {
+            assert_eq!(runtime_budget(value).ok(), Some(value));
+        }
+        for value in [
+            Duration::MAX,
+            Duration::from_millis(i32::MAX as u64) + Duration::from_nanos(1),
+        ] {
+            assert_eq!(
+                runtime_budget(value).err().map(|e| e.kind()),
+                Some(ErrorKind::InvalidInput)
+            );
+        }
+    }
     #[test]
     fn postgres_watchdog_bounds() {
         assert_eq!(watchdog(Duration::ZERO), "1ms");

@@ -12,6 +12,7 @@ keywords = ["projection", "postgres", "checkpoint"]
 publish = ["crates-io"]
 
 [dependencies]
+tokio = { workspace = true, features = ["rt"] }
 thiserror.workspace = true
 rss-projection.workspace = true
 rss-request-context.workspace = true

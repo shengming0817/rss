@@ -9,7 +9,7 @@ use rss_projection::{
     ReplayBound, Timer,
 };
 use sqlx::Row;
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc};
 use uuid::Uuid;
 
 /// A private provider-minted worker identity. Obtain a new one only by explicit takeover.
@@ -191,8 +191,13 @@ impl PgStore {
             Err(Error::new(ErrorKind::ScopeMismatch))
         }
     }
-    async fn checkpoint_for(&self, claim: Arc<PgClaim>) -> Result<Checkpoint, Error> {
-        self.transact(claim.scope.source().tenant(), Duration::from_secs(30), move |tx| Box::pin(async move {
+    async fn checkpoint_for<T: Timer>(
+        &self,
+        claim: Arc<PgClaim>,
+        control: &Control<'_, T>,
+    ) -> Result<Checkpoint, Error> {
+        let source = claim.scope.source().clone();
+        self.controlled_read(&source, control, move |tx| Box::pin(async move {
             let s = &claim.scope;
             let row = sqlx::query("SELECT position,replay,end_position,definition_identity FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id=$2 AND projection_id=$3 AND generation=$4 AND epoch=$5 AND worker_token=$6::uuid")
                 .bind(s.source().tenant().to_string()).bind(s.source().source()).bind(s.projection()).bind(s.generation()).bind(claim.epoch).bind(claim.token.to_string())
@@ -239,8 +244,8 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
     fn definition_identity(&self) -> &DefinitionIdentity {
         self.claim.definition_identity()
     }
-    async fn checkpoint(&self) -> Result<Checkpoint, Error> {
-        self.store.checkpoint_for(self.claim.clone()).await
+    async fn checkpoint<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+        self.store.checkpoint_for(self.claim.clone(), control).await
     }
     async fn execute<T: Timer>(
         &self,
@@ -258,6 +263,7 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
             .controlled_tx(self.scope().source(), control, move |tx| {
                 Box::pin(async move {
                     let duplicate = lock(tx, &claim, expected, &event).await?;
+                    tx.check()?;
                     let outcome = if duplicate {
                         ApplyOutcome::Duplicate
                     } else {
@@ -270,6 +276,7 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
                             PgEffectOutcome::Filtered => ApplyOutcome::Filtered,
                         }
                     };
+                    tx.check()?;
                     finish(tx, &claim, expected, &event).await?;
                     Ok(outcome)
                 })
@@ -289,8 +296,8 @@ impl ExternalCheckpoint for PgCheckpoint {
     fn definition_identity(&self) -> &DefinitionIdentity {
         self.claim.definition_identity()
     }
-    async fn load(&self) -> Result<Checkpoint, Error> {
-        self.store.checkpoint_for(self.claim.clone()).await
+    async fn load<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+        self.store.checkpoint_for(self.claim.clone(), control).await
     }
     async fn advance<T: Timer>(
         &self,

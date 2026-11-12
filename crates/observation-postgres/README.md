@@ -70,7 +70,7 @@ locks precede the first possible write and therefore do not by themselves mark a
 All operations use the caller's original absolute deadline, including pool acquisition, lock and
 statement watchdogs, settlement and readback. Timeouts before effects return `Deadline`; during potentially mutating execution or commit they
 return `CommitUnknown`, and during rollback they return `RollbackFailed`. Cancellation by dropping
-a future closes its unconfirmed connection. PostgreSQL watchdogs clamp to its supported millisecond range. The server
+a future closes its unconfirmed connection. Runtime budgets outside PostgreSQL's positive signed-integer millisecond range are rejected before acquisition; watchdogs use the remaining time rounded up to milliseconds. The server
 clock owns receipt time and baseline expiry; the host-injected clock owns the operation budget.
 
 Core `u64` producer sequence and revision use checked PostgreSQL `numeric(20,0)` without bigint
@@ -126,7 +126,7 @@ generations and fits the Projection 1 MiB event limit even for a legal 4 MiB rep
 Reference encoding is private; unknown, changed or misplaced references are rejected by exact
 reconstruction from the validated durable record. Debug/error formatting does not expose facts.
 
-`resolve(event, deadline)` returns `ApplicableRecord` under the source's tenant grant.
+`resolve(event, &control)` returns `ApplicableRecord` under the source's tenant grant.
 `resolve_in_transaction(&mut PgTransaction, event)` (requires `projection-postgres`) resolves on the **same borrowed transaction**
 as the consumer's `PgEffect`. Provision that projection runtime role with Observation schema USAGE
 and table SELECT as well. The resolver does not change session identity, deadlines or settlement. Both resolver methods return `rss_projection::Error`; their static SQL is classified by the Observation owner before projection.
@@ -140,8 +140,14 @@ The consumer mapping supplies its own `DefinitionIdentity` to Projection `initia
 `takeover`; the source does not invent a definition for a business read model. The handoff mapping
 owns its declaration next to its effect. A changed definition requires a new generation, and
 mismatched takeover must fail before Facts SQL. Use `projection` / `run` for atomic
-read-model SQL, write-authority validation, fact receipt and checkpoint. The source's own reads
-have a 30-second provider bound; runner Control additionally bounds the whole invocation.
+read-model SQL, write-authority validation, fact receipt and checkpoint. Source high-water/read and independent resolve consume the same caller Control as the runner.
+There is no provider 30-second deadline, second timeout or conversion between Timer and Clock
+origins: the private shared transaction engine asks its entrypoint for current remaining time.
+Native Observation operations continue using their own Deadline/Clock; Projection reads use
+Projection Control. Both entrypoints retain settlement and connection quarantine responsibility.
+The new signatures replace the old ones without compatibility wrappers. Source restore diagnostics
+and unconfirmed rollback (RollbackFailed) survive runner composition. Borrowed resolve performs
+query and reconstruction inside the enclosing transaction's internally checked callback.
 
 For another system, resolve before sending and compose existing `AtLeastOnce`; destination
 idempotency and conditional-write/fencing remain the consumer's responsibility. Local checkpoint

@@ -32,6 +32,13 @@ async fn required_permissions_are_checked() -> anyhow::Result<()> {
 }
 #[tokio::test]
 async fn exhausted_journal_rejects_every_new_report() -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let f = Fixture::new(false).await?;
     let store = f.store().await?;
     let stream = scope(TENANT, "exhausted", "r", "source", "e")?;
@@ -50,7 +57,7 @@ async fn exhausted_journal_rejects_every_new_report() -> anyhow::Result<()> {
     let source = f.source(store, TENANT)?;
     assert_eq!(
         source
-            .read(source.scope(), None, BatchLimit::new(10)?)
+            .read(source.scope(), None, BatchLimit::new(10)?, &control)
             .await?
             .len(),
         1
@@ -122,6 +129,13 @@ async fn resolver_record(
     std::sync::Arc<rss_observation_postgres::PgSource<Clock>>,
     rss_projection::Event,
 )> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let store = f.store().await?;
     let scope = scope(TENANT, "resolver", "r", "source", "e")?;
     activate(&store, &scope, None).await?;
@@ -133,7 +147,7 @@ async fn resolver_record(
         .await?;
     let source = f.source(store, TENANT)?;
     let events = source
-        .read(source.scope(), None, BatchLimit::new(1)?)
+        .read(source.scope(), None, BatchLimit::new(1)?, &control)
         .await?;
     Ok((source, events[0].clone()))
 }
@@ -161,7 +175,7 @@ async fn reject_permanent(
     sqlx::raw_sql("REVOKE SELECT ON rss_observation.batches FROM handoff_runtime")
         .execute(&f.owner)
         .await?;
-    let independent = source.resolve(event, deadline()).await;
+    let independent = source.resolve(event, control).await;
     let atomic = execution.execute(None, event, control).await;
     sqlx::raw_sql("GRANT SELECT ON rss_observation.batches TO handoff_runtime")
         .execute(&f.owner)
@@ -174,6 +188,6 @@ async fn reject_permanent(
         atomic.err().map(|e| e.kind()),
         Some(rss_projection::ErrorKind::Rejected)
     );
-    assert_eq!(execution.checkpoint().await?.position, None);
+    assert_eq!(execution.checkpoint(control).await?.position, None);
     Ok(())
 }

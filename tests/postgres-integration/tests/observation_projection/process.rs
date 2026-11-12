@@ -40,7 +40,7 @@ pub async fn crash(f: &Fixture) -> anyhow::Result<()> {
             .await?,
         model::Facts::new(source.clone()),
     )?;
-    assert_eq!(execution.checkpoint().await?.position, None);
+    assert_eq!(execution.checkpoint(&control).await?.position, None);
     let report = rss_projection::run(
         source.as_ref(),
         &execution,
@@ -170,7 +170,7 @@ async fn worker_child() -> anyhow::Result<()> {
     .await?;
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "crash")?;
     let event = source
-        .read(source.scope(), None, BatchLimit::new(1)?)
+        .read(source.scope(), None, BatchLimit::new(1)?, &control)
         .await?;
     let execution = projection.projection(
         projection

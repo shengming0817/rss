@@ -27,7 +27,16 @@ let limit = RunLimit::new(BatchLimit::new(100)?, 10_000)?;
   it on checkpoint reads and writes, before effects. `run` loads its checkpoint, reads
   bounded batches and settles each event. No task is spawned and no implicit retry/takeover occurs.
 - `Control` uses a required caller-injected monotonic `Timer`, absolute deadline and cancellation
-  token. The total event budget includes duplicates and filtered events; phases never reset time.
+  token. Every Source high-water/read, Execution checkpoint/execute and ExternalCheckpoint
+  load/advance receives that same Control. Implementations enforce it through waiting, decoding
+  and settlement; the runner and AtLeastOnce do not race a second timeout against providers.
+  The total event budget includes duplicates and filtered events; phases never reset time.
+  ExternalTarget owns interruption classification: a possibly applied effect is CommitUnknown,
+  and unconfirmed rollback is RollbackFailed. AtLeastOnce preserves that evidence. Once the remote
+  effect is acknowledged, interruption before checkpoint confirmation remains CommitUnknown.
+  A run that reaches its deadline after an acknowledged event retains that event in its report
+  and observation, even when its stop reason is Deadline. Synchronous work is checked at bounded
+  stages; cancellation is not preemption or proof that external work stopped.
 - `Report.position` includes only acknowledged progress. `CommitUnknown` and `RollbackFailed`
   require reloading durable state with the same fact identity. Cancellation of a mutating future
   cannot prove the absence of effects.

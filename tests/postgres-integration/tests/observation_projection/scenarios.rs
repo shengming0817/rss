@@ -126,7 +126,7 @@ async fn initial_projection(
     execution: &Session,
     control: &Control<'_, ProjectionClock>,
 ) -> anyhow::Result<()> {
-    assert_eq!(execution.checkpoint().await?.position, None);
+    assert_eq!(execution.checkpoint(control).await?.position, None);
     assert!(values(f, "live", "inside").await?.is_empty());
     let report = rss_projection::run(
         source.as_ref(),
@@ -144,13 +144,20 @@ async fn initial_projection(
     Ok(())
 }
 async fn reject_incomplete(input: &Inputs) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let Inputs {
         store,
         source,
         stream,
         ..
     } = input;
-    let cursor = source.high_water(source.scope()).await?;
+    let cursor = source.high_water(source.scope(), &control).await?;
     store
         .receive(
             &batch(
@@ -187,10 +194,10 @@ async fn reject_incomplete(input: &Inputs) -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
-    assert_eq!(source.high_water(source.scope()).await?, cursor);
+    assert_eq!(source.high_water(source.scope(), &control).await?, cursor);
     assert!(
         source
-            .read(source.scope(), cursor, BatchLimit::new(10)?)
+            .read(source.scope(), cursor, BatchLimit::new(10)?, &control)
             .await?
             .is_empty()
     );
@@ -268,9 +275,9 @@ async fn fail_and_commit(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let control = Control::new(clock, Duration::from_secs(30), cancel);
-    let checkpoint = execution.checkpoint().await?.position;
+    let checkpoint = execution.checkpoint(&control).await?.position;
     let next = source
-        .read(source.scope(), checkpoint, BatchLimit::new(1)?)
+        .read(source.scope(), checkpoint, BatchLimit::new(1)?, &control)
         .await?;
     projection.inject_next_fault(PgFault::CommitPending);
     let short = Control::new(
@@ -284,7 +291,7 @@ async fn fail_and_commit(
             .await
             .is_err()
     );
-    assert_eq!(execution.checkpoint().await?.position, checkpoint);
+    assert_eq!(execution.checkpoint(&control).await?.position, checkpoint);
     assert_eq!(values(f, "live", "inside").await?.len(), 1);
     projection.inject_next_fault(PgFault::CommitUnknownAfterAck);
     assert!(
@@ -324,7 +331,7 @@ async fn resumed_projection(
     .await
     .into_result()?;
     assert_eq!(report.applied, 0);
-    assert!(execution.checkpoint().await.is_err());
+    assert!(execution.checkpoint(control).await.is_err());
     let retry = store.receive(first, deadline()).await?;
     assert!(matches!(retry, ReceiveOutcome::Replay(_)));
     assert_eq!(retry.record().received_at(), saved.record().received_at());
@@ -361,8 +368,15 @@ async fn concurrent_pair(
     source: &ObsSource,
     rollback: bool,
 ) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let (input, other) = parallel_inputs(store, rollback).await?;
-    let before = source.high_water(source.scope()).await?;
+    let before = source.high_water(source.scope(), &control).await?;
     // Use the actual commit funnel, but deliberately hold the first transaction before COMMIT.
     let mut tx = f.pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
@@ -381,7 +395,7 @@ async fn concurrent_pair(
     settle(tx, rollback).await?;
     pending.await?;
     let events = source
-        .read(source.scope(), before, BatchLimit::new(10)?)
+        .read(source.scope(), before, BatchLimit::new(10)?, &control)
         .await?;
     assert_eq!(events.len(), if rollback { 1 } else { 2 });
     assert_positions(&events, before);
@@ -396,10 +410,17 @@ async fn settle(tx: sqlx::Transaction<'_, sqlx::Postgres>, rollback: bool) -> an
     Ok(())
 }
 async fn assert_invisible(source: &ObsSource, before: Option<Position>) -> anyhow::Result<()> {
-    assert_eq!(source.high_water(source.scope()).await?, before);
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
+    assert_eq!(source.high_water(source.scope(), &control).await?, before);
     assert!(
         source
-            .read(source.scope(), before, BatchLimit::new(10)?)
+            .read(source.scope(), before, BatchLimit::new(10)?, &control)
             .await?
             .is_empty()
     );
@@ -457,6 +478,13 @@ pub async fn references_and_isolation(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 async fn seed_large(f: &Fixture) -> anyhow::Result<Large> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let store = f.store().await?;
     let source = f.source(store.clone(), OTHER)?;
     let stream = scope(OTHER, "large", "注册一", "采集器", "epoch")?;
@@ -468,7 +496,7 @@ async fn seed_large(f: &Fixture) -> anyhow::Result<Large> {
     assert!(input.batch().encode().len() > 3_000_000);
     let receipt = store.receive(&input, deadline()).await?;
     let events = source
-        .read(source.scope(), None, BatchLimit::new(1000)?)
+        .read(source.scope(), None, BatchLimit::new(1000)?, &control)
         .await?;
     assert_eq!(events.len(), 1);
     let event = events[0].clone();
@@ -482,6 +510,13 @@ async fn seed_large(f: &Fixture) -> anyhow::Result<Large> {
     })
 }
 async fn validate_large(large: &Large) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let Large {
         source,
         receipt,
@@ -490,17 +525,24 @@ async fn validate_large(large: &Large) -> anyhow::Result<()> {
     } = large;
     assert!(event.payload().len() < 4096);
     assert_eq!(event.id().len(), 64);
-    let resolved = source.resolve(event, deadline()).await?;
+    let resolved = source.resolve(event, &control).await?;
     assert_eq!(resolved.record().batch(), receipt.record().batch());
     assert_eq!(
         source
-            .read(source.scope(), None, BatchLimit::new(1)?)
+            .read(source.scope(), None, BatchLimit::new(1)?, &control)
             .await?[0],
         *event
     );
     Ok(())
 }
 async fn reject_changed(f: &Fixture, large: &Large) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let Large {
         store,
         source,
@@ -510,11 +552,11 @@ async fn reject_changed(f: &Fixture, large: &Large) -> anyhow::Result<()> {
     let wrong = f.source(store.clone(), TENANT)?;
     assert!(
         source
-            .read(wrong.scope(), None, BatchLimit::new(1)?)
+            .read(wrong.scope(), None, BatchLimit::new(1)?, &control)
             .await
             .is_err()
     );
-    assert!(wrong.resolve(event, deadline()).await.is_err());
+    assert!(wrong.resolve(event, &control).await.is_err());
     for payload in [
         b"{}".to_vec(),
         event.payload().iter().copied().chain([b' ']).collect(),
@@ -525,7 +567,7 @@ async fn reject_changed(f: &Fixture, large: &Large) -> anyhow::Result<()> {
             event.id(),
             payload,
         )?;
-        assert!(source.resolve(&changed, deadline()).await.is_err());
+        assert!(source.resolve(&changed, &control).await.is_err());
     }
     let changed = Event::new(
         event.source().clone(),
@@ -533,10 +575,17 @@ async fn reject_changed(f: &Fixture, large: &Large) -> anyhow::Result<()> {
         event.id(),
         event.payload().to_vec(),
     )?;
-    assert!(source.resolve(&changed, deadline()).await.is_err());
+    assert!(source.resolve(&changed, &control).await.is_err());
     Ok(())
 }
 async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let Large {
         store,
         source,
@@ -567,14 +616,14 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
             .await?;
     }
     let all = source
-        .read(source.scope(), None, BatchLimit::new(10)?)
+        .read(source.scope(), None, BatchLimit::new(10)?, &control)
         .await?;
     let ids = all
         .iter()
         .map(|e| e.id())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids.len(), 4);
-    assert!(source.resolve(event, deadline()).await.is_ok());
+    assert!(source.resolve(event, &control).await.is_ok());
     assert_eq!(
         store
             .lookup(
@@ -651,12 +700,19 @@ async fn definition_and_source(
     );
     let after: String = sqlx::query_scalar("SELECT row_to_json(c)::text FROM rss_projection.checkpoints c WHERE tenant_id=$1::uuid AND generation='live'").bind(TENANT).fetch_one(&f.admin).await?;
     assert_eq!(before, after);
-    assert_eq!(execution.checkpoint().await?.position, None);
+    assert_eq!(execution.checkpoint(control).await?.position, None);
     assert!(values(f, "live", "inside").await?.is_empty());
     rebuilt_checkpoint(input, projection, scope, control).await
 }
 
 async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let tenant = rss_request_context::TenantId::parse(TENANT)?;
     let grant = rss_observation::JournalReadGrant::verify(&Trusted, tenant)?;
     let wrong =
@@ -671,17 +727,17 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
     )?;
     let original = input
         .source
-        .read(input.source.scope(), None, BatchLimit::new(1)?)
+        .read(input.source.scope(), None, BatchLimit::new(1)?, &control)
         .await?;
     let new = rebuilt
-        .read(rebuilt.scope(), None, BatchLimit::new(1)?)
+        .read(rebuilt.scope(), None, BatchLimit::new(1)?, &control)
         .await?;
     assert_eq!(original.len(), 1);
     assert_eq!(new.len(), 1);
     assert_eq!(original[0].payload(), new[0].payload());
     assert_ne!(original[0].source(), new[0].source());
     assert!(
-        matches!(rebuilt.resolve(&original[0], deadline()).await, Err(e) if e.kind() == rss_projection::ErrorKind::ScopeMismatch)
+        matches!(rebuilt.resolve(&original[0], &control).await, Err(e) if e.kind() == rss_projection::ErrorKind::ScopeMismatch)
     );
     Ok(rebuilt)
 }
@@ -713,7 +769,7 @@ async fn rebuilt_checkpoint(
             .await?,
     )?;
     assert_eq!(
-        rss_projection::ExternalCheckpoint::load(&checkpoint)
+        rss_projection::ExternalCheckpoint::load(&checkpoint, control)
             .await?
             .position,
         None
@@ -722,16 +778,17 @@ async fn rebuilt_checkpoint(
 }
 
 pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
-    let input = seed(f).await?;
-    let events = input
-        .source
-        .read(input.source.scope(), None, BatchLimit::new(2)?)
-        .await?;
-    assert_eq!(events.len(), 2);
-    let bad = &events[1];
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+
+    let input = seed(f).await?;
+    let events = input
+        .source
+        .read(input.source.scope(), None, BatchLimit::new(2)?, &control)
+        .await?;
+    assert_eq!(events.len(), 2);
+    let bad = &events[1];
     let projection = f.projection(&control).await?;
     let scope = ProjectionScope::new(input.source.scope().clone(), "facts", "bad-row")?;
     let execution = session(&projection, &scope, &input.source, &control).await?;
@@ -766,11 +823,11 @@ async fn assert_source_failures(
     .err()
     .ok_or_else(|| anyhow::anyhow!("bad source row accepted"))?;
     assert_restore_error(&error, Kind::StorageContract, bad.position())?;
-    assert_eq!(execution.checkpoint().await?.position, None);
+    assert_eq!(execution.checkpoint(control).await?.position, None);
     assert!(values(f, "bad-row", "inside").await?.is_empty());
     let error = input
         .source
-        .resolve(bad, deadline())
+        .resolve(bad, control)
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("bad row resolved"))?;
@@ -781,7 +838,7 @@ async fn assert_source_failures(
         .err()
         .ok_or_else(|| anyhow::anyhow!("bad row applied"))?;
     assert_restore_error(&error, Kind::Rejected, bad.position())?;
-    assert_eq!(execution.checkpoint().await?.position, None);
+    assert_eq!(execution.checkpoint(control).await?.position, None);
     assert!(values(f, "bad-row", "inside").await?.is_empty());
 
     Ok(())
@@ -791,6 +848,13 @@ async fn assert_restore_settlement(
     execution: &Session,
     bad: &Event,
 ) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     use rss_projection::{ErrorKind as Kind, Phase};
     // Settlement uncertainty overrides the earlier restore failure; its coordinate is not evidence of rollback.
     input
@@ -798,7 +862,7 @@ async fn assert_restore_settlement(
         .inject_next_fault(rss_observation_postgres::Fault::RollbackAckLost);
     let error = input
         .source
-        .read(input.source.scope(), None, BatchLimit::new(2)?)
+        .read(input.source.scope(), None, BatchLimit::new(2)?, &control)
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("rollback failure lost"))?;
@@ -808,17 +872,38 @@ async fn assert_restore_settlement(
     input
         .store
         .inject_next_fault(rss_observation_postgres::Fault::RollbackPending);
-    let short = rss_request_context::Deadline::at(
-        rss_observation::Clock::now(&Clock) + Duration::from_millis(100),
+    let short = Control::new(
+        &budget_clock,
+        rss_projection::Timer::now(&budget_clock) + Duration::from_millis(100),
+        &budget_cancel,
     );
     let error = input
         .source
-        .resolve(bad, short)
+        .resolve(bad, &short)
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("pending rollback accepted"))?;
     assert_eq!(error.kind(), Kind::RollbackFailed);
-    assert_eq!(execution.checkpoint().await?.position, None);
+    // The same pending rollback must survive the runner composition, not just a direct call.
+    input
+        .store
+        .inject_next_fault(rss_observation_postgres::Fault::RollbackPending);
+    let run_budget = Control::new(
+        &budget_clock,
+        rss_projection::Timer::now(&budget_clock) + Duration::from_millis(100),
+        &budget_cancel,
+    );
+    let report = rss_projection::run(
+        input.source.as_ref(),
+        execution,
+        &run_budget,
+        RunLimit::new(BatchLimit::new(2)?, 2)?,
+    )
+    .await;
+    assert!(
+        matches!(report.stop, rss_projection::Stop::Failed(error) if error.kind() == Kind::RollbackFailed)
+    );
+    assert_eq!(execution.checkpoint(&control).await?.position, None);
     Ok(())
 }
 fn assert_restore_error(

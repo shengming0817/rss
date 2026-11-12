@@ -84,7 +84,7 @@ async fn replay_snapshot(
 ) -> anyhow::Result<()> {
     use rss_projection::Execution as _;
     let replay = ProjectionScope::new(source.clone(), "counter", "v2")?;
-    let bound = control.run(store.high_water(source)).await?;
+    let bound = store.high_water(source, control).await?;
     store
         .initialize(
             &replay,
@@ -103,7 +103,7 @@ async fn replay_snapshot(
         .into_result()?;
     anyhow::ensure!(replayed.applied == 2, "replay did not apply both facts");
     anyhow::ensure!(
-        control.run(worker.checkpoint()).await?.position == bound,
+        worker.checkpoint(control).await?.position == bound,
         "replay checkpoint missing"
     );
     Ok(())
@@ -151,7 +151,7 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
     anyhow::ensure!(!store.receipt_status(&receipt, &control).await?.is_settled());
     let worker = store.projection(store.takeover(&live, &DEFINITION, &control).await?, Counter)?;
     use rss_projection::Execution as _;
-    let high_water = control.run(store.high_water(&source)).await?;
+    let high_water = store.high_water(&source, &control).await?;
     let limits = RunLimit::new(BatchLimit::new(100)?, 1000)?;
     let work = rss_projection::run(store, &worker, &control, limits);
     let observation = work.observation();
@@ -167,7 +167,7 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
         "initial projection did not apply both events"
     );
     anyhow::ensure!(
-        control.run(worker.checkpoint()).await?.position == high_water,
+        worker.checkpoint(&control).await?.position == high_water,
         "checkpoint not persisted"
     );
     verify_receipts(store, &live, &control).await?;

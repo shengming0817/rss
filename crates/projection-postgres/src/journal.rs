@@ -1,9 +1,11 @@
-use crate::{PgOperationError, PgStore, PgTransaction, transaction::map_sql};
+use crate::{
+    PgOperationError, PgStore, PgTransaction,
+    transaction::{map_sql, watchdog},
+};
 use rss_projection::{
     BatchLimit, Control, Error, ErrorKind, Event, Position, Source, SourceScope, Timer,
 };
 use sqlx::Row;
-use std::time::Duration;
 
 impl PgTransaction<'_> {
     /// Idempotently append a fact in this transaction, holding the source allocator lock until
@@ -15,12 +17,13 @@ impl PgTransaction<'_> {
         id: &str,
         payload: &[u8],
     ) -> Result<Position, PgOperationError> {
+        self.check().map_err(PgOperationError)?;
         if self.tenant() != source.tenant() {
             return Err(PgOperationError(Error::new(ErrorKind::ScopeMismatch)));
         }
-        append_connection(self.connection, source, id, payload)
-            .await
-            .map_err(PgOperationError)
+        let result = append_connection(self.connection, source, id, payload).await;
+        self.check().map_err(PgOperationError)?;
+        result.map_err(PgOperationError)
     }
 }
 /// Stage an append in a caller-owned SQLx transaction without taking settlement authority.
@@ -36,11 +39,7 @@ pub async fn append_in_transaction<T: Timer>(
     control: &Control<'_, T>,
 ) -> Result<Position, Error> {
     control.check()?;
-    let millis = control
-        .remaining()
-        .as_millis()
-        .clamp(1, i32::MAX as u128)
-        .to_string();
+    let millis = watchdog(control.remaining())?.to_string();
     control
         .run(async {
             sqlx::query(
@@ -50,7 +49,10 @@ pub async fn append_in_transaction<T: Timer>(
             .execute(&mut **transaction)
             .await
             .map_err(map_sql)?;
-            append_connection(transaction, source, id, payload).await
+            control.check()?;
+            let result = append_connection(transaction, source, id, payload).await;
+            control.check()?;
+            result
         })
         .await
         .map_err(Error::uncertain)
@@ -73,26 +75,38 @@ async fn append_connection(
     decode_position(position)
 }
 impl Source for PgStore {
-    async fn high_water(&self, source: &SourceScope) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(
+        &self,
+        source: &SourceScope,
+        control: &Control<'_, T>,
+    ) -> Result<Option<Position>, Error> {
         let scope = source.clone();
-        self.transact(source.tenant(), Duration::from_secs(30), move |tx| Box::pin(async move {
+        self.controlled_read(source, control, move |tx| Box::pin(async move {
             let value: Option<i64> = sqlx::query_scalar("SELECT max(position) FROM rss_projection.events WHERE tenant_id=$1::uuid AND source_id=$2")
                 .bind(scope.tenant().to_string()).bind(scope.source()).fetch_one(&mut *tx.connection).await.map_err(map_sql)?;
             value.map(decode_position).transpose()
         })).await
     }
-    async fn read(
+    async fn read<T: Timer>(
         &self,
         source: &SourceScope,
         after: Option<Position>,
         limit: BatchLimit,
+        control: &Control<'_, T>,
     ) -> Result<Vec<Event>, Error> {
         let scope = source.clone();
-        self.transact(source.tenant(), Duration::from_secs(30), move |tx| Box::pin(async move {
+        self.controlled_read(source, control, move |tx| Box::pin(async move {
             let rows = sqlx::query("SELECT position,event_id,payload FROM rss_projection.events WHERE tenant_id=$1::uuid AND source_id=$2 AND ($3::bigint IS NULL OR position>$3) ORDER BY position LIMIT $4")
                 .bind(scope.tenant().to_string()).bind(scope.source()).bind(encode_position(after)).bind(i64::from(limit.get()))
                 .fetch_all(&mut *tx.connection).await.map_err(map_sql)?;
-            rows.into_iter().map(|row| Event::new(scope.clone(), decode_position(row.try_get("position").map_err(map_sql)?)?, row.try_get::<String,_>("event_id").map_err(map_sql)?, row.try_get("payload").map_err(map_sql)?)).collect()
+            let mut events = Vec::with_capacity(rows.len());
+            for row in rows {
+                tx.check()?;
+                events.push(Event::new(scope.clone(), decode_position(row.try_get("position").map_err(map_sql)?)?, row.try_get::<String,_>("event_id").map_err(map_sql)?, row.try_get("payload").map_err(map_sql)?)?);
+                tx.check()?;
+                tokio::task::yield_now().await;
+            }
+            Ok(events)
         })).await
     }
 }

@@ -21,3 +21,15 @@ pub fn source<C: Clock>(
     rss_observation_postgres::PgSource::new(store, grant, scope)
 }
 fn main() {}
+
+#[cfg(feature = "observation-projection")]
+pub async fn read_source<C: Clock,T: rss_projection::Timer>(
+    source: &rss_observation_postgres::PgSource<C>, control: &rss_projection::Control<'_,T>,
+) -> Result<(),rss_projection::Error> {
+    use rss_projection::Source;
+    source.high_water(source.scope(),control).await?;
+    for event in source.read(source.scope(),None,rss_projection::BatchLimit::new(1)?,control).await? {
+        source.resolve(&event,control).await?;
+    }
+    Ok(())
+}

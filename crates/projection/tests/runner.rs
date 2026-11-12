@@ -42,15 +42,22 @@ fn event(scope: &ProjectionScope, n: u64) -> anyhow::Result<Event> {
 }
 struct Journal(Vec<Event>);
 impl Source for Journal {
-    async fn high_water(&self, _: &SourceScope) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(
+        &self,
+        _: &SourceScope,
+        control: &Control<'_, T>,
+    ) -> Result<Option<Position>, Error> {
+        control.check()?;
         Ok(self.0.last().map(Event::position))
     }
-    async fn read(
+    async fn read<T: Timer>(
         &self,
         _: &SourceScope,
         after: Option<Position>,
         limit: BatchLimit,
+        control: &Control<'_, T>,
     ) -> Result<Vec<Event>, Error> {
+        control.check()?;
         Ok(self
             .0
             .iter()
@@ -86,7 +93,8 @@ impl Execution for Memory {
     fn scope(&self) -> &ProjectionScope {
         &self.scope
     }
-    async fn checkpoint(&self) -> Result<Checkpoint, Error> {
+    async fn checkpoint<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+        control.check()?;
         if self.stale.load(Ordering::SeqCst) {
             return Err(Error::new(rss_projection::ErrorKind::Fenced));
         }
@@ -99,8 +107,9 @@ impl Execution for Memory {
         &self,
         expected: Option<Position>,
         event: &Event,
-        _: &Control<'_, T>,
+        control: &Control<'_, T>,
     ) -> Result<ApplyOutcome, Error> {
+        control.check()?;
         let mut state = self
             .state
             .lock()
@@ -276,8 +285,9 @@ impl ExternalCheckpoint for &Progress {
     fn scope(&self) -> &ProjectionScope {
         &self.inner.scope
     }
-    async fn load(&self) -> Result<Checkpoint, Error> {
-        self.inner.checkpoint().await
+    async fn load<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+        control.check()?;
+        self.inner.checkpoint(control).await
     }
     async fn advance<T: Timer>(
         &self,
@@ -365,8 +375,9 @@ impl Execution for ConsumingTime<'_> {
     fn scope(&self) -> &ProjectionScope {
         self.memory.scope()
     }
-    async fn checkpoint(&self) -> Result<Checkpoint, Error> {
-        self.memory.checkpoint().await
+    async fn checkpoint<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+        control.check()?;
+        self.memory.checkpoint(control).await
     }
     async fn execute<T: Timer>(
         &self,
@@ -411,17 +422,24 @@ struct BlockedSource {
     entered: tokio::sync::Notify,
 }
 impl Source for BlockedSource {
-    async fn high_water(&self, _: &SourceScope) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(
+        &self,
+        _: &SourceScope,
+        control: &Control<'_, T>,
+    ) -> Result<Option<Position>, Error> {
+        control.check()?;
         Ok(None)
     }
-    async fn read(
+    async fn read<T: Timer>(
         &self,
         _: &SourceScope,
         _: Option<Position>,
         _: BatchLimit,
+        control: &Control<'_, T>,
     ) -> Result<Vec<Event>, Error> {
+        control.check()?;
         self.entered.notify_one();
-        std::future::pending().await
+        control.run(std::future::pending()).await
     }
 }
 #[tokio::test]
@@ -481,8 +499,9 @@ impl Execution for Filtering {
     fn scope(&self) -> &ProjectionScope {
         self.0.scope()
     }
-    async fn checkpoint(&self) -> Result<Checkpoint, Error> {
-        self.0.checkpoint().await
+    async fn checkpoint<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+        control.check()?;
+        self.0.checkpoint(control).await
     }
     async fn execute<T: Timer>(
         &self,
@@ -520,9 +539,15 @@ async fn filtered_events_advance_and_consume_total_budget() -> anyhow::Result<()
     );
     assert_eq!(report.position, Some(Position::new(1)?));
     assert_eq!(report.stop, Stop::EventLimit);
-    assert_eq!(execution.checkpoint().await?.position, report.position);
+    assert_eq!(
+        execution.checkpoint(&control).await?.position,
+        report.position
+    );
     Ok(())
 }
 
 #[path = "runner/observation.rs"]
 mod observation;
+
+#[path = "runner/budget.rs"]
+mod budget;
