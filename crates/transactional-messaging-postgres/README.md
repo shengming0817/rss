@@ -296,8 +296,9 @@ Configure an `rss-data-protection::Aead` implementation with external key owners
 or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
 An existing terminal Inbox receipt with no saved payload is not retroactively replayable.
 
-Create the opaque operator store with `PgRecoveryStore::connect(config, timer, binding, protector)` after
-provisioning its privileges. The store privately owns the same PG pool/transaction implementation;
+Create the opaque operator store with `PgRecoveryStore::connect(config, timer, storage, protector)` after
+provisioning its privileges. Each query, mutation and receipt read supplies its own explicit
+`ExecutionBinding`, alongside the authorized request. The store privately owns the same PG pool/transaction implementation;
 it has no runtime, pool, raw SQL, Deref or generic transaction accessor. Ordinary `PgRuntime::connect`
 continues to reject operator UPDATE rights. Provision the operator using the single
 [maintenance grant contract below](#consumer-archive-schema-and-role-cutover-2302); ordinary consumer
