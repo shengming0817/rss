@@ -251,8 +251,11 @@ fn bounded_identity_values() -> Result<(), Box<dyn std::error::Error>> {
     assert!(DeviceId::parse("bad").is_err());
     assert!(DeviceId::parse("00000000-0000-0000-0000-000000000000").is_err());
     assert!(BatchLimit::new(0).is_err());
-    assert!(BatchLimit::new(65).is_err());
-    assert_eq!(BatchLimit::new(64)?.get(), 64);
+    assert!(BatchLimit::new(1025).is_err());
+    for value in [1, 65, 1024] {
+        assert_eq!(BatchLimit::new(value)?.get(), value);
+    }
+    assert_eq!(BatchLimit::default().get(), 64);
     assert!(!format!("{:?}", c.spec()).contains("matrix"));
     Ok(())
 }

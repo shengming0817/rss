@@ -9,20 +9,23 @@ use std::sync::Arc;
 pub struct PgStore<R> {
     outbox: Arc<PgOutboxStore<R>>,
     clock: crate::CommandClock,
+    supersede_batch_size: BatchLimit,
 }
 impl<R: Send> PgStore<R> {
     /// Validate component storage/role on the caller's configured transaction.
     /// All later transactions must use this same database and runtime role.
+    /// `supersede_batch_size` bounds each page within one atomic authority transaction.
     /// `callers` declares the complete component caller set, including this runtime's login.
     pub async fn new(
         tx: &mut PgTransaction<'_>,
         outbox: Arc<PgOutboxStore<R>>,
         clock: crate::CommandClock,
         callers: &crate::CallerRoles,
+        supersede_batch_size: BatchLimit,
     ) -> Result<Self, PgError> {
         outbox.validate_transaction(tx)?;
         crate::probe::validate(tx, callers).await?;
-        Ok(Self { outbox, clock })
+        Ok(Self { outbox, clock, supersede_batch_size })
     }
     /// Read this store's authoritative command time in Unix microseconds.
     /// The transaction must belong to the admitted runtime, even with an integration clock.
@@ -171,7 +174,7 @@ impl<R: Send> Store for PgStore<R> {
         }
         // Each page is bounded in memory. One enclosing transaction/deadline covers the full authority change.
         loop {
-            let rows = page(tx, s, None, 64).await?;
+            let rows = page(tx, s, None, i64::from(self.supersede_batch_size.get())).await?;
             if rows.is_empty() {
                 break;
             }

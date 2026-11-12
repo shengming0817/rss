@@ -234,6 +234,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
                         other_outbox,
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
+                        BatchLimit::default(),
                     )
                     .await
                 })
@@ -290,6 +291,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
                         selected,
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
+                        BatchLimit::default(),
                     )
                     .await
                 })

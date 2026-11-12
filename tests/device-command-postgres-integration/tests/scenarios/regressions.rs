@@ -95,6 +95,8 @@ pub(crate) async fn authority_rollback(f: &Fixture) -> anyhow::Result<()> {
     let c = Coordinate::new(2, 3)?;
     let a = f.queue("authority-rollback-a", s, c).await?;
     let b = f.queue("authority-rollback-b", s, c).await?;
+    // The fixture uses two records per supersede page.
+    let tail = f.queue("authority-rollback-tail", s, c).await?;
     let store = f.store.clone();
     let next = Coordinate::new(2, 4)?;
     let attempt = f
@@ -109,6 +111,7 @@ pub(crate) async fn authority_rollback(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(status(attempt), "rolled-back");
     assert_eq!(f.load("authority-rollback-a", s).await?, Some(a));
     assert_eq!(f.load("authority-rollback-b", s).await?, Some(b));
+    assert_eq!(f.load("authority-rollback-tail", s).await?, Some(tail));
     f.queue("authority-remains", s, c).await?;
     Ok(())
 }

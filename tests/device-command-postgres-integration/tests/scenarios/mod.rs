@@ -557,8 +557,14 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
             .is_err()
         );
     }
+    let s = Scope::new(s.tenant(), DeviceId::parse("550e8400-e29b-41d4-a716-446655440099")?);
+    let c = Coordinate::new(1, 1)?;
+    f.initialize(s, c).await?;
+    for index in 0..1025 {
+        f.queue(&format!("page-{index:04}"), s, c).await?;
+    }
     let store = f.store.clone();
-    let limit = BatchLimit::new(1)?;
+    let limit = BatchLimit::new(1024)?;
     let page = committed(
         f.runtime
             .local_tx(s.tenant(), budget()?, move |tx| {
@@ -566,7 +572,7 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
             })
             .await,
     )?;
-    assert_eq!(page.commands.len(), 1);
+    assert_eq!(page.commands.len(), 1024);
     let store = f.store.clone();
     let after = page.after;
     let next_cursor = after.clone();
@@ -577,7 +583,7 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
             })
             .await,
     )?;
-    assert!(next.commands.len() <= 1);
+    assert_eq!(next.commands.len(), 1);
     if let (Some(a), Some(b)) = (after, next.after) {
         assert!(a < b);
     }

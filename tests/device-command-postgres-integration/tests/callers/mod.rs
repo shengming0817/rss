@@ -95,7 +95,7 @@ async fn admit(f: &Fixture, callers: CallerRoles) -> anyhow::Result<bool> {
         .runtime
         .local_tx(scope(TENANT)?.tenant(), budget()?, move |tx| {
             Box::pin(
-                async move { PgStore::new(tx, outbox, CommandClock::Postgres, &callers).await },
+                async move { PgStore::new(tx, outbox, CommandClock::Postgres, &callers, BatchLimit::default()).await },
             )
         })
         .await;
@@ -228,7 +228,7 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
         .runtime
         .local_tx(s.tenant(), budget()?, move |tx| {
             Box::pin(
-                async move { PgStore::new(tx, outbox, CommandClock::Postgres, &callers).await },
+                async move { PgStore::new(tx, outbox, CommandClock::Postgres, &callers, BatchLimit::default()).await },
             )
         })
         .await;

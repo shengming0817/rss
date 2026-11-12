@@ -145,10 +145,11 @@ async fn stores_for(
         )?,
     )?);
     let selected = outbox.clone();
+    let supersede_batch_size = BatchLimit::new(2)?;
     let store = Arc::new(committed(
         runtime
             .local_tx(TenantId::parse(TENANT)?, budget()?, move |tx| {
-                Box::pin(async move { PgStore::new(tx, selected, clock, &callers).await })
+                Box::pin(async move { PgStore::new(tx, selected, clock, &callers, supersede_batch_size).await })
             })
             .await,
     )?);

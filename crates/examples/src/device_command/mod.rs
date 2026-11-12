@@ -180,6 +180,7 @@ async fn scenario(
                         selected,
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
+                        BatchLimit::default(),
                     )
                     .await
                 })
