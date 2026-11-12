@@ -379,9 +379,9 @@ async fn identity_conflict_visibility_and_restart_recovery() -> anyhow::Result<(
     )?;
     assert!(f.write(&other).await.is_err());
     assert_eq!(f.read(&d).await?.rows.len(), 2);
+    expanded_dimensions(&f).await?;
     f.ch.restart().await?;
     assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
-    expanded_dimensions(&f).await?;
     Ok(())
 }
 #[tokio::test]

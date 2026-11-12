@@ -456,13 +456,13 @@ async fn run() -> anyhow::Result<()> {
         &config("dr_operator")?,
     ))
     .await?;
+    expanded_members(config("dr_operator")?, other).await?;
     Box::pin(consumer::run(
         config("dr_runtime")?,
         config("dr_operator")?,
         &owner,
     ))
     .await?;
-    expanded_members(config("dr_operator")?, other).await?;
     next.close().await;
     store.close().await;
     runtime.close().await;

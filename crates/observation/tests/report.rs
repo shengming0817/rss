@@ -100,6 +100,10 @@ fn canonical_bytes_cover_all_inputs() -> anyhow::Result<()> {
     Ok(())
 }
 #[test]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one boundary matrix verifies the shared encoded batch budget and decoding contract"
+)]
 fn bounds_and_unknown_versions_are_rejected() -> anyhow::Result<()> {
     assert!(id("").is_err());
     assert!(id(&"x".repeat(257)).is_err());

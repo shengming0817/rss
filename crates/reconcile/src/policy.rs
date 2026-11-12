@@ -84,7 +84,7 @@ impl Policy {
     pub(crate) fn retry_delay(&self, target: &crate::Target, failures: u32) -> Duration {
         use std::hash::{Hash, Hasher};
         let mut upper = self.backoff;
-        for _ in 0..failures.max(1).min(128) {
+        for _ in 0..failures.clamp(1, 128) {
             upper = upper.saturating_mul(2).min(self.cap);
             if upper == self.cap {
                 break;

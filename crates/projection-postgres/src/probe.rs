@@ -75,7 +75,7 @@ SELECT
         LEFT JOIN pg_constraint c ON c.conrelid=to_regclass('rss_projection.'||expected.relation)
             AND c.conname=expected.relation||'_'||expected.field||'_check'
         WHERE c.oid IS NULL OR NOT c.convalidated OR pg_get_constraintdef(c.oid) IS DISTINCT FROM
-            format('CHECK (((octet_length(%1$s) >= 1) AND (octet_length(%1$s) <= 255) AND ((%1$s COLLATE "C") !~ ''[^A-Za-z0-9_.:-]''::text)))',expected.field)
+            format('CHECK ((((octet_length(%1$s) >= 1) AND (octet_length(%1$s) <= 255)) AND ((%1$s COLLATE "C") !~ ''[^A-Za-z0-9_.:-]''::text)))',expected.field)
     )
     AND EXISTS (SELECT FROM pg_attribute WHERE attrelid=to_regclass('rss_projection.checkpoints')
         AND attname='definition_identity' AND atttypid='bytea'::regtype AND attnotnull AND NOT attisdropped)

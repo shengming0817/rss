@@ -285,7 +285,7 @@ pub(super) async fn run(
         .execute(&mut *raw)
         .await?;
     let claimed = sqlx::query_scalar::<_,i64>(
-        "SELECT count(*) FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,86400001)",
+        "SELECT count(*) FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,9223372036854776)",
     )
     .fetch_one(&mut *raw)
     .await;
@@ -297,7 +297,7 @@ pub(super) async fn run(
         .execute(&mut *raw)
         .await?;
     let lease: (i64, String, i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,60000)").fetch_one(&mut *raw).await?;
-    for invalid in [-1_i64, 86400001, i64::MAX] {
+    for invalid in [-1_i64, 9_223_372_036_854_776, i64::MAX] {
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM rss_transactional_messaging.outbox_lease(current_setting('rss.tenant_id')::uuid,$1,$2::uuid,$3,$4,NULL)",
         )

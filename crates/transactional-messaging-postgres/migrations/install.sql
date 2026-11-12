@@ -134,7 +134,7 @@ CREATE TABLE rss_transactional_messaging.dr_plans (
 );
 
 CREATE TABLE rss_transactional_messaging.dr_members (
- tenant_id uuid NOT NULL, operation_id uuid NOT NULL, ordinal integer NOT NULL CHECK(ordinal BETWEEN 0 AND 499),
+ tenant_id uuid NOT NULL, operation_id uuid NOT NULL, ordinal integer NOT NULL CHECK(ordinal BETWEEN 0 AND 1023),
  message_id text NOT NULL, consumer_group text NOT NULL, contract text,
  fingerprint bytea NOT NULL CHECK(octet_length(fingerprint)=32), outbox_seq bigint REFERENCES rss_transactional_messaging.outbox(seq),
  status text NOT NULL CHECK(status IN ('pending','publishing','completed','blocked')),

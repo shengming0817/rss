@@ -351,6 +351,19 @@ impl RejectReason {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "MQTT transport owns its Tokio connection and reconnect timers"
+)]
+pub(crate) fn timer_deadline(timeout: Duration) -> Result<tokio::time::Instant, MqttError> {
+    if timeout.is_zero() {
+        return Err(MqttError::InvalidConfig);
+    }
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or(MqttError::InvalidConfig)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,17 +435,4 @@ mod tests {
         }
         Ok(())
     }
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "MQTT transport owns its Tokio connection and reconnect timers"
-)]
-pub(crate) fn timer_deadline(timeout: Duration) -> Result<tokio::time::Instant, MqttError> {
-    if timeout.is_zero() {
-        return Err(MqttError::InvalidConfig);
-    }
-    tokio::time::Instant::now()
-        .checked_add(timeout)
-        .ok_or(MqttError::InvalidConfig)
 }

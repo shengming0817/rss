@@ -12,6 +12,10 @@ const V3: &str = concat!(
     ),
 );
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one upgrade fixture compares preserved data and current schema admission"
+)]
 pub(crate) async fn upgrade(connection: &mut PgConnection) -> anyhow::Result<()> {
     sqlx::raw_sql(V3).execute(&mut *connection).await?;
     // A different tenant's generation and receipt must survive without identity adoption.

@@ -507,6 +507,10 @@ pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
     f.runtime.close().await;
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one transaction fixture verifies permissions and committed recovery cursor progression"
+)]
 async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
     let s = scope(TENANT)?;
     let leaked:i64=committed(f.runtime.local_tx(s.tenant(),budget()?,|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {
@@ -597,7 +601,10 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
     eprintln!(
         "DEVICE_RECOVERY_CAPACITY records={} transaction_ms={} granted_locks={locks}",
         page.commands.len(),
-        Timer::new().now().duration_since(started).as_millis()
+        Timer::new()
+            .now()
+            .saturating_duration_since(started)
+            .as_millis()
     );
     assert_eq!(page.commands.len(), 1024);
     let store = f.store.clone();

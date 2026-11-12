@@ -462,6 +462,10 @@ async fn expired_transaction_keeps_conflicting_resources_locked(
 }
 
 // Same durable owner and ACL path as the small fairness cases; no extra fixture service.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one durable fixture verifies resource admission and bounded scan cursor progression"
+)]
 async fn expanded_capacity(
     store: &PgStore,
     owner: &PgPool,

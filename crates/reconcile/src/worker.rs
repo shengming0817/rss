@@ -119,10 +119,10 @@ impl<F: FnMut(Observation)> Active<'_, F> {
     fn schedule(&mut self, now: Duration, after: Duration) {
         // Longer deadlines are covered by the recovery scan. These hints carry no
         // claim authority and exist only after acknowledged settlement.
-        if after < self.idle_scan {
-            if let Some(at) = now.checked_add(after) {
-                self.due.insert(at);
-            }
+        if after < self.idle_scan
+            && let Some(at) = now.checked_add(after)
+        {
+            self.due.insert(at);
         }
     }
     fn scanned_through(&mut self, started: Duration) {
