@@ -14,14 +14,14 @@ impl PgArchiveRepository {
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: rss_transactional_messaging::fence::ExecutionBinding,
+        storage: rss_transactional_messaging::fence::StorageIdentity,
     ) -> Result<Self, Error> {
         Ok(Self {
             retired_scan_limit: 64,
             runtime: PgRuntime::connect_profile(
                 config,
                 timer,
-                binding,
+                storage,
                 crate::transaction::Profile::Archive,
             )
             .await

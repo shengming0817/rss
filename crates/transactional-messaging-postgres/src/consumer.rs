@@ -127,7 +127,7 @@ pub(crate) async fn execute_transaction<
     source: Option<(&crate::PgOutboxStore<()>, &crate::PgOutboxClaim)>,
     #[cfg(feature = "integration")] injection: Option<crate::transaction::TransactionInjection>,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
-    if !claim.matches(runtime) {
+    if !claim.matches(runtime) || source.is_some_and(|(_, source)| source.binding != claim.binding) {
         return TransactionOutcome::fenced();
     }
     let timer = &runtime.timer;

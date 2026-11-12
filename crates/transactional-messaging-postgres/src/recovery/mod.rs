@@ -48,14 +48,14 @@ impl<K: Aead + Send + Sync> PgRecoveryStore<K> {
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: rss_transactional_messaging::fence::ExecutionBinding,
+        storage: rss_transactional_messaging::fence::StorageIdentity,
         key: Arc<K>,
     ) -> Result<Self, Error> {
         let runtime = Arc::new(
             PgRuntime::connect_profile(
                 config,
                 timer,
-                binding,
+                storage,
                 crate::transaction::Profile::Recovery,
             )
             .await
@@ -144,18 +144,21 @@ pub(crate) async fn check(
 impl<K: Aead + Send + Sync> RecoveryStore for PgRecoveryStore<K> {
     async fn query(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedQuery,
         deadline: OperationDeadline,
     ) -> Result<Page, Error> {
-        query::query(&self.runtime, request.request(), deadline).await
+        query::query(&self.runtime, binding, request.request(), deadline).await
     }
     async fn mutate(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedMutation,
         deadline: OperationDeadline,
     ) -> LocalTxAttempt<Receipt, Error> {
         mutation::mutate(
             &self.runtime,
+            binding,
             self.key.as_ref(),
             request.request(),
             deadline,
@@ -164,13 +167,15 @@ impl<K: Aead + Send + Sync> RecoveryStore for PgRecoveryStore<K> {
     }
     async fn receipt(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedMutation,
         deadline: OperationDeadline,
     ) -> Result<Option<Receipt>, Error> {
+        if binding.tenant() != request.request().tenant() { return Err(Error::Unauthorized); }
         let result = self
             .runtime
             .local_tx_with_context(
-                request.request().tenant(),
+                binding,
                 deadline,
                 request.request(),
                 |request, tx| Box::pin(mutation::read_receipt(tx, request)),

@@ -16,13 +16,15 @@ use sqlx::{Row, postgres::PgRow};
 
 pub(super) async fn mutate<K: Aead + Send + Sync>(
     runtime: &PgRuntime,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     key: &K,
     request: &Mutation,
     deadline: OperationDeadline,
 ) -> LocalTxAttempt<Receipt, Error> {
+    if binding.tenant() != request.tenant() { return LocalTxAttempt::not_started(Error::Unauthorized); }
     let result = runtime
         .local_tx_with_context(
-            request.tenant(),
+            binding,
             deadline,
             (key, request),
             |(key, request), tx| {

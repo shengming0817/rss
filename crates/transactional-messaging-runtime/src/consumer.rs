@@ -148,7 +148,11 @@ where
                     execution.emitter,
                 )
                 .await?;
-                return Ok(ProcessingDisposition::Rejected(failure));
+                return Ok(if failure == EnvelopeValidationFailure::ExecutionMismatch {
+                    ProcessingDisposition::Fenced
+                } else {
+                    ProcessingDisposition::Rejected(failure)
+                });
             }
         };
 

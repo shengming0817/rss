@@ -71,11 +71,13 @@ fn candidate(v: &Value, r: &Request) -> Result<Option<Candidate>, PgError> {
 impl ArchiveRepository for PgArchiveRepository {
     async fn receipt(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         deadline: OperationDeadline,
     ) -> Result<Option<Outcome>, Error> {
         let r = request.request();
-        attempt(self.runtime.local_tx_with_context(r.tenant(),deadline,r,|r,tx|Box::pin(async move {
+        if binding.tenant() != r.tenant() { return Err(Error::Unauthorized); }
+        attempt(self.runtime.local_tx_with_context(binding,deadline,r,|r,tx|Box::pin(async move {
             let row=sqlx::query("SELECT j.request_digest,j.held,j.purged,j.fault,o.verified,o.reconciled FROM rss_transactional_messaging.archive_jobs j LEFT JOIN rss_transactional_messaging.archive_objects o ON o.tenant_id=j.tenant_id AND o.generation=j.generation WHERE j.tenant_id=$1::uuid AND j.operation_id=$2::uuid AND j.claim_epoch=current_setting('rss.execution_epoch')::bigint AND j.claim_lineage=decode(current_setting('rss.storage_lineage'),'hex')")
                 .bind(r.tenant().to_string()).bind(r.operation().to_string()).fetch_optional(&mut *tx.connection).await.map_err(super::sql_error)?;
             let Some(row)=row else {return Ok(None)};
@@ -89,6 +91,7 @@ impl ArchiveRepository for PgArchiveRepository {
 
     async fn claim(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         deadline: OperationDeadline,
     ) -> LocalTxAttempt<Claim, Error> {
@@ -101,8 +104,9 @@ impl ArchiveRepository for PgArchiveRepository {
         }
         let ttl = ttl as i64;
         let r = request.request();
+        if binding.tenant() != r.tenant() { return LocalTxAttempt::not_started(Error::Unauthorized); }
         let scan = i32::from(self.retired_scan_limit);
-        attempt(self.runtime.local_tx_with_context(r.tenant(),deadline,(r,ttl,scan),|(r,ttl,scan),tx|Box::pin(async move {
+        attempt(self.runtime.local_tx_with_context(binding,deadline,(r,ttl,scan),|(r,ttl,scan),tx|Box::pin(async move {
             let v:Value=sqlx::query_scalar("SELECT rss_transactional_messaging.archive_claim($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9)")
                 .bind(r.operation().to_string()).bind(r.id().to_string()).bind(r.version().get()).bind(r.digest().as_slice()).bind(r.retention().hot_seconds()).bind(r.retention().cold_seconds()).bind(r.hold()==Hold::Retain).bind(*ttl).bind(*scan).fetch_one(&mut *tx.connection).await.map_err(super::sql_error)?;
             let j=&v["job"];
@@ -123,15 +127,17 @@ impl ArchiveRepository for PgArchiveRepository {
     }
     async fn prepare(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         r: &AuthorizedRequest,
         c: &Claim,
         p: &Prepared,
         d: OperationDeadline,
     ) -> LocalTxAttempt<(), Error> {
-        self.apply(r, c, d, Command::Prepare(p)).await
+        self.apply(binding, r, c, d, Command::Prepare(p)).await
     }
     async fn record(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         r: &AuthorizedRequest,
         c: &Claim,
         p: &Verified,
@@ -140,10 +146,11 @@ impl ArchiveRepository for PgArchiveRepository {
         if p.request_digest() != r.request().digest() {
             return LocalTxAttempt::not_started(Error::Evidence);
         }
-        self.apply(r, c, d, Command::Record(p)).await
+        self.apply(binding, r, c, d, Command::Record(p)).await
     }
     async fn purge(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         r: &AuthorizedRequest,
         c: &Claim,
         p: &Verified,
@@ -152,10 +159,11 @@ impl ArchiveRepository for PgArchiveRepository {
         if p.request_digest() != r.request().digest() || p.generation() != c.generation {
             return LocalTxAttempt::not_started(Error::Evidence);
         }
-        self.apply(r, c, d, Command::Purge(p)).await
+        self.apply(binding, r, c, d, Command::Purge(p)).await
     }
     async fn reconcile(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         r: &AuthorizedRequest,
         c: &Claim,
         p: &Missing,
@@ -164,10 +172,11 @@ impl ArchiveRepository for PgArchiveRepository {
         if p.request_digest() != r.request().digest() {
             return LocalTxAttempt::not_started(Error::Evidence);
         }
-        self.apply(r, c, d, Command::Reconcile(p)).await
+        self.apply(binding, r, c, d, Command::Reconcile(p)).await
     }
     async fn fault(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         r: &AuthorizedRequest,
         c: &Claim,
         error: Error,
@@ -178,7 +187,7 @@ impl ArchiveRepository for PgArchiveRepository {
             Error::Evidence => Command::FaultEvidence,
             _ => return LocalTxAttempt::not_started(Error::Invalid),
         };
-        self.apply(r, c, d, command).await
+        self.apply(binding, r, c, d, command).await
     }
 }
 // Each variant fixes both the SQL signature and its parameter shape; no optional bind positions.
@@ -213,15 +222,17 @@ impl Command<'_> {
 impl PgArchiveRepository {
     async fn apply(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         r: &AuthorizedRequest,
         c: &Claim,
         d: OperationDeadline,
         command: Command<'_>,
     ) -> LocalTxAttempt<(), Error> {
+        if binding.tenant() != r.request().tenant() { return LocalTxAttempt::not_started(Error::Unauthorized); }
         attempt(
             self.runtime
                 .local_tx_with_context(
-                    r.request().tenant(),
+                    binding,
                     d,
                     (r.request(), c, command),
                     |(r, c, command), tx| {

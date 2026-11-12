@@ -11,18 +11,21 @@ pub trait ArchiveRepository: Send + Sync {
     /// Read durable progress for the exact request after uncertain settlement; absence proves nothing.
     fn receipt(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<Option<Outcome>, Error>> + Send;
     /// Acquire or resume a generation, fencing previous workers. Held requests persist their decision too.
     fn claim(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         deadline: OperationDeadline,
     ) -> impl Future<Output = LocalTxAttempt<Claim, Error>> + Send;
     /// Persist encryption bytes before any external write.
     fn prepare(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         claim: &Claim,
         prepared: &Prepared,
@@ -31,6 +34,7 @@ pub trait ArchiveRepository: Send + Sync {
     /// Persist the verifier's receipt and discard temporary ciphertext atomically.
     fn record(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         claim: &Claim,
         proof: &Verified,
@@ -39,6 +43,7 @@ pub trait ArchiveRepository: Send + Sync {
     /// Recheck current policy, source revision and lease under lock before removing HOT.
     fn purge(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         claim: &Claim,
         proof: &Verified,
@@ -47,6 +52,7 @@ pub trait ArchiveRepository: Send + Sync {
     /// Mark an expired exact version missing, preserving the source and operation evidence.
     fn reconcile(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         claim: &Claim,
         proof: &Missing,
@@ -55,6 +61,7 @@ pub trait ArchiveRepository: Send + Sync {
     /// Persist a closed integrity fault; never delete evidence.
     fn fault(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedRequest,
         claim: &Claim,
         error: Error,
@@ -128,6 +135,7 @@ pub async fn execute<
     O: Observer,
 >(
     repository: &R,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     store: &S,
     hot: &HotKey<H>,
     archive: &ArchiveKey<K>,
@@ -145,6 +153,7 @@ pub async fn execute<
         |deadline| {
             run(
                 repository,
+                binding,
                 store,
                 hot,
                 archive,
@@ -158,7 +167,7 @@ pub async fn execute<
             if integrity_observed.load(Ordering::Relaxed) {
                 Ok(None)
             } else {
-                repository.receipt(request, deadline).await
+                repository.receipt(binding, request, deadline).await
             }
         },
         |status, outcome, error| {
@@ -172,6 +181,7 @@ pub async fn execute<
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // reason: one immutable execution identity accompanies the existing archive dependencies.
 async fn run<
     R: ArchiveRepository,
     S: ArchiveObjectStore,
@@ -179,6 +189,7 @@ async fn run<
     K: Aead + Send + Sync,
 >(
     repository: &R,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     store: &S,
     hot: &HotKey<H>,
     archive: &ArchiveKey<K>,
@@ -186,14 +197,14 @@ async fn run<
     deadline: OperationDeadline,
     integrity_observed: &AtomicBool,
 ) -> LocalTxAttempt<Outcome, Error> {
-    let claim = match settled(repository.claim(request, deadline).await) {
+    let claim = match settled(repository.claim(binding, request, deadline).await) {
         Ok(v) => v,
         Err(e) => return e,
     };
     if request.request().hold() == Hold::Retain {
         return LocalTxAttempt::committed(Outcome::Held);
     }
-    let result = advance(repository, store, hot, archive, request, &claim, deadline).await;
+    let result = advance(repository, binding, store, hot, archive, request, &claim, deadline).await;
     match result {
         Ok(outcome) => LocalTxAttempt::committed(outcome),
         Err(attempt) => {
@@ -209,7 +220,7 @@ async fn run<
             if let Some(error) = integrity {
                 integrity_observed.store(true, Ordering::Relaxed);
                 if let Err(failure) =
-                    settled(repository.fault(request, &claim, error, deadline).await)
+                    settled(repository.fault(binding, request, &claim, error, deadline).await)
                 {
                     return failure;
                 }
@@ -218,6 +229,7 @@ async fn run<
         }
     }
 }
+#[allow(clippy::too_many_arguments)] // reason: one immutable execution identity accompanies the existing archive dependencies.
 async fn advance<
     R: ArchiveRepository,
     S: ArchiveObjectStore,
@@ -225,6 +237,7 @@ async fn advance<
     K: Aead + Send + Sync,
 >(
     repository: &R,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     store: &S,
     hot: &HotKey<H>,
     archive: &ArchiveKey<K>,
@@ -233,7 +246,7 @@ async fn advance<
     deadline: OperationDeadline,
 ) -> Result<Outcome, LocalTxAttempt<Outcome, Error>> {
     let failure = LocalTxAttempt::not_started;
-    reconcile_retired(repository, store, request, claim, deadline).await?;
+    reconcile_retired(repository, binding, store, request, claim, deadline).await?;
     let object = if let Some(object) = &claim.object {
         object.clone()
     } else {
@@ -249,7 +262,7 @@ async fn advance<
                     .map_err(failure)?;
             settled(
                 repository
-                    .prepare(request, claim, &prepared, deadline)
+                    .prepare(binding, request, claim, &prepared, deadline)
                     .await,
             )?;
             prepared
@@ -277,7 +290,7 @@ async fn advance<
                 digest: request.request().digest(),
                 generation: claim.generation.clone(),
             };
-            settled(repository.reconcile(request, claim, &proof, deadline).await)?;
+            settled(repository.reconcile(binding, request, claim, &proof, deadline).await)?;
             return Ok(Outcome::Reconciled);
         }
         return Err(failure(Error::Missing));
@@ -291,11 +304,11 @@ async fn advance<
         });
     }
     let proof = verify(archive, request.request(), claim, &object, observed).map_err(failure)?;
-    settled(repository.record(request, claim, &proof, deadline).await)?;
+    settled(repository.record(binding, request, claim, &proof, deadline).await)?;
     if claim.now < claim.hot_until {
         return Ok(Outcome::Archived);
     }
-    settled(repository.purge(request, claim, &proof, deadline).await)?;
+    settled(repository.purge(binding, request, claim, &proof, deadline).await)?;
     Ok(Outcome::Purged)
 }
 fn validate_object(expected: &Object, observed: &Observation) -> Result<(), Error> {
@@ -360,6 +373,7 @@ fn object_generation(object: &Object) -> Result<String, Error> {
 
 async fn reconcile_retired<R: ArchiveRepository, S: ArchiveObjectStore>(
     repository: &R,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     store: &S,
     request: &AuthorizedRequest,
     claim: &Claim,
@@ -384,7 +398,7 @@ async fn reconcile_retired<R: ArchiveRepository, S: ArchiveObjectStore>(
                         digest: request.request().digest(),
                         generation,
                     };
-                    settled(repository.record(request, claim, &proof, deadline).await)?;
+                    settled(repository.record(binding, request, claim, &proof, deadline).await)?;
                 }
             }
             None if object.version.is_some() => {
@@ -394,7 +408,7 @@ async fn reconcile_retired<R: ArchiveRepository, S: ArchiveObjectStore>(
                     digest: request.request().digest(),
                     generation,
                 };
-                settled(repository.reconcile(request, claim, &proof, deadline).await)?;
+                settled(repository.reconcile(binding, request, claim, &proof, deadline).await)?;
             }
             // An unknown PUT with no known version is not exact-version missing evidence.
             None => {}
