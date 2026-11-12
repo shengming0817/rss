@@ -56,97 +56,10 @@ pub(crate) async fn verify(owner: &PgPool, options: &PgConnectOptions) -> anyhow
             .await?,
     )?;
     for stage in 0..4 {
-        for (expired, cancelled, expected) in [
-            (true, false, ErrorKind::Deadline),
-            (false, true, ErrorKind::Cancelled),
-            (true, true, ErrorKind::Cancelled),
-        ] {
-            timer.advance(if expired {
-                Duration::from_secs(60)
-            } else {
-                Duration::ZERO
-            });
-            let signal = CancellationToken::new();
-            if cancelled {
-                signal.cancel();
-            }
-            let limited = Control::new(&timer, Duration::from_secs(60), &signal);
-            let before = attempts.load(Ordering::SeqCst);
-            assert_eq!(
-                read(&store, &projection, &checkpoint, stage, &limited)
-                    .await
-                    .err()
-                    .map(|e| e.kind()),
-                Some(expected)
-            );
-            assert_eq!(attempts.load(Ordering::SeqCst), before);
-        }
-        timer.advance(Duration::ZERO);
-        let huge = Control::new(&timer, Duration::MAX, &cancel);
-        let before = attempts.load(Ordering::SeqCst);
-        assert_eq!(
-            read(&store, &projection, &checkpoint, stage, &huge)
-                .await
-                .err()
-                .map(|e| e.kind()),
-            Some(ErrorKind::InvalidInput)
-        );
-        assert_eq!(attempts.load(Ordering::SeqCst), before);
-        for cancelled in [false, true] {
-            let held = pool.acquire().await?;
-            let signal = CancellationToken::new();
-            let limited = Control::new(&timer, Duration::from_secs(60), &signal);
-            let mut operation = Box::pin(read(&store, &projection, &checkpoint, stage, &limited));
-            assert!(futures::poll!(operation.as_mut()).is_pending());
-            timer.advance(Duration::from_secs(31));
-            assert!(futures::poll!(operation.as_mut()).is_pending());
-            if cancelled {
-                signal.cancel();
-            } else {
-                timer.advance(Duration::from_secs(60));
-            }
-            assert_eq!(
-                tokio::time::timeout(GUARD, operation)
-                    .await?
-                    .err()
-                    .map(|e| e.kind()),
-                Some(if cancelled {
-                    ErrorKind::Cancelled
-                } else {
-                    ErrorKind::Deadline
-                })
-            );
-            drop(held);
-            timer.advance(Duration::ZERO);
-        }
+        preflight(&store, &projection, &checkpoint, &timer, &attempts, stage).await?;
+        acquire_wait(&pool, &store, &projection, &checkpoint, &timer, stage).await?;
     }
-    // Spend 31 of 60 seconds at acquire: setup must use 29 seconds, never 60 or a fixed 30.
-    armed.store(true, Ordering::SeqCst);
-    let values = store.local_tx(scope.source(),&control,|tx|Box::pin(async move {
-        tx.with_connection(|connection| Box::pin(async move {
-            sqlx::query_as::<_,(String,String)>("SELECT current_setting('statement_timeout'),current_setting('lock_timeout')").fetch_one(connection).await
-        })).await
-    })).await?;
-    assert_eq!(values, ("29s".into(), "29s".into()));
-    armed.store(false, Ordering::SeqCst);
-    timer.advance(Duration::ZERO);
-    let values = store
-        .local_tx(scope.source(), &control, |tx| {
-            Box::pin(async move {
-                tx.with_connection(|connection| {
-                    Box::pin(async move {
-                        sqlx::query_scalar::<_, String>(
-                            "SELECT current_setting('statement_timeout')",
-                        )
-                        .fetch_one(connection)
-                        .await
-                    })
-                })
-                .await
-            })
-        })
-        .await?;
-    assert_eq!(values, "1min");
+    sql_budgets(&store, &scope, &timer, &armed, &control).await?;
     interrupted_read(owner, &pool, &store, &projection, &checkpoint, &timer).await?;
     rollback_stage(&store, scope.source(), &timer).await?;
     pool.close().await;
@@ -265,5 +178,127 @@ async fn rollback_stage(
         result.err().map(|e| e.kind()),
         Some(ErrorKind::RollbackFailed)
     );
+    Ok(())
+}
+
+async fn preflight(
+    store: &PgStore,
+    projection: &PgProjection<Counter>,
+    checkpoint: &PgCheckpoint,
+    timer: &ManualTimer,
+    attempts: &AtomicUsize,
+    stage: u8,
+) -> anyhow::Result<()> {
+    for (expired, cancelled, expected) in [
+        (true, false, ErrorKind::Deadline),
+        (false, true, ErrorKind::Cancelled),
+        (true, true, ErrorKind::Cancelled),
+    ] {
+        timer.advance(if expired {
+            Duration::from_secs(60)
+        } else {
+            Duration::ZERO
+        });
+        let signal = CancellationToken::new();
+        if cancelled {
+            signal.cancel();
+        }
+        let limited = Control::new(timer, Duration::from_secs(60), &signal);
+        let before = attempts.load(Ordering::SeqCst);
+        assert_eq!(
+            read(store, projection, checkpoint, stage, &limited)
+                .await
+                .err()
+                .map(|e| e.kind()),
+            Some(expected)
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), before);
+    }
+    timer.advance(Duration::ZERO);
+    let signal = CancellationToken::new();
+    let huge = Control::new(timer, Duration::MAX, &signal);
+    let before = attempts.load(Ordering::SeqCst);
+    assert_eq!(
+        read(store, projection, checkpoint, stage, &huge)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        Some(ErrorKind::InvalidInput)
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), before);
+    Ok(())
+}
+async fn acquire_wait(
+    pool: &PgPool,
+    store: &PgStore,
+    projection: &PgProjection<Counter>,
+    checkpoint: &PgCheckpoint,
+    timer: &ManualTimer,
+    stage: u8,
+) -> anyhow::Result<()> {
+    for cancelled in [false, true] {
+        let held = pool.acquire().await?;
+        let signal = CancellationToken::new();
+        let limited = Control::new(timer, Duration::from_secs(60), &signal);
+        let mut operation = Box::pin(read(store, projection, checkpoint, stage, &limited));
+        assert!(futures::poll!(operation.as_mut()).is_pending());
+        timer.advance(Duration::from_secs(31));
+        assert!(futures::poll!(operation.as_mut()).is_pending());
+        if cancelled {
+            signal.cancel();
+        } else {
+            timer.advance(Duration::from_secs(60));
+        }
+        assert_eq!(
+            tokio::time::timeout(GUARD, operation)
+                .await?
+                .err()
+                .map(|e| e.kind()),
+            Some(if cancelled {
+                ErrorKind::Cancelled
+            } else {
+                ErrorKind::Deadline
+            })
+        );
+        drop(held);
+        timer.advance(Duration::ZERO);
+    }
+    Ok(())
+}
+
+async fn sql_budgets(
+    store: &PgStore,
+    scope: &ProjectionScope,
+    timer: &ManualTimer,
+    armed: &AtomicBool,
+    control: &Control<'_, ManualTimer>,
+) -> anyhow::Result<()> {
+    // Spend 31 of 60 seconds at acquire: setup must use 29 seconds, never 60 or a fixed 30.
+    armed.store(true, Ordering::SeqCst);
+    let values = store.local_tx(scope.source(),control,|tx|Box::pin(async move {
+        tx.with_connection(|connection| Box::pin(async move {
+            sqlx::query_as::<_,(String,String)>("SELECT current_setting('statement_timeout'),current_setting('lock_timeout')").fetch_one(connection).await
+        })).await
+    })).await?;
+    assert_eq!(values, ("29s".into(), "29s".into()));
+    armed.store(false, Ordering::SeqCst);
+    timer.advance(Duration::ZERO);
+    let values = store
+        .local_tx(scope.source(), control, |tx| {
+            Box::pin(async move {
+                tx.with_connection(|connection| {
+                    Box::pin(async move {
+                        sqlx::query_scalar::<_, String>(
+                            "SELECT current_setting('statement_timeout')",
+                        )
+                        .fetch_one(connection)
+                        .await
+                    })
+                })
+                .await
+            })
+        })
+        .await?;
+    assert_eq!(values, "1min");
     Ok(())
 }
