@@ -64,6 +64,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         Arc::new(tls),
         rss_mqtt::Limits::new(8, 8, 8, 65536)?,
     )?
+    .timing(Duration::from_secs(30), Duration::from_secs(15))?
     .credentials(input.username, input.password.into_bytes())?
     .subscriptions(vec![topic.clone()])?;
     let (publisher, mut receiver, resource) = rss_mqtt::connect(

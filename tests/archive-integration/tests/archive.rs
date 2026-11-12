@@ -198,7 +198,8 @@ async fn run() -> anyhow::Result<()> {
     fence_fixture::provision(&owner).await?;
     let repository =
         PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::binding())
-            .await?.with_retired_scan_limit(1024)?;
+            .await?
+            .with_retired_scan_limit(1024)?;
     let raw = PgPoolOptions::new()
         .connect_with(
             options

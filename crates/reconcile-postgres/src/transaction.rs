@@ -227,7 +227,8 @@ async fn setup(
     identity: &Identity,
 ) -> Result<(), Error> {
     let millis = i32::try_from(timeout.as_millis().max(1))
-        .map_err(|_| Error::new(ErrorKind::InvalidInput))?.to_string();
+        .map_err(|_| Error::new(ErrorKind::InvalidInput))?
+        .to_string();
     let valid: bool = sqlx::query_scalar("SELECT session_user::text=$3 AND current_user::text=$4 AND current_database()::text=$5, set_config('rss.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true)")
         .bind(tenant.to_string()).bind(millis).bind(&identity.login).bind(&identity.role).bind(&identity.database)
         .fetch_one(connection).await.map_err(map_sql)?;

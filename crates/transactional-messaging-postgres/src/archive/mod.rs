@@ -31,7 +31,9 @@ impl PgArchiveRepository {
     /// Bound expired generations inspected per claim (1..=1024, default 64).
     /// This runtime budget is independent of immutable archive request identity.
     pub fn with_retired_scan_limit(mut self, limit: u16) -> Result<Self, Error> {
-        if !(1..=1024).contains(&limit) { return Err(Error::Invalid); }
+        if !(1..=1024).contains(&limit) {
+            return Err(Error::Invalid);
+        }
         self.retired_scan_limit = limit;
         Ok(self)
     }

@@ -226,16 +226,26 @@ fn dimensions_are_whitelisted_bounded_and_canonical() -> TestResult {
         )
         .is_err()
     );
-    let keys = (0..1024).map(|i| id(&format!("d{i:04}"))).collect::<Result<BTreeSet<_>, _>>()?;
+    let keys = (0..1024)
+        .map(|i| id(&format!("d{i:04}")))
+        .collect::<Result<BTreeSet<_>, _>>()?;
     let mut expanded = d.spec().clone();
     expanded.dimensions.allowed = keys.clone();
     expanded.dimensions.max_count = 1024;
     expanded.dimensions.max_total_bytes = 32768;
-    expanded.metric = Metric::State { members: keys.clone() };
+    expanded.metric = Metric::State {
+        members: keys.clone(),
+    };
     let definition = Definition::new(expanded.clone())?;
-    let dimensions = keys.iter().map(|k| Ok((k.clone(), id("v")?))).collect::<Result<BTreeMap<_,_>, Error>>()?;
+    let dimensions = keys
+        .iter()
+        .map(|k| Ok((k.clone(), id("v")?)))
+        .collect::<Result<BTreeMap<_, _>, Error>>()?;
     let series = Series::new(definition, id("s")?, id("r")?, dimensions)?;
-    assert_eq!(serde_json::from_slice::<Series>(&serde_json::to_vec(&series)?)?, series);
+    assert_eq!(
+        serde_json::from_slice::<Series>(&serde_json::to_vec(&series)?)?,
+        series
+    );
     expanded.dimensions.allowed.insert(id("extra")?);
     assert!(Definition::new(expanded.clone()).is_err());
     expanded.dimensions.allowed = keys.clone();

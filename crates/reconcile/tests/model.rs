@@ -80,7 +80,12 @@ fn resource_sets_are_explicit_bounded_canonical_and_redacted() -> anyhow::Result
     assert!(ResourceSet::new(tenant, ["bad key"]).is_err());
     assert!(ResourceSet::new(tenant, std::iter::repeat_n("same", 1025)).is_err());
     for count in [1001, 1024] {
-        assert_eq!(ResourceSet::new(tenant, (0..count).map(|i| format!("resource-{i}")))?.keys().len(), count);
+        assert_eq!(
+            ResourceSet::new(tenant, (0..count).map(|i| format!("resource-{i}")))?
+                .keys()
+                .len(),
+            count
+        );
     }
     assert!(ResourceSet::new(tenant, ["r".repeat(255)]).is_ok());
     assert!(ResourceSet::new(tenant, ["r".repeat(256)]).is_err());

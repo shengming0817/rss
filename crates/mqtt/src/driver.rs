@@ -432,7 +432,10 @@ async fn wait_reconnect(
 ) -> Next {
     let until = match crate::model::timer_deadline(driver.reconnect.next()) {
         Ok(until) => until,
-        Err(error) => { driver.fail(error); return Next::Stop; }
+        Err(error) => {
+            driver.fail(error);
+            return Next::Stop;
+        }
     };
     let sleep = tokio::time::sleep_until(until);
     tokio::pin!(sleep);

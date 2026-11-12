@@ -171,7 +171,9 @@ async fn damaged_row(
         ErrorKind::StorageContract,
     );
     assert_kind(
-        store.claim_due(scope, 2, 64, Duration::from_secs(1), c).await,
+        store
+            .claim_due(scope, 2, 64, Duration::from_secs(1), c)
+            .await,
         ErrorKind::StorageContract,
     );
     worker_rejects(store, scope, c, ErrorKind::StorageContract).await?;
@@ -272,7 +274,9 @@ async fn exhausted_epoch(
         .execute(owner).await?;
     let before = snapshot(owner, scope.reconciler()).await?;
     for _ in 0..2 {
-        let result = store.claim_due(&scope, 2, 64, Duration::from_secs(1), c).await;
+        let result = store
+            .claim_due(&scope, 2, 64, Duration::from_secs(1), c)
+            .await;
         assert_kind(result, ErrorKind::InvalidInput);
         assert_eq!(
             snapshot(owner, scope.reconciler()).await?,

@@ -462,33 +462,69 @@ async fn expired_transaction_keeps_conflicting_resources_locked(
 }
 
 // Same durable owner and ACL path as the small fairness cases; no extra fixture service.
-async fn expanded_capacity(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
+async fn expanded_capacity(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     let scope = scope(&"r".repeat(255))?;
     let target = Target::new(scope.clone(), "e".repeat(255))?;
-    let resources = ResourceSet::new(scope.tenant(), (0..1024).map(|i| format!("{i:04}{}", "x".repeat(251))))?;
+    let resources = ResourceSet::new(
+        scope.tenant(),
+        (0..1024).map(|i| format!("{i:04}{}", "x".repeat(251))),
+    )?;
     store.wake(&target, &resources, c).await?;
-    let claim = store.claim_due(&scope, 1024, 4096, Duration::from_secs(90_000), c).await?.claims.remove(0);
+    let claim = store
+        .claim_due(&scope, 1024, 4096, Duration::from_secs(90_000), c)
+        .await?
+        .claims
+        .remove(0);
     store.renew(&claim, Duration::from_secs(90_001), c).await?;
-    store.finish(&claim, Completion::Retry { after: Duration::from_secs(90_002), failures: u32::MAX }, c).await?;
+    store
+        .finish(
+            &claim,
+            Completion::Retry {
+                after: Duration::from_secs(90_002),
+                failures: u32::MAX,
+            },
+            c,
+        )
+        .await?;
     let persisted: (i64, i64) = sqlx::query_as("SELECT failures,(SELECT count(*) FROM rss_reconcile.target_resources WHERE reconciler=$1) FROM rss_reconcile.targets WHERE reconciler=$1")
         .bind(scope.reconciler()).fetch_one(owner).await?;
     assert_eq!(persisted, (i64::from(u32::MAX), 1024));
-    assert!(store.claim_due(&scope, 1025, 4096, Duration::from_secs(1), c).await.is_err());
-    assert!(store.claim_due(&scope, 1, u32::MAX, Duration::from_secs(1), c).await.is_err());
+    assert!(
+        store
+            .claim_due(&scope, 1025, 4096, Duration::from_secs(1), c)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_due(&scope, 1, u32::MAX, Duration::from_secs(1), c)
+            .await
+            .is_err()
+    );
     let queued = Scope::new(scope.tenant(), "expanded-scan")?;
     // Seed through the real definer in one fixture transaction, retaining canonical bindings.
     sqlx::query("SELECT rss_reconcile.wake($1::uuid,$2,'item-'||n,ARRAY[]::text[]) FROM generate_series(1,4096) n")
         .bind(queued.tenant().to_string()).bind(queued.reconciler()).execute(owner).await?;
     sqlx::query("UPDATE rss_reconcile.targets SET next_run=clock_timestamp()+interval '1 day' WHERE reconciler=$1 AND entity<>'item-4096'")
         .bind(queued.reconciler()).execute(owner).await?;
-    let page = store.claim_due(&queued, 1024, 4096, Duration::from_secs(30), c).await?;
+    let page = store
+        .claim_due(&queued, 1024, 4096, Duration::from_secs(30), c)
+        .await?;
     assert!(!page.more);
     assert_eq!(page.claims.len(), 1);
     assert_eq!(page.claims[0].target().entity(), "item-4096");
-    store.finish(&page.claims[0], Completion::Converged, c).await?;
+    store
+        .finish(&page.claims[0], Completion::Converged, c)
+        .await?;
     sqlx::query("UPDATE rss_reconcile.targets SET next_run=clock_timestamp() WHERE reconciler=$1 AND next_run IS NOT NULL")
         .bind(queued.reconciler()).execute(owner).await?;
-    let page = store.claim_due(&queued, 1024, 4096, Duration::from_secs(30), c).await?;
+    let page = store
+        .claim_due(&queued, 1024, 4096, Duration::from_secs(30), c)
+        .await?;
     assert_eq!(page.claims.len(), 1024);
     assert!(page.more);
     Ok(())

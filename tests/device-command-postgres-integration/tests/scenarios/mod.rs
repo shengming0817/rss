@@ -557,21 +557,48 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
             .is_err()
         );
     }
-    let s = Scope::new(s.tenant(), DeviceId::parse("550e8400-e29b-41d4-a716-446655440099")?);
+    let s = Scope::new(
+        s.tenant(),
+        DeviceId::parse("550e8400-e29b-41d4-a716-446655440099")?,
+    );
     let c = Coordinate::new(1, 1)?;
     f.initialize(s, c).await?;
     for index in 0..1025 {
         f.queue(&format!("page-{index:04}"), s, c).await?;
     }
-    let store = f.store.clone();
     let limit = BatchLimit::new(1024)?;
-    let page = committed(
+    let page_budget = OperationDeadline::from_remaining(Duration::from_secs(60));
+    let store = f.store.clone();
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    let unknown = f
+        .runtime
+        .local_tx(s.tenant(), page_budget, move |tx| {
+            Box::pin(async move { store.recover(tx, s, limit, None).await })
+        })
+        .await;
+    assert_eq!(status(unknown), "unknown");
+    // No cursor escaped unknown settlement: the next sweep still starts from None.
+    let store = f.store.clone();
+    let started = Timer::new().now();
+    let (page, locks) = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
-                Box::pin(async move { store.recover(tx, s, limit, None).await })
+            .local_tx(s.tenant(), page_budget, move |tx| {
+                Box::pin(async move {
+                    let page = store.recover(tx, s, limit, None).await?;
+                    let locks: i64 = tx.with_connection(|c| Box::pin(async move {
+                        sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND granted").fetch_one(c).await
+                    })).await?;
+                    Ok((page, locks))
+                })
             })
             .await,
     )?;
+    eprintln!(
+        "DEVICE_RECOVERY_CAPACITY records={} transaction_ms={} granted_locks={locks}",
+        page.commands.len(),
+        Timer::new().now().duration_since(started).as_millis()
+    );
     assert_eq!(page.commands.len(), 1024);
     let store = f.store.clone();
     let after = page.after;

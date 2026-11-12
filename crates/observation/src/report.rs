@@ -115,9 +115,7 @@ impl Body {
             Self::Snapshot(v) | Self::Partial(v) | Self::Delta { changes: v, .. } => v,
             Self::Failed { .. } => return Ok(()),
         };
-        if changes.len() > 4096
-            || changes.iter().any(|c| snapshot && c.value.is_none())
-        {
+        if changes.len() > 4096 || changes.iter().any(|c| snapshot && c.value.is_none()) {
             return Err(ErrorKind::InvalidInput.into());
         }
         changes.sort_by(|a, b| a.key.cmp(&b.key));

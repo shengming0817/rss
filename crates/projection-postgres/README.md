@@ -38,7 +38,7 @@ Admission failure does not explicitly close other owners' pool clones. Returning
 is not proof that asynchronous connection cleanup or the remote query has already terminated.
 
 This replaces the old one-argument Rust constructor; no overload, default budget, or compatibility
-feature remains. Schema revision 3 and its migrations are unchanged. RSS workspace consumers move
+feature remains. The provider requires schema revision 4. RSS workspace consumers move
 together; independently pinned product consumers, including rss-mdm, must update their callsites
 when upgrading their RSS revision.
 
@@ -62,20 +62,12 @@ The schema contains only source allocators, events, generation/checkpoint state 
 It does not contain product read models or settings. Revision 3 binds each generation to exactly
 one 32-byte `definition_identity`, independent of its primary key. Runtime roles cannot update it.
 
-`UPGRADE_SQL` upgrades revision 2 to 3 only when **all tenants have no existing checkpoints**.
-It owns an explicit transaction: stop workers and execute it outside another transaction as the
-schema owner. A nullable column is added then immediately made NOT NULL; PostgreSQL validates
-all physical rows, including those hidden by FORCE RLS. Any existing generation aborts the
-upgrade without adopting or changing its data. Roll back the failed connection before reuse,
-or close it. No default identity, backfill or first-takeover adoption is provided. If unexpected
-legacy generations exist, stop: their disposition requires a separate product migration decision.
-
-After a successful upgrade, grant runtime EXECUTE on the new component functions before starting
-v3 workers. Old initialize/takeover/lock/finish signatures are removed, so old clients cannot
-continue through a compatibility path. The provider admits only revision 3 with its required
-identity column/constraint and EXECUTE permission on each required new function.
-Missing or revoked function permission rejects `PgStore::new` with `StorageContract`. Existing migration files remain append-only.
-Fresh `MIGRATION_SQL` also includes this transaction; do not nest it inside a caller transaction.
+`UPGRADE_SQL` upgrades revision 3 to 4, expanding source/projection names to 255 bytes.
+Stop workers and execute it outside another transaction as the schema owner. It takes exclusive
+component table locks and preserves generation definitions, checkpoints and receipts across tenants.
+Runtime admission requires revision 4 and the exact name constraints. Historical migrations remain
+immutable; the public upgrade entry accepts only the immediately preceding schema.
+Fresh `MIGRATION_SQL` executes the complete chain; do not nest it inside another transaction.
 
 ## API and recovery
 

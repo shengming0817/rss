@@ -398,11 +398,19 @@ where
         self,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<(), MessagingError> {
-        absolute_deadline(self.clock.as_ref(), self.config.poll_interval(), self.emitter.as_ref())?;
+        absolute_deadline(
+            self.clock.as_ref(),
+            self.config.poll_interval(),
+            self.emitter.as_ref(),
+        )?;
         let mut ticker = tokio::time::interval(self.config.poll_interval());
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            absolute_deadline(self.clock.as_ref(), self.config.poll_interval(), self.emitter.as_ref())?;
+            absolute_deadline(
+                self.clock.as_ref(),
+                self.config.poll_interval(),
+                self.emitter.as_ref(),
+            )?;
             tokio::select! {
                 biased;
                 () = token.cancelled() => return Ok(()),

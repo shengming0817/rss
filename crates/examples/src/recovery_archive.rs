@@ -75,7 +75,9 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         .verify(&Wall, deadline()?)
         .await?;
     let pg = &input.recovery.pg;
-    let repository = PgArchiveRepository::connect(config(pg)?, Timer, binding(pg)?).await?;
+    let repository = PgArchiveRepository::connect(config(pg)?, Timer, binding(pg)?)
+        .await?
+        .with_retired_scan_limit(1024)?;
     let hot = HotKey(crate::ephemeral::EphemeralKey::from_bytes(
         &input.recovery.hot_key,
         "example-hot",

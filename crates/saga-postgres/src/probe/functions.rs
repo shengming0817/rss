@@ -4,9 +4,14 @@ use sqlx::{PgConnection, Row as _};
 const HISTORY_SQL: &str = include_str!("../../migrations/0002_add_history_bounds.sql");
 fn current_definitions() -> Result<Vec<Definition<'static>>, ()> {
     let mut current = definitions(HISTORY_SQL)?;
-    if current.len() != 12 { return Err(()); }
+    if current.len() != 12 {
+        return Err(());
+    }
     for replacement in definitions(UPGRADE_SQL)? {
-        let existing = current.iter_mut().find(|d| d.signature == replacement.signature).ok_or(())?;
+        let existing = current
+            .iter_mut()
+            .find(|d| d.signature == replacement.signature)
+            .ok_or(())?;
         *existing = replacement;
     }
     Ok(current)

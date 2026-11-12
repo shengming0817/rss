@@ -121,7 +121,11 @@ fn lease_policy_keeps_precision_and_minimum_without_a_day_ceiling() -> anyhow::R
     for ttl in [Duration::from_millis(30), Duration::from_secs(90_000)] {
         assert_eq!(LeasePolicy::new(ttl)?.ttl(), ttl);
     }
-    for ttl in [Duration::ZERO, Duration::from_millis(29), Duration::from_nanos(30_000_001)] {
+    for ttl in [
+        Duration::ZERO,
+        Duration::from_millis(29),
+        Duration::from_nanos(30_000_001),
+    ] {
         assert!(LeasePolicy::new(ttl).is_err());
     }
     Ok(())

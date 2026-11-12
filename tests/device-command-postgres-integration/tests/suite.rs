@@ -149,7 +149,9 @@ async fn stores_for(
     let store = Arc::new(committed(
         runtime
             .local_tx(TenantId::parse(TENANT)?, budget()?, move |tx| {
-                Box::pin(async move { PgStore::new(tx, selected, clock, &callers, supersede_batch_size).await })
+                Box::pin(async move {
+                    PgStore::new(tx, selected, clock, &callers, supersede_batch_size).await
+                })
             })
             .await,
     )?);

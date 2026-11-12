@@ -55,20 +55,28 @@ impl ServePolicyError {
     /// Identify the rejected field without parsing Display text.
     pub fn field(&self) -> ServePolicyField {
         match self {
-            Self::ZeroCapacity(field) | Self::ZeroTimeout(field) | Self::DeadlineOverflow(field) => {
-                *field
-            }
+            Self::ZeroCapacity(field)
+            | Self::ZeroTimeout(field)
+            | Self::DeadlineOverflow(field) => *field,
             Self::BufferTooSmall => ServePolicyField::MaxBufferSize,
         }
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "HTTP transport owns the phase timer")]
-pub(super) fn timeout_deadline(timeout: Duration, field: ServePolicyField) -> Result<tokio::time::Instant, ServePolicyError> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "HTTP transport owns the phase timer"
+)]
+pub(super) fn timeout_deadline(
+    timeout: Duration,
+    field: ServePolicyField,
+) -> Result<tokio::time::Instant, ServePolicyError> {
     if timeout.is_zero() {
         return Err(ServePolicyError::ZeroTimeout(field));
     }
-    tokio::time::Instant::now().checked_add(timeout).ok_or(ServePolicyError::DeadlineOverflow(field))
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or(ServePolicyError::DeadlineOverflow(field))
 }
 
 fn validate_timeout(timeout: Duration, field: ServePolicyField) -> Result<(), ServePolicyError> {

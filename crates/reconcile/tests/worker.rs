@@ -149,7 +149,10 @@ impl DurableStore for Store {
         {
             tokio::time::sleep(delay).await;
         }
-        let more = self.lock().iter().any(|r| r.target.scope() == scope && !r.leased && !r.suspended && r.due <= now);
+        let more = self
+            .lock()
+            .iter()
+            .any(|r| r.target.scope() == scope && !r.leased && !r.suspended && r.due <= now);
         Ok(ClaimBatch { claims, more })
     }
     async fn renew<T: Timer>(
@@ -353,52 +356,58 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
 #[tokio::test(start_paused = true)]
 async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result<()> {
     for concurrency in [2, 65, 1025] {
-    let clock = Clock::new();
-    let cancel = CancellationToken::new();
-    let stop = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_millis(35), &cancel);
-    let store = Store {
-        rows: Mutex::new(vec![]),
-        clock: Clock::new(),
-        lost: true,
-        scans: AtomicUsize::new(0),
-        scan_delay: None,
-        scan_failure: None,
-        scan_failure_after: 0,
-        finish_delay: None,
-        finish_failure: None,
-        finishes: AtomicUsize::new(0),
-        releases: AtomicUsize::new(0),
-    };
-    let scope = scope()?;
-    for i in 0..concurrency * 2 {
-        store
-            .wake(
-                &Target::new(scope.clone(), format!("e{i}"))?,
-                &ResourceSet::empty(scope.tenant()),
-                &control,
-            )
-            .await?;
-    }
-    let business = business(2);
-    let report = run(
-        &store,
-        &business,
-        &scope,
-        Policy::try_from(PolicyConfig {
-            concurrency, claim_batch_size: 1024, scan_budget: 4096,
-            lease_ttl: Duration::from_millis(15), attempt_timeout: Duration::from_millis(100),
-            scan_interval: Duration::from_millis(2), idle_scan_interval: Duration::from_millis(2),
-            initial_backoff: Duration::from_millis(2), max_backoff: Duration::from_millis(8), max_attempts: 2,
-        })?,
-        &control,
-        &stop,
-        |_| {},
-    )
-    .await?;
-    assert!(report.fenced >= concurrency as u64);
-    assert_eq!(business.peak.load(Ordering::SeqCst), concurrency);
-    assert_eq!(business.active.load(Ordering::SeqCst), 0);
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_millis(35), &cancel);
+        let store = Store {
+            rows: Mutex::new(vec![]),
+            clock: Clock::new(),
+            lost: true,
+            scans: AtomicUsize::new(0),
+            scan_delay: None,
+            scan_failure: None,
+            scan_failure_after: 0,
+            finish_delay: None,
+            finish_failure: None,
+            finishes: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        };
+        let scope = scope()?;
+        for i in 0..concurrency * 2 {
+            store
+                .wake(
+                    &Target::new(scope.clone(), format!("e{i}"))?,
+                    &ResourceSet::empty(scope.tenant()),
+                    &control,
+                )
+                .await?;
+        }
+        let business = business(2);
+        let report = run(
+            &store,
+            &business,
+            &scope,
+            Policy::try_from(PolicyConfig {
+                concurrency,
+                claim_batch_size: 1024,
+                scan_budget: 4096,
+                lease_ttl: Duration::from_millis(15),
+                attempt_timeout: Duration::from_millis(100),
+                scan_interval: Duration::from_millis(2),
+                idle_scan_interval: Duration::from_millis(2),
+                initial_backoff: Duration::from_millis(2),
+                max_backoff: Duration::from_millis(8),
+                max_attempts: 2,
+            })?,
+            &control,
+            &stop,
+            |_| {},
+        )
+        .await?;
+        assert!(report.fenced >= concurrency as u64);
+        assert_eq!(business.peak.load(Ordering::SeqCst), concurrency);
+        assert_eq!(business.active.load(Ordering::SeqCst), 0);
     }
     Ok(())
 }
@@ -458,7 +467,8 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
 
 #[tokio::test(start_paused = true)]
 async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
-    for (initial_failures, max_attempts) in [(0, 1), (0, 2), (1000, 1002), (u32::MAX - 1, u32::MAX)] {
+    for (initial_failures, max_attempts) in [(0, 1), (0, 2), (1000, 1002), (u32::MAX - 1, u32::MAX)]
+    {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
@@ -493,7 +503,10 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
             |_| {},
         )
         .await?;
-        assert_eq!(report.retried, u64::from(max_attempts - initial_failures - 1));
+        assert_eq!(
+            report.retried,
+            u64::from(max_attempts - initial_failures - 1)
+        );
         assert_eq!(report.suspended, 1);
         assert_eq!(report.converged, 0);
         assert_eq!(store.lock()[0].failures, max_attempts);
@@ -1697,7 +1710,9 @@ impl DurableStore for ReboundStore<'_> {
         lease: Duration,
         c: &Control<'_, T>,
     ) -> Result<ClaimBatch<Token>, Error> {
-        self.inner.claim_due(scope, limit, scan_budget, lease, c).await
+        self.inner
+            .claim_due(scope, limit, scan_budget, lease, c)
+            .await
     }
     async fn renew<T: Timer>(
         &self,

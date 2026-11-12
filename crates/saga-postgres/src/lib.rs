@@ -72,7 +72,8 @@ impl PgStore {
         F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<R, Error>> + Send,
     {
         control.check()?;
-        let millis = i32::try_from(control.remaining().as_millis().max(1)).map_err(|_| Error::new(ErrorKind::InvalidBudget))?;
+        let millis = i32::try_from(control.remaining().as_millis().max(1))
+            .map_err(|_| Error::new(ErrorKind::InvalidBudget))?;
         let timeout = format!("{millis}ms");
         let settlement = std::sync::atomic::AtomicU8::new(0);
         let result = control.run(async {
@@ -159,7 +160,10 @@ fn admission_error(error: Error) -> Error {
 fn ttl_millis(ttl: Duration) -> Result<i64, Error> {
     let millis =
         i64::try_from(ttl.as_millis()).map_err(|_| Error::new(rss_saga::ErrorKind::LeaseInput))?;
-    if millis == 0 || ttl.as_micros() > i64::MAX as u128 || !ttl.subsec_nanos().is_multiple_of(1_000_000) {
+    if millis == 0
+        || ttl.as_micros() > i64::MAX as u128
+        || !ttl.subsec_nanos().is_multiple_of(1_000_000)
+    {
         return Err(Error::new(rss_saga::ErrorKind::LeaseInput));
     }
     Ok(millis)

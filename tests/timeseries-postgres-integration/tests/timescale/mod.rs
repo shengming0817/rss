@@ -89,6 +89,7 @@ async fn shared_atomic_replay_isolation_and_catalog_readmission() -> anyhow::Res
     )?;
     assert_eq!(f.write(&conflict).await.err(), Some(Error::Conflict));
     assert_eq!(f.count().await?, 2);
+    super::writing::expanded_dimensions(&f).await?;
     let move_chunk = format!("ALTER TABLE {chunk} SET SCHEMA public");
     sqlx::raw_sql(sqlx::AssertSqlSafe(move_chunk.as_str()))
         .execute(&f.admin)
@@ -229,6 +230,48 @@ async fn native_refresh_late_delete_restore_columnstore_and_retention() -> anyho
             .await
             .err(),
         Some(Error::HistoryExpired)
+    );
+    let samples = (0..33)
+        .map(|i| sample(&d, &format!("chunk-{i}"), 20_000 + i * 100, 1))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    confirmed(f.write(&batch("expanded-chunks", samples)?).await?)?;
+    let maintenance_deadline = Deadline::from_timeout(&Timer, Duration::from_secs(60))?;
+    assert_eq!(
+        confirmed(
+            f.store
+                .convert_raw_chunks(
+                    window(20_000, 23_300)?,
+                    cap,
+                    StorageFormat::Columnstore,
+                    maintenance_deadline
+                )
+                .await?
+        )?,
+        33
+    );
+    assert_eq!(
+        confirmed(
+            f.store
+                .convert_raw_chunks(
+                    window(20_000, 23_300)?,
+                    cap,
+                    StorageFormat::Columnstore,
+                    deadline()?
+                )
+                .await?
+        )?,
+        0
+    );
+    assert!(
+        f.store
+            .convert_raw_chunks(
+                window(20_000, 23_300)?,
+                NonZeroU32::new(1025).ok_or(Error::InvalidInput)?,
+                StorageFormat::Columnstore,
+                deadline()?
+            )
+            .await
+            .is_err()
     );
     Ok(())
 }

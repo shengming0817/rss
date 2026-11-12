@@ -89,7 +89,7 @@ implementations; private proof construction does not establish the truth of a ma
 ## Bounded disaster recovery
 
 Recovery constructor `dr::Plan::new` binds one tenant, external storage target/lineage, expected epoch, operation identity,
-restore evidence and 1–500 canonical members. `dr::Member` selects one direction: retained Published
+restore evidence and 1–1024 canonical members. `dr::Member` selects one direction: retained Published
 Outbox facts for database-ahead delivery, or full ConsumerIdentity/fingerprint for broker-ahead
 ordinary consumption. Mixed directions, duplicate members and cross-tenant subscriptions are
 rejected before authorization. The next epoch is exactly one checked increment.

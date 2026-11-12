@@ -94,9 +94,16 @@ async fn admit(f: &Fixture, callers: CallerRoles) -> anyhow::Result<bool> {
     let attempt = f
         .runtime
         .local_tx(scope(TENANT)?.tenant(), budget()?, move |tx| {
-            Box::pin(
-                async move { PgStore::new(tx, outbox, CommandClock::Postgres, &callers, BatchLimit::default()).await },
-            )
+            Box::pin(async move {
+                PgStore::new(
+                    tx,
+                    outbox,
+                    CommandClock::Postgres,
+                    &callers,
+                    BatchLimit::default(),
+                )
+                .await
+            })
         })
         .await;
     // A deadline/connection failure cannot masquerade as a successful security rejection.
@@ -227,9 +234,16 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
     let constructor = other
         .runtime
         .local_tx(s.tenant(), budget()?, move |tx| {
-            Box::pin(
-                async move { PgStore::new(tx, outbox, CommandClock::Postgres, &callers, BatchLimit::default()).await },
-            )
+            Box::pin(async move {
+                PgStore::new(
+                    tx,
+                    outbox,
+                    CommandClock::Postgres,
+                    &callers,
+                    BatchLimit::default(),
+                )
+                .await
+            })
         })
         .await;
     assert!(committed(constructor).is_err());

@@ -7,16 +7,15 @@ cryptography; the adapter persists protected records and independently validates
 ## Installation and upgrade
 
 An external migrator executes `MIGRATION_SQL` as a dedicated NOSUPERUSER NOBYPASSRLS schema owner.
-For an existing component V1 installation, stop all writers and execute `UPGRADE_SQL` instead.
-The upgrade takes exclusive component table locks, validates and replays the original history,
-moves each receipt into its `ForwardApplied` journal row, and removes the old receipt table and
-pairing triggers. It preserves definitions, sequences, attempts, effect keys and receipt V1 bytes.
-An invalid history or arithmetic overflow aborts the transaction. The product owns the migration
-execution deadline, maintenance window, database backup and available temporary disk/WAL space.
+For an existing component V2 installation, stop writers and execute `UPGRADE_SQL` instead.
+The upgrade locks both component tables, replaces lease routines and preserves all stored history,
+definitions, effect identities and protected receipts. The product owns the migration deadline,
+maintenance window and backup. Runtime admission accepts only schema V3 with its exact routines.
+Original migrations remain immutable; fresh installation executes the complete chain.
 
-Schema V2 has two tables: `instances` and `journal`. The new runtime accepts only V2; it does not
-run migrations or maintain an old-schema reader. Original committed migrations remain immutable.
-Fresh installation executes the same migration chain as an upgrade.
+Lease TTLs use positive whole milliseconds within PostgreSQL's signed 64-bit microsecond interval
+range (at most 9223372036854775 milliseconds). Timestamp addition must also remain representable.
+Each database operation separately requires a statement/lock timeout within i32::MAX milliseconds.
 
 Provision a separate runtime login with schema USAGE, table SELECT and EXECUTE on the component
 functions. Reapply function EXECUTE grants after the upgrade creates the new signatures. Grant

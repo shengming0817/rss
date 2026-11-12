@@ -203,7 +203,8 @@ impl DurableStore for PgStore {
         if !(1..=1024).contains(&limit) || scan_budget == 0 {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
-        let scan_budget = i32::try_from(scan_budget).map_err(|_| Error::new(ErrorKind::InvalidInput))?;
+        let scan_budget =
+            i32::try_from(scan_budget).map_err(|_| Error::new(ErrorKind::InvalidInput))?;
         let ttl = millis(lease)?;
         let scope = scope.clone();
         self.controlled_tx(&scope.clone(), control, move |tx| Box::pin(async move {

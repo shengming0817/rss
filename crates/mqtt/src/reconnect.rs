@@ -12,9 +12,7 @@ impl ReconnectPolicy {
     /// Require at least one millisecond initially and room for jitter below the maximum.
     /// The transport clock must represent the maximum wait.
     pub fn new(initial: Duration, maximum: Duration) -> Result<Self, crate::MqttError> {
-        if initial < Duration::from_millis(1)
-            || initial > maximum / 2
-        {
+        if initial < Duration::from_millis(1) || initial > maximum / 2 {
             return Err(crate::MqttError::InvalidConfig);
         }
         crate::model::timer_deadline(maximum)?;

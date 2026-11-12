@@ -78,7 +78,7 @@ Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .
 
 v2 使用 targets、target_resources（声明和可空等待票号）、resources（原 claim 的 owner）、scans 四张租户表。队列票号使用组件 sequence；运行角色不得直接使用/更新 sequence，也不得写组件表。只扩展已有 claim 事务，不增加每资源连接、线程或第二租约。
 
-每个 claim 调用最多检查 64 个候选，以 Scope 游标和固定高水位保证本轮有界；future/live 候选也计入预算。资源队头由部分索引点查，整个集合一次取得。所有资源占用绑定 target/token/epoch，TTL 直接引用 target；释放精确匹配 owner，旧 claim 不能清除接管者。
+每个 claim 调用按显式 scan_budget 检查候选（正 u32，PostgreSQL 要求不超过 i32::MAX），以 Scope 游标和固定高水位保证本轮有界；future/live 候选也计入预算。资源队头由部分索引点查，整个集合一次取得。所有资源占用绑定 target/token/epoch，TTL 直接引用 target；释放精确匹配 owner，旧 claim 不能清除接管者。
 
 `protect` / `protect_in` callback 返回 `ProtectedStep::Ready(value)`、`Deferred(after)` 或 `Rebind(resources, after)`。Ready 才标记 Applied；Rebind 在原事务改声明，确认提交后返回 `ReconcileStep::Deferred`，runner 仍唯一负责 finish。`wake_with` / `wake_in` 显式带资源；`bind_with` / `bind_in` 提供保留调度事实的原事务绑定。消息 protect 发现绑定已变化时跳过 callback，返回 1ms 的 Deferred；这是 staged 结果，必须先等待原事务 owner 的已确认提交。实际资源排队仍由 claim 阶段持有。
 
@@ -87,3 +87,7 @@ v2 使用 targets、target_resources（声明和可空等待票号）、resource
 扫描最终游标和高水位没有变化时不 UPDATE `scans`，有实际窗口进展时仍持久化。扫描行锁及其可能产生的 WAL 保留。
 
 重绑定保留旧 acquired owner，直到 Deferred finish/release 或 TTL 接管；两次事务间崩溃仍由原恢复机制处理。CommitUnknown/RollbackFailed 没有成功的 Deferred 回执，不凭客户端猜测继续释放。全部新增关系的结构、约束、索引、FORCE RLS、ACL 与当前函数定义在构造时精确准入。
+
+租约与重试/延期时长使用正整毫秒，PostgreSQL interval 的微秒表示为有符号 64 位整数，
+最多接受 9223372036854775 毫秒；实际时间戳加法溢出也会拒绝。
+单次数据库操作的 statement/lock timeout 独立受 i32::MAX 毫秒限制，不截断配置。

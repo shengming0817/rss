@@ -131,3 +131,7 @@ Command composition explicitly separates `bootstrap` from `enqueue`. Bootstrap i
 authority once; enqueue only queues or exactly replays the original spec/message. After authority
 advances, an exact replay returns the original command at its current durable state, without adding
 a command or outbox row. A new command with the old coordinate remains fenced.
+
+The final `PgStore::new` argument selects authority-supersede page size using `BatchLimit` (1–1024).
+`BatchLimit::default()` retains 64. All pages share the caller's transaction and deadline; recovery
+cursors become usable only after the caller confirms commit.

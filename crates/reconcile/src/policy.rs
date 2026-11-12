@@ -50,10 +50,7 @@ impl TryFrom<PolicyConfig> for Policy {
             max_backoff: cap,
             max_attempts,
         } = config;
-        let valid = |d: Duration| {
-            !d.is_zero()
-                && d.subsec_nanos().is_multiple_of(1_000_000)
-        };
+        let valid = |d: Duration| !d.is_zero() && d.subsec_nanos().is_multiple_of(1_000_000);
         if concurrency == 0
             || !(1..=1024).contains(&claim_batch_size)
             || scan_budget == 0
@@ -86,10 +83,13 @@ impl Policy {
     // floor remains intact; persisted next_run, not the hash, owns restart recovery.
     pub(crate) fn retry_delay(&self, target: &crate::Target, failures: u32) -> Duration {
         use std::hash::{Hash, Hasher};
-        let upper = self
-            .backoff
-            .saturating_mul(1u32.checked_shl(failures.max(1)).unwrap_or(u32::MAX))
-            .min(self.cap);
+        let mut upper = self.backoff;
+        for _ in 0..failures.max(1).min(128) {
+            upper = upper.saturating_mul(2).min(self.cap);
+            if upper == self.cap {
+                break;
+            }
+        }
         // Duration milliseconds fit u128; do not narrow large valid delays before jitter.
         let upper = upper.as_millis();
         let floor = self.backoff.as_millis();
@@ -106,9 +106,13 @@ impl Policy {
         self.concurrency
     }
     /// Maximum returned claims in one request.
-    pub const fn claim_batch_size(&self) -> usize { self.claim_batch_size }
+    pub const fn claim_batch_size(&self) -> usize {
+        self.claim_batch_size
+    }
     /// Maximum candidates visited in one provider scan.
-    pub const fn scan_budget(&self) -> u32 { self.scan_budget }
+    pub const fn scan_budget(&self) -> u32 {
+        self.scan_budget
+    }
     /// Provider lease duration.
     pub const fn lease(&self) -> Duration {
         self.lease

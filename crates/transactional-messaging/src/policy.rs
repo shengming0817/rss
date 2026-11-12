@@ -106,7 +106,9 @@ impl RetryPolicy {
     /// Return the next admitted attempt; exhaustion never wraps or saturates into another retry.
     #[must_use]
     pub fn next_attempt(&self, attempt: NonZeroU32) -> Option<NonZeroU32> {
-        attempt.checked_add(1).filter(|next| self.allows_attempt(*next))
+        attempt
+            .checked_add(1)
+            .filter(|next| self.allows_attempt(*next))
     }
     #[must_use]
     /// Capped exponential delay after a one-based failure; does not check whether another attempt
@@ -221,7 +223,6 @@ pub enum ShutdownBudgetError {
     #[error("shutdown budget must be non-zero")]
     /// No drain time was allowed.
     Zero,
-
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

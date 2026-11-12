@@ -59,7 +59,8 @@ impl<C: Clock> PgStore<C> {
             let Some(remaining) = deadline.remaining(self.clock.now()) else {
                 return Ok(Outcome::Unknown);
             };
-            let ms = i32::try_from(remaining.as_millis().max(1)).map_err(|_| Error::InvalidInput)?;
+            let ms =
+                i32::try_from(remaining.as_millis().max(1)).map_err(|_| Error::InvalidInput)?;
             let operation = async {
                 sqlx::query("SELECT set_config('statement_timeout',$1,false),set_config('lock_timeout',$1,false)").bind(format!("{ms}ms")).execute(&mut *connection).await?;
                 sqlx::query(sql).bind(name).execute(&mut *connection).await

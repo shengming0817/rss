@@ -341,7 +341,13 @@ async fn claim_round<S: DurableStore, T: Timer, F: FnMut(Observation) + Send>(
     active: &mut Active<'_, F>,
 ) -> Result<ClaimBatch<S::Claim>, Error> {
     let scan_control = control.child(policy.attempt);
-    let scan = scan_control.run(store.claim_due(scope, available, policy.scan_budget, policy.lease, &scan_control));
+    let scan = scan_control.run(store.claim_due(
+        scope,
+        available,
+        policy.scan_budget,
+        policy.lease,
+        &scan_control,
+    ));
     tokio::pin!(scan);
     loop {
         tokio::select! {
@@ -535,5 +541,7 @@ async fn renew_lease<S: DurableStore, T: Timer>(
     control
         .run(store.renew(claim, policy.lease, &control))
         .await?;
-    started.checked_add(policy.lease / 3).ok_or_else(|| Error::new(ErrorKind::InvalidInput))
+    started
+        .checked_add(policy.lease / 3)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput))
 }

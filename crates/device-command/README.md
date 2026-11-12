@@ -61,7 +61,7 @@ persistently redeliver that original ingress; it must not write a terminal Inbox
 library does not keep another ingress journal, queue, receipt database or transport sequence.
 See the PostgreSQL package for composition with the existing Inbox transaction.
 
-`recover` inspects at most `BatchLimit` (1–64) active commands using an explicit command-ID cursor.
+`recover` inspects at most `BatchLimit` (1–1024) active commands using an explicit command-ID cursor.
 Each inspected no-op counts toward the limit. Commit the page before advancing its cursor; after
 a complete sweep restart from None for newly published or newly expired commands. The provider
 uses the enclosing transaction's original deadline. Cancellation drops that transaction future

@@ -88,8 +88,8 @@ async fn scenario(
         .await?;
     let business = Business(store);
     let policy = Policy::try_from(PolicyConfig {
-        claim_batch_size: 64,
-        scan_budget: 64,
+        claim_batch_size: 1024,
+        scan_budget: 4096,
         concurrency: 1,
         lease_ttl: Duration::from_secs(10),
         attempt_timeout: Duration::from_secs(5),

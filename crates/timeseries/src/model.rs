@@ -63,7 +63,9 @@ fn unique_dimensions<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<
         ) -> Result<Self::Value, A::Error> {
             let mut values = BTreeMap::new();
             while let Some((key, value)) = map.next_entry::<Id, Id>()? {
-                if values.len() >= usize::from(crate::definition::MAX_DIMENSIONS) || values.insert(key, value).is_some() {
+                if values.len() >= usize::from(crate::definition::MAX_DIMENSIONS)
+                    || values.insert(key, value).is_some()
+                {
                     return Err(serde::de::Error::custom("invalid dimensions"));
                 }
             }

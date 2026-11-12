@@ -68,7 +68,13 @@ mod tests {
             assert!(ApplicationName::parse(&value).is_ok());
             assert!(ModuleName::parse(&value).is_ok());
         }
-        for value in [String::new(), "a".repeat(256), "é".repeat(128), "Bad".into(), "bad.name".into()] {
+        for value in [
+            String::new(),
+            "a".repeat(256),
+            "é".repeat(128),
+            "Bad".into(),
+            "bad.name".into(),
+        ] {
             assert!(ApplicationName::parse(&value).is_err());
             assert!(ModuleName::parse(&value).is_err());
         }

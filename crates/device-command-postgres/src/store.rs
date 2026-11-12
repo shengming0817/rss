@@ -25,7 +25,11 @@ impl<R: Send> PgStore<R> {
     ) -> Result<Self, PgError> {
         outbox.validate_transaction(tx)?;
         crate::probe::validate(tx, callers).await?;
-        Ok(Self { outbox, clock, supersede_batch_size })
+        Ok(Self {
+            outbox,
+            clock,
+            supersede_batch_size,
+        })
     }
     /// Read this store's authoritative command time in Unix microseconds.
     /// The transaction must belong to the admitted runtime, even with an integration clock.

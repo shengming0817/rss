@@ -240,7 +240,10 @@ mod tests {
     #[test]
     fn invalid_lease_is_configuration_not_durable_corruption() {
         for millis in [86_400_001, 9_223_372_036_854_775] {
-            assert_eq!(milliseconds(Duration::from_millis(millis)).ok(), Some(millis as i64));
+            assert_eq!(
+                milliseconds(Duration::from_millis(millis)).ok(),
+                Some(millis as i64)
+            );
         }
         for duration in [
             Duration::ZERO,
