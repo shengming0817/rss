@@ -24,13 +24,26 @@ edition = "2024"
 [workspace]
 [dependencies]
 kafka = {{ package = "rss-transactional-messaging-kafka", path = {owner:?}, default-features = false }}
-"#
+rss-transactional-messaging = {{ path = {core:?}, default-features = false }}
+"#,
+            core = owner.join("../transactional-messaging")
         ),
     )?;
     fs::write(
         root.path().join("src/lib.rs"),
         r#"
-use kafka::{KafkaConfig, KafkaPublisher, KafkaError};
+use kafka::{KafkaClientId, KafkaConfig, KafkaCredentials, KafkaLimits, KafkaTimeouts, KafkaPublisher, KafkaError};
+pub fn configure(
+    brokers: String,
+    ca: String,
+    credentials: KafkaCredentials,
+    domain: rss_transactional_messaging::message::MessagingDomain,
+    route: rss_transactional_messaging::message::MessageRoute,
+) -> Result<KafkaConfig, KafkaError> {
+    let timeouts = KafkaTimeouts::low_latency(std::time::Duration::from_secs(2))?;
+    let limits = KafkaLimits::new(64, 32, 131072, 32000000, timeouts)?;
+    KafkaConfig::new(KafkaClientId::parse("independent-host")?, brokers, ca, credentials, domain, [(route, "events-v1".into())], limits)
+}
 pub async fn host(config: KafkaConfig) -> Result<(), KafkaError> {
     let (_publisher, resource) = KafkaPublisher::create(config, std::time::Duration::from_secs(5)).await?;
     resource.shutdown(std::time::Duration::from_secs(5)).await

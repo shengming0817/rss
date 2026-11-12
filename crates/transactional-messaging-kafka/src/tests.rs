@@ -22,7 +22,13 @@ fn config() -> anyhow::Result<KafkaConfig> {
         KafkaCredentials::scram_sha512("fixture".into(), "SECRET_BAIT".into())?,
         MessagingDomain::parse("events")?,
         [(MessageRoute::parse("event:v1")?, "events-v1".into())],
-        KafkaLimits::new(1, 1, 4096, 1_048_576, crate::KafkaTimeouts::low_latency(Duration::from_millis(100))?)?,
+        KafkaLimits::new(
+            1,
+            1,
+            4096,
+            1_048_576,
+            crate::KafkaTimeouts::low_latency(Duration::from_millis(100))?,
+        )?,
     )?)
 }
 fn message() -> anyhow::Result<MessageEnvelope<Vec<u8>>> {
@@ -97,7 +103,13 @@ fn projection_preserves_authored_bytes_and_reserved_headers() -> anyhow::Result<
 fn record_limits_include_metadata_and_route_validation() -> anyhow::Result<()> {
     let mut c = config()?;
     let m = message()?;
-    c.plan.limits = KafkaLimits::new(1, 1, 20, 1_048_576, crate::KafkaTimeouts::low_latency(Duration::from_secs(1))?)?;
+    c.plan.limits = KafkaLimits::new(
+        1,
+        1,
+        20,
+        1_048_576,
+        crate::KafkaTimeouts::low_latency(Duration::from_secs(1))?,
+    )?;
     assert!(Record::encode(&m, &c.plan).is_none());
     c = config()?;
     let header_heavy = MessageEnvelope::new(m.id().clone(), m.metadata().clone(), Vec::new())
@@ -311,7 +323,6 @@ fn absent_extensions_do_not_create_keys_or_headers() -> anyhow::Result<()> {
     Ok(())
 }
 
-
 #[test]
 fn finite_limits_replace_policy_ceilings_and_check_aggregate_budget() -> anyhow::Result<()> {
     let timeouts = KafkaTimeouts::low_latency(Duration::from_secs(1))?;
@@ -325,30 +336,51 @@ fn finite_limits_replace_policy_ceilings_and_check_aggregate_budget() -> anyhow:
         c.plan.limits = KafkaLimits::new(queued, in_flight, record, budget, timeouts)?;
         // Conf setters validate without allocating queue slots, payloads or a producer.
         let native = c.client().create_native_config()?;
-        assert_eq!(native.get("queue.buffering.max.messages")?, in_flight.to_string());
-        assert_eq!(native.get("queue.buffering.max.kbytes")?, (in_flight * record).div_ceil(1024).to_string());
-        assert_eq!(native.get("message.max.bytes")?, (record + 36).max(1000).to_string());
+        assert_eq!(
+            native.get("queue.buffering.max.messages")?,
+            in_flight.to_string()
+        );
+        assert_eq!(
+            native.get("queue.buffering.max.kbytes")?,
+            (in_flight * record).div_ceil(1024).to_string()
+        );
+        assert_eq!(
+            native.get("message.max.bytes")?,
+            (record + 36).max(1000).to_string()
+        );
     }
     for (queued, in_flight, record, budget) in [
-        (0, 1, 1024, usize::MAX), (1, 0, 1024, usize::MAX),
-        (1, 1, 0, usize::MAX), (1, 1, 1024, 0),
+        (0, 1, 1024, usize::MAX),
+        (1, 0, 1024, usize::MAX),
+        (1, 1, 0, usize::MAX),
+        (1, 1, 1024, 0),
         (usize::MAX, 1, 1024, usize::MAX),
         (1, i32::MAX as usize + 1, 1024, usize::MAX),
         (1, 1, usize::MAX, usize::MAX),
         (1, 1, 1_000_000_000 - 35, usize::MAX),
         (1, 3_000_000, 999_999_000, usize::MAX),
     ] {
-        assert!(matches!(KafkaLimits::new(queued, in_flight, record, budget, timeouts), Err(KafkaError::InvalidLimits)));
+        assert!(matches!(
+            KafkaLimits::new(queued, in_flight, record, budget, timeouts),
+            Err(KafkaError::InvalidLimits)
+        ));
     }
     for record in [1023usize, 1024, 1025] {
         let rounded_native = record.div_ceil(1024) * 1024;
-        let required = 4 * record + rounded_native
-            + 3 * std::mem::size_of::<Command>() + engine::pending_entry_bytes();
+        let required = 4 * record
+            + rounded_native
+            + 3 * std::mem::size_of::<Command>()
+            + engine::pending_entry_bytes();
         assert!(KafkaLimits::new(1, 1, record, required, timeouts).is_ok());
         assert!(KafkaLimits::new(1, 1, record, required - 1, timeouts).is_err());
         let mut c = config()?;
         c.plan.limits = KafkaLimits::new(1, 1, record, required, timeouts)?;
-        assert_eq!(c.client().create_native_config()?.get("queue.buffering.max.kbytes")?, record.div_ceil(1024).to_string());
+        assert_eq!(
+            c.client()
+                .create_native_config()?
+                .get("queue.buffering.max.kbytes")?,
+            record.div_ceil(1024).to_string()
+        );
     }
     Ok(())
 }
@@ -365,28 +397,49 @@ fn transport_timeouts_preserve_native_units_ranges_and_independence() -> anyhow:
         (ms(10), ms(1), Duration::ZERO, ms(i32::MAX as u64 + 1)),
         (ms(10), ms(1), ms(1), ms(1)),
         (ms(10), ms(1), ms(2), ms(1)),
-        (ms(10), ms(1), Duration::from_micros(900_000_001), ms(900_001)),
+        (
+            ms(10),
+            ms(1),
+            Duration::from_micros(900_000_001),
+            ms(900_001),
+        ),
         (ms(10), ms(1), Duration::from_nanos(1), ms(1)),
         (Duration::from_micros(10_001), ms(1), Duration::ZERO, ms(1)),
         (ms(10), Duration::from_micros(1001), Duration::ZERO, ms(1)),
         (ms(10), ms(1), Duration::ZERO, Duration::from_micros(1001)),
     ] {
-        assert!(matches!(KafkaTimeouts::new(socket, request, linger, delivery), Err(KafkaError::InvalidTimeouts)));
+        assert!(matches!(
+            KafkaTimeouts::new(socket, request, linger, delivery),
+            Err(KafkaError::InvalidTimeouts)
+        ));
     }
     // Deliberately request > delivery: librdkafka does not enforce Java's summed relation.
     let mut c = config()?;
-    c.plan.limits = KafkaLimits::new(1, 1, 1024, 1_048_576,
-        KafkaTimeouts::new(ms(300_000), ms(900_000), Duration::ZERO, ms(1))?)?;
+    c.plan.limits = KafkaLimits::new(
+        1,
+        1,
+        1024,
+        1_048_576,
+        KafkaTimeouts::new(ms(300_000), ms(900_000), Duration::ZERO, ms(1))?,
+    )?;
     let native = c.client().create_native_config()?;
     assert_eq!(native.get("socket.timeout.ms")?, "300000");
     assert_eq!(native.get("request.timeout.ms")?, "900000");
     assert_eq!(native.get("message.timeout.ms")?, "1");
     for micros in [0, 1, 1001, 999_999, 900_000_000] {
-        let timeouts = KafkaTimeouts::new(ms(15_000), ms(20_000), Duration::from_micros(micros), ms(i32::MAX as u64))?;
+        let timeouts = KafkaTimeouts::new(
+            ms(15_000),
+            ms(20_000),
+            Duration::from_micros(micros),
+            ms(i32::MAX as u64),
+        )?;
         let mut c = config()?;
         c.plan.limits = KafkaLimits::new(1, 1, 1024, 1_048_576, timeouts)?;
         let client = c.client();
-        let encoded = client.get("linger.ms").ok_or_else(|| anyhow::anyhow!("linger mapping"))?.parse::<f64>()?;
+        let encoded = client
+            .get("linger.ms")
+            .ok_or_else(|| anyhow::anyhow!("linger mapping"))?
+            .parse::<f64>()?;
         // Mirrors the pinned native double-ms -> integer-us conversion, including 1001us rounding.
         assert_eq!((encoded * 1000.0) as u64, micros);
         let native = client.create_native_config()?;

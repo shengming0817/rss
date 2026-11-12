@@ -426,7 +426,13 @@ fn fatal_callback_seals_owner_and_finishes_pending_as_ambiguous() -> anyhow::Res
         client_id: crate::KafkaClientId::parse("fatal-test")?,
         domain: rss_transactional_messaging::message::MessagingDomain::parse("events")?,
         routes: HashMap::new(),
-        limits: crate::KafkaLimits::new(1, 1, 1024, 1_048_576, crate::KafkaTimeouts::low_latency(Duration::from_secs(1))?)?,
+        limits: crate::KafkaLimits::new(
+            1,
+            1,
+            1024,
+            1_048_576,
+            crate::KafkaTimeouts::low_latency(Duration::from_secs(1))?,
+        )?,
     });
     Context {
         shared: shared.clone(),
@@ -496,7 +502,13 @@ fn callback_logs_identify_client_and_domain_without_provider_text() -> anyhow::R
             client_id: crate::KafkaClientId::parse("orders-writer")?,
             domain: rss_transactional_messaging::message::MessagingDomain::parse("events")?,
             routes: HashMap::new(),
-            limits: crate::KafkaLimits::new(1, 1, 1024, 1_048_576, crate::KafkaTimeouts::low_latency(Duration::from_secs(1))?)?,
+            limits: crate::KafkaLimits::new(
+                1,
+                1,
+                1024,
+                1_048_576,
+                crate::KafkaTimeouts::low_latency(Duration::from_secs(1))?,
+            )?,
         }),
     };
     tracing::subscriber::with_default(subscriber, || {

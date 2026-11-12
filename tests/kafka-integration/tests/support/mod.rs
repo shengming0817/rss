@@ -66,6 +66,21 @@ pub fn message(id: &str) -> anyhow::Result<MessageEnvelope<Vec<u8>>> {
     ))
 }
 pub fn config(f: &testkit::KafkaTlsFixture) -> anyhow::Result<KafkaConfig> {
+    config_with_limits(
+        f,
+        KafkaLimits::new(
+            1,
+            1,
+            4096,
+            1_048_576,
+            KafkaTimeouts::low_latency(Duration::from_secs(2))?,
+        )?,
+    )
+}
+pub fn config_with_limits(
+    f: &testkit::KafkaTlsFixture,
+    limits: KafkaLimits,
+) -> anyhow::Result<KafkaConfig> {
     Ok(KafkaConfig::new(
         KafkaClientId::parse(f.topic())?,
         f.brokers().into(),
@@ -73,10 +88,10 @@ pub fn config(f: &testkit::KafkaTlsFixture) -> anyhow::Result<KafkaConfig> {
         KafkaCredentials::mutual_tls(f.client_certificate_pem().into(), f.client_key_pem().into())?,
         MessagingDomain::parse("events")?,
         [(MessageRoute::parse("event:v1")?, f.topic().into())],
-        KafkaLimits::new(1, 1, 4096, Duration::from_secs(2))?,
+        limits,
     )?)
 }
-struct Quiet;
+pub struct Quiet;
 impl rdkafka::consumer::ConsumerContext for Quiet {}
 impl ClientContext for Quiet {
     fn log(&self, _: rdkafka::config::RDKafkaLogLevel, _: &str, _: &str) { /* reason: fixture credentials must never enter native logs. */

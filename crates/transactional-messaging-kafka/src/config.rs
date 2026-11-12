@@ -78,7 +78,12 @@ impl KafkaTimeouts {
     /// Use 10-second socket/request timeouts and zero linger; delivery remains caller-selected.
     /// Native Produce requests still consume only the remaining message delivery time.
     pub fn low_latency(delivery: Duration) -> Result<Self, KafkaError> {
-        Self::new(Duration::from_secs(10), Duration::from_secs(10), Duration::ZERO, delivery)
+        Self::new(
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+            Duration::ZERO,
+            delivery,
+        )
     }
 }
 fn milliseconds(value: Duration, min: u32, max: u32) -> Result<u32, KafkaError> {
@@ -125,7 +130,9 @@ impl KafkaLimits {
             return Err(invalid);
         }
         i32::try_from(in_flight).map_err(|_| invalid)?;
-        let native_message_bytes = record_bytes.checked_add(RECORD_FRAMING_BYTES).ok_or(invalid)?;
+        let native_message_bytes = record_bytes
+            .checked_add(RECORD_FRAMING_BYTES)
+            .ok_or(invalid)?;
         if native_message_bytes > 1_000_000_000 {
             return Err(invalid);
         }
@@ -147,10 +154,20 @@ impl KafkaLimits {
             native_message_bytes: native_message_bytes.max(1000) as i32,
         })
     }
-    fn required_budget(queued: usize, in_flight: usize, record: usize, native: usize) -> Option<usize> {
+    fn required_budget(
+        queued: usize,
+        in_flight: usize,
+        record: usize,
+        native: usize,
+    ) -> Option<usize> {
         // One worker-owned command plus a candidate being encoded (including header pairs/copies).
-        let records = queued.checked_add(3)?.checked_mul(record)?.checked_add(native)?;
-        let commands = queued.checked_add(2)?.checked_mul(std::mem::size_of::<crate::engine::Command>())?;
+        let records = queued
+            .checked_add(3)?
+            .checked_mul(record)?
+            .checked_add(native)?;
+        let commands = queued
+            .checked_add(2)?
+            .checked_mul(std::mem::size_of::<crate::engine::Command>())?;
         let pending = in_flight.checked_mul(crate::engine::pending_entry_bytes())?;
         // Rust channel allocation must also be representable independently of its record charge.
         if commands > isize::MAX as usize {
