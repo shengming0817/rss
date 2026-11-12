@@ -158,7 +158,8 @@ async fn drive<S: Source, E: Execution, T: Timer>(
     report: &mut Report,
     publisher: &mut Publisher,
 ) -> Result<Stop, Error> {
-    let mut checkpoint = control.run(execution.checkpoint()).await?;
+    control.check()?;
+    let mut checkpoint = execution.checkpoint(control).await?;
     report.position = checkpoint.position;
     publisher.confirmed(report);
     let mut remaining = limit.events;
@@ -174,10 +175,9 @@ async fn drive<S: Source, E: Execution, T: Timer>(
             u32::try_from(remaining.min(u64::from(limit.batch.get())))
                 .map_err(|_| Error::new(ErrorKind::InvalidInput))?,
         )?;
-        let events = control
-            .run(source.read(execution.scope().source(), checkpoint.position, batch))
-            .await?;
+        let events = source.read(execution.scope().source(), checkpoint.position, batch, control).await?;
         validate_batch(&events, execution, checkpoint.position, batch)?;
+        control.check()?;
         if events.is_empty() {
             return empty_stop(checkpoint);
         }
@@ -187,10 +187,7 @@ async fn drive<S: Source, E: Execution, T: Timer>(
                 return Err(Error::new(ErrorKind::SourceContract));
             }
             control.check()?;
-            let result = control
-                .run(execution.execute(checkpoint.position, &event, control))
-                .await
-                .map_err(Error::uncertain)?;
+            let result = execution.execute(checkpoint.position, &event, control).await?;
             match result {
                 ApplyOutcome::Applied => report.applied += 1,
                 ApplyOutcome::Duplicate => report.duplicates += 1,
@@ -200,6 +197,7 @@ async fn drive<S: Source, E: Execution, T: Timer>(
             report.position = checkpoint.position;
             publisher.confirmed(report);
             remaining -= 1;
+            control.check()?;
             if replay_done(checkpoint) {
                 return Ok(Stop::CaughtUp);
             }

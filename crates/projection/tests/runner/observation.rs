@@ -25,11 +25,12 @@ impl Execution for Probe {
     fn definition_identity(&self) -> &DefinitionIdentity {
         &DEFINITION
     }
-    async fn checkpoint(&self) -> Result<Checkpoint, Error> {
+    async fn checkpoint<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+        control.check()?;
         if matches!(self.boundary, Boundary::Checkpoint) {
-            std::future::pending::<()>().await;
+            control.run(std::future::pending::<Result<(), Error>>()).await?;
         }
-        self.memory.checkpoint().await
+        self.memory.checkpoint(control).await
     }
     #[allow(clippy::panic)]
     // reason: test a provider unwinding after one acknowledged event.
@@ -41,7 +42,7 @@ impl Execution for Probe {
     ) -> Result<ApplyOutcome, Error> {
         if event.position().get() == 2 {
             match self.boundary {
-                Boundary::Execute => std::future::pending::<()>().await,
+                Boundary::Execute => control.run(std::future::pending::<Result<(), Error>>()).await.map_err(Error::uncertain)?,
                 Boundary::Panic => panic!("test provider unwind"),
                 Boundary::Unknown => {
                     self.memory.execute(expected, event, control).await?;
@@ -86,20 +87,23 @@ impl Fixture {
     }
 }
 impl Source for Fixture {
-    async fn high_water(&self, _: &SourceScope) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(&self, _: &SourceScope, control: &Control<'_, T>) -> Result<Option<Position>, Error> {
+        control.check()?;
         // Observation must not introduce this extra provider operation.
         Err(Error::new(ErrorKind::SourceContract))
     }
-    async fn read(
+    async fn read<T: Timer>(
         &self,
         scope: &SourceScope,
         after: Option<Position>,
         limit: BatchLimit,
+        control: &Control<'_, T>,
     ) -> Result<Vec<Event>, Error> {
+        control.check()?;
         if matches!(self.execution.boundary, Boundary::Read) {
-            std::future::pending::<()>().await;
+            control.run(std::future::pending::<Result<(), Error>>()).await?;
         }
-        self.source.read(scope, after, limit).await
+        self.source.read(scope, after, limit, control).await
     }
 }
 fn limit(events: u64) -> anyhow::Result<RunLimit> {
@@ -201,7 +205,7 @@ async fn observation_unknown_settlement_never_advances() -> anyhow::Result<()> {
         (1, 0, 0)
     );
     assert_eq!(
-        fixture.execution.checkpoint().await?.position,
+        fixture.execution.checkpoint(&control).await?.position,
         Some(Position::new(2)?)
     );
     assert_eq!(reader.read(), ObservationStatus::Stopped(report));
