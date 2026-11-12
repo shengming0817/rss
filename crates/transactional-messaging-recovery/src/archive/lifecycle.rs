@@ -151,7 +151,8 @@ pub async fn execute<
         deadlines,
         Error::Deadline,
         |deadline| {
-            run(
+            // Keep the provider/object-store state machine out of the caller's inline future.
+            Box::pin(run(
                 repository,
                 binding,
                 store,
@@ -160,7 +161,7 @@ pub async fn execute<
                 request,
                 deadline,
                 integrity_observed,
-            )
+            ))
         },
         |deadline| async move {
             // An older receipt cannot settle an integrity fault whose write was interrupted.

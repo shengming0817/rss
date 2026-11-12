@@ -396,12 +396,9 @@ impl OutboxDriver for Driver {
             .await
             .map_err(conformance)?;
         }
-        // The provider may return a partial batch while paging tenants. Complete each identity.
-        for _ in [a, b] {
-            let claim = self
-                .claim(message(&self.h.id()).metadata().tenant_id())
-                .await
-                .map_err(conformance)?;
+        // Host scheduling selects each tenant explicitly on the same runtime and pool.
+        for tenant in [a, b] {
+            let claim = self.claim(tenant).await.map_err(conformance)?;
             self.settle(claim, OutboxSettlement::Published(()))
                 .await
                 .map_err(conformance)?;

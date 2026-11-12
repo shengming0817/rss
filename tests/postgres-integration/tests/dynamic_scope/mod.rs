@@ -136,6 +136,16 @@ pub(super) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         .await?,
     );
     let first = observe(&runtime, execution(a, 1)).await?;
+    unprovisioned_is_fenced(&runtime, b).await;
+    newly_provisioned(runtime.clone(), owner, a, b, first).await?;
+    reject_wrong_storage(&runtime, a).await?;
+    shared_capacity(runtime.clone(), a, b, first).await?;
+    runtime.close().await;
+    assert!(runtime.is_closed());
+    Ok(())
+}
+
+async fn unprovisioned_is_fenced(runtime: &PgRuntime, b: TenantId) {
     let absent = runtime
         .local_tx(execution(b, 1), deadline(), |_| {
             Box::pin(async { panic!("unprovisioned scope executed") })
@@ -149,26 +159,9 @@ pub(super) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         |_| false,
         |_| true
     ));
-    sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
-        .bind(b.to_string())
-        .execute(owner)
-        .await?;
-    {
-        let scope = execution(b, 1);
-        assert_eq!(observe(&runtime, scope).await?, first);
-        roundtrip(runtime.clone(), scope).await?;
-    }
-    assert!(!runtime.is_closed());
-    roundtrip(runtime.clone(), execution(a, 1)).await?;
-    assert_eq!(observe(&runtime, execution(a, 1)).await?, first);
-    sqlx::query(
-        "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",
-    )
-    .bind(b.to_string())
-    .execute(owner)
-    .await?;
-    assert!(observe(&runtime, execution(b, 1)).await.is_err());
-    assert_eq!(observe(&runtime, execution(b, 2)).await?, first);
+}
+
+async fn reject_wrong_storage(runtime: &PgRuntime, a: TenantId) -> anyhow::Result<()> {
     for storage in [
         StorageIdentity::new([9; 16], [2; 16])?,
         StorageIdentity::new([1; 16], [9; 16])?,
@@ -189,6 +182,15 @@ pub(super) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
             |_| false
         ));
     }
+    Ok(())
+}
+
+async fn shared_capacity(
+    runtime: Arc<PgRuntime>,
+    a: TenantId,
+    b: TenantId,
+    first: i32,
+) -> anyhow::Result<()> {
     let (entered_tx, entered) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     let held = runtime.clone();
@@ -225,7 +227,35 @@ pub(super) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     release.send(()).map_err(|_| anyhow::anyhow!("release"))?;
     assert_eq!(first_task.await?.fold(Ok, Err, Err, Err, Err, Err)?, first);
     assert_eq!(second_task.await??, first);
-    runtime.close().await;
-    assert!(runtime.is_closed());
+    Ok(())
+}
+
+async fn newly_provisioned(
+    runtime: Arc<PgRuntime>,
+    owner: &sqlx::PgPool,
+    a: TenantId,
+    b: TenantId,
+    first: i32,
+) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
+        .bind(b.to_string())
+        .execute(owner)
+        .await?;
+    {
+        let scope = execution(b, 1);
+        assert_eq!(observe(&runtime, scope).await?, first);
+        roundtrip(runtime.clone(), scope).await?;
+    }
+    assert!(!runtime.is_closed());
+    roundtrip(runtime.clone(), execution(a, 1)).await?;
+    assert_eq!(observe(&runtime, execution(a, 1)).await?, first);
+    sqlx::query(
+        "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",
+    )
+    .bind(b.to_string())
+    .execute(owner)
+    .await?;
+    assert!(observe(&runtime, execution(b, 1)).await.is_err());
+    assert_eq!(observe(&runtime, execution(b, 2)).await?, first);
     Ok(())
 }

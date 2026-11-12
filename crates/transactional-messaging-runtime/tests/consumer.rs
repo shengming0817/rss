@@ -3736,15 +3736,14 @@ fn wrong_execution_tenant_requeues_instead_of_rejecting_message_content() {
         }
     }
     let message = envelope(|_| {});
-    let error = match rss_transactional_messaging::transaction::verify_ingress(
+    let error = rss_transactional_messaging::transaction::verify_ingress(
         &Wrong,
         ConsumerGroup::parse("wrong-scope").expect("group"),
         &subscription(&message),
         &message,
-    ) {
-        Ok(_) => panic!("mismatched tenant admitted"),
-        Err(error) => error,
-    };
+    )
+    .err()
+    .expect("mismatched tenant must be rejected");
     assert_eq!(error.reason(), EnvelopeValidationFailure::ExecutionMismatch);
     assert_eq!(error.into_decision().kind(), SettlementKind::Requeue);
 }

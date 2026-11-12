@@ -259,7 +259,6 @@ async fn run_inner(input: FixtureInput) -> anyhow::Result<()> {
             &publisher,
             &subscriber,
             &timer,
-            tenant,
             &input.id,
             &input.route,
         )
@@ -343,10 +342,10 @@ async fn transfer(
     publisher: &AmqpPublisher,
     subscriber: &AmqpSubscriber,
     timer: &Timer,
-    tenant: TenantId,
     id: &str,
     route: &str,
 ) -> anyhow::Result<()> {
+    let tenant = authority.tenant();
     let subscription = subscription(route)?;
     let message = MessageEnvelope::new(
         MessageId::parse(id)?,
