@@ -61,42 +61,25 @@ impl std::fmt::Debug for StorageIdentity {
     }
 }
 
-/// Fixed, nonempty tenant generation set. No wildcard, refresh, or implicit tenant admission.
-#[derive(Clone)]
+/// Exact execution identity for one operation, supplied by the trusted host.
+/// This value neither authenticates a tenant nor discovers its current database epoch.
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ExecutionBinding {
     storage: StorageIdentity,
-    tenants: Vec<(TenantId, Epoch)>,
+    tenant: TenantId,
+    epoch: Epoch,
 }
 impl ExecutionBinding {
-    /// Validate the host's exact tenant scope; duplicate tenants are ambiguous even at equal epochs.
-    pub fn new(
-        storage: StorageIdentity,
-        mut tenants: Vec<(TenantId, Epoch)>,
-    ) -> Result<Self, InvalidBinding> {
-        if tenants.is_empty() {
-            return Err(InvalidBinding);
-        }
-        tenants.sort_by_key(|(tenant, _)| tenant.to_string());
-        if tenants.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-            return Err(InvalidBinding);
-        }
-        Ok(Self { storage, tenants })
+    /// Combine validated coordinates without acquiring resources or admitting execution.
+    pub const fn new(storage: StorageIdentity, tenant: TenantId, epoch: Epoch) -> Self {
+        Self { storage, tenant, epoch }
     }
-    /// Bound physical restore unit and lineage.
-    pub const fn storage(&self) -> StorageIdentity {
-        self.storage
-    }
-    /// Exact epoch, or no admission for an unknown tenant.
-    pub fn epoch(&self, tenant: TenantId) -> Option<Epoch> {
-        self.tenants
-            .iter()
-            .find(|(id, _)| *id == tenant)
-            .map(|(_, epoch)| *epoch)
-    }
-    /// Canonically ordered admitted tenant generations.
-    pub fn tenants(&self) -> &[(TenantId, Epoch)] {
-        &self.tenants
-    }
+    /// Exact physical restore unit and externally established lineage.
+    pub const fn storage(self) -> StorageIdentity { self.storage }
+    /// Tenant selected for this operation.
+    pub const fn tenant(self) -> TenantId { self.tenant }
+    /// Expected generation; never refreshed from durable state.
+    pub const fn epoch(self) -> Epoch { self.epoch }
 }
 impl std::fmt::Debug for ExecutionBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
