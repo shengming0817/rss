@@ -462,9 +462,30 @@ async fn run() -> anyhow::Result<()> {
         &owner,
     ))
     .await?;
+    expanded_members(config("dr_operator")?, other).await?;
     next.close().await;
     store.close().await;
     runtime.close().await;
     owner.close().await;
+    Ok(())
+}
+
+async fn expanded_members(config: PgConfig, tenant: rss_request_context::TenantId) -> anyhow::Result<()> {
+    use rss_transactional_messaging::{inbox::{ConsumerIdentity, ConsumerGroup}, message::{MessageId, MessageFingerprint}};
+    let storage = binding(1)?.storage();
+    let bound = ExecutionBinding::new(storage, vec![(tenant, Epoch::new(1)?)])?;
+    let store = PgDrStore::connect(config, Timer::new(), bound).await?;
+    let envelope = message("capacity");
+    let members = (0..1024).map(|i| Ok(Member::Consumer {
+        identity: ConsumerIdentity::new(tenant, ConsumerGroup::parse("capacity")?, MessageId::parse(&format!("capacity-{i:04}"))?, envelope.metadata().contract().clone()),
+        fingerprint: MessageFingerprint::of(&envelope),
+    })).collect::<anyhow::Result<Vec<_>>>()?;
+    let clock = Timer::new();
+    let plan = authorize_dr(&Allow, Plan::new(tenant, OperationId::new(), storage, Epoch::new(1)?, RestoreEvidence::new([3;32], [4;32])?, members)?, &clock, clock.cutoff()).await?;
+    let receipt = committed(store.apply(&plan, deadline()).await)?;
+    assert_eq!(receipt.epoch, Epoch::new(2)?);
+    assert_eq!(store.progress(&plan, deadline()).await?.ok_or_else(|| anyhow::anyhow!("capacity progress"))?.members, vec![MemberStatus::Pending; 1024]);
+    assert_eq!(committed(store.apply(&plan, deadline()).await)?, receipt);
+    store.close().await;
     Ok(())
 }

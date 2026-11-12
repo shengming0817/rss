@@ -24,7 +24,7 @@ impl<C: Clock> PgStore<C> {
         if !matches!(self.profile, StorageProfile::TimescaleDedicatedTenant(_)) {
             return Err(Error::Unsupported);
         }
-        if max_chunks.get() > 32 || window.width_micros() == 0 {
+        if max_chunks.get() > 1024 || window.width_micros() == 0 {
             return Err(Error::InvalidInput);
         }
         let pool = self.maintenance.as_ref().ok_or(Error::Invariant)?;
@@ -41,7 +41,7 @@ impl<C: Clock> PgStore<C> {
         let remaining = deadline
             .remaining(self.clock.now())
             .ok_or(Error::Deadline)?;
-        let ms = remaining.as_millis().clamp(1, i32::MAX as u128);
+        let ms = i32::try_from(remaining.as_millis().max(1)).map_err(|_| Error::InvalidInput)?;
         tokio::time::timeout(remaining,sqlx::query("SELECT set_config('statement_timeout',$1,false),set_config('lock_timeout',$1,false)").bind(format!("{ms}ms")).execute(&mut *connection)).await.map_err(|_|Error::Deadline)?.map_err(sql_error)?;
         let rows=tokio::time::timeout(deadline.remaining(self.clock.now()).ok_or(Error::Deadline)?,sqlx::query("SELECT format('%I.%I',chunk_schema,chunk_name) AS name FROM timescaledb_information.chunks WHERE hypertable_schema='rss_timeseries' AND hypertable_name='samples' AND range_start_integer >= $1 AND range_end_integer <= $2 AND is_compressed=$3 ORDER BY range_start_integer,chunk_name LIMIT $4")
             .bind(window.start().micros()).bind(window.end().micros()).bind(matches!(format,StorageFormat::Rowstore)).bind(i64::from(max_chunks.get())).fetch_all(&mut *connection)).await.map_err(|_|Error::Deadline)?.map_err(sql_error)?;
@@ -59,7 +59,7 @@ impl<C: Clock> PgStore<C> {
             let Some(remaining) = deadline.remaining(self.clock.now()) else {
                 return Ok(Outcome::Unknown);
             };
-            let ms = remaining.as_millis().clamp(1, i32::MAX as u128);
+            let ms = i32::try_from(remaining.as_millis().max(1)).map_err(|_| Error::InvalidInput)?;
             let operation = async {
                 sqlx::query("SELECT set_config('statement_timeout',$1,false),set_config('lock_timeout',$1,false)").bind(format!("{ms}ms")).execute(&mut *connection).await?;
                 sqlx::query(sql).bind(name).execute(&mut *connection).await

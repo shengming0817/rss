@@ -31,7 +31,7 @@ impl PgInboxClaim {
                 == binding.epoch(self.identity.tenant_id())
     }
 }
-/// PostgreSQL inbox. Lease duration is explicit and bounded to one day.
+/// PostgreSQL inbox. Lease duration uses exact PostgreSQL interval microseconds.
 pub struct PgInboxStore {
     pub(crate) runtime: Arc<PgRuntime>,
     lease_ms: i64,
@@ -49,7 +49,7 @@ impl PgInboxStore {
 }
 pub(crate) fn milliseconds(duration: Duration) -> Result<i64, PgError> {
     if duration.is_zero()
-        || duration > Duration::from_secs(86400)
+        || duration.as_micros() > i64::MAX as u128
         || !duration.subsec_nanos().is_multiple_of(1_000_000)
     {
         return Err(PgError::InvalidLeaseDuration);
@@ -191,7 +191,7 @@ impl InboxStore for PgInboxStore {
         let lease_ms = self.lease_ms;
         settled(self.runtime.local_tx(identity.tenant_id(), deadline, move |tx| Box::pin(async move {
             lock_identity(tx, &identity).await?;
-            let remaining = sqlx::query_scalar::<_, i64>("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()+$5*interval '1 millisecond' WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp() RETURNING GREATEST(0,(extract(epoch FROM lease_until-clock_timestamp())*1000000)::bigint)")
+            let remaining = sqlx::query_scalar::<_, i64>("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()+($5::bigint::text || ' milliseconds')::interval WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp() RETURNING GREATEST(0,(extract(epoch FROM lease_until-clock_timestamp())*1000000)::bigint)")
                 .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str()).bind(token).bind(lease_ms)
                 .fetch_optional(&mut *tx.connection).await?;
             Ok(match remaining { Some(value) => LeaseStatus::Held { remaining: Duration::from_micros(value.unsigned_abs()) }, None => LeaseStatus::Lost })
@@ -218,9 +218,9 @@ impl InboxStore for PgInboxStore {
 // DB time is sampled at the write; an expired claim is never resurrected by renew/release.
 const CLAIM_SQL: &str = "INSERT INTO rss_transactional_messaging.inbox AS i
  (tenant_id,message_id,consumer_group,contract,lease_token,lease_until)
- VALUES ($1::uuid,$2,$3,$4,gen_random_uuid(),clock_timestamp()+$5*interval '1 millisecond')
+ VALUES ($1::uuid,$2,$3,$4,gen_random_uuid(),clock_timestamp()+($5::bigint::text || ' milliseconds')::interval)
  ON CONFLICT (tenant_id,message_id,consumer_group) DO UPDATE
- SET lease_token=gen_random_uuid(), lease_until=clock_timestamp()+$5*interval '1 millisecond', receive_count=i.receive_count+1
+ SET lease_token=gen_random_uuid(), lease_until=clock_timestamp()+($5::bigint::text || ' milliseconds')::interval, receive_count=i.receive_count+1
  WHERE i.disposition IS NULL AND (i.lease_until<=clock_timestamp() OR i.claim_epoch<>current_setting('rss.execution_epoch')::bigint OR i.claim_lineage IS DISTINCT FROM decode(current_setting('rss.storage_lineage'),'hex')) AND i.contract=EXCLUDED.contract
  RETURNING lease_token::text AS token";
 
@@ -239,10 +239,13 @@ mod tests {
     }
     #[test]
     fn invalid_lease_is_configuration_not_durable_corruption() {
+        for millis in [86_400_001, 9_223_372_036_854_775] {
+            assert_eq!(milliseconds(Duration::from_millis(millis)).ok(), Some(millis as i64));
+        }
         for duration in [
             Duration::ZERO,
             Duration::from_nanos(1),
-            Duration::from_secs(86401),
+            Duration::from_millis(9_223_372_036_854_776),
         ] {
             assert!(matches!(
                 milliseconds(duration),

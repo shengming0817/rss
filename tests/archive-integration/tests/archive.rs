@@ -186,7 +186,7 @@ async fn run() -> anyhow::Result<()> {
         .execute(&owner)
         .await?;
     sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
-    sqlx::raw_sql("CREATE ROLE archive_worker LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT USAGE ON SCHEMA rss_transactional_messaging TO archive_worker; GRANT SELECT ON rss_transactional_messaging.consumer_dead_letter,rss_transactional_messaging.archive_jobs,rss_transactional_messaging.archive_objects TO archive_worker; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.archive_claim(uuid,uuid,bigint,bytea,bigint,bigint,boolean,bigint),rss_transactional_messaging.archive_prepare(uuid,uuid,bytea,jsonb,bytea),rss_transactional_messaging.archive_record(uuid,uuid,bytea,uuid,jsonb),rss_transactional_messaging.archive_purge(uuid,uuid,bytea,jsonb),rss_transactional_messaging.archive_missing(uuid,uuid,bytea,uuid,jsonb),rss_transactional_messaging.archive_fault(uuid,uuid,bytea,text) TO archive_worker;").execute(&owner).await?;
+    sqlx::raw_sql("CREATE ROLE archive_worker LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT USAGE ON SCHEMA rss_transactional_messaging TO archive_worker; GRANT SELECT ON rss_transactional_messaging.consumer_dead_letter,rss_transactional_messaging.archive_jobs,rss_transactional_messaging.archive_objects TO archive_worker; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.archive_claim(uuid,uuid,bigint,bytea,bigint,bigint,boolean,bigint,integer),rss_transactional_messaging.archive_prepare(uuid,uuid,bytea,jsonb,bytea),rss_transactional_messaging.archive_record(uuid,uuid,bytea,uuid,jsonb),rss_transactional_messaging.archive_purge(uuid,uuid,bytea,jsonb),rss_transactional_messaging.archive_missing(uuid,uuid,bytea,uuid,jsonb),rss_transactional_messaging.archive_fault(uuid,uuid,bytea,text) TO archive_worker;").execute(&owner).await?;
     let config = PgConfig::new(
         &params.host,
         params.port,
@@ -198,7 +198,7 @@ async fn run() -> anyhow::Result<()> {
     fence_fixture::provision(&owner).await?;
     let repository =
         PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::binding())
-            .await?;
+            .await?.with_retired_scan_limit(1024)?;
     let raw = PgPoolOptions::new()
         .connect_with(
             options
@@ -783,7 +783,7 @@ async fn temporary_table_shadow(raw: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::query("CREATE TEMP TABLE consumer_dead_letter(shadow boolean) ON COMMIT DROP")
         .execute(&mut *tx)
         .await?;
-    let result = sqlx::query("SELECT rss_transactional_messaging.archive_claim(gen_random_uuid(),gen_random_uuid(),1,decode(repeat('00',32),'hex'),172800,604800,false,30000)")
+    let result = sqlx::query("SELECT rss_transactional_messaging.archive_claim(gen_random_uuid(),gen_random_uuid(),1,decode(repeat('00',32),'hex'),172800,604800,false,30000,64)")
         .execute(&mut *tx).await;
     let error = result
         .err()
@@ -840,7 +840,7 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
             "REVOKE UPDATE(capsule) ON rss_transactional_messaging.consumer_dead_letter FROM archive_worker",
         ),
     ];
-    let function = "rss_transactional_messaging.archive_claim(uuid,uuid,bigint,bytea,bigint,bigint,boolean,bigint)";
+    let function = "rss_transactional_messaging.archive_claim(uuid,uuid,bigint,bytea,bigint,bigint,boolean,bigint,integer)";
     let function_cases=[
         (format!("ALTER FUNCTION {function} RESET ALL"),format!("ALTER FUNCTION {function} SET search_path=pg_catalog,rss_transactional_messaging,pg_temp")),
         (format!("ALTER FUNCTION {function} SECURITY INVOKER"),format!("ALTER FUNCTION {function} SECURITY DEFINER")),
@@ -851,7 +851,7 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
         ("CREATE FUNCTION rss_transactional_messaging.archive_claim(text) RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT NULL::void'; REVOKE ALL ON FUNCTION rss_transactional_messaging.archive_claim(text) FROM PUBLIC; CREATE ROLE archive_extra NOLOGIN; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.archive_claim(text) TO archive_extra; GRANT archive_extra TO archive_worker".into(),"REVOKE archive_extra FROM archive_worker; DROP FUNCTION rss_transactional_messaging.archive_claim(text); DROP ROLE archive_extra".into()),
     ];
     let search_path_cases = [
-        "rss_transactional_messaging.archive_claim(uuid,uuid,bigint,bytea,bigint,bigint,boolean,bigint)",
+        "rss_transactional_messaging.archive_claim(uuid,uuid,bigint,bytea,bigint,bigint,boolean,bigint,integer)",
         "rss_transactional_messaging.archive_prepare(uuid,uuid,bytea,jsonb,bytea)",
         "rss_transactional_messaging.archive_record(uuid,uuid,bytea,uuid,jsonb)",
         "rss_transactional_messaging.archive_purge(uuid,uuid,bytea,jsonb)",
@@ -900,16 +900,16 @@ async fn fair_scan(repository: &PgArchiveRepository, owner: &sqlx::PgPool) -> an
     let r = request(id, 1, Hold::Release).await?;
     settled(repository.claim(&r, deadline()).await)?;
     // More unresolved unknown PUTs than a batch must not monopolize every retry.
-    sqlx::query("INSERT INTO rss_transactional_messaging.archive_objects(tenant_id,operation_id,generation,object) SELECT $1::uuid,$2::uuid,gen_random_uuid(),jsonb_build_object('key','unknown-'||n,'checksum',to_jsonb(array_fill(0,ARRAY[32])),'length',1,'version',NULL,'retainUntil',1) FROM generate_series(1,130) n")
+    sqlx::query("INSERT INTO rss_transactional_messaging.archive_objects(tenant_id,operation_id,generation,object) SELECT $1::uuid,$2::uuid,gen_random_uuid(),jsonb_build_object('key','unknown-'||n,'checksum',to_jsonb(array_fill(0,ARRAY[32])),'length',1,'version',NULL,'retainUntil',1) FROM generate_series(1,2050) n")
         .bind(tenant().to_string()).bind(r.request().operation().to_string()).execute(owner).await?;
     let mut seen = std::collections::BTreeSet::new();
     for _ in 0..3 {
         expire(owner, &r).await?;
         let c = settled(repository.claim(&r, deadline()).await)?;
-        assert_eq!(c.retired.len(), 64);
+        assert_eq!(c.retired.len(), 1024);
         seen.extend(c.retired.into_iter().map(|o| o.key));
     }
-    assert_eq!(seen.len(), 130);
+    assert_eq!(seen.len(), 2050);
     Ok(())
 }
 async fn fault_receipt(

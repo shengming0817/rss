@@ -7,6 +7,7 @@ use rss_transactional_messaging_recovery::archive::Error;
 /// PostgreSQL archive capability with private transaction authority.
 pub struct PgArchiveRepository {
     runtime: PgRuntime,
+    retired_scan_limit: u16,
 }
 impl PgArchiveRepository {
     /// Validate the archive schema and a dedicated, least-privilege archive role.
@@ -16,6 +17,7 @@ impl PgArchiveRepository {
         binding: rss_transactional_messaging::fence::ExecutionBinding,
     ) -> Result<Self, Error> {
         Ok(Self {
+            retired_scan_limit: 64,
             runtime: PgRuntime::connect_profile(
                 config,
                 timer,
@@ -25,6 +27,13 @@ impl PgArchiveRepository {
             .await
             .map_err(error)?,
         })
+    }
+    /// Bound expired generations inspected per claim (1..=1024, default 64).
+    /// This runtime budget is independent of immutable archive request identity.
+    pub fn with_retired_scan_limit(mut self, limit: u16) -> Result<Self, Error> {
+        if !(1..=1024).contains(&limit) { return Err(Error::Invalid); }
+        self.retired_scan_limit = limit;
+        Ok(self)
     }
     /// Close the privately owned pool.
     pub async fn close(&self) {

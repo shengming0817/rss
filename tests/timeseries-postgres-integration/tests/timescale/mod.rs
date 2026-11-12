@@ -118,7 +118,7 @@ async fn native_refresh_late_delete_restore_columnstore_and_retention() -> anyho
         .fetch_one(&f.admin)
         .await?;
     assert_eq!(n, 2);
-    let cap = NonZeroU32::new(1).ok_or(Error::InvalidInput)?;
+    let cap = NonZeroU32::new(1024).ok_or(Error::InvalidInput)?;
     assert_eq!(
         confirmed(
             f.store

@@ -371,7 +371,7 @@ BEGIN
   END IF;
  END LOOP;
  value:=result->>'correlation';
- IF value IS NOT NULL AND (octet_length(value) NOT BETWEEN 1 AND 128 OR (value COLLATE "C") ~ '[^A-Za-z0-9_.-]') THEN
+ IF value IS NOT NULL AND (octet_length(value) NOT BETWEEN 1 AND 255 OR (value COLLATE "C") ~ '[^A-Za-z0-9_.-]') THEN
   RAISE EXCEPTION 'invalid correlation' USING ERRCODE='22023';
  END IF;
  value:=result->>'partition';
@@ -575,7 +575,7 @@ DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(curren
   WHERE c.eligible_at<=clock_timestamp() ORDER BY src.seq FOR UPDATE OF src SKIP LOCKED;
 BEGIN
  PERFORM check_execution();
- IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 86400000 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
+ IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
  -- FETCH NEXT avoids PL/pgSQL FOR's prefetch locks and never reopens an exhausted scan.
  -- ref: PostgreSQL REL_17_6 src/pl/plpgsql/src/pl_exec.c exec_stmt_fetch/exec_for_query.
  OPEN candidates;
@@ -587,14 +587,14 @@ BEGIN
   n:=clock_timestamp();
   IF r.op IS NULL THEN
    IF NOT (o.status='pending' OR (o.status='publishing' AND (o.lease_until<=n OR o.claim_epoch<>e OR o.claim_lineage IS DISTINCT FROM l))) OR o.retry_after>n THEN CONTINUE; END IF;
-   UPDATE outbox src SET status='publishing',lease_token=gen_random_uuid(),lease_until=n+p_ttl_ms*interval '1 millisecond',automatic_retry_deadline=COALESCE(src.automatic_retry_deadline,n+interval '24 hours') WHERE src.seq=o.seq RETURNING * INTO o;
+   UPDATE outbox src SET status='publishing',lease_token=gen_random_uuid(),lease_until=n+(p_ttl_ms::text || ' milliseconds')::interval,automatic_retry_deadline=COALESCE(src.automatic_retry_deadline,n+interval '24 hours') WHERE src.seq=o.seq RETURNING * INTO o;
   ELSE
    SELECT * INTO m FROM dr_members x WHERE x.tenant_id=p_tenant AND x.operation_id=r.op AND x.outbox_seq=o.seq FOR UPDATE;
    IF NOT FOUND OR NOT (m.status='pending' OR (m.status='publishing' AND m.lease_until<=n)) OR m.retry_after>n THEN CONTINUE; END IF;
    IF o.automatic_retry_deadline IS NULL OR o.automatic_retry_deadline<=n THEN
     UPDATE dr_members x SET status='blocked',block_reason='deadline_expired',lease_token=NULL,lease_until=NULL WHERE x.tenant_id=p_tenant AND x.operation_id=r.op AND x.outbox_seq=o.seq; CONTINUE;
    END IF;
-   UPDATE dr_members x SET status='publishing',lease_token=gen_random_uuid(),lease_until=n+p_ttl_ms*interval '1 millisecond' WHERE x.tenant_id=p_tenant AND x.operation_id=r.op AND x.outbox_seq=o.seq RETURNING * INTO m;
+   UPDATE dr_members x SET status='publishing',lease_token=gen_random_uuid(),lease_until=n+(p_ttl_ms::text || ' milliseconds')::interval WHERE x.tenant_id=p_tenant AND x.operation_id=r.op AND x.outbox_seq=o.seq RETURNING * INTO m;
    o.lease_token:=m.lease_token; o.lease_until:=m.lease_until;
   END IF;
   used:=used+1;
@@ -628,7 +628,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_m
 DECLARE o outbox; m dr_members; n timestamptz; deadline timestamptz; e bigint:=current_setting('rss.execution_epoch')::bigint; l bytea:=decode(current_setting('rss.storage_lineage'),'hex');
 BEGIN
  PERFORM check_execution();
- IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_extend_ms NOT BETWEEN 0 AND 86400000 THEN RETURN; END IF;
+ IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_extend_ms NOT BETWEEN 0 AND 9223372036854775 THEN RETURN; END IF;
  SELECT * INTO o FROM outbox src WHERE src.seq=p_seq AND src.tenant_id=p_tenant FOR UPDATE;
  IF NOT FOUND THEN RETURN; END IF;
  IF p_dr IS NULL THEN
@@ -642,7 +642,7 @@ BEGIN
  n:=clock_timestamp();
  IF deadline<=n OR (extract(epoch FROM deadline)*1000000)::bigint<>p_lease_us THEN RETURN; END IF;
  IF p_extend_ms>0 THEN
-  deadline:=n+p_extend_ms*interval '1 millisecond';
+  deadline:=n+(p_extend_ms::text || ' milliseconds')::interval;
   IF p_dr IS NULL THEN UPDATE outbox SET lease_until=deadline WHERE outbox.seq=p_seq;
   ELSE UPDATE dr_members SET lease_until=deadline WHERE dr_members.tenant_id=p_tenant AND operation_id=p_dr AND outbox_seq=p_seq; END IF;
  END IF;
@@ -688,7 +688,7 @@ BEGIN
  RETURN j;
 END $f$;
 
-CREATE FUNCTION rss_transactional_messaging.archive_claim(p_op uuid,p_id uuid,p_version bigint,p_digest bytea,p_hot bigint,p_cold bigint,p_hold boolean,p_ttl bigint)
+CREATE FUNCTION rss_transactional_messaging.archive_claim(p_op uuid,p_id uuid,p_version bigint,p_digest bytea,p_hot bigint,p_cold bigint,p_hold boolean,p_ttl bigint,p_scan integer)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid; d consumer_dead_letter; j archive_jobs; p policy; a archive_objects; n timestamptz; retired jsonb;
 BEGIN
@@ -696,7 +696,7 @@ BEGIN
  SELECT * INTO d FROM consumer_dead_letter WHERE tenant_id=t AND id=p_id FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'archive not found' USING ERRCODE='P0002'; END IF;
  SELECT * INTO p FROM policy WHERE revision=1;
- IF p_hot<p.automatic_window_seconds+p.safety_seconds OR p_cold<=0 OR p_ttl NOT BETWEEN 1 AND 300000 THEN RAISE EXCEPTION 'archive retention' USING ERRCODE='22023'; END IF;
+ IF p_hot<p.automatic_window_seconds+p.safety_seconds OR p_cold<=0 OR p_ttl NOT BETWEEN 1 AND 9223372036854775 OR p_scan IS NULL OR p_scan NOT BETWEEN 1 AND 1024 THEN RAISE EXCEPTION 'archive retention' USING ERRCODE='22023'; END IF;
  SELECT * INTO j FROM archive_jobs WHERE tenant_id=t AND operation_id=p_op FOR UPDATE;
  n:=clock_timestamp();
  IF FOUND THEN
@@ -724,13 +724,13 @@ BEGIN
   UPDATE archive_objects SET prepared=NULL WHERE tenant_id=t AND generation=j.generation;
   UPDATE archive_jobs SET generation=gen_random_uuid() WHERE tenant_id=t AND operation_id=p_op RETURNING * INTO j;
  END IF;
- UPDATE archive_jobs SET lease_token=gen_random_uuid(),lease_until=n+p_ttl*interval '1 millisecond' WHERE tenant_id=t AND operation_id=p_op RETURNING * INTO j;
+ UPDATE archive_jobs SET lease_token=gen_random_uuid(),lease_until=n+(p_ttl::text || ' milliseconds')::interval WHERE tenant_id=t AND operation_id=p_op RETURNING * INTO j;
  -- Persist rotation even when an unknown PUT remains unresolved. Every eligible row gets a turn.
  WITH batch AS (
   SELECT o.generation FROM archive_objects o JOIN archive_jobs old ON old.tenant_id=o.tenant_id AND old.operation_id=o.operation_id
   WHERE old.tenant_id=t AND old.dead_letter_id=p_id AND o.generation<>j.generation AND NOT o.reconciled
    AND (o.object->>'retainUntil')::bigint <= floor(extract(epoch FROM n))
-  ORDER BY o.last_checked NULLS FIRST,o.generation LIMIT 64
+  ORDER BY o.last_checked NULLS FIRST,o.generation LIMIT p_scan
  ), scanned AS (
   UPDATE archive_objects o SET last_checked=n FROM batch b WHERE o.tenant_id=t AND o.generation=b.generation RETURNING o.object
  ) SELECT coalesce(jsonb_agg(object),'[]'::jsonb) INTO retired FROM scanned;
@@ -828,7 +828,7 @@ BEGIN
   SELECT * INTO target FROM dr_plans WHERE tenant_id=t AND operation_id=(p_evidence->>'operation')::uuid;
   IF NOT FOUND THEN RAISE EXCEPTION 'target absent' USING ERRCODE='P0002'; END IF;
   IF target.kind='terminate' OR target.request_digest IS DISTINCT FROM decode(p_evidence->>'digest','hex') OR target.lineage IS DISTINCT FROM s.lineage OR target.epoch<>current_epoch THEN RAISE EXCEPTION 'termination conflict' USING ERRCODE='23505'; END IF;
- ELSIF jsonb_array_length(p_members) NOT BETWEEN 1 AND 500 THEN
+ ELSIF jsonb_array_length(p_members) NOT BETWEEN 1 AND 1024 THEN
   RAISE EXCEPTION 'invalid members' USING ERRCODE='22023';
  END IF;
  next_epoch:=old_epoch+1;

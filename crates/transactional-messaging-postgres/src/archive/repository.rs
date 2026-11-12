@@ -96,14 +96,15 @@ impl ArchiveRepository for PgArchiveRepository {
         if ttl == 0 {
             return LocalTxAttempt::not_started(Error::Deadline);
         }
-        if ttl > 300_000 {
+        if ttl > 9_223_372_036_854_775 {
             return LocalTxAttempt::not_started(Error::Invalid);
         }
         let ttl = ttl as i64;
         let r = request.request();
-        attempt(self.runtime.local_tx_with_context(r.tenant(),deadline,(r,ttl),|(r,ttl),tx|Box::pin(async move {
-            let v:Value=sqlx::query_scalar("SELECT rss_transactional_messaging.archive_claim($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8)")
-                .bind(r.operation().to_string()).bind(r.id().to_string()).bind(r.version().get()).bind(r.digest().as_slice()).bind(r.retention().hot_seconds()).bind(r.retention().cold_seconds()).bind(r.hold()==Hold::Retain).bind(*ttl).fetch_one(&mut *tx.connection).await.map_err(super::sql_error)?;
+        let scan = i32::from(self.retired_scan_limit);
+        attempt(self.runtime.local_tx_with_context(r.tenant(),deadline,(r,ttl,scan),|(r,ttl,scan),tx|Box::pin(async move {
+            let v:Value=sqlx::query_scalar("SELECT rss_transactional_messaging.archive_claim($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9)")
+                .bind(r.operation().to_string()).bind(r.id().to_string()).bind(r.version().get()).bind(r.digest().as_slice()).bind(r.retention().hot_seconds()).bind(r.retention().cold_seconds()).bind(r.hold()==Hold::Retain).bind(*ttl).bind(*scan).fetch_one(&mut *tx.connection).await.map_err(super::sql_error)?;
             let j=&v["job"];
             let generation=string(j,"generation")?.to_owned();
             let row=sqlx::query("SELECT object,prepared,verified FROM rss_transactional_messaging.archive_objects WHERE tenant_id=$1::uuid AND generation=$2::uuid")
