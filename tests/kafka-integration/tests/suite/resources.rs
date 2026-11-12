@@ -1,4 +1,5 @@
 use super::support::*;
+use anyhow::Context;
 use rdkafka::{
     ClientConfig,
     admin::{AdminClient, AdminOptions, AlterConfig, ResourceSpecifier},
@@ -60,7 +61,7 @@ async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
                     matches!(outcome, PublishOutcome::Confirmed(_)),
                     "load publication was not confirmed"
                 );
-                latencies.push(timer.now().duration_since(start).as_micros());
+                latencies.push(timer.now().saturating_duration_since(start).as_micros());
             }
             Ok::<_, anyhow::Error>(latencies)
         });
@@ -69,7 +70,7 @@ async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
     while let Some(result) = workers.join_next().await {
         latencies.extend(result??);
     }
-    let elapsed = timer.now().duration_since(start).as_secs_f64();
+    let elapsed = timer.now().saturating_duration_since(start).as_secs_f64();
     latencies.sort_unstable();
     assert_eq!(latencies.len(), 1024);
     assert_eq!(publisher.pending_for_test(), 0);
@@ -124,10 +125,9 @@ async fn saturated_queue(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
     let outcome = publisher
         .publish(&message, deadline(Duration::from_secs(1))?)
         .await;
-    assert!(matches!(outcome, PublishOutcome::DefinitelyNotPublished(_)));
-    let failure = outcome
-        .failure()
-        .ok_or_else(|| anyhow::anyhow!("missing refusal"))?;
+    // A failure with no ambiguity is definite non-publication.
+    assert!(!outcome.is_ambiguous());
+    let failure = outcome.failure().context("missing refusal")?;
     assert_eq!(failure.kind(), PublishFailureKind::Transient);
     assert_eq!(failure.stage(), PublishFailureStage::Admission);
     emit(&format!(
