@@ -175,7 +175,7 @@ async fn complete_message(runtime: Arc<PgRuntime>, raw: &PgPool) -> anyhow::Resu
     )?;
     let claim = store
         .claim_partition_heads(
-            crate::execution(crate::fixture_tenant(), 1),
+            crate::execution(item.metadata().tenant_id(), 1),
             NonZeroUsize::MIN,
             deadline(),
         )

@@ -623,11 +623,7 @@ async fn cached_order(runtime: Arc<PgRuntime>, owner: &PgPool, raw: &PgPool) -> 
     )?;
     for id in ["cache-first", "cache-second"] {
         let claim = store
-            .claim_partition_heads(
-                crate::execution(crate::fixture_tenant(), 1),
-                NonZeroUsize::MIN,
-                deadline(),
-            )
+            .claim_partition_heads(crate::execution(tenant, 1), NonZeroUsize::MIN, deadline())
             .await?
             .into_iter()
             .next()

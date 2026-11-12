@@ -535,7 +535,7 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
         )?;
         let accepted = store
             .claim_partition_heads(
-                crate::execution(crate::fixture_tenant(), 1),
+                crate::execution(rss_request_context::TenantId::parse(tenant)?, 1),
                 std::num::NonZeroUsize::MIN,
                 deadline(),
             )
@@ -694,7 +694,7 @@ async fn tenant_isolation(
     assert_eq!(
         claims.len(),
         2,
-        "atomic cross-tenant relay must claim distinct rows"
+        "explicit tenant claims must return their distinct rows"
     );
     assert_ne!(
         PgOutboxStore::<()>::message(&claims[0]).message_id(),
