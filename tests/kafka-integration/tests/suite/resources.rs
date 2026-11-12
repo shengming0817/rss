@@ -1,4 +1,4 @@
-mod support;
+use super::support::*;
 use rdkafka::{
     ClientConfig,
     admin::{AdminClient, AdminOptions, AlterConfig, ResourceSpecifier},
@@ -7,7 +7,6 @@ use rss_request_context::Clock;
 use rss_transactional_messaging::{message::MessageEnvelope, transport::*};
 use rss_transactional_messaging_kafka::*;
 use std::{future::Future, sync::Arc, time::Duration};
-use support::*;
 
 const PAYLOAD_BYTES: usize = 64 * 1024;
 const RECORD_BYTES: usize = 128 * 1024;
