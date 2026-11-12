@@ -43,13 +43,6 @@ use std::time::Duration;
 
 use crate::error::{MessagingError, MessagingErrorKind};
 
-/// Maximum total attempts accepted by [`RetryPolicy`], including the initial attempt.
-pub const RETRY_ATTEMPTS_MAX: NonZeroU32 = NonZeroU32::MIN.saturating_add(127);
-/// Upper bound for each component of [`DeliveryBudget`].
-pub const DELIVERY_BUDGET_MAX: Duration = Duration::from_secs(24 * 60 * 60);
-/// Upper bound for a [`ShutdownBudget`].
-pub const SHUTDOWN_BUDGET_MAX: Duration = Duration::from_secs(24 * 60 * 60);
-
 /// Minimum supported periodic lease-renewal interval.
 #[cfg(feature = "consumer")]
 pub const LEASE_RENEWAL_INTERVAL_MIN: Duration = Duration::from_millis(1);
@@ -57,12 +50,6 @@ pub const LEASE_RENEWAL_INTERVAL_MIN: Duration = Duration::from_millis(1);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 /// Invalid attempt count or backoff relationship.
 pub enum RetryPolicyError {
-    #[error("retry attempts exceed operational maximum {max}")]
-    /// The requested attempt count exceeds [`RETRY_ATTEMPTS_MAX`].
-    AttemptsExceeded {
-        /// Maximum number of attempts accepted by the policy.
-        max: NonZeroU32,
-    },
     #[error("retry backoff base must be non-zero")]
     /// Backoff would allow a busy retry loop.
     ZeroBackoff,
@@ -93,11 +80,6 @@ impl RetryPolicy {
         base: Duration,
         cap: Duration,
     ) -> Result<Self, RetryPolicyError> {
-        if max_attempts > RETRY_ATTEMPTS_MAX {
-            return Err(RetryPolicyError::AttemptsExceeded {
-                max: RETRY_ATTEMPTS_MAX,
-            });
-        }
         if base.is_zero() {
             return Err(RetryPolicyError::ZeroBackoff);
         }
@@ -120,6 +102,11 @@ impl RetryPolicy {
     /// Whether this one-based attempt fits the count limit; time-budget admission is separate.
     pub const fn allows_attempt(&self, attempt: NonZeroU32) -> bool {
         attempt.get() <= self.max_attempts.get()
+    }
+    /// Return the next admitted attempt; exhaustion never wraps or saturates into another retry.
+    #[must_use]
+    pub fn next_attempt(&self, attempt: NonZeroU32) -> Option<NonZeroU32> {
+        attempt.checked_add(1).filter(|next| self.allows_attempt(*next))
     }
     #[must_use]
     /// Capped exponential delay after a one-based failure; does not check whether another attempt
@@ -145,9 +132,6 @@ pub enum DeliveryBudgetError {
     #[error("delivery budget component must use integral milliseconds")]
     /// A component contains sub-millisecond precision.
     NonIntegralMilliseconds,
-    #[error("delivery budget component exceeds operational maximum")]
-    /// A component exceeds [`DELIVERY_BUDGET_MAX`].
-    OperationalRangeExceeded,
     #[error("delivery required budget overflows Duration")]
     /// The sum of publication, settlement, and margin durations cannot be represented.
     RequiredBudgetOverflow,
@@ -166,7 +150,7 @@ pub struct DeliveryBudget {
 }
 
 impl DeliveryBudget {
-    /// Require positive whole-millisecond components within [`DELIVERY_BUDGET_MAX`] and work
+    /// Require positive whole-millisecond components and work
     /// strictly below TTL; otherwise return [`DeliveryBudgetError`].
     pub fn new(
         lease_ttl: Duration,
@@ -180,9 +164,6 @@ impl DeliveryBudget {
             }
             if !duration.subsec_nanos().is_multiple_of(1_000_000) {
                 return Err(DeliveryBudgetError::NonIntegralMilliseconds);
-            }
-            if duration > DELIVERY_BUDGET_MAX {
-                return Err(DeliveryBudgetError::OperationalRangeExceeded);
             }
         }
         let required = publish_timeout
@@ -240,9 +221,7 @@ pub enum ShutdownBudgetError {
     #[error("shutdown budget must be non-zero")]
     /// No drain time was allowed.
     Zero,
-    #[error("shutdown budget exceeds operational maximum")]
-    /// The duration exceeds [`SHUTDOWN_BUDGET_MAX`].
-    OperationalRangeExceeded,
+
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,14 +231,11 @@ pub struct ShutdownBudget(Duration);
 impl ShutdownBudget {
     /// Allow up to forty-five seconds for drain.
     pub const STANDARD: Self = Self(Duration::from_secs(45));
-    /// Require a positive duration no greater than [`SHUTDOWN_BUDGET_MAX`]; otherwise return
+    /// Require a positive duration; the runtime validates its actual clock range. Otherwise return
     /// [`ShutdownBudgetError`].
     pub fn new(timeout: Duration) -> Result<Self, ShutdownBudgetError> {
         if timeout.is_zero() {
             return Err(ShutdownBudgetError::Zero);
-        }
-        if timeout > SHUTDOWN_BUDGET_MAX {
-            return Err(ShutdownBudgetError::OperationalRangeExceeded);
         }
         Ok(Self(timeout))
     }

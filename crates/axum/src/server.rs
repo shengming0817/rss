@@ -353,11 +353,14 @@ async fn prepared_connection<T: ConnectionTransport>(
     protocol: Protocol,
     listener_label: Arc<str>,
 ) -> ConnectionExit {
+    let Ok(preparation_deadline) = policy::timeout_deadline(protocol.policy().preparation_timeout, ServePolicyField::PreparationTimeout) else {
+        return ConnectionExit::PreparationError;
+    };
     // The factory call also executes inside this async body and its outer catch_unwind.
     let prepared = tokio::select! {
         biased;
         () = token.cancelled() => return ConnectionExit::Clean,
-        result = tokio::time::timeout(protocol.policy().preparation_timeout, async { transport.prepare(stream, peer).await }) => {
+        result = tokio::time::timeout_at(preparation_deadline, async { transport.prepare(stream, peer).await }) => {
             match result {
                 Ok(Ok(prepared)) => prepared,
                 Ok(Err(_)) => return ConnectionExit::PreparationError,
@@ -395,6 +398,9 @@ where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     M: Clone + Send + Sync + 'static,
 {
+    let Ok(establishment_deadline) = policy::timeout_deadline(protocol.policy().establishment_timeout, ServePolicyField::EstablishmentTimeout) else {
+        return ConnectionExit::EstablishmentTimeout;
+    };
     let io = TokioIo::new(stream);
     let service = TowerToHyperService::new(router.layer(axum::Extension(info)));
     use hyper::service::Service as _;
@@ -477,7 +483,7 @@ where
         }
         result = &mut connection => result,
         () = admitted.cancelled() => connection.await,
-        () = tokio::time::sleep(protocol.policy().establishment_timeout) => ConnectionExit::EstablishmentTimeout,
+        () = tokio::time::sleep_until(establishment_deadline) => ConnectionExit::EstablishmentTimeout,
     }
 }
 

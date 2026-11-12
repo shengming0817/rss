@@ -474,14 +474,12 @@ where
             .emit(TransactionalMessagingObservation::ConsumerTransaction {
                 status: outcome.status(),
             });
-        if !outcome.may_retry()
-            || !execution
-                .policy
-                .retry()
-                .allows_attempt(attempt.saturating_add(1))
-        {
+        if !outcome.may_retry() {
             return outcome;
         }
+        let Some(next_attempt) = execution.policy.retry().next_attempt(attempt) else {
+            return outcome;
+        };
         let delay = execution.policy.retry().delay_after(attempt);
         if deadline
             .remaining(execution.timer.now())
@@ -499,7 +497,7 @@ where
         {
             return outcome;
         }
-        attempt = attempt.saturating_add(1);
+        attempt = next_attempt;
     }
 }
 

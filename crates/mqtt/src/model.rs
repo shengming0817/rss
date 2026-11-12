@@ -150,6 +150,18 @@ impl MqttConfig {
             reconnect: crate::ReconnectPolicy::default(),
         })
     }
+    /// Configure positive integral-second keep-alive (1..=65535 seconds) and a positive
+    /// connection timeout. Both default to ten seconds; timeout precision is preserved.
+    pub fn timing(mut self, keep_alive: Duration, connect_timeout: Duration) -> Result<Self, MqttError> {
+        if keep_alive.is_zero() || keep_alive.subsec_nanos() != 0 {
+            return Err(MqttError::InvalidConfig);
+        }
+        let seconds = u16::try_from(keep_alive.as_secs()).map_err(|_| MqttError::InvalidConfig)?;
+        timer_deadline(connect_timeout)?;
+        self.options.set_keep_alive(seconds);
+        self.options.set_connect_timeout(connect_timeout);
+        Ok(self)
+    }
     /// Exponential reconnect delays with jitter; reset only after validated readiness.
     #[must_use]
     pub fn reconnect_policy(mut self, policy: crate::ReconnectPolicy) -> Self {
@@ -339,6 +351,28 @@ impl RejectReason {
 mod tests {
     use super::*;
     #[test]
+    fn timing_reaches_upstream_options_with_protocol_bounds() -> anyhow::Result<()> {
+        let tls = Arc::new(rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?.with_root_certificates(rustls::RootCertStore::empty()).with_no_client_auth());
+        let config = || MqttConfig::new("localhost", 8883, "timing", "scope", tls.clone(), Limits::new(2, 2, 2, 1024)?);
+        let defaults = config()?;
+        assert_eq!(defaults.options.keep_alive(), Duration::from_secs(10));
+        assert_eq!(defaults.options.connect_timeout(), Duration::from_secs(10));
+        for seconds in [1, 65535] {
+            let timeout = Duration::from_nanos(90_000_000_000_001);
+            let configured = config()?.timing(Duration::from_secs(seconds), timeout)?;
+            assert_eq!(configured.options.keep_alive(), Duration::from_secs(seconds));
+            assert_eq!(configured.options.connect_timeout(), timeout);
+        }
+        for keep_alive in [Duration::ZERO, Duration::from_millis(1500), Duration::from_secs(65536)] {
+            assert!(config()?.timing(keep_alive, Duration::from_secs(1)).is_err());
+        }
+        for timeout in [Duration::ZERO, Duration::MAX] {
+            assert!(config()?.timing(Duration::from_secs(1), timeout).is_err());
+        }
+        Ok(())
+    }
+    #[test]
     fn qos_one_size_matches_encoded_packets_including_length_rollover() -> anyhow::Result<()> {
         for payload_len in [0, 1, 117, 118, 119, 120, 121, 122, 123, 127, 16370, 16380] {
             let request = PublishRequest::new("abc", vec![0; payload_len])?;
@@ -358,4 +392,12 @@ mod tests {
         }
         Ok(())
     }
+}
+
+#[allow(clippy::disallowed_methods, reason = "MQTT transport owns its Tokio connection and reconnect timers")]
+pub(crate) fn timer_deadline(timeout: Duration) -> Result<tokio::time::Instant, MqttError> {
+    if timeout.is_zero() {
+        return Err(MqttError::InvalidConfig);
+    }
+    tokio::time::Instant::now().checked_add(timeout).ok_or(MqttError::InvalidConfig)
 }

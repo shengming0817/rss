@@ -22,18 +22,18 @@ fn policies_reject_unbounded_or_unsupported_inputs() {
 
 #[test]
 #[allow(clippy::expect_used)] // reason: known supported fixture budget.
-fn phase_timeout_support_is_stable_and_includes_establishment() {
+fn phase_timeouts_accept_more_than_one_day() {
     let day = Duration::from_secs(24 * 60 * 60);
-    let too_large = day + Duration::from_nanos(1);
+    let extended = day + Duration::from_nanos(1);
     assert!(ServePolicy::new(1, day, day, day).is_ok());
-    assert!(ServePolicy::new(1, too_large, day, day).is_err());
-    assert!(ServePolicy::new(1, day, too_large, day).is_err());
-    assert!(ServePolicy::new(1, day, day, too_large).is_err());
+    assert!(ServePolicy::new(1, extended, day, day).is_ok());
+    assert!(ServePolicy::new(1, day, extended, day).is_ok());
+    assert!(ServePolicy::new(1, day, day, extended).is_ok());
     assert!(ServePolicy::new(1, day, Duration::ZERO, day).is_err());
     assert!(ServePolicy::new(1, day, Duration::MAX, day).is_err());
     let serve = ServePolicy::new(1, day, day, day).expect("supported policy");
     assert!(Http1ServePolicy::new(serve, day, 64, 32768).is_ok());
-    assert!(Http1ServePolicy::new(serve, too_large, 64, 32768).is_err());
+    assert!(Http1ServePolicy::new(serve, extended, 64, 32768).is_ok());
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn policy_error_variants_preserve_field_identity() {
     ] {
         for (invalid, expected) in [
             (Duration::ZERO, E::ZeroTimeout(field)),
-            (Duration::MAX, E::TimeoutTooLarge(field)),
+            (Duration::MAX, E::DeadlineOverflow(field)),
         ] {
             let mut budgets = [second; 3];
             budgets[index] = invalid;
@@ -104,7 +104,7 @@ fn policy_error_variants_preserve_field_identity() {
     let serve = ServePolicy::new(1, second, second, second).unwrap();
     for (invalid, expected) in [
         (Duration::ZERO, E::ZeroTimeout(F::HeaderReadTimeout)),
-        (Duration::MAX, E::TimeoutTooLarge(F::HeaderReadTimeout)),
+        (Duration::MAX, E::DeadlineOverflow(F::HeaderReadTimeout)),
     ] {
         assert_eq!(
             Http1ServePolicy::new(serve, invalid, 64, 32768).unwrap_err(),

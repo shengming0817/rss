@@ -34,6 +34,7 @@ pub fn connect(
     store: Arc<dyn SessionStore>,
 ) -> Result<(MqttPublisher, MqttReceiver, MqttResource), MqttError> {
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| MqttError::InvalidConfig)?;
+    crate::model::timer_deadline(config.options.connect_timeout())?;
     let mut options = config.options;
     options.set_session_store_arc(store);
     let (client, eventloop) = AsyncClient::builder(options)
@@ -396,6 +397,10 @@ async fn next(
     eventloop: &mut EventLoop,
     commands: &mut mpsc::Receiver<Command>,
 ) -> Next {
+    if let Err(error) = crate::model::timer_deadline(eventloop.options.connect_timeout()) {
+        driver.fail(error);
+        return Next::Stop;
+    }
     // Keep poll alive across commands: cancelling it during a write could leave an unflushed event.
     let poll = eventloop.poll();
     tokio::pin!(poll);
@@ -425,7 +430,11 @@ async fn wait_reconnect(
     client: &AsyncClient,
     commands: &mut mpsc::Receiver<Command>,
 ) -> Next {
-    let sleep = tokio::time::sleep(driver.reconnect.next());
+    let until = match crate::model::timer_deadline(driver.reconnect.next()) {
+        Ok(until) => until,
+        Err(error) => { driver.fail(error); return Next::Stop; }
+    };
+    let sleep = tokio::time::sleep_until(until);
     tokio::pin!(sleep);
     let shared = driver.shared.clone();
     loop {

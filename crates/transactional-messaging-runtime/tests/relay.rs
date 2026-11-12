@@ -1067,3 +1067,12 @@ impl rss_request_context::ExecutionTimer for ShutdownTimer {
         tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
     }
 }
+
+#[test]
+fn relay_polling_keeps_only_the_busy_loop_floor() {
+    assert!(RelayConfig::new(Duration::from_millis(99), NonZeroUsize::MIN).is_err());
+    for seconds in [301, 90_000] {
+        let config = RelayConfig::new(Duration::from_secs(seconds), NonZeroUsize::MIN).expect("finite polling");
+        assert_eq!(config.poll_interval(), Duration::from_secs(seconds));
+    }
+}
