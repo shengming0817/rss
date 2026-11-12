@@ -7,7 +7,7 @@ pub struct CorrelationId(String);
 
 impl CorrelationId {
     /// Maximum accepted identifier length in bytes.
-    pub const MAX_LEN: usize = 128;
+    pub const MAX_LEN: usize = 255;
 
     /// Parses an identifier using the ASCII allowlist `[A-Za-z0-9._-]`.
     ///
@@ -110,6 +110,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_too_long() {
+        assert!(CorrelationId::parse(&"a".repeat(129)).is_ok());
         let long = "a".repeat(CorrelationId::MAX_LEN + 1);
         assert!(matches!(
             CorrelationId::parse(&long),

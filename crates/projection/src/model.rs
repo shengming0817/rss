@@ -4,8 +4,12 @@ use rss_request_context::TenantId;
 use sha2::{Digest, Sha256};
 
 pub(crate) fn validate_name(value: &str) -> Result<(), Error> {
+    validate_identity(value, 128)
+}
+
+fn validate_identity(value: &str, max_bytes: usize) -> Result<(), Error> {
     if value.is_empty()
-        || value.len() > 128
+        || value.len() > max_bytes
         || !value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
@@ -57,9 +61,9 @@ impl Position {
 #[derive(Debug, Clone, Copy)]
 pub struct BatchLimit(u32);
 impl BatchLimit {
-    /// Accept 1 through 1000 records.
+    /// Accept 1 through 1024 records.
     pub const fn new(value: u32) -> Result<Self, Error> {
-        if value == 0 || value > 1000 {
+        if value == 0 || value > 1024 {
             Err(Error::new(ErrorKind::InvalidInput))
         } else {
             Ok(Self(value))
@@ -85,7 +89,7 @@ impl SourceScope {
     /// Bind a tenant and validated source name.
     pub fn new(tenant: TenantId, source: impl Into<String>) -> Result<Self, Error> {
         let source = source.into();
-        validate_name(&source)?;
+        validate_identity(&source, 255)?;
         Ok(Self { tenant, source })
     }
     /// Tenant selected by the authenticated application.
@@ -118,7 +122,7 @@ impl ProjectionScope {
     ) -> Result<Self, Error> {
         let projection = projection.into();
         let generation = generation.into();
-        validate_name(&projection)?;
+        validate_identity(&projection, 255)?;
         validate_name(&generation)?;
         Ok(Self {
             source,

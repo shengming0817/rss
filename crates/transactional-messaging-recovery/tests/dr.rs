@@ -73,7 +73,7 @@ fn plan_bounds_and_consumer_scope_are_closed() -> Result<(), Box<dyn std::error:
     let members = (0..Plan::MAX_MEMBERS)
         .map(|n| member(&format!("message-{n}")))
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(bounded_plan(members.clone())?.members().len(), 500);
+    assert_eq!(bounded_plan(members.clone())?.members().len(), 1024);
     let mut too_many = members;
     too_many.push(member("excess")?);
     assert!(bounded_plan(too_many).is_err());

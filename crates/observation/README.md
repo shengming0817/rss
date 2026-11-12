@@ -41,7 +41,7 @@ integrity; the product owns source preference and conflict resolution.
 `Batch::new` accepts `Body::Snapshot`, `Delta`, `Partial` or `Failed`. Content is opaque bytes under
 `Coverage::format`; the coverage ID/version and collection definition reference are product-owned.
 All identifiers are nonempty, at most 256 UTF-8 bytes, without control characters. V1 admits at most
-1,000 unique keys, 64 KiB per value and 4 MiB of canonical encoded JSON. Binary values are JSON byte
+4096 unique keys and 4 MiB of canonical encoded JSON; individual values share that total budget. Binary values are JSON byte
 arrays in this durable format, so their encoded size counts toward the 4 MiB bound. Snapshot values
 must be upserts; delta deletion uses `Change::delete`. Object order is normalized before hashing.
 

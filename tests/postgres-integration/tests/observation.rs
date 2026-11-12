@@ -106,6 +106,10 @@ async fn observation_atomic_recovery() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(180), suite()).await??;
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "ordered lifecycle checks share the admitted store before its explicit close"
+)]
 async fn suite() -> anyhow::Result<()> {
     let network = testkit::bridge_network("obs-pg").await?;
     let fixture = testkit::postgres_tls(
@@ -123,6 +127,7 @@ async fn suite() -> anyhow::Result<()> {
     receipt_identity(&store, &base).await?;
     journal_position(&admin).await?;
     delta_gap(&store, &base).await?;
+    expanded_snapshot(&store).await?;
     review_regressions(&admin, &pool, &store).await?;
     contract_checks(&store, &base, &admin, &pool).await?;
     new_regressions(params, fixture.ca_pem(), &admin, &pool, &store, &base).await?;
@@ -1009,5 +1014,33 @@ async fn journal_position(admin: &PgPool) -> anyhow::Result<()> {
             .fetch_one(admin)
             .await?;
     assert_eq!(position, 1);
+    Ok(())
+}
+
+async fn expanded_snapshot(store: &PgStore<Timer>) -> anyhow::Result<()> {
+    let s = Scope::new(
+        TenantId::parse(TENANT)?,
+        Id::new("capacity-device")?,
+        Registration::new("capacity")?,
+        Id::new("agent")?,
+        Id::new("inventory")?,
+        Epoch::new("capacity")?,
+    );
+    activate(store, &s, None).await?;
+    let mut changes = (0..4096)
+        .map(|i| Ok(Change::upsert(Id::new(format!("k{i:04}"))?, vec![1])))
+        .collect::<Result<Vec<_>, Error>>()?;
+    changes[0] = Change::upsert(Id::new("k0000")?, vec![255; 65537]);
+    let input = report(&s, "large", 1, Body::Snapshot(changes))?;
+    store.receive(&input, deadline()).await?;
+    let durable = store
+        .lookup(&read_grant(&s)?, &Id::new("large")?, deadline())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing expanded snapshot"))?;
+    assert_eq!(durable.batch(), input.batch());
+    assert!(matches!(
+        store.receive(&input, deadline()).await?,
+        ReceiveOutcome::Replay(_)
+    ));
     Ok(())
 }

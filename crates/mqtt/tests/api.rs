@@ -65,6 +65,8 @@ fn invalid_credentials_fail_before_a_runtime_or_driver_is_needed() -> anyhow::Re
 fn reconnect_policy_rejects_unbounded_or_inverted_budgets() {
     use rss_mqtt::ReconnectPolicy;
     use std::time::Duration;
+    assert!(ReconnectPolicy::new(Duration::from_secs(1), Duration::from_secs(90_000)).is_ok());
+    assert!(ReconnectPolicy::new(Duration::from_secs(1), Duration::MAX).is_err());
     assert!(ReconnectPolicy::new(Duration::ZERO, Duration::from_secs(1)).is_err());
     assert!(ReconnectPolicy::new(Duration::from_secs(2), Duration::from_secs(1)).is_err());
     assert!(ReconnectPolicy::new(Duration::from_millis(100), Duration::from_secs(30)).is_ok());

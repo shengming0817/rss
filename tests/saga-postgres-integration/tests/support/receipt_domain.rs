@@ -79,7 +79,11 @@ pub(super) async fn upgrade(owner: &PgPool) -> anyhow::Result<()> {
         sqlx::raw_sql("SET ROLE saga_owner")
             .execute(&mut *conn)
             .await?;
-        let result = sqlx::raw_sql(UPGRADE_SQL).execute(&mut *conn).await;
+        let result = sqlx::raw_sql(include_str!(
+            "../../../../crates/saga-postgres/migrations/0002_add_history_bounds.sql"
+        ))
+        .execute(&mut *conn)
+        .await;
         sqlx::raw_sql("ROLLBACK; RESET ROLE")
             .execute(&mut *conn)
             .await?;

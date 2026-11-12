@@ -339,7 +339,9 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
     use rss_transactional_messaging_postgres::{PgConsumerTx, PgInboxStore};
     let inbox = PgInboxStore::new(
         runtime.clone(),
-        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(
+            90_000,
+        ))?,
     )?;
     for (id, disposition, count) in [
         ("consumer-success", TerminalDisposition::Succeeded, 1_i64),
@@ -391,7 +393,7 @@ async fn outbox_roundtrip(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
     let store = Arc::new(PgOutboxStore::<()>::new(
         runtime.clone(),
         domain.clone(),
-        crate::outbox_budget(Duration::from_secs(60)),
+        crate::outbox_budget(Duration::from_secs(360_000)),
     )?);
     let message = PendingMessage::new(MessageEnvelope::new(
         MessageId::parse("outbox-roundtrip")?,
@@ -407,7 +409,12 @@ async fn outbox_roundtrip(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
                     SchemaDigest::parse(&format!("sha256:{}", "a".repeat(64)))?,
                 ),
             ),
-            MessageMetadataExtensions::default(),
+            MessageMetadataExtensions::new(
+                Some(rss_diag_context::CorrelationId::parse(&"c".repeat(255))?),
+                None,
+                None,
+                Default::default(),
+            ),
         ),
         vec![1, 2, 3],
     ));

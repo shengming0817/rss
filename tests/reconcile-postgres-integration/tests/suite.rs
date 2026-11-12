@@ -45,7 +45,7 @@ async fn claim(
     lease: Duration,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<PgClaim> {
-    let mut batch = store.claim_due(t.scope(), 1, lease, c).await?.claims;
+    let mut batch = store.claim_due(t.scope(), 1, 64, lease, c).await?.claims;
     anyhow::ensure!(
         batch.len() == 1,
         "expected one due claim for {}",

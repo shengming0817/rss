@@ -295,3 +295,24 @@ fn epoch() -> std::time::Instant {
     static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     *ORIGIN.get_or_init(std::time::Instant::now)
 }
+
+#[test]
+fn expanded_policies_keep_numeric_and_budget_boundaries() -> Result<(), Box<dyn std::error::Error>>
+{
+    use rss_transactional_messaging::policy::{DeliveryBudget, RetryPolicy, ShutdownBudget};
+    use std::num::NonZeroU32;
+    for count in [129, 1001, u32::MAX] {
+        let count = NonZeroU32::new(count).expect("positive attempts");
+        let retry = RetryPolicy::new(count, Duration::from_millis(1), Duration::from_secs(1))?;
+        assert_eq!(retry.next_attempt(count), None);
+        let before = NonZeroU32::new(count.get() - 1).expect("previous attempt");
+        assert_eq!(retry.next_attempt(before), Some(count));
+        assert_eq!(retry.delay_after(count), Duration::from_secs(1));
+    }
+    let long = Duration::from_secs(90_000);
+    let budget = DeliveryBudget::new(long * 4, long, long, long)?;
+    assert!(!budget.can_start_attempt(long * 3));
+    assert!(ShutdownBudget::new(long).is_ok());
+    assert!(ShutdownBudget::new(Duration::ZERO).is_err());
+    Ok(())
+}

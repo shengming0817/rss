@@ -172,3 +172,8 @@ share their source between both modes, and execute under the existing provider f
 Candidate validation checks embedded Cargo identity and dependency origins before execution;
 VCS metadata is not cryptographic provenance. Compilation, fixed-artifact execution and registry
 publication are distinct results.
+
+`MqttConfig::timing(keep_alive, connect_timeout)` selects connection timing. Defaults are ten seconds
+for both. Keep-alive requires positive whole seconds up to 65535; connect timeout is positive and
+must fit the transport clock. `ReconnectPolicy` retains its minimum and jitter relationship while
+accepting maximum waits beyond one day when representable.

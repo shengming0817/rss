@@ -70,6 +70,13 @@ SELECT
         OR pg_get_expr(p.polwithcheck,p.polrelid) IS DISTINCT FROM
             $predicate$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$predicate$
     )
+    AND NOT EXISTS (
+        SELECT FROM (VALUES ('sources','source_id'),('checkpoints','source_id'),('checkpoints','projection_id')) expected(relation,field)
+        LEFT JOIN pg_constraint c ON c.conrelid=to_regclass('rss_projection.'||expected.relation)
+            AND c.conname=expected.relation||'_'||expected.field||'_check'
+        WHERE c.oid IS NULL OR NOT c.convalidated OR pg_get_constraintdef(c.oid) IS DISTINCT FROM
+            format('CHECK ((((octet_length(%1$s) >= 1) AND (octet_length(%1$s) <= 255)) AND ((%1$s COLLATE "C") !~ ''[^A-Za-z0-9_.:-]''::text)))',expected.field)
+    )
     AND EXISTS (SELECT FROM pg_attribute WHERE attrelid=to_regclass('rss_projection.checkpoints')
         AND attname='definition_identity' AND atttypid='bytea'::regtype AND attnotnull AND NOT attisdropped)
     AND EXISTS (SELECT FROM pg_constraint WHERE conrelid=to_regclass('rss_projection.checkpoints')
@@ -92,7 +99,7 @@ SELECT
         ) AS required(signature)
         WHERE has_function_privilege(current_user, to_regprocedure(signature), 'EXECUTE') IS NOT TRUE
     )
-    AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:3'
+    AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:4'
          FROM pg_namespace WHERE nspname='rss_projection')
 "#).fetch_one(connection).await.map_err(|e| sql_error(e, rss_projection::Phase::Admission))?;
     if safe == Some(true) {

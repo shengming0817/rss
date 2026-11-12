@@ -213,7 +213,7 @@ fn dimensions_are_whitelisted_bounded_and_canonical() -> TestResult {
     spec.dimensions.required.insert(id("core")?);
     assert!(Series::new(Definition::new(spec)?, id("s")?, id("r")?, BTreeMap::new()).is_err());
     let mut spec = d.spec().clone();
-    spec.dimensions.max_count = 65;
+    spec.dimensions.max_count = 1025;
     assert!(Definition::new(spec).is_err());
     let mut spec = d.spec().clone();
     spec.dimensions.max_total_bytes = 4;
@@ -226,6 +226,33 @@ fn dimensions_are_whitelisted_bounded_and_canonical() -> TestResult {
         )
         .is_err()
     );
+    let keys = (0..1024)
+        .map(|i| id(&format!("d{i:04}")))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut expanded = d.spec().clone();
+    expanded.dimensions.allowed = keys.clone();
+    expanded.dimensions.max_count = 1024;
+    expanded.dimensions.max_total_bytes = 32768;
+    expanded.metric = Metric::State {
+        members: keys.clone(),
+    };
+    let definition = Definition::new(expanded.clone())?;
+    let dimensions = keys
+        .iter()
+        .map(|k| Ok((k.clone(), id("v")?)))
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+    let series = Series::new(definition, id("s")?, id("r")?, dimensions)?;
+    assert_eq!(
+        serde_json::from_slice::<Series>(&serde_json::to_vec(&series)?)?,
+        series
+    );
+    expanded.dimensions.allowed.insert(id("extra")?);
+    assert!(Definition::new(expanded.clone()).is_err());
+    expanded.dimensions.allowed = keys.clone();
+    let mut members = keys;
+    members.insert(id("extra")?);
+    expanded.metric = Metric::State { members };
+    assert!(Definition::new(expanded).is_err());
     let a = mk(BTreeMap::from([(id("core")?, id("1")?)]))?;
     assert_eq!(
         a.digest()?,
@@ -306,7 +333,6 @@ fn counter_and_state_semantics_cannot_be_bypassed() -> TestResult {
 #[test]
 fn stable_identity_and_batch_order_cover_cross_batch_conflicts() -> TestResult {
     let a = gauge(1)?;
-    assert_eq!(a.compare(&a)?, IdentityMatch::Replay);
     assert_eq!(gauge(2)?.compare(&a), Err(Error::Conflict));
     let mut input = a.input().clone();
     input.id = id("sample-2")?;

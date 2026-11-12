@@ -30,6 +30,7 @@ pub async fn bootstrap(
                     outbox,
                     rss_device_command_postgres::CommandClock::Postgres,
                     &callers,
+                    BatchLimit::default(),
                 )
                 .await?;
                 store.initialize(tx, scope, coordinate).await
@@ -54,6 +55,7 @@ pub async fn enqueue(
                     outbox,
                     rss_device_command_postgres::CommandClock::Postgres,
                     &callers,
+                    BatchLimit::default(),
                 )
                 .await?;
                 store.queue(tx, spec, message).await

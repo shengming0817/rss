@@ -13,7 +13,7 @@ pub(super) async fn run(
         .execute(owner)
         .await?;
     let empty = store
-        .claim_due(scope, 2, Duration::from_secs(1), control)
+        .claim_due(scope, 2, 64, Duration::from_secs(1), control)
         .await;
     let startup = PgStore::new(pool.clone(), control).await;
     // Work is registered through the already admitted public boundary while catalog drift exists.
@@ -21,7 +21,7 @@ pub(super) async fn run(
         .wake(&target, &ResourceSet::empty(scope.tenant()), control)
         .await?;
     let due = store
-        .claim_due(scope, 2, Duration::from_secs(1), control)
+        .claim_due(scope, 2, 64, Duration::from_secs(1), control)
         .await;
     sqlx::raw_sql("ALTER TABLE rss_reconcile.targets DROP CONSTRAINT idle_extra")
         .execute(owner)
@@ -72,8 +72,8 @@ async fn safety(
             "DROP POLICY hidden ON rss_reconcile.targets",
         ),
         (
-            "GRANT EXECUTE ON FUNCTION rss_reconcile.claim_due(uuid,text,integer,bigint) TO PUBLIC",
-            "REVOKE EXECUTE ON FUNCTION rss_reconcile.claim_due(uuid,text,integer,bigint) FROM PUBLIC",
+            "GRANT EXECUTE ON FUNCTION rss_reconcile.claim_due(uuid,text,integer,integer,bigint) TO PUBLIC",
+            "REVOKE EXECUTE ON FUNCTION rss_reconcile.claim_due(uuid,text,integer,integer,bigint) FROM PUBLIC",
         ),
     ] {
         sqlx::raw_sql(damage).execute(owner).await?;
@@ -87,7 +87,7 @@ async fn safety(
     }
     assert!(
         store
-            .claim_due(scope, 1, Duration::from_secs(1), control)
+            .claim_due(scope, 1, 64, Duration::from_secs(1), control)
             .await?
             .claims
             .is_empty()

@@ -2,8 +2,9 @@ use rss_projection::*;
 fn main() -> anyhow::Result<()> {
     let scope = SourceScope::new(
         rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
-        "example",
+        "s".repeat(255),
     )?;
+    anyhow::ensure!(BatchLimit::new(1024)?.get() == 1024, "projection capacity");
     let position = Position::new(1)?;
     let event = Event::new(scope, position, "event", vec![1])?;
     anyhow::ensure!(

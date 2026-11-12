@@ -54,7 +54,7 @@ impl Error {
 }
 pub(crate) fn name(value: String) -> Result<String, Error> {
     if value.is_empty()
-        || value.len() > 128
+        || value.len() > 255
         || !value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))

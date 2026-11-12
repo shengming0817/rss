@@ -2,20 +2,25 @@
 use crate::{Command, CommandId, CommandSpec, Coordinate, DeviceReport, Outcome, Scope};
 use rss_transactional_messaging::outbox::PendingMessage;
 
-/// At most 64 records per recovery page; time is bounded by the enclosing transaction.
+/// At most 1024 records per page; time is bounded by the enclosing transaction.
 #[derive(Debug, Clone, Copy)]
-pub struct BatchLimit(u8);
+pub struct BatchLimit(u16);
 impl BatchLimit {
     /// Reject zero or unbounded work.
-    pub fn new(value: u8) -> Result<Self, crate::Error> {
-        if value == 0 || value > 64 {
+    pub fn new(value: u16) -> Result<Self, crate::Error> {
+        if value == 0 || value > 1024 {
             return Err(crate::Error::InvalidValue);
         }
         Ok(Self(value))
     }
     /// Maximum records examined, including no-ops.
-    pub const fn get(self) -> u8 {
+    pub const fn get(self) -> u16 {
         self.0
+    }
+}
+impl Default for BatchLimit {
+    fn default() -> Self {
+        Self(64)
     }
 }
 /// Staged recovery output. `after` is valid only after the enclosing commit is acknowledged.

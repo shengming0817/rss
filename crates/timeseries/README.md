@@ -25,7 +25,7 @@ exact previously accepted replay and historical interpretation. Products must no
 remove referenced definitions. There is no latest-version reinterpretation.
 
 Identifiers are exact 1–256 UTF-8 bytes without controls. Definitions allow at most
-64 dimension names and 256 state members; each dimension value is at most 256 bytes,
+1024 dimension names and 1024 state members; each dimension value is at most 256 bytes,
 and the declared total dimension budget is at most 32768 bytes. Batches are nonempty,
 limited to 4096 samples and 4 MiB encoded JSON. Host budgets may be stricter.
 

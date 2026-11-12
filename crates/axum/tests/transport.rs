@@ -22,58 +22,18 @@ fn policies_reject_unbounded_or_unsupported_inputs() {
 
 #[test]
 #[allow(clippy::expect_used)] // reason: known supported fixture budget.
-fn phase_timeout_support_is_stable_and_includes_establishment() {
+fn phase_timeouts_accept_more_than_one_day() {
     let day = Duration::from_secs(24 * 60 * 60);
-    let too_large = day + Duration::from_nanos(1);
+    let extended = day + Duration::from_nanos(1);
     assert!(ServePolicy::new(1, day, day, day).is_ok());
-    assert!(ServePolicy::new(1, too_large, day, day).is_err());
-    assert!(ServePolicy::new(1, day, too_large, day).is_err());
-    assert!(ServePolicy::new(1, day, day, too_large).is_err());
+    assert!(ServePolicy::new(1, extended, day, day).is_ok());
+    assert!(ServePolicy::new(1, day, extended, day).is_ok());
+    assert!(ServePolicy::new(1, day, day, extended).is_ok());
     assert!(ServePolicy::new(1, day, Duration::ZERO, day).is_err());
     assert!(ServePolicy::new(1, day, Duration::MAX, day).is_err());
     let serve = ServePolicy::new(1, day, day, day).expect("supported policy");
     assert!(Http1ServePolicy::new(serve, day, 64, 32768).is_ok());
-    assert!(Http1ServePolicy::new(serve, too_large, 64, 32768).is_err());
-}
-
-#[test]
-#[allow(clippy::unwrap_used)] // reason: exact invalid field is the public diagnostic under test.
-fn policy_errors_identify_the_rejected_field() {
-    let second = Duration::from_secs(1);
-    for (index, field) in [
-        (0, "preparation_timeout"),
-        (1, "establishment_timeout"),
-        (2, "shutdown_timeout"),
-    ] {
-        for invalid in [Duration::ZERO, Duration::MAX] {
-            let mut budgets = [second; 3];
-            budgets[index] = invalid;
-            let error = ServePolicy::new(1, budgets[0], budgets[1], budgets[2]).unwrap_err();
-            assert!(
-                error.to_string().contains(field),
-                "missing field {field}: {error}"
-            );
-        }
-    }
-    let error = ServePolicy::new(0, second, second, second).unwrap_err();
-    assert!(error.to_string().contains("connection_limit"));
-    let serve = ServePolicy::new(1, second, second, second).unwrap();
-    for invalid in [Duration::ZERO, Duration::MAX] {
-        let error = Http1ServePolicy::new(serve, invalid, 64, 32768).unwrap_err();
-        assert!(error.to_string().contains("header_read_timeout"));
-    }
-    assert!(
-        Http1ServePolicy::new(serve, second, 0, 32768)
-            .unwrap_err()
-            .to_string()
-            .contains("max_headers")
-    );
-    assert!(
-        Http1ServePolicy::new(serve, second, 64, 8191)
-            .unwrap_err()
-            .to_string()
-            .contains("max_buffer_size")
-    );
+    assert!(Http1ServePolicy::new(serve, extended, 64, 32768).is_ok());
 }
 
 #[test]
@@ -88,13 +48,14 @@ fn policy_error_variants_preserve_field_identity() {
     ] {
         for (invalid, expected) in [
             (Duration::ZERO, E::ZeroTimeout(field)),
-            (Duration::MAX, E::TimeoutTooLarge(field)),
+            (Duration::MAX, E::DeadlineOverflow(field)),
         ] {
             let mut budgets = [second; 3];
             budgets[index] = invalid;
             let actual = ServePolicy::new(1, budgets[0], budgets[1], budgets[2]).unwrap_err();
             assert_eq!(actual, expected);
             assert_eq!(actual.field(), field);
+            assert!(actual.to_string().contains(&field.to_string()));
         }
     }
     assert_eq!(
@@ -104,7 +65,7 @@ fn policy_error_variants_preserve_field_identity() {
     let serve = ServePolicy::new(1, second, second, second).unwrap();
     for (invalid, expected) in [
         (Duration::ZERO, E::ZeroTimeout(F::HeaderReadTimeout)),
-        (Duration::MAX, E::TimeoutTooLarge(F::HeaderReadTimeout)),
+        (Duration::MAX, E::DeadlineOverflow(F::HeaderReadTimeout)),
     ] {
         assert_eq!(
             Http1ServePolicy::new(serve, invalid, 64, 32768).unwrap_err(),

@@ -41,7 +41,7 @@ admission proof or a runtime capability. Adding another independent caller requi
 complete declaration and provisioning its grants; it does not require a different API or a product
 role enum. Different operation profiles and live privilege reconfiguration are not provided.
 
-`PgStore::new(tx, outbox, CommandClock::Postgres, &callers)` checks its schema revision, RLS and every
+`PgStore::new(tx, outbox, CommandClock::Postgres, &callers, BatchLimit::default())` checks its schema revision, RLS and every
 declared caller's effective privileges using
 an existing tenant-bound transaction. Rejections log structured `phase="probe"` and a closed
 `reason` (`revision`, `relations`, `caller_roles`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
@@ -131,3 +131,7 @@ Command composition explicitly separates `bootstrap` from `enqueue`. Bootstrap i
 authority once; enqueue only queues or exactly replays the original spec/message. After authority
 advances, an exact replay returns the original command at its current durable state, without adding
 a command or outbox row. A new command with the old coordinate remains fenced.
+
+The final `PgStore::new` argument selects authority-supersede page size using `BatchLimit` (1–1024).
+`BatchLimit::default()` retains 64. All pages share the caller's transaction and deadline; recovery
+cursors become usable only after the caller confirms commit.

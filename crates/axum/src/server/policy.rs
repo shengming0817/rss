@@ -43,9 +43,9 @@ pub enum ServePolicyError {
     /// Each phase must have a positive time budget.
     #[error("{0} must be nonzero")]
     ZeroTimeout(ServePolicyField),
-    /// Listener phase budgets support at most 24 hours.
-    #[error("{0} must not exceed 24 hours")]
-    TimeoutTooLarge(ServePolicyField),
+    /// The transport clock cannot represent the requested deadline.
+    #[error("{0} deadline is not representable")]
+    DeadlineOverflow(ServePolicyField),
     /// Hyper requires at least 8192 bytes for its HTTP/1 buffer.
     #[error("max_buffer_size must be at least 8192 bytes")]
     BufferTooSmall,
@@ -55,26 +55,32 @@ impl ServePolicyError {
     /// Identify the rejected field without parsing Display text.
     pub fn field(&self) -> ServePolicyField {
         match self {
-            Self::ZeroCapacity(field) | Self::ZeroTimeout(field) | Self::TimeoutTooLarge(field) => {
-                *field
-            }
+            Self::ZeroCapacity(field)
+            | Self::ZeroTimeout(field)
+            | Self::DeadlineOverflow(field) => *field,
             Self::BufferTooSmall => ServePolicyField::MaxBufferSize,
         }
     }
 }
 
-// A stable supported horizon, not a check against the instant at construction time.
-// HTTP listener phases are finite operational budgets, not calendar-scale scheduling.
-const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-
-fn validate_timeout(timeout: Duration, field: ServePolicyField) -> Result<(), ServePolicyError> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "HTTP transport owns the phase timer"
+)]
+pub(super) fn timeout_deadline(
+    timeout: Duration,
+    field: ServePolicyField,
+) -> Result<tokio::time::Instant, ServePolicyError> {
     if timeout.is_zero() {
         return Err(ServePolicyError::ZeroTimeout(field));
     }
-    if timeout > MAX_TIMEOUT {
-        return Err(ServePolicyError::TimeoutTooLarge(field));
-    }
-    Ok(())
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or(ServePolicyError::DeadlineOverflow(field))
+}
+
+fn validate_timeout(timeout: Duration, field: ServePolicyField) -> Result<(), ServePolicyError> {
+    timeout_deadline(timeout, field).map(|_| ())
 }
 
 /// Required capacity and budgets for preparation, first request and runtime drain.
@@ -82,7 +88,7 @@ fn validate_timeout(timeout: Duration, field: ServePolicyField) -> Result<(), Se
 /// Capacity counts both preparing and established connections. Preparation includes any
 /// product failure handling; choose a budget that covers all work before HTTP starts.
 /// Establishment ends at the first service call and never limits admitted handlers/bodies.
-/// Each duration must be in (0, 24 hours]; this stable range remains valid after storage.
+/// Each duration must be positive and representable by the transport clock.
 #[derive(Debug, Clone, Copy)]
 pub struct ServePolicy {
     pub(super) connection_limit: usize,

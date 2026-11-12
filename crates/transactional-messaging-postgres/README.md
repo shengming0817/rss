@@ -352,9 +352,9 @@ migration owner. The receipt-writer credential is a trusted verifier capability,
 operator credential; products must keep it away from untrusted arbitrary SQL execution.
 
 Claim/replay/purge share source-first locking. Each new exact archive request increments recovery
-revision and fences older requests; retries reuse the same OperationId/digest. The lease duration is derived from the current operation budget (up to five minutes)
-and may be resumed after expiry. Zero budgets return `Deadline`; larger budgets return `Invalid`
-before claim I/O. Longer jobs must be split into bounded attempts with the same exact request. A live competing lease returns `Busy`; a request/version mismatch
+revision and fences older requests; retries reuse the same OperationId/digest. The lease duration is derived from the current operation budget
+and may be resumed after expiry. Zero budgets return `Deadline`; budgets outside the PostgreSQL
+interval or statement-timeout range are rejected. Interrupted jobs resume with the same exact request. A live competing lease returns `Busy`; a request/version mismatch
 returns `Conflict`, while a stale worker produces the distinct `LocalTxAttempt::Fenced` settlement. A hold is persisted even when no object work is performed. Later
 hold/release decisions require the current source revision. Policy changes cannot retroactively
 restore already-purged HOT content.
@@ -408,7 +408,7 @@ relay ownership or inherited privileged roles. `PgDrStore::connect(config, timer
 this contract; ordinary runtime profiles reject DR application authority. Migration owners administer
 lineage/epoch provisioning; application roles cannot write the control tables.
 
-For recovery, construct and product-authorize a bounded `recovery::dr::Plan` (1–500 exact members) with target,
+For recovery, construct and product-authorize a bounded `recovery::dr::Plan` (1–1024 exact members) with target,
 lineage, expected tenant epoch, operation identity and both restore-evidence digests. Application
 atomically compares the epoch, advances it by one, installs the selected members and writes the
 exact receipt. After a crash, a newly constructed operator with the current binding can retry the exact authorized
@@ -537,3 +537,9 @@ isolation evidence. It does not resolve records or choose host admission policy.
 consume each result as it completes; each completion releases its runtime slot. To refill capacity,
 the host polls new claims alongside outstanding streams. Stop claiming and drain existing streams
 on shutdown. Dropping a stream is cancellation, never proof of rollback or successful settlement.
+
+Inbox/Outbox lease TTLs accept positive whole milliseconds representable in PostgreSQL's signed
+64-bit microsecond interval (at most 9223372036854775 milliseconds), with checked timestamp addition.
+Per-operation statement/lock timeouts separately require at most i32::MAX milliseconds.
+`PgArchiveRepository::with_retired_scan_limit(1..=1024)` selects the expired-generation scan budget;
+its default remains 64 and it does not alter request authorization or digest identity.

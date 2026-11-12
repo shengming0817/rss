@@ -42,6 +42,7 @@ SELECT to_regclass('rss_transactional_messaging.storage_lineage') IS NOT NULL
  ('dr_plans','dr_plans_kind_check','CHECK ((kind = ANY (ARRAY[''database''::text, ''broker''::text, ''terminate''::text])))'),
  ('dr_plans','dr_plans_tenant_id_target_operation_fkey','FOREIGN KEY (tenant_id, target_operation) REFERENCES rss_transactional_messaging.dr_plans(tenant_id, operation_id)'),
  ('dr_plans','dr_plans_tenant_id_target_operation_key','UNIQUE (tenant_id, target_operation)'),
+ ('dr_members','dr_members_ordinal_check','CHECK (((ordinal >= 0) AND (ordinal <= 1023)))'),
  ('dr_members','dr_member_block_shape','CHECK (((status = ''blocked''::text) = (block_reason IS NOT NULL)))'),
  ('dr_members','dr_member_reason','CHECK ((block_reason = ANY (ARRAY[''deadline_expired''::text, ''permanent_publish_failure''::text])))'),
  ('storage_lineage','storage_lineage_pkey','PRIMARY KEY (singleton)'),

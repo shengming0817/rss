@@ -40,7 +40,7 @@ async fn scheduling(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> 
     let old = claim(store, &t, Duration::from_secs(2), c).await?;
     assert!(
         store
-            .claim_due(t.scope(), 2, Duration::from_secs(1), c)
+            .claim_due(t.scope(), 2, 64, Duration::from_secs(1), c)
             .await?
             .claims
             .is_empty()
@@ -73,7 +73,7 @@ async fn retry_cycle(
         .await?;
     assert!(
         store
-            .claim_due(t.scope(), 1, Duration::from_secs(1), c)
+            .claim_due(t.scope(), 1, 64, Duration::from_secs(1), c)
             .await?
             .claims
             .is_empty()
@@ -95,7 +95,7 @@ async fn suspend_cycle(
         .await?;
     assert!(
         store
-            .claim_due(t.scope(), 1, Duration::from_secs(1), c)
+            .claim_due(t.scope(), 1, 64, Duration::from_secs(1), c)
             .await?
             .claims
             .is_empty()
@@ -202,7 +202,7 @@ async fn atomicity(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> a
         entered.notified().await;
         assert!(
             store
-                .claim_due(t.scope(), 1, Duration::from_secs(1), c)
+                .claim_due(t.scope(), 1, 64, Duration::from_secs(1), c)
                 .await?
                 .claims
                 .is_empty()

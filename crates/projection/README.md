@@ -55,7 +55,7 @@ The fingerprint checks declaration equality, not the truth of the actual mapping
 mapping uses a new generation. A rebuilt input journal uses a new `SourceScope` identity even
 when its encoding is unchanged; worker epoch and position never substitute for source lineage.
 
-Names are 1–128 ASCII alphanumeric/`_.:-` bytes. Payloads are encoded application facts, at most
+Source and projection names are 1–255 ASCII alphanumeric/`_.:-` bytes; generation and event identities remain 1–128 bytes. Payloads are encoded application facts, at most
 1 MiB; event type/schema information belongs in those bytes. Fingerprints use the exact bytes,
 not position, so retries at later coordinates remain the same fact. Providers must preserve the
 source contract, and effects must not silently reinterpret an existing generation's definition.

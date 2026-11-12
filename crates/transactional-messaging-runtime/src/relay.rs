@@ -24,7 +24,6 @@ use rss_transactional_messaging::transport::{
 use tokio::time::MissedTickBehavior;
 
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Invalid relay loop configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -32,9 +31,6 @@ pub enum RelayConfigError {
     /// Polling faster than the supported operational floor would create a busy loop.
     #[error("relay poll interval must be at least 100ms")]
     PollIntervalTooSmall,
-    /// Polling slower than the supported operational ceiling delays recovery excessively.
-    #[error("relay poll interval must not exceed 300s")]
-    PollIntervalTooLarge,
 }
 
 /// Validated polling and backpressure configuration for one relay worker.
@@ -52,9 +48,6 @@ impl RelayConfig {
     ) -> Result<Self, RelayConfigError> {
         if poll_interval < MIN_POLL_INTERVAL {
             return Err(RelayConfigError::PollIntervalTooSmall);
-        }
-        if poll_interval > MAX_POLL_INTERVAL {
-            return Err(RelayConfigError::PollIntervalTooLarge);
         }
         Ok(Self {
             poll_interval,
@@ -405,9 +398,19 @@ where
         self,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<(), MessagingError> {
+        absolute_deadline(
+            self.clock.as_ref(),
+            self.config.poll_interval(),
+            self.emitter.as_ref(),
+        )?;
         let mut ticker = tokio::time::interval(self.config.poll_interval());
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
+            absolute_deadline(
+                self.clock.as_ref(),
+                self.config.poll_interval(),
+                self.emitter.as_ref(),
+            )?;
             tokio::select! {
                 biased;
                 () = token.cancelled() => return Ok(()),

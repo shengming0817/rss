@@ -101,9 +101,12 @@ pub enum PgError {
     /// A positive acquisition bound is required.
     #[error("invalid PostgreSQL acquire timeout")]
     InvalidAcquireTimeout,
-    /// Lease must be an integral number of milliseconds between 1ms and 24h.
-    #[error("invalid PostgreSQL lease duration: expected integral milliseconds in 1ms..=24h")]
+    /// Lease must be positive whole milliseconds representable as PostgreSQL interval microseconds.
+    #[error("invalid PostgreSQL lease duration")]
     InvalidLeaseDuration,
+    /// PostgreSQL statement and lock timeouts use signed 32-bit milliseconds.
+    #[error("PostgreSQL operation timeout is not representable")]
+    InvalidOperationTimeout,
     /// Own schema or effective permissions do not match this adapter.
     #[error("incompatible transactional messaging storage contract: {}", .0.as_label())]
     IncompatibleStorageContract(PgStorageContractFailure),
@@ -708,6 +711,7 @@ impl PgRuntime {
                 .unwrap_or_default()
                 .as_millis()
                 .max(1);
+            let millis = i32::try_from(millis).map_err(|_| PgError::InvalidOperationTimeout)?;
             sqlx::query("SELECT set_config('statement_timeout', $1, true)")
                 .bind(format!("{millis}ms"))
                 .execute(transaction.connection())
@@ -819,6 +823,7 @@ impl PgTransaction<'_> {
             .unwrap_or_default()
             .as_millis()
             .max(1);
+        let millis = i32::try_from(millis).map_err(|_| PgError::InvalidOperationTimeout)?;
         stage(self.timer, self.cutoff, LocalTxDeadlineStage::Setup,
             sqlx::query("SELECT set_config('rss.tenant_id', $1, true), set_config('statement_timeout', $2, true)")
                 .bind(self.tenant.to_string()).bind(format!("{millis}ms")).execute(&mut *self.connection)).await?;

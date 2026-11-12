@@ -17,8 +17,11 @@ fn retry_windows_keep_the_floor_and_spread_at_the_ceiling() -> Result<(), Error>
         (59999, 60000),
         (5, 5),
         (1, 86400000),
+        (86_400_001, u64::MAX),
     ] {
         let policy = Policy::try_from(PolicyConfig {
+            claim_batch_size: 64,
+            scan_budget: 64,
             concurrency: 2,
             lease_ttl: Duration::from_secs(1),
             attempt_timeout: Duration::from_secs(1),
@@ -26,7 +29,7 @@ fn retry_windows_keep_the_floor_and_spread_at_the_ceiling() -> Result<(), Error>
             idle_scan_interval: Duration::from_secs(1),
             initial_backoff: Duration::from_millis(initial),
             max_backoff: Duration::from_millis(cap),
-            max_attempts: 1000,
+            max_attempts: u32::MAX,
         })?;
         for failures in [0, 1, 4, 5, 6, 7, 32, u32::MAX] {
             let mut delays = BTreeSet::new();
@@ -49,6 +52,9 @@ fn retry_windows_keep_the_floor_and_spread_at_the_ceiling() -> Result<(), Error>
                             && delay <= Duration::from_millis(upper)
                     );
                 }
+                if failures == u32::MAX {
+                    assert!(delay >= Duration::from_millis(cap.div_ceil(2)));
+                }
                 delays.insert(delay);
             }
             if initial < cap {
@@ -61,5 +67,55 @@ fn retry_windows_keep_the_floor_and_spread_at_the_ceiling() -> Result<(), Error>
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn independent_claim_scan_and_time_bounds() -> Result<(), Error> {
+    let config = PolicyConfig {
+        concurrency: 1025,
+        claim_batch_size: 1024,
+        scan_budget: 4096,
+        lease_ttl: Duration::from_secs(90_000),
+        attempt_timeout: Duration::from_secs(89_000),
+        scan_interval: Duration::from_secs(90_001),
+        idle_scan_interval: Duration::from_secs(90_002),
+        initial_backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_secs(90_003),
+        max_attempts: u32::MAX,
+    };
+    let policy = Policy::try_from(config)?;
+    assert_eq!(policy.claim_batch_size(), 1024);
+    assert_eq!(policy.scan_budget(), 4096);
+    for claim_batch_size in [0, 1025] {
+        assert!(
+            Policy::try_from(PolicyConfig {
+                claim_batch_size,
+                ..config
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        Policy::try_from(PolicyConfig {
+            scan_budget: 0,
+            ..config
+        })
+        .is_err()
+    );
+    assert!(
+        Policy::try_from(PolicyConfig {
+            max_attempts: 0,
+            ..config
+        })
+        .is_err()
+    );
+    assert!(
+        Policy::try_from(PolicyConfig {
+            lease_ttl: Duration::from_nanos(3_000_001),
+            ..config
+        })
+        .is_err()
+    );
     Ok(())
 }

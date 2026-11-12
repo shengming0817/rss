@@ -125,7 +125,7 @@ pub struct Plan {
 }
 impl Plan {
     /// Maximum atomic member set; product orchestration splits larger recovery units explicitly.
-    pub const MAX_MEMBERS: usize = 500;
+    pub const MAX_MEMBERS: usize = 1024;
     /// Freeze exact inputs before requesting product authorization.
     pub fn new(
         tenant: TenantId,

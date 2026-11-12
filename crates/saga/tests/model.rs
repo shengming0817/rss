@@ -114,3 +114,20 @@ fn identity_preserves_canonical_value_owners() -> anyhow::Result<()> {
     assert!(serde_json::from_value::<Definition>(wire).is_err());
     Ok(())
 }
+
+#[test]
+fn lease_policy_keeps_precision_and_minimum_without_a_day_ceiling() -> anyhow::Result<()> {
+    use rss_saga::LeasePolicy;
+    use std::time::Duration;
+    for ttl in [Duration::from_millis(30), Duration::from_secs(90_000)] {
+        assert_eq!(LeasePolicy::new(ttl)?.ttl(), ttl);
+    }
+    for ttl in [
+        Duration::ZERO,
+        Duration::from_millis(29),
+        Duration::from_nanos(30_000_001),
+    ] {
+        assert!(LeasePolicy::new(ttl).is_err());
+    }
+    Ok(())
+}

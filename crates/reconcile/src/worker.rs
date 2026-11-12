@@ -119,8 +119,10 @@ impl<F: FnMut(Observation)> Active<'_, F> {
     fn schedule(&mut self, now: Duration, after: Duration) {
         // Longer deadlines are covered by the recovery scan. These hints carry no
         // claim authority and exist only after acknowledged settlement.
-        if after < self.idle_scan {
-            self.due.insert(now.saturating_add(after));
+        if after < self.idle_scan
+            && let Some(at) = now.checked_add(after)
+        {
+            self.due.insert(at);
         }
     }
     fn scanned_through(&mut self, started: Duration) {
@@ -247,7 +249,7 @@ async fn run_inner<
         if active.tasks.len() < policy.concurrency {
             let before = active.tasks.len();
             let started = control.elapsed();
-            let available = policy.concurrency - before;
+            let available = (policy.concurrency - before).min(policy.claim_batch_size);
             let batch = claim_round(store, scope, available, policy, control, &mut active).await;
             active.scanned_through(started);
             let freed = active.tasks.len() < before;
@@ -339,7 +341,13 @@ async fn claim_round<S: DurableStore, T: Timer, F: FnMut(Observation) + Send>(
     active: &mut Active<'_, F>,
 ) -> Result<ClaimBatch<S::Claim>, Error> {
     let scan_control = control.child(policy.attempt);
-    let scan = scan_control.run(store.claim_due(scope, available, policy.lease, &scan_control));
+    let scan = scan_control.run(store.claim_due(
+        scope,
+        available,
+        policy.scan_budget,
+        policy.lease,
+        &scan_control,
+    ));
     tokio::pin!(scan);
     loop {
         tokio::select! {
@@ -388,7 +396,9 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
     outer: &Control<'_, T>,
     claimed_at: Duration,
 ) -> Outcome {
-    let mut renew_at = claimed_at.saturating_add(policy.lease / 3);
+    let Some(mut renew_at) = claimed_at.checked_add(policy.lease / 3) else {
+        return Outcome::failed(Stage::Renew, Error::new(ErrorKind::InvalidInput));
+    };
     let outcome =
         attempt_with_renewal(store, reconciler, &claim, policy, outer, &mut renew_at).await;
     if let Err(failure) = &outcome
@@ -531,5 +541,7 @@ async fn renew_lease<S: DurableStore, T: Timer>(
     control
         .run(store.renew(claim, policy.lease, &control))
         .await?;
-    Ok(started.saturating_add(policy.lease / 3))
+    started
+        .checked_add(policy.lease / 3)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput))
 }

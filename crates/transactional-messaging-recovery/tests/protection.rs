@@ -114,6 +114,12 @@ async fn different_request_cannot_consume_stale_authorization() {
 #[allow(clippy::expect_used)] // reason: fixed pagination fixtures.
 fn cursor_cannot_cross_tenant_or_source() {
     let query = Query::list(support::tenant(), Source::Consumer, 10, None).expect("query");
+    for n in [1001, 1024] {
+        assert!(Query::list(support::tenant(), Source::Consumer, n, None).is_ok());
+    }
+    for n in [0, 1025] {
+        assert!(Query::list(support::tenant(), Source::Consumer, n, None).is_err());
+    }
     let cursor = query.cursor("last-key");
     assert!(Query::list(support::tenant(), Source::Consumer, 10, Some(&cursor)).is_ok());
     assert!(Query::list(support::tenant(), Source::Outbox, 10, Some(&cursor)).is_err());

@@ -114,9 +114,12 @@ impl DurableStore for Store {
         &self,
         scope: &Scope,
         limit: usize,
+        scan_budget: u32,
         _: Duration,
         _: &Control<'_, T>,
     ) -> Result<ClaimBatch<Token>, Error> {
+        assert!(scan_budget > 0);
+        assert!((1..=1024).contains(&limit));
         let scan = self.scans.fetch_add(1, Ordering::SeqCst);
         if let Some(kind) = self.scan_failure
             && scan >= self.scan_failure_after
@@ -128,7 +131,7 @@ impl DurableStore for Store {
             .lock()
             .iter_mut()
             .filter(|r| r.target.scope() == scope && !r.leased && !r.suspended && r.due <= now)
-            .take(limit)
+            .take(limit.min(scan_budget as usize))
             .map(|r| {
                 r.leased = true;
                 r.epoch += 1;
@@ -146,10 +149,11 @@ impl DurableStore for Store {
         {
             tokio::time::sleep(delay).await;
         }
-        Ok(ClaimBatch {
-            claims,
-            more: false,
-        })
+        let more = self
+            .lock()
+            .iter()
+            .any(|r| r.target.scope() == scope && !r.leased && !r.suspended && r.due <= now);
+        Ok(ClaimBatch { claims, more })
     }
     async fn renew<T: Timer>(
         &self,
@@ -232,7 +236,7 @@ impl Reconciler<Token> for Business {
             let n = self.observed.fetch_add(1, Ordering::SeqCst);
             Ok(ReconcileDiff::between(
                 DesiredState::present(1),
-                ActualState::present(usize::from(n > 1)),
+                ActualState::present(usize::from(n > 1 && self.behavior != 2)),
             ))
         }
         .await;
@@ -293,6 +297,8 @@ fn policy() -> Result<Policy, Error> {
 }
 fn policy_with_attempts(max_attempts: u32) -> Result<Policy, Error> {
     Policy::try_from(rss_reconcile::PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 2,
         lease_ttl: Duration::from_millis(15),
         attempt_timeout: Duration::from_millis(100),
@@ -349,47 +355,60 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
 }
 #[tokio::test(start_paused = true)]
 async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result<()> {
-    let clock = Clock::new();
-    let cancel = CancellationToken::new();
-    let stop = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_millis(35), &cancel);
-    let store = Store {
-        rows: Mutex::new(vec![]),
-        clock: Clock::new(),
-        lost: true,
-        scans: AtomicUsize::new(0),
-        scan_delay: None,
-        scan_failure: None,
-        scan_failure_after: 0,
-        finish_delay: None,
-        finish_failure: None,
-        finishes: AtomicUsize::new(0),
-        releases: AtomicUsize::new(0),
-    };
-    let scope = scope()?;
-    for i in 0..4 {
-        store
-            .wake(
-                &Target::new(scope.clone(), format!("e{i}"))?,
-                &ResourceSet::empty(scope.tenant()),
-                &control,
-            )
-            .await?;
+    for concurrency in [2, 65, 1025] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_millis(35), &cancel);
+        let store = Store {
+            rows: Mutex::new(vec![]),
+            clock: Clock::new(),
+            lost: true,
+            scans: AtomicUsize::new(0),
+            scan_delay: None,
+            scan_failure: None,
+            scan_failure_after: 0,
+            finish_delay: None,
+            finish_failure: None,
+            finishes: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        };
+        let scope = scope()?;
+        for i in 0..concurrency * 2 {
+            store
+                .wake(
+                    &Target::new(scope.clone(), format!("e{i}"))?,
+                    &ResourceSet::empty(scope.tenant()),
+                    &control,
+                )
+                .await?;
+        }
+        let business = business(2);
+        let report = run(
+            &store,
+            &business,
+            &scope,
+            Policy::try_from(PolicyConfig {
+                concurrency,
+                claim_batch_size: 1024,
+                scan_budget: 4096,
+                lease_ttl: Duration::from_millis(15),
+                attempt_timeout: Duration::from_millis(100),
+                scan_interval: Duration::from_millis(2),
+                idle_scan_interval: Duration::from_millis(2),
+                initial_backoff: Duration::from_millis(2),
+                max_backoff: Duration::from_millis(8),
+                max_attempts: 2,
+            })?,
+            &control,
+            &stop,
+            |_| {},
+        )
+        .await?;
+        assert!(report.fenced >= concurrency as u64);
+        assert_eq!(business.peak.load(Ordering::SeqCst), concurrency);
+        assert_eq!(business.active.load(Ordering::SeqCst), 0);
     }
-    let business = business(2);
-    let report = run(
-        &store,
-        &business,
-        &scope,
-        policy()?,
-        &control,
-        &stop,
-        |_| {},
-    )
-    .await?;
-    assert!(report.fenced >= 2);
-    assert!(business.peak.load(Ordering::SeqCst) <= 2);
-    assert_eq!(business.active.load(Ordering::SeqCst), 0);
     Ok(())
 }
 #[tokio::test(start_paused = true)]
@@ -420,7 +439,7 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
         )
         .await?;
     let c = store
-        .claim_due(&scope, 1, policy()?.lease(), &control)
+        .claim_due(&scope, 1, 64, policy()?.lease(), &control)
         .await?
         .claims
         .remove(0);
@@ -434,7 +453,7 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
     store.finish(&c, Completion::Converged, &control).await?;
     assert_eq!(
         store
-            .claim_due(&scope, 1, policy()?.lease(), &control)
+            .claim_due(&scope, 1, 64, policy()?.lease(), &control)
             .await?
             .claims
             .len(),
@@ -448,7 +467,8 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
 
 #[tokio::test(start_paused = true)]
 async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
-    for max_attempts in [1, 2] {
+    for (initial_failures, max_attempts) in [(0, 1), (0, 2), (1000, 1002), (u32::MAX - 1, u32::MAX)]
+    {
         let clock = Clock::new();
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
@@ -471,6 +491,7 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
         store
             .wake(&t, &ResourceSet::empty(t.scope().tenant()), &control)
             .await?;
+        store.lock()[0].failures = initial_failures;
         let business = business(1);
         let report = run(
             &store,
@@ -482,7 +503,10 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
             |_| {},
         )
         .await?;
-        assert_eq!(report.retried, u64::from(max_attempts - 1));
+        assert_eq!(
+            report.retried,
+            u64::from(max_attempts - initial_failures - 1)
+        );
         assert_eq!(report.suspended, 1);
         assert_eq!(report.converged, 0);
         assert_eq!(store.lock()[0].failures, max_attempts);
@@ -682,6 +706,8 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
             .await?;
     }
     let p = Policy::try_from(rss_reconcile::PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 2,
         lease_ttl: Duration::from_secs(2),
         attempt_timeout: Duration::from_millis(500),
@@ -853,6 +879,8 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
     let t = Target::new(scope.clone(), "hint")?;
     let notify = tokio::sync::Notify::new();
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 1,
         lease_ttl: Duration::from_secs(2),
         attempt_timeout: Duration::from_millis(50),
@@ -955,6 +983,8 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
         };
         let scope = scope()?;
         let policy = Policy::try_from(PolicyConfig {
+            claim_batch_size: 64,
+            scan_budget: 64,
             concurrency: 2,
             lease_ttl: Duration::from_millis(30),
             attempt_timeout: Duration::from_millis(50),
@@ -1015,6 +1045,8 @@ fn idle_store() -> Store {
 }
 fn idle_policy(scan: Duration, idle: Duration) -> Result<Policy, Error> {
     Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 2,
         lease_ttl: Duration::from_millis(90),
         attempt_timeout: Duration::from_millis(100),
@@ -1186,6 +1218,8 @@ async fn runner_rediscovers_newer_wake_after_terminal_completion() -> anyhow::Re
                     suspend,
                 };
                 let policy = Policy::try_from(PolicyConfig {
+                    claim_batch_size: 64,
+                    scan_budget: 64,
                     concurrency,
                     lease_ttl: Duration::from_secs(1),
                     attempt_timeout: Duration::from_millis(100),
@@ -1273,6 +1307,8 @@ async fn stop_drains_apply_and_settlement_without_claiming_the_next_target() -> 
         resume: Default::default(),
     };
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 1,
         lease_ttl: Duration::from_secs(1),
         attempt_timeout: Duration::from_millis(100),
@@ -1406,6 +1442,8 @@ async fn stop_keeps_an_inflight_claim_until_its_acquired_work_is_settled() -> an
             .await?;
     }
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 1,
         lease_ttl: Duration::from_secs(1),
         attempt_timeout: Duration::from_millis(100),
@@ -1507,6 +1545,8 @@ async fn concurrent_failures_persist_separate_bounded_retry_times() -> anyhow::R
                 .await?;
         }
         let policy = Policy::try_from(PolicyConfig {
+            claim_batch_size: 64,
+            scan_budget: 64,
             concurrency: 2,
             lease_ttl: Duration::from_millis(15),
             attempt_timeout: Duration::from_millis(100),
@@ -1666,10 +1706,13 @@ impl DurableStore for ReboundStore<'_> {
         &self,
         scope: &Scope,
         limit: usize,
+        scan_budget: u32,
         lease: Duration,
         c: &Control<'_, T>,
     ) -> Result<ClaimBatch<Token>, Error> {
-        self.inner.claim_due(scope, limit, lease, c).await
+        self.inner
+            .claim_due(scope, limit, scan_budget, lease, c)
+            .await
     }
     async fn renew<T: Timer>(
         &self,
@@ -1756,6 +1799,8 @@ async fn capped_retries_survive_runner_restart_and_early_notifications() -> anyh
         row.failures = 5;
     }
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 2,
         lease_ttl: Duration::from_secs(1),
         attempt_timeout: Duration::from_millis(100),

@@ -72,7 +72,9 @@ Replay returns `Archived`; exact existing Replay operation retries still return 
 No cold restoration/replay API is supplied in this version.
 
 Expired generations retain coordinates for bounded reconciliation. The PG scan rotates a persisted
-64-object batch so unresolved writes cannot starve later generations. A purged object remains
+batch (default 64, configurable from 1 to 1024 through
+[`PgArchiveRepository::with_retired_scan_limit`](../transactional-messaging-postgres/README.md))
+so unresolved writes cannot starve later generations. A purged object remains
 `Purged` until expiry; `Retained` means it still exists after expiry.
 
 Missing/Evidence faults are persisted and block the same operation. A prior success cannot settle an
@@ -89,7 +91,7 @@ implementations; private proof construction does not establish the truth of a ma
 ## Bounded disaster recovery
 
 Recovery constructor `dr::Plan::new` binds one tenant, external storage target/lineage, expected epoch, operation identity,
-restore evidence and 1–500 canonical members. `dr::Member` selects one direction: retained Published
+restore evidence and 1–1024 canonical members. `dr::Member` selects one direction: retained Published
 Outbox facts for database-ahead delivery, or full ConsumerIdentity/fingerprint for broker-ahead
 ordinary consumption. Mixed directions, duplicate members and cross-tenant subscriptions are
 rejected before authorization. The next epoch is exactly one checked increment.

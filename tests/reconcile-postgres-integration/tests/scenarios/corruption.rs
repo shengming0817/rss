@@ -171,7 +171,9 @@ async fn damaged_row(
         ErrorKind::StorageContract,
     );
     assert_kind(
-        store.claim_due(scope, 2, Duration::from_secs(1), c).await,
+        store
+            .claim_due(scope, 2, 64, Duration::from_secs(1), c)
+            .await,
         ErrorKind::StorageContract,
     );
     worker_rejects(store, scope, c, ErrorKind::StorageContract).await?;
@@ -213,7 +215,7 @@ async fn recovery(
     );
     assert!(
         restarted
-            .claim_due(scope, 2, Duration::from_secs(1), c)
+            .claim_due(scope, 2, 64, Duration::from_secs(1), c)
             .await?
             .claims
             .is_empty()
@@ -226,7 +228,7 @@ async fn recovery(
         )
         .await?;
     let batch = restarted
-        .claim_due(scope, 2, Duration::from_secs(1), c)
+        .claim_due(scope, 2, 64, Duration::from_secs(1), c)
         .await?
         .claims;
     assert_eq!(batch.len(), 1);
@@ -272,7 +274,9 @@ async fn exhausted_epoch(
         .execute(owner).await?;
     let before = snapshot(owner, scope.reconciler()).await?;
     for _ in 0..2 {
-        let result = store.claim_due(&scope, 2, Duration::from_secs(1), c).await;
+        let result = store
+            .claim_due(&scope, 2, 64, Duration::from_secs(1), c)
+            .await;
         assert_kind(result, ErrorKind::InvalidInput);
         assert_eq!(
             snapshot(owner, scope.reconciler()).await?,
@@ -294,6 +298,8 @@ async fn exhausted_epoch(
 
 fn policy() -> Result<Policy, Error> {
     Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 2,
         lease_ttl: Duration::from_secs(1),
         attempt_timeout: Duration::from_millis(200),
