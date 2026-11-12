@@ -240,7 +240,7 @@ fn dimensions_are_whitelisted_bounded_and_canonical() -> TestResult {
     let dimensions = keys
         .iter()
         .map(|k| Ok((k.clone(), id("v")?)))
-        .collect::<Result<BTreeMap<_, _>, Error>>()?;
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
     let series = Series::new(definition, id("s")?, id("r")?, dimensions)?;
     assert_eq!(
         serde_json::from_slice::<Series>(&serde_json::to_vec(&series)?)?,

@@ -236,7 +236,7 @@ impl Reconciler<Token> for Business {
             let n = self.observed.fetch_add(1, Ordering::SeqCst);
             Ok(ReconcileDiff::between(
                 DesiredState::present(1),
-                ActualState::present(usize::from(n > 1)),
+                ActualState::present(usize::from(n > 1 && self.behavior != 2)),
             ))
         }
         .await;

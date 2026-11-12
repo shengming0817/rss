@@ -117,6 +117,7 @@ fn identity_preserves_canonical_value_owners() -> anyhow::Result<()> {
 
 #[test]
 fn lease_policy_keeps_precision_and_minimum_without_a_day_ceiling() -> anyhow::Result<()> {
+    use rss_saga::LeasePolicy;
     use std::time::Duration;
     for ttl in [Duration::from_millis(30), Duration::from_secs(90_000)] {
         assert_eq!(LeasePolicy::new(ttl)?.ttl(), ttl);

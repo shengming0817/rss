@@ -297,7 +297,8 @@ fn epoch() -> std::time::Instant {
 }
 
 #[test]
-fn expanded_policies_keep_numeric_and_budget_boundaries() -> anyhow::Result<()> {
+fn expanded_policies_keep_numeric_and_budget_boundaries() -> Result<(), Box<dyn std::error::Error>>
+{
     use rss_transactional_messaging::policy::{DeliveryBudget, RetryPolicy, ShutdownBudget};
     use std::num::NonZeroU32;
     for count in [129, 1001, u32::MAX] {
