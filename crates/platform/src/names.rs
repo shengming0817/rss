@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-const NAME_MAX_BYTES: usize = 64;
+const NAME_MAX_BYTES: usize = 255;
 
 macro_rules! name_type {
     ($name:ident) => {
@@ -56,4 +56,21 @@ fn validate(value: &str) -> Result<(), NameError> {
         return Err(NameError::InvalidFormat);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn names_preserve_ascii_format_with_expanded_byte_capacity() {
+        for size in [65, 255] {
+            let value = "a".repeat(size);
+            assert!(ApplicationName::parse(&value).is_ok());
+            assert!(ModuleName::parse(&value).is_ok());
+        }
+        for value in [String::new(), "a".repeat(256), "é".repeat(128), "Bad".into(), "bad.name".into()] {
+            assert!(ApplicationName::parse(&value).is_err());
+            assert!(ModuleName::parse(&value).is_err());
+        }
+    }
 }

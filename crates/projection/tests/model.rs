@@ -7,7 +7,9 @@ fn position_and_source_identity_are_validated() -> anyhow::Result<()> {
     let source = SourceScope::new(tenant, "journal")?;
     assert!(SourceScope::new(tenant, "").is_err());
     assert!(BatchLimit::new(0).is_err());
-    assert!(BatchLimit::new(1001).is_err());
+    assert!(BatchLimit::new(1001).is_ok());
+    assert_eq!(BatchLimit::new(1024)?.get(), 1024);
+    assert!(BatchLimit::new(1025).is_err());
     assert!(Position::new(u64::MAX).is_err());
     let event = Event::new(source, Position::new(0)?, "event-1", b"secret".to_vec())?;
     assert_eq!(event.position().get(), 0);
@@ -181,5 +183,23 @@ fn receipt_query_validates_exact_identity_and_redacts_debug() -> anyhow::Result<
     assert_eq!(query.definition_identity(), &definition);
     assert_eq!(query.event_id(), "sensitive-id");
     assert!(!format!("{query:?}").contains("sensitive"));
+    Ok(())
+}
+
+#[test]
+fn expanded_names_do_not_expand_generation_or_fact_id() -> anyhow::Result<()> {
+    use rss_projection::ProjectionScope;
+    let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+    for size in [129, 255] {
+        let name = "a".repeat(size);
+        let source = SourceScope::new(tenant, &name)?;
+        assert!(ProjectionScope::new(source.clone(), &name, "v1").is_ok());
+        assert!(ProjectionScope::new(source.clone(), "projection", &name).is_err());
+        assert!(Event::new(source, Position::new(1)?, &name, vec![]).is_err());
+    }
+    for name in ["a".repeat(256), "é".repeat(128), "bad name".into()] {
+        assert!(SourceScope::new(tenant, &name).is_err());
+        assert!(ProjectionScope::new(SourceScope::new(tenant, "source")?, &name, "v1").is_err());
+    }
     Ok(())
 }

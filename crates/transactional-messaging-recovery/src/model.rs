@@ -295,7 +295,7 @@ impl Query {
         limit: u16,
         cursor: Option<&str>,
     ) -> Result<Self, Error> {
-        if limit == 0 || limit > 1000 {
+        if limit == 0 || limit > 1024 {
             return Err(Error::Invalid);
         }
         let after = cursor
