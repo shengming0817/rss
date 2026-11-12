@@ -62,7 +62,7 @@ pub(crate) async fn borrowed_timeout_rolls_back(
     ));
     tokio::time::timeout(Duration::from_secs(2), blocked.rollback()).await??;
     holder.rollback().await?;
-    assert_eq!(store.high_water(s.source()).await?, None);
+    assert_eq!(store.high_water(s.source(), control).await?, None);
     assert_eq!(append(store, &s, "after", b"x", control).await?.get(), 0);
     Ok(())
 }
@@ -124,7 +124,7 @@ pub(crate) async fn bounded_close(
     assert!(pool.is_closed());
     assert!(matches!(pool.acquire().await, Err(sqlx::Error::PoolClosed)));
     let error = store
-        .high_water(s.source())
+        .high_water(s.source(), control)
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("closed pool served read"))?;
@@ -170,7 +170,7 @@ pub(crate) async fn application_error_cannot_claim_settlement(
         .ok_or_else(|| anyhow::anyhow!("missing redacted evidence"))?;
     assert!(source.source().is_none());
     assert!(!format!("{source:?} {source}").contains("private-value"));
-    assert_eq!(store.high_water(s.source()).await?, None);
+    assert_eq!(store.high_water(s.source(), control).await?, None);
     Ok(())
 }
 
@@ -344,6 +344,6 @@ pub(crate) async fn application_lock_timeout_rolls_back(
         error.diagnostic().map(|d| d.phase()),
         Some(Phase::Application)
     );
-    assert_eq!(store.high_water(s.source()).await?, None);
+    assert_eq!(store.high_water(s.source(), control).await?, None);
     Ok(())
 }

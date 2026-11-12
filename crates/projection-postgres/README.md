@@ -226,3 +226,25 @@ Transient SQLSTATE classification uses an explicit allowlist. Undefined/duplicat
 `58P02`), dropped databases (`57P04`), configuration limits (`53400`), protocol violations (`08P01`)
 and disk exhaustion (`53100`) require correction, rather than automatic retries based on their class.
 Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .
+
+## Runtime budgets (#3174)
+
+Source high-water/read, Execution checkpoint and ExternalCheckpoint load now require the same
+`&Control` as writes. Migrate all direct calls; old signatures and internal 30-second budgets are
+removed. Reads use the existing read-only transaction policy: interruption is Cancelled/Deadline,
+while failed settlement is Unavailable and retires the connection. Writes preserve CommitUnknown
+and RollbackFailed. The provider owns cancellation and settlement; callers should not wrap these
+operations in another timeout that hides the provider's result.
+
+Acquire time is deducted before SQL watchdog setup. Runtime operations require positive remaining
+time representable by PostgreSQL's signed integer milliseconds (at most 2,147,483,647 ms), rounded
+up for sub-millisecond precision. Larger budgets return InvalidInput before acquisition or SQL;
+they are never clamped or translated into disabled watchdogs. This is a PG adapter limit, not a
+Projection core limit. Caller-configured pool/transport limits remain caller-owned.
+
+Borrowed PgTransaction operations check the enclosing budget internally, including callback
+completion. Confirmed commit/rollback acknowledgments are not rewritten by a later budget check.
+Connection quarantine is separate from the invocation result; scheduling close does not prove
+cleanup completed or supply a missing rollback acknowledgment.
+
+ref: postgres/postgres src/backend/utils/misc/guc_tables.c@REL_16_6

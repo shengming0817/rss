@@ -75,11 +75,11 @@ pub(crate) async fn external_recovery(
         Err(Error::new(rss_projection::ErrorKind::CommitUnknown))
     );
     assert_eq!(
-        execution.checkpoint().await?.position,
+        execution.checkpoint(control).await?.position,
         Some(first.position())
     );
     assert_eq!(
-        old.load().await,
+        old.load(control).await,
         Err(Error::new(rss_projection::ErrorKind::Fenced))
     );
     duplicate_and_conflict(&execution, &remote, &s, first.position(), control).await
@@ -105,7 +105,7 @@ async fn duplicate_and_conflict(
         Err(Error::new(rss_projection::ErrorKind::Conflict))
     );
     assert_eq!(
-        execution.checkpoint().await?.position,
+        execution.checkpoint(control).await?.position,
         Some(duplicate.position())
     );
     Ok(())
@@ -135,7 +135,7 @@ pub(crate) async fn direct_advance_obeys_control(
         checkpoint.advance(None, &fact, &cancelled).await,
         Err(Error::new(rss_projection::ErrorKind::Cancelled))
     );
-    assert_eq!(checkpoint.load().await?.position, None);
+    assert_eq!(checkpoint.load(control).await?.position, None);
     let signal = CancellationToken::new();
     let expired = Control::new(&clock, Duration::ZERO, &signal);
     assert_eq!(
@@ -147,6 +147,9 @@ pub(crate) async fn direct_advance_obeys_control(
         checkpoint.advance(None, &fact, control).await,
         Err(Error::new(rss_projection::ErrorKind::CommitUnknown))
     );
-    assert_eq!(checkpoint.load().await?.position, Some(fact.position()));
+    assert_eq!(
+        checkpoint.load(control).await?.position,
+        Some(fact.position())
+    );
     Ok(())
 }

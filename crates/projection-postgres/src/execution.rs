@@ -191,7 +191,11 @@ impl PgStore {
             Err(Error::new(ErrorKind::ScopeMismatch))
         }
     }
-    async fn checkpoint_for<T: Timer>(&self, claim: Arc<PgClaim>, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
+    async fn checkpoint_for<T: Timer>(
+        &self,
+        claim: Arc<PgClaim>,
+        control: &Control<'_, T>,
+    ) -> Result<Checkpoint, Error> {
         let source = claim.scope.source().clone();
         self.controlled_read(&source, control, move |tx| Box::pin(async move {
             let s = &claim.scope;

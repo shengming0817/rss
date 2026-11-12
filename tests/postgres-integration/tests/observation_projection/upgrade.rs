@@ -142,14 +142,21 @@ async fn verify_tenant(
     tenant: &str,
     expected: &[(&str, u64)],
 ) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let source = f.source(store, tenant)?;
     let events = source
-        .read(source.scope(), None, BatchLimit::new(20)?)
+        .read(source.scope(), None, BatchLimit::new(20)?, &control)
         .await?;
     assert_eq!(events.len(), expected.len());
     for (index, (event, (object, sequence))) in events.iter().zip(expected).enumerate() {
         assert_eq!(event.position().get(), index as u64 + 1);
-        let record = source.resolve(event, deadline()).await?;
+        let record = source.resolve(event, &control).await?;
         assert_eq!(record.record().scope().object().as_str(), *object);
         assert_eq!(record.record().batch().sequence(), *sequence);
     }
@@ -163,6 +170,13 @@ async fn continue_tenant(
     sequence: u64,
     position: u64,
 ) -> anyhow::Result<()> {
+    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let budget_cancel = tokio_util::sync::CancellationToken::new();
+    let control = rss_projection::Control::new(
+        &budget_clock,
+        std::time::Duration::from_secs(60),
+        &budget_cancel,
+    );
     let stream = scope(tenant, object, "r", "source", "e")?;
     assert!(
         store
@@ -182,7 +196,10 @@ async fn continue_tenant(
         .await?;
     let source = f.source(store, tenant)?;
     assert_eq!(
-        source.high_water(source.scope()).await?.map(|p| p.get()),
+        source
+            .high_water(source.scope(), &control)
+            .await?
+            .map(|p| p.get()),
         Some(position)
     );
     Ok(())

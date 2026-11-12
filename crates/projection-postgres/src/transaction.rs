@@ -70,27 +70,55 @@ impl PgStore {
         F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, PgOperationError>>
             + Send,
     {
-        self.transact(scope.tenant(), control, TransactionMode::ReadWrite, operation).await
+        self.transact(
+            scope.tenant(),
+            control,
+            TransactionMode::ReadWrite,
+            operation,
+        )
+        .await
     }
 
     pub(crate) async fn controlled_tx<T: Timer, R: Send, F>(
-        &self, scope: &SourceScope, control: &Control<'_, T>, operation: F,
+        &self,
+        scope: &SourceScope,
+        control: &Control<'_, T>,
+        operation: F,
     ) -> Result<R, Error>
     where
         F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, Error>> + Send,
     {
-        self.transact(scope.tenant(), control, TransactionMode::ReadWrite, operation).await
+        self.transact(
+            scope.tenant(),
+            control,
+            TransactionMode::ReadWrite,
+            operation,
+        )
+        .await
     }
     pub(crate) async fn controlled_read<T: Timer, R: Send, F>(
-        &self, scope: &SourceScope, control: &Control<'_, T>, operation: F,
+        &self,
+        scope: &SourceScope,
+        control: &Control<'_, T>,
+        operation: F,
     ) -> Result<R, Error>
     where
         F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, Error>> + Send,
     {
-        self.transact(scope.tenant(), control, TransactionMode::ReadOnly, operation).await
+        self.transact(
+            scope.tenant(),
+            control,
+            TransactionMode::ReadOnly,
+            operation,
+        )
+        .await
     }
     async fn transact<T: Timer, R: Send, E: Into<Error> + Send, F>(
-        &self, tenant: TenantId, control: &Control<'_, T>, mode: TransactionMode, operation: F,
+        &self,
+        tenant: TenantId,
+        control: &Control<'_, T>,
+        mode: TransactionMode,
+        operation: F,
     ) -> Result<R, Error>
     where
         F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, E>> + Send,
@@ -98,34 +126,53 @@ impl PgStore {
         control.check()?;
         watchdog(control.remaining())?;
         let progress = std::sync::atomic::AtomicU8::new(0);
-        control.run(self.transact_inner(tenant, control, mode, &progress, operation)).await
+        control
+            .run(self.transact_inner(tenant, control, mode, &progress, operation))
+            .await
             .map_err(|error| {
-                if mode.is_read_only() || !matches!(error.kind(), ErrorKind::Cancelled | ErrorKind::Deadline) {
+                if mode.is_read_only()
+                    || !matches!(error.kind(), ErrorKind::Cancelled | ErrorKind::Deadline)
+                {
                     return error;
                 }
                 match progress.load(std::sync::atomic::Ordering::SeqCst) {
-                    0 => error,
-                    2 => Error::provider(ErrorKind::RollbackFailed, Phase::Rollback, None, None, error),
+                    0 | 3 => error,
+                    2 => Error::provider(
+                        ErrorKind::RollbackFailed,
+                        Phase::Rollback,
+                        None,
+                        None,
+                        error,
+                    ),
                     _ => error.uncertain(),
                 }
             })
     }
     async fn transact_inner<T: Timer, R: Send, E: Into<Error> + Send, F>(
-        &self, tenant: TenantId, control: &Control<'_, T>, mode: TransactionMode,
-        progress: &std::sync::atomic::AtomicU8, operation: F,
+        &self,
+        tenant: TenantId,
+        control: &Control<'_, T>,
+        mode: TransactionMode,
+        progress: &std::sync::atomic::AtomicU8,
+        operation: F,
     ) -> Result<R, Error>
     where
         F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, E>> + Send,
     {
         let mut lease = Lease {
-            connection: self.pool.acquire().await.map_err(|e| sql_error(e, Phase::Acquire))?,
+            connection: self
+                .pool
+                .acquire()
+                .await
+                .map_err(|e| sql_error(e, Phase::Acquire))?,
             quarantine: true,
         };
         control.check()?;
         let mut tx = match mode {
             TransactionMode::ReadOnly => lease.connection.begin_with("BEGIN READ ONLY").await,
             TransactionMode::ReadWrite => lease.connection.begin().await,
-        }.map_err(|e| sql_error(e, Phase::Begin))?;
+        }
+        .map_err(|e| sql_error(e, Phase::Begin))?;
         #[cfg(feature = "integration")]
         let fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
         let check = || control.check();
@@ -135,18 +182,29 @@ impl PgStore {
             control.check()?;
             progress.store(1, std::sync::atomic::Ordering::SeqCst);
             let result = operation(&mut PgTransaction {
-                connection: &mut tx, tenant, check: &check,
-            }).await.map_err(Into::into);
+                connection: &mut tx,
+                tenant,
+                check: &check,
+            })
+            .await
+            .map_err(Into::into);
             control.check()?;
             result
-        }.await;
+        }
+        .await;
         match result {
             Ok(value) => {
                 #[cfg(feature = "integration")]
                 if fault == PgFault::CommitPending as u8 {
                     std::future::pending::<()>().await;
                 }
-                tx.commit().await.map_err(|e| evidence(e, mode.settlement_error(ErrorKind::CommitUnknown), Phase::Commit))?;
+                tx.commit().await.map_err(|e| {
+                    evidence(
+                        e,
+                        mode.settlement_error(ErrorKind::CommitUnknown),
+                        Phase::Commit,
+                    )
+                })?;
                 #[cfg(feature = "integration")]
                 if fault == PgFault::CommitUnknownAfterAck as u8 {
                     return Err(Error::new(mode.settlement_error(ErrorKind::CommitUnknown)));
@@ -160,12 +218,20 @@ impl PgStore {
                 if fault == PgFault::RollbackPending as u8 {
                     std::future::pending::<()>().await;
                 }
-                tx.rollback().await.map_err(|e| evidence(e, mode.settlement_error(ErrorKind::RollbackFailed), Phase::Rollback))?;
+                tx.rollback().await.map_err(|e| {
+                    evidence(
+                        e,
+                        mode.settlement_error(ErrorKind::RollbackFailed),
+                        Phase::Rollback,
+                    )
+                })?;
                 #[cfg(feature = "integration")]
                 if fault == PgFault::RollbackFailedAfterAck as u8 {
                     return Err(Error::new(mode.settlement_error(ErrorKind::RollbackFailed)));
                 }
                 lease.quarantine = false;
+                // An acknowledged rollback establishes the original operation failure.
+                progress.store(3, std::sync::atomic::Ordering::SeqCst);
                 Err(error)
             }
         }
@@ -197,7 +263,9 @@ enum TransactionMode {
     ReadWrite,
 }
 impl TransactionMode {
-    fn is_read_only(self) -> bool { matches!(self, Self::ReadOnly) }
+    fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
     fn settlement_error(self, mutating: ErrorKind) -> ErrorKind {
         match self {
             Self::ReadOnly => ErrorKind::Unavailable,
@@ -224,7 +292,9 @@ pub struct PgTransaction<'a> {
     check: &'a (dyn Fn() -> Result<(), Error> + Sync),
 }
 impl PgTransaction<'_> {
-    pub(crate) fn check(&self) -> Result<(), Error> { (self.check)() }
+    pub(crate) fn check(&self) -> Result<(), Error> {
+        (self.check)()
+    }
     /// Tenant bound by the enclosing transaction.
     pub const fn tenant(&self) -> TenantId {
         self.tenant
@@ -253,7 +323,9 @@ async fn setup(
 }
 /// PostgreSQL stores these GUCs as signed integer milliseconds; never silently shorten a budget.
 pub(crate) fn watchdog(remaining: Duration) -> Result<i32, Error> {
-    if remaining.is_zero() { return Err(ErrorKind::Deadline.into()); }
+    if remaining.is_zero() {
+        return Err(ErrorKind::Deadline.into());
+    }
     let millis = remaining.as_nanos().div_ceil(1_000_000);
     i32::try_from(millis).map_err(|_| ErrorKind::InvalidInput.into())
 }
@@ -375,6 +447,21 @@ impl From<PgOperationError> for Error {
 #[cfg(test)]
 mod regression {
     use super::*;
+    #[test]
+    fn watchdog_rejects_unrepresentable_and_expired_budgets() {
+        assert_eq!(watchdog(Duration::ZERO), Err(ErrorKind::Deadline.into()));
+        assert_eq!(watchdog(Duration::from_nanos(1)), Ok(1));
+        assert_eq!(watchdog(Duration::from_micros(1001)), Ok(2));
+        assert_eq!(
+            watchdog(Duration::from_millis(i32::MAX as u64)),
+            Ok(i32::MAX)
+        );
+        assert_eq!(
+            watchdog(Duration::from_millis(i32::MAX as u64) + Duration::from_nanos(1)),
+            Err(ErrorKind::InvalidInput.into())
+        );
+        assert_eq!(watchdog(Duration::MAX), Err(ErrorKind::InvalidInput.into()));
+    }
     #[test]
     fn structural_sqlx_errors_are_not_retryable() {
         for error in [

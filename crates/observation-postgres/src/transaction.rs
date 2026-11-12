@@ -104,7 +104,9 @@ pub(crate) async fn within<C: Clock, T>(
 }
 /// Validate runtime budgets before acquisition; startup probes retain their own admission policy.
 pub(crate) fn runtime_budget(remaining: Duration) -> Result<Duration, Error> {
-    if remaining.is_zero() { return Err(ErrorKind::Deadline.into()); }
+    if remaining.is_zero() {
+        return Err(ErrorKind::Deadline.into());
+    }
     if remaining.as_nanos().div_ceil(1_000_000) > i32::MAX as u128 {
         return Err(ErrorKind::InvalidInput.into());
     }
@@ -159,6 +161,29 @@ pub(crate) async fn after_write_fault<T, E: From<Error>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_budgets_are_checked_without_clamping() {
+        assert_eq!(
+            runtime_budget(Duration::ZERO).err().map(|e| e.kind()),
+            Some(ErrorKind::Deadline)
+        );
+        for value in [
+            Duration::from_nanos(1),
+            Duration::from_secs(60),
+            Duration::from_millis(i32::MAX as u64),
+        ] {
+            assert_eq!(runtime_budget(value).ok(), Some(value));
+        }
+        for value in [
+            Duration::MAX,
+            Duration::from_millis(i32::MAX as u64) + Duration::from_nanos(1),
+        ] {
+            assert_eq!(
+                runtime_budget(value).err().map(|e| e.kind()),
+                Some(ErrorKind::InvalidInput)
+            );
+        }
+    }
     #[test]
     fn postgres_watchdog_bounds() {
         assert_eq!(watchdog(Duration::ZERO), "1ms");

@@ -175,7 +175,14 @@ async fn drive<S: Source, E: Execution, T: Timer>(
             u32::try_from(remaining.min(u64::from(limit.batch.get())))
                 .map_err(|_| Error::new(ErrorKind::InvalidInput))?,
         )?;
-        let events = source.read(execution.scope().source(), checkpoint.position, batch, control).await?;
+        let events = source
+            .read(
+                execution.scope().source(),
+                checkpoint.position,
+                batch,
+                control,
+            )
+            .await?;
         validate_batch(&events, execution, checkpoint.position, batch)?;
         control.check()?;
         if events.is_empty() {
@@ -187,7 +194,9 @@ async fn drive<S: Source, E: Execution, T: Timer>(
                 return Err(Error::new(ErrorKind::SourceContract));
             }
             control.check()?;
-            let result = execution.execute(checkpoint.position, &event, control).await?;
+            let result = execution
+                .execute(checkpoint.position, &event, control)
+                .await?;
             match result {
                 ApplyOutcome::Applied => report.applied += 1,
                 ApplyOutcome::Duplicate => report.duplicates += 1,

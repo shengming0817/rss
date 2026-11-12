@@ -8,12 +8,12 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const GUARD: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
-struct ManualTimer(watch::Sender<Duration>);
+pub(super) struct ManualTimer(watch::Sender<Duration>);
 impl ManualTimer {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(watch::channel(Duration::ZERO).0)
     }
-    fn advance(&self, now: Duration) {
+    pub(super) fn advance(&self, now: Duration) {
         self.0.send_replace(now);
     }
 }
@@ -211,7 +211,7 @@ async fn probe_wait(pool: &PgPool, owner: &PgPool, stop: Stop) -> anyhow::Result
     fresh_admission(pool).await
 }
 
-async fn assert_replacement(pool: &PgPool, original: i32) -> anyhow::Result<()> {
+pub(super) async fn assert_replacement(pool: &PgPool, original: i32) -> anyhow::Result<()> {
     // Keep the lock: default return-to-pool ping would wait for the original query and
     // retain the only permit. Quarantine instead allows a replacement backend now.
     let mut replacement = tokio::time::timeout(GUARD, pool.acquire())
@@ -224,7 +224,7 @@ async fn assert_replacement(pool: &PgPool, original: i32) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn wait_for_retirement(owner: &PgPool, original: i32) -> anyhow::Result<()> {
+pub(super) async fn wait_for_retirement(owner: &PgPool, original: i32) -> anyhow::Result<()> {
     tokio::time::timeout(GUARD, async {
         while sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE pid=$1)",

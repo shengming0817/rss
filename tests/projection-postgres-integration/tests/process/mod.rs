@@ -56,7 +56,7 @@ pub(super) async fn crash(
     ready??;
     assert_eq!(count(owner, &s).await?, 0);
     let projection = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
-    assert_eq!(projection.checkpoint().await?.position, None);
+    assert_eq!(projection.checkpoint(control).await?.position, None);
     projection
         .execute(None, &event(&s, 0, "crash-fact", b"x")?, control)
         .await?;

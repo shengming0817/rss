@@ -35,7 +35,10 @@ pub trait Execution: Send + Sync {
     /// and on progress reads and writes, rejecting mismatches before any effect.
     fn definition_identity(&self) -> &DefinitionIdentity;
     /// Read progress while validating that this session still owns its epoch.
-    fn checkpoint<T: Timer>(&self, control: &Control<'_, T>) -> impl Future<Output = Result<Checkpoint, Error>> + Send;
+    fn checkpoint<T: Timer>(
+        &self,
+        control: &Control<'_, T>,
+    ) -> impl Future<Output = Result<Checkpoint, Error>> + Send;
     /// Settle one event under expected progress. The implementation must fence before effects.
     fn execute<T: Timer>(
         &self,
@@ -53,7 +56,10 @@ pub trait ExternalCheckpoint: Send + Sync {
     /// and on progress reads and writes, rejecting mismatches before any effect.
     fn definition_identity(&self) -> &DefinitionIdentity;
     /// Read and validate the current epoch.
-    fn load<T: Timer>(&self, control: &Control<'_, T>) -> impl Future<Output = Result<Checkpoint, Error>> + Send;
+    fn load<T: Timer>(
+        &self,
+        control: &Control<'_, T>,
+    ) -> impl Future<Output = Result<Checkpoint, Error>> + Send;
     /// CAS advance after an externally acknowledged effect, validating the same epoch.
     fn advance<T: Timer>(
         &self,
@@ -117,13 +123,16 @@ impl<C: ExternalCheckpoint, H: ExternalTarget> Execution for AtLeastOnce<C, H> {
         }
         crate::validate_next(current, event)?;
         control.check()?;
-        let outcome = self.target
+        let outcome = self
+            .target
             .apply(self.scope(), self.definition_identity(), event, control)
             .await?;
         // A confirmed remote effect cannot be undone by a local interruption.
         control.check().map_err(Error::uncertain)?;
-        self.checkpoint.advance(expected, event, control)
-            .await.map_err(Error::uncertain)?;
+        self.checkpoint
+            .advance(expected, event, control)
+            .await
+            .map_err(Error::uncertain)?;
         Ok(outcome)
     }
 }

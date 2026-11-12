@@ -122,7 +122,7 @@ async fn identity_drift(
     sqlx::query("UPDATE rss_projection.checkpoints SET definition_identity=$1 WHERE tenant_id=$2::uuid AND source_id='definition'").bind(b.as_bytes().as_slice()).bind(TENANT).execute(owner).await?;
     let before = state(owner, s).await?;
     assert_eq!(
-        execution.checkpoint().await,
+        execution.checkpoint(control).await,
         Err(Error::new(ErrorKind::Conflict))
     );
     assert_eq!(
@@ -201,9 +201,12 @@ async fn resumed_checkpoint(
     assert_eq!(other.definition_identity(), b);
     let checkpoint = store.external_checkpoint(store.takeover(s, a, control).await?)?;
     assert_eq!(checkpoint.definition_identity(), a);
-    assert_eq!(checkpoint.load().await?.position, Some(Position::new(0)?));
     assert_eq!(
-        execution.checkpoint().await,
+        checkpoint.load(control).await?.position,
+        Some(Position::new(0)?)
+    );
+    assert_eq!(
+        execution.checkpoint(control).await,
         Err(Error::new(ErrorKind::Fenced))
     );
     Ok(())

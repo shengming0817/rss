@@ -1,4 +1,7 @@
-use crate::{PgOperationError, PgStore, PgTransaction, transaction::{map_sql, watchdog}};
+use crate::{
+    PgOperationError, PgStore, PgTransaction,
+    transaction::{map_sql, watchdog},
+};
 use rss_projection::{
     BatchLimit, Control, Error, ErrorKind, Event, Position, Source, SourceScope, Timer,
 };
@@ -72,7 +75,11 @@ async fn append_connection(
     decode_position(position)
 }
 impl Source for PgStore {
-    async fn high_water<T: Timer>(&self, source: &SourceScope, control: &Control<'_, T>) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(
+        &self,
+        source: &SourceScope,
+        control: &Control<'_, T>,
+    ) -> Result<Option<Position>, Error> {
         let scope = source.clone();
         self.controlled_read(source, control, move |tx| Box::pin(async move {
             let value: Option<i64> = sqlx::query_scalar("SELECT max(position) FROM rss_projection.events WHERE tenant_id=$1::uuid AND source_id=$2")

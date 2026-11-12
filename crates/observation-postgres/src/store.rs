@@ -50,8 +50,7 @@ impl<C: Clock> PgStore<C> {
                 connection: pool.acquire().await.map_err(sql_error)?,
                 settled: false,
             };
-            budget()?;
-    let mut tx = lease.connection.begin().await.map_err(sql_error)?;
+            let mut tx = lease.connection.begin().await.map_err(sql_error)?;
             let result = async {
                 let budget = watchdog(deadline.remaining(clock.now()).ok_or(ErrorKind::Deadline)?);
                 sqlx::query("SELECT set_config('statement_timeout',$1,true)")
@@ -109,7 +108,10 @@ impl<C: Clock> PgStore<C> {
         } // reason: faults do not exist in production builds.
     }
     async fn setup(
-        &self, connection: &mut PgConnection, tenant: TenantId, remaining: std::time::Duration,
+        &self,
+        connection: &mut PgConnection,
+        tenant: TenantId,
+        remaining: std::time::Duration,
     ) -> Result<(), Error> {
         let remaining = remaining.as_nanos().div_ceil(1_000_000).to_string();
         sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")
@@ -133,76 +135,104 @@ impl<C: Clock> PgStore<C> {
             + Send,
     {
         let progress = Progress::new();
-        let budget = || deadline.remaining(self.clock.now()).ok_or_else(|| Error::new(ErrorKind::Deadline)).and_then(runtime_budget).map_err(E::from);
+        let budget = || {
+            deadline
+                .remaining(self.clock.now())
+                .ok_or_else(|| Error::new(ErrorKind::Deadline))
+                .and_then(runtime_budget)
+                .map_err(E::from)
+        };
         budget()?;
-        within(&self.clock, deadline, &progress,
-            self.transact_inner(tenant, fault, &progress, &budget, |connection, progress, _| operation(connection, progress))
-        ).await.map_err(E::from)?
+        within(
+            &self.clock,
+            deadline,
+            &progress,
+            self.transact_inner(
+                tenant,
+                fault,
+                &progress,
+                &budget,
+                |connection, progress, _| operation(connection, progress),
+            ),
+        )
+        .await
+        .map_err(E::from)?
     }
     pub(crate) async fn transact_inner<T, E, F, B>(
-        &self, tenant: TenantId, fault: u8, progress: &Progress, budget: &B, operation: F,
+        &self,
+        tenant: TenantId,
+        fault: u8,
+        progress: &Progress,
+        budget: &B,
+        operation: F,
     ) -> Result<T, E>
     where
         T: Send,
         E: From<Error> + Send,
         B: Fn() -> Result<std::time::Duration, E> + Sync,
-        F: for<'a> FnOnce(&'a mut PgConnection, &'a Progress, &'a B)
-            -> futures::future::BoxFuture<'a, Result<T, E>> + Send,
+        F: for<'a> FnOnce(
+                &'a mut PgConnection,
+                &'a Progress,
+                &'a B,
+            ) -> futures::future::BoxFuture<'a, Result<T, E>>
+            + Send,
     {
         budget()?;
-    let mut lease = Lease {
-        connection: self.pool.acquire().await.map_err(sql_error)?,
-        settled: false,
-    };
-    budget()?;
-    let mut tx = lease.connection.begin().await.map_err(sql_error)?;
-    let result = async {
-        self.setup(&mut tx, tenant, budget()?).await?;
-        #[cfg(feature = "integration")]
-        crate::transaction::watchdog_fault(&mut tx, fault).await?;
+        let mut lease = Lease {
+            connection: self.pool.acquire().await.map_err(sql_error)?,
+            settled: false,
+        };
         budget()?;
+        let mut tx = lease.connection.begin().await.map_err(sql_error)?;
+        let result = async {
+            self.setup(&mut tx, tenant, budget()?).await?;
+            #[cfg(feature = "integration")]
+            crate::transaction::watchdog_fault(&mut tx, fault).await?;
+            budget()?;
             let result = operation(&mut tx, progress, budget).await;
             budget()?;
-        #[cfg(feature = "integration")]
-        let result = crate::transaction::after_write_fault(&mut tx, fault, result).await;
-        result
-    }
-    .await;
-    let result = if fault == 1 || fault == 5 || fault == 6 {
-        Err(Error::new(ErrorKind::Storage).into())
-    } else {
-        result
-    };
-    match result {
-        Ok(value) => {
-            progress.set(Stage::Effects);
-            if fault == 4 {
-                std::future::pending::<()>().await;
-            }
-            tx.commit()
-                .await
-                .map_err(|e| Error::provider(ErrorKind::CommitUnknown, e))?;
-            if fault == 2 || fault == 3 {
-                return Err(Error::new(ErrorKind::CommitUnknown).into());
-            }
-            lease.settled = true;
-            Ok(value)
+            #[cfg(feature = "integration")]
+            let result = crate::transaction::after_write_fault(&mut tx, fault, result).await;
+            result
         }
-        Err(error) => {
-            progress.set(Stage::Rollback);
-            if fault == 6 {
-                std::future::pending::<()>().await;
+        .await;
+        let result = if fault == 1 || fault == 5 || fault == 6 {
+            Err(Error::new(ErrorKind::Storage).into())
+        } else {
+            result
+        };
+        match result {
+            Ok(value) => {
+                progress.set(Stage::Effects);
+                if fault == 4 {
+                    std::future::pending::<()>().await;
+                }
+                tx.commit()
+                    .await
+                    .map_err(|e| Error::provider(ErrorKind::CommitUnknown, e))?;
+                if fault == 2 || fault == 3 {
+                    return Err(Error::new(ErrorKind::CommitUnknown).into());
+                }
+                lease.settled = true;
+                Ok(value)
             }
-            tx.rollback()
-                .await
-                .map_err(|e| Error::provider(ErrorKind::RollbackFailed, e))?;
-            if fault == 5 {
-                return Err(Error::new(ErrorKind::RollbackFailed).into());
+            Err(error) => {
+                progress.set(Stage::Rollback);
+                if fault == 6 {
+                    std::future::pending::<()>().await;
+                }
+                tx.rollback()
+                    .await
+                    .map_err(|e| Error::provider(ErrorKind::RollbackFailed, e))?;
+                if fault == 5 {
+                    return Err(Error::new(ErrorKind::RollbackFailed).into());
+                }
+                lease.settled = true;
+                // The original failure is now backed by an acknowledged rollback.
+                progress.set(Stage::Waiting);
+                Err(error)
             }
-            lease.settled = true;
-            Err(error)
         }
-    }
     }
     async fn receive_once(
         &self,

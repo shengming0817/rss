@@ -28,7 +28,9 @@ impl Execution for Probe {
     async fn checkpoint<T: Timer>(&self, control: &Control<'_, T>) -> Result<Checkpoint, Error> {
         control.check()?;
         if matches!(self.boundary, Boundary::Checkpoint) {
-            control.run(std::future::pending::<Result<(), Error>>()).await?;
+            control
+                .run(std::future::pending::<Result<(), Error>>())
+                .await?;
         }
         self.memory.checkpoint(control).await
     }
@@ -42,7 +44,10 @@ impl Execution for Probe {
     ) -> Result<ApplyOutcome, Error> {
         if event.position().get() == 2 {
             match self.boundary {
-                Boundary::Execute => control.run(std::future::pending::<Result<(), Error>>()).await.map_err(Error::uncertain)?,
+                Boundary::Execute => control
+                    .run(std::future::pending::<Result<(), Error>>())
+                    .await
+                    .map_err(Error::uncertain)?,
                 Boundary::Panic => panic!("test provider unwind"),
                 Boundary::Unknown => {
                     self.memory.execute(expected, event, control).await?;
@@ -87,7 +92,11 @@ impl Fixture {
     }
 }
 impl Source for Fixture {
-    async fn high_water<T: Timer>(&self, _: &SourceScope, control: &Control<'_, T>) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(
+        &self,
+        _: &SourceScope,
+        control: &Control<'_, T>,
+    ) -> Result<Option<Position>, Error> {
         control.check()?;
         // Observation must not introduce this extra provider operation.
         Err(Error::new(ErrorKind::SourceContract))
@@ -101,7 +110,9 @@ impl Source for Fixture {
     ) -> Result<Vec<Event>, Error> {
         control.check()?;
         if matches!(self.execution.boundary, Boundary::Read) {
-            control.run(std::future::pending::<Result<(), Error>>()).await?;
+            control
+                .run(std::future::pending::<Result<(), Error>>())
+                .await?;
         }
         self.source.read(scope, after, limit, control).await
     }

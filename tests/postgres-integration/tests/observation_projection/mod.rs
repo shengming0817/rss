@@ -1,4 +1,5 @@
 mod admission;
+mod budget;
 mod fixture;
 #[path = "../../../../crates/examples/src/observation/install.rs"]
 mod installer;
@@ -11,6 +12,7 @@ async fn durable_handoff() -> anyhow::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(180), async {
         let f = Fixture::new(false).await?;
         scenarios::composition(&f).await?;
+        budget::verify(&f).await?;
         scenarios::ordered_visibility(&f).await?;
         scenarios::references_and_isolation(&f).await?;
         process::crash(&f).await?;

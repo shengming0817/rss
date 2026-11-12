@@ -43,7 +43,7 @@ pub(crate) async fn baseline_receipts_prevent_cross_start_duplicates(
     );
     assert_eq!(count(owner, &s).await?, 1);
     assert_eq!(
-        projection.checkpoint().await?.position,
+        projection.checkpoint(control).await?.position,
         Some(repeated.position())
     );
     store

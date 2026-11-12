@@ -42,7 +42,11 @@ fn event(scope: &ProjectionScope, n: u64) -> anyhow::Result<Event> {
 }
 struct Journal(Vec<Event>);
 impl Source for Journal {
-    async fn high_water<T: Timer>(&self, _: &SourceScope, control: &Control<'_, T>) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(
+        &self,
+        _: &SourceScope,
+        control: &Control<'_, T>,
+    ) -> Result<Option<Position>, Error> {
         control.check()?;
         Ok(self.0.last().map(Event::position))
     }
@@ -418,7 +422,11 @@ struct BlockedSource {
     entered: tokio::sync::Notify,
 }
 impl Source for BlockedSource {
-    async fn high_water<T: Timer>(&self, _: &SourceScope, control: &Control<'_, T>) -> Result<Option<Position>, Error> {
+    async fn high_water<T: Timer>(
+        &self,
+        _: &SourceScope,
+        control: &Control<'_, T>,
+    ) -> Result<Option<Position>, Error> {
         control.check()?;
         Ok(None)
     }
@@ -531,9 +539,15 @@ async fn filtered_events_advance_and_consume_total_budget() -> anyhow::Result<()
     );
     assert_eq!(report.position, Some(Position::new(1)?));
     assert_eq!(report.stop, Stop::EventLimit);
-    assert_eq!(execution.checkpoint(&control).await?.position, report.position);
+    assert_eq!(
+        execution.checkpoint(&control).await?.position,
+        report.position
+    );
     Ok(())
 }
 
 #[path = "runner/observation.rs"]
 mod observation;
+
+#[path = "runner/budget.rs"]
+mod budget;
