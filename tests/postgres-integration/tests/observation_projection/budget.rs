@@ -2,8 +2,16 @@
 use super::fixture::*;
 use rss_observation::{Body, ObservationStore};
 use rss_projection::{BatchLimit, Control, ErrorKind, Event, Source, Timer};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+const GUARD: Duration = Duration::from_secs(5);
 use tokio_util::sync::CancellationToken;
+#[derive(Clone)]
 struct ManualTimer(tokio::sync::watch::Sender<Duration>);
 impl ManualTimer {
     fn new() -> Self {
@@ -31,8 +39,19 @@ impl Timer for ManualTimer {
 }
 type ObsSource = rss_observation_postgres::PgSource<Clock>;
 pub(super) async fn verify(f: &Fixture) -> anyhow::Result<()> {
+    let timer = ManualTimer::new();
+    let acquired = timer.clone();
+    let armed = Arc::new(AtomicBool::new(false));
+    let trigger = armed.clone();
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
+        .test_before_acquire(false)
+        .before_acquire(move |_, _| {
+            if trigger.load(Ordering::SeqCst) {
+                acquired.0.send_replace(Duration::from_millis(59_920));
+            }
+            Box::pin(async { Ok(true) })
+        })
         .connect_with(
             f.options
                 .clone()
@@ -51,7 +70,6 @@ pub(super) async fn verify(f: &Fixture) -> anyhow::Result<()> {
         )
         .await?;
     let source = f.source(store.clone(), TENANT)?;
-    let timer = ManualTimer::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&timer, Duration::from_secs(60), &cancel);
     let events = source
@@ -105,6 +123,7 @@ pub(super) async fn verify(f: &Fixture) -> anyhow::Result<()> {
         timer.advance(31);
         read(&source, event, stage, &control).await?;
     }
+    acquired_budget(f, &pool, &source, event, &timer, &armed).await?;
     store.close(deadline()).await?;
     Ok(())
 }
@@ -121,5 +140,87 @@ async fn read(
             .await
             .map(|_| ()),
         _ => source.resolve(event, control).await.map(|_| ()),
+    }
+}
+
+async fn acquired_budget(
+    f: &Fixture,
+    pool: &sqlx::PgPool,
+    source: &ObsSource,
+    event: &Event,
+    timer: &ManualTimer,
+    armed: &AtomicBool,
+) -> anyhow::Result<()> {
+    let mut blocker = f.admin.begin().await?;
+    sqlx::query("LOCK TABLE rss_observation.batches IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    for stage in 0..3 {
+        timer.advance(0);
+        armed.store(true, Ordering::SeqCst);
+        let cancel = CancellationToken::new();
+        let control = Control::new(timer, Duration::from_secs(60), &cancel);
+        // Only the server clock runs: 59.920 seconds consumed by acquisition leaves 80ms.
+        // Fixed 30s or a renewed 60s watchdog cannot complete within this guard.
+        let result = tokio::time::timeout(GUARD, read(source, event, stage, &control)).await?;
+        assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Deadline));
+        assert_eq!(timer.now(), Duration::from_millis(59_920));
+        armed.store(false, Ordering::SeqCst);
+    }
+    for stage in 0..3 {
+        for expired in [false, true] {
+            timer.advance(0);
+            let mut held = pool.acquire().await?;
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *held)
+                .await?;
+            drop(held);
+            let cancel = CancellationToken::new();
+            let control = Control::new(timer, Duration::from_secs(60), &cancel);
+            let mut operation = Box::pin(read(source, event, stage, &control));
+            tokio::time::timeout(GUARD,async {
+                tokio::select! {
+                    result = &mut operation => anyhow::bail!("read did not wait for its SQL lock: {result:?}"),
+                    result = wait_for_backend(&f.admin,pid,true) => result,
+                }
+            }).await??;
+            if expired {
+                timer.advance(60);
+            } else {
+                cancel.cancel();
+            }
+            assert_eq!(
+                operation.await.err().map(|e| e.kind()),
+                Some(if expired {
+                    ErrorKind::Deadline
+                } else {
+                    ErrorKind::Cancelled
+                })
+            );
+            let mut replacement = tokio::time::timeout(GUARD, pool.acquire()).await??;
+            let next: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *replacement)
+                .await?;
+            assert_ne!(pid, next, "unconfirmed source connection returned to pool");
+            drop(replacement);
+            // Cleanup is observed separately from the already-returned interruption result.
+            blocker.rollback().await?;
+            tokio::time::timeout(GUARD, wait_for_backend(&f.admin, pid, false)).await??;
+            blocker = f.admin.begin().await?;
+            sqlx::query("LOCK TABLE rss_observation.batches IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *blocker)
+                .await?;
+        }
+    }
+    blocker.rollback().await?;
+    Ok(())
+}
+async fn wait_for_backend(admin: &sqlx::PgPool, pid: i32, waiting: bool) -> anyhow::Result<()> {
+    loop {
+        let (exists,locked): (bool,bool) = sqlx::query_as("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE pid=$1),EXISTS(SELECT FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')").bind(pid).fetch_one(admin).await?;
+        if (waiting && locked) || (!waiting && !exists) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
