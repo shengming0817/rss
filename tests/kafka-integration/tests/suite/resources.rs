@@ -232,12 +232,17 @@ fn emit(line: &str) -> anyhow::Result<()> {
     use std::io::Write;
     eprintln!("{line}");
     if let Ok(directory) = std::env::var("RSS_TEST_METRICS_DIR") {
-        std::fs::create_dir_all(&directory)?;
+        // The fixture-metrics directory accepts JSONL only; keep this readable load report beside it.
+        let metrics = std::path::Path::new(&directory);
+        let output = metrics
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("missing metrics parent"))?;
+        std::fs::create_dir_all(output)?;
         writeln!(
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(std::path::Path::new(&directory).join("kafka-resource-budget.txt"))?,
+                .open(output.join("kafka-resource-budget.txt"))?,
             "{line}"
         )?;
     }
