@@ -32,8 +32,8 @@ and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or 
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
-`PgOutboxStore::next_wakeup(binding, deadline)` reads the same candidate definition as claim across its
-admitted tenants and domain. `OutboxWakeup::due_now()` reports already-due work;
+`PgOutboxStore::next_wakeup(binding, deadline)` reads the same candidate definition as claim for the selected
+tenant and configured domain. Hosts query other tenants separately when composing a waiting strategy. `OutboxWakeup::due_now()` reports already-due work;
 `next_deadline()` separately reports the earliest future eligibility, including retry/lease and active
 DR state. The deadline uses the injected runtime clock and is anchored before database I/O, so the
 query cannot extend the wait. Due work may be locked or claimed concurrently: bound immediate rescans
