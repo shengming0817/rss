@@ -323,6 +323,7 @@ pub trait OutboxRelayStore<P>: Send + Sync {
     /// Atomically lease at most `limit` records; an empty batch means no eligible work was found.
     fn claim_partition_heads(
         &self,
+        binding: crate::fence::ExecutionBinding,
         limit: NonZeroUsize,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<OutboxClaimBatch<Self::Claim>, MessagingError>> + Send;

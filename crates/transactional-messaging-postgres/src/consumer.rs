@@ -89,9 +89,6 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>> 
         intent: ReceiptIntent,
         deadline: OperationDeadline,
     ) -> TransactionOutcome<Self::CommitProof> {
-        if !claim.matches(&self.runtime.binding) {
-            return TransactionOutcome::fenced();
-        }
         if !matches_message(claim, message, &intent) {
             return TransactionOutcome::not_started(FailureClass::Infrastructure);
         }
@@ -130,6 +127,9 @@ pub(crate) async fn execute_transaction<
     source: Option<(&crate::PgOutboxStore<()>, &crate::PgOutboxClaim)>,
     #[cfg(feature = "integration")] injection: Option<crate::transaction::TransactionInjection>,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
+    if !claim.matches(runtime) {
+        return TransactionOutcome::fenced();
+    }
     let timer = &runtime.timer;
     let cutoff = match Deadline::from_timeout(timer, deadline.timeout()) {
         Ok(value) => value,
@@ -156,7 +156,7 @@ pub(crate) async fn execute_transaction<
         };
     let mut tx = PgTransaction::new(
         transaction.connection(),
-        claim.identity.tenant_id(),
+        claim.binding,
         cutoff,
         runtime,
     );
