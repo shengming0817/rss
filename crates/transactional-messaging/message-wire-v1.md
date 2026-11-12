@@ -34,7 +34,7 @@ flags, invalid lengths and trailing bytes must be rejected before persistence.
 | 18 | payload bytes, including empty or arbitrary binary values | one |
 
 Primitive validation follows the owning core types: IDs/domain/route/causation are 1–255 ASCII
-bytes `[A-Za-z0-9_.:-]`; correlation is 1–128 ASCII bytes `[A-Za-z0-9_.-]`; partition key is
+bytes `[A-Za-z0-9_.:-]`; correlation is 1–255 ASCII bytes `[A-Za-z0-9_.-]`; partition key is
 1–255 UTF-8 bytes with no ASCII control bytes (0–31 or 127). Contract IDs have at least two
 dot-separated segments, each beginning with a lowercase ASCII letter followed by lowercase
 letters/digits or single hyphens between letters/digits, at most 255 bytes total. Schema digest

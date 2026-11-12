@@ -352,9 +352,9 @@ migration owner. The receipt-writer credential is a trusted verifier capability,
 operator credential; products must keep it away from untrusted arbitrary SQL execution.
 
 Claim/replay/purge share source-first locking. Each new exact archive request increments recovery
-revision and fences older requests; retries reuse the same OperationId/digest. The lease duration is derived from the current operation budget (up to five minutes)
-and may be resumed after expiry. Zero budgets return `Deadline`; larger budgets return `Invalid`
-before claim I/O. Longer jobs must be split into bounded attempts with the same exact request. A live competing lease returns `Busy`; a request/version mismatch
+revision and fences older requests; retries reuse the same OperationId/digest. The lease duration is derived from the current operation budget
+and may be resumed after expiry. Zero budgets return `Deadline`; budgets outside the PostgreSQL
+interval or statement-timeout range are rejected. Interrupted jobs resume with the same exact request. A live competing lease returns `Busy`; a request/version mismatch
 returns `Conflict`, while a stale worker produces the distinct `LocalTxAttempt::Fenced` settlement. A hold is persisted even when no object work is performed. Later
 hold/release decisions require the current source revision. Policy changes cannot retroactively
 restore already-purged HOT content.

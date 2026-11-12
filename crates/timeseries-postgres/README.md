@@ -249,8 +249,8 @@ or overwrites canonical retained summaries**. Thus native buffers do not indefin
 retain pruned contributions, while retained query results survive raw retirement.
 
 `convert_raw_chunks(window, max_chunks, StorageFormat, deadline)` is host-owned physical
-administration, available only with dedicated owner credentials. It converts at most
-32 complete raw chunks in an explicit interval and is idempotent on repetition. Unknown
+administration, available only with dedicated owner credentials. The caller selects
+`max_chunks` in 1–1024 to bound complete raw chunks in an explicit interval; repetition is idempotent. Unknown
 may mean only a subset converted. Conversion does not alter logical retention or
 resource authorization; it must not be exposed as an end-user maintenance endpoint.
 CAgg materializations remain rowstore. No background refresh/compression/retention job

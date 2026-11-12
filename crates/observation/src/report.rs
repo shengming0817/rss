@@ -48,7 +48,7 @@ pub struct Change {
     value: Option<Vec<u8>>,
 }
 impl Change {
-    /// Declare a positive fact; Batch validates the key set and 64 KiB value limit.
+    /// Declare a positive fact; Batch validates the key set and complete encoded batch budget.
     pub const fn upsert(key: Id, value: Vec<u8>) -> Self {
         Self {
             key,
@@ -148,8 +148,8 @@ impl std::fmt::Debug for Batch {
 }
 impl Batch {
     /// Construct V1, sort facts by key and enforce the complete-batch bounds.
-    /// Reject duplicate keys, snapshot deletes, more than 1,000 entries, values over 64 KiB
-    /// or canonical JSON over 4 MiB. Sequence is producer-local; observed time never orders facts.
+    /// Reject duplicate keys, snapshot deletes, more than 4,096 entries or canonical JSON
+    /// over 4 MiB. Sequence is producer-local; observed time never orders facts.
     pub fn new(
         id: Id,
         sequence: u64,

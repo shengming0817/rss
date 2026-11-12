@@ -18,7 +18,7 @@ range (at most 9223372036854775 milliseconds). Timestamp addition must also rema
 Each database operation separately requires a statement/lock timeout within i32::MAX milliseconds.
 
 Provision a separate runtime login with schema USAGE, table SELECT and EXECUTE on the component
-functions. Reapply function EXECUTE grants after the upgrade creates the new signatures. Grant
+functions. The V2→V3 upgrade preserves function signatures and their existing grants. Grant
 no direct write, REFERENCES or TRIGGER privileges, including column grants, and no owner membership.
 Tables remain LOGGED with ENABLE/FORCE RLS. Admission checks every SET ROLE reachable role,
 PUBLIC privileges, rewrite rules, exact tenant policies, function signatures/bodies/attributes,
@@ -78,8 +78,7 @@ lease, expected revision and expected capacity. It does not append a journal eve
 `CandidateFilter::Runnable` and `CandidateFilter::CapacityBlocked` expose disjoint, bounded pages from the same admission predicate. Blocked discovery returns only scope metadata for explicit history_head/extend_history handling. Runnable discovery excludes capacity-blocked new intents while keeping
 pending settlements recoverable.
 
-Upgrade initializes each existing capacity to its observed use plus mandatory remaining obligations
-(at least one for empty numeric limits). An instance beyond a worker's read budget requires an
+The V2→V3 upgrade preserves each existing capacity and its accounting. An instance beyond a worker's read budget requires an
 explicitly larger finite read budget; further new attempts may also require capacity growth.
 All instances then follow the same runtime path. There is no unlimited grandfather mode,
 compaction, checkpoint, history reset or automatic compensation on capacity exhaustion.
