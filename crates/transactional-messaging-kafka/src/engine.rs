@@ -22,6 +22,10 @@ use tokio::sync::oneshot;
 
 pub(crate) type Outcome = PublishOutcome<KafkaPublishReceipt>;
 type Reply = oneshot::Sender<Outcome>;
+/// Logical map-entry charge; allocator buckets/control bytes are additional.
+pub(crate) const fn pending_entry_bytes() -> usize {
+    std::mem::size_of::<(usize, Reply)>()
+}
 const POLL: Duration = Duration::from_millis(5);
 pub(crate) struct Command {
     pub(crate) record: Record,

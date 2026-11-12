@@ -5,7 +5,7 @@ mod config;
 mod engine;
 mod publisher;
 mod record;
-pub use config::{KafkaClientId, KafkaConfig, KafkaCredentials, KafkaLimits};
+pub use config::{KafkaClientId, KafkaConfig, KafkaCredentials, KafkaLimits, KafkaTimeouts};
 pub use publisher::{KafkaPublisher, KafkaPublisherResource};
 
 /// Safe component diagnostic; provider text and credentials never enter its source chain.
@@ -13,6 +13,8 @@ pub use publisher::{KafkaPublisher, KafkaPublisherResource};
 pub enum KafkaError {
     #[error("invalid Kafka resource limits")]
     InvalidLimits,
+    #[error("invalid Kafka transport timeouts")]
+    InvalidTimeouts,
     #[error("invalid Kafka lifecycle timeout")]
     InvalidLifecycleTimeout,
     #[error("invalid Kafka configuration")]

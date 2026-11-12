@@ -8,10 +8,10 @@ use std::{collections::HashMap, time::Duration};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KafkaClientId(Box<str>);
 impl KafkaClientId {
-    /// Accept 1..=128 ASCII letters, digits, dots, underscores or hyphens; never supply a secret.
+    /// Accept 1..=255 ASCII letters, digits, dots, underscores or hyphens; never supply a secret.
     pub fn parse(value: &str) -> Result<Self, KafkaError> {
         if value.is_empty()
-            || value.len() > 128
+            || value.len() > 255
             || !value
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
@@ -32,47 +32,131 @@ impl rss_redact::Redact for KafkaClientId {
     }
 }
 
-/// Validated limits for queued commands, native in-flight records, and authored record bytes.
+/// Independent native timeouts. Delivery is finite and includes native retries.
+///
+/// Socket, request and delivery use integral milliseconds; linger uses integral microseconds.
+/// No Java-producer request-plus-linger relation is imposed by librdkafka 2.12.1.
+#[derive(Clone, Copy, Debug)]
+pub struct KafkaTimeouts {
+    socket_ms: u32,
+    request_ms: u32,
+    linger_ms: f64,
+    delivery_ms: u32,
+}
+impl KafkaTimeouts {
+    /// Configure socket (10ms..=300s), request (1ms..=900s), linger (0..=900s),
+    /// and delivery (1ms..=i32::MAX milliseconds). Delivery must exceed linger.
+    pub fn new(
+        socket: Duration,
+        request: Duration,
+        linger: Duration,
+        delivery: Duration,
+    ) -> Result<Self, KafkaError> {
+        let socket_ms = milliseconds(socket, 10, 300_000)?;
+        let request_ms = milliseconds(request, 1, 900_000)?;
+        let delivery_ms = milliseconds(delivery, 1, i32::MAX as u32)?;
+        if !linger.subsec_nanos().is_multiple_of(1_000)
+            || linger.as_micros() > 900_000_000
+            || linger >= delivery
+        {
+            return Err(KafkaError::InvalidTimeouts);
+        }
+        // Native truncates double milliseconds to integer microseconds. Avoid losing one
+        // microsecond to binary floating-point rounding (for example 1001us / 1000).
+        let micros = linger.as_micros() as f64;
+        let mut linger_ms = micros / 1000.0;
+        if linger_ms * 1000.0 < micros {
+            linger_ms = linger_ms.next_up();
+        }
+        Ok(Self {
+            socket_ms,
+            request_ms,
+            linger_ms,
+            delivery_ms,
+        })
+    }
+    /// Use 10-second socket/request timeouts and zero linger; delivery remains caller-selected.
+    /// Native Produce requests still consume only the remaining message delivery time.
+    pub fn low_latency(delivery: Duration) -> Result<Self, KafkaError> {
+        Self::new(Duration::from_secs(10), Duration::from_secs(10), Duration::ZERO, delivery)
+    }
+}
+fn milliseconds(value: Duration, min: u32, max: u32) -> Result<u32, KafkaError> {
+    if !value.subsec_nanos().is_multiple_of(1_000_000)
+        || !(u128::from(min)..=u128::from(max)).contains(&value.as_millis())
+    {
+        return Err(KafkaError::InvalidTimeouts);
+    }
+    Ok(value.as_millis() as u32)
+}
+
+// ref: librdkafka e1db7eaa517f0a6438bc846a9c49ede73b9ea211
+// src/rdkafka_proto.h:526-534 and src/rdkafka_msg.h:189-199.
+// 36 is the maximum per-record v2 framing, excluding batch/ProduceRequest framing.
+const RECORD_FRAMING_BYTES: usize = 36;
+
+/// Finite queue counts and a static aggregate record-accounting budget.
+///
+/// This budget is an admission model, not an exact process RSS limit. See the crate documentation
+/// for queue, transient-copy and structural charges and the additional native/allocator memory.
 #[derive(Clone, Copy, Debug)]
 pub struct KafkaLimits {
     pub(crate) queued: usize,
     pub(crate) in_flight: usize,
     pub(crate) record_bytes: usize,
-    pub(crate) timeout_ms: u32,
+    timeouts: KafkaTimeouts,
+    native_queue_kbytes: i32,
+    native_message_bytes: i32,
 }
 impl KafkaLimits {
-    /// Bound both queues independently. Timeout must be integral milliseconds in 10ms..=24h.
-    /// Record bytes include key, headers and payload; native bookkeeping is additional.
+    /// Choose positive counts/record bytes and an explicit total accounting budget in bytes.
+    ///
+    /// Construction checks the aggregate worst case, checked arithmetic and native representation;
+    /// it does not allocate queue slots or record bodies. Native pending count must fit i32.
     pub fn new(
         queued: usize,
         in_flight: usize,
         record_bytes: usize,
-        timeout: Duration,
+        total_budget_bytes: usize,
+        timeouts: KafkaTimeouts,
     ) -> Result<Self, KafkaError> {
-        let millis = timeout.as_millis();
-        if queued == 0
-            || queued > 100_000
-            || in_flight == 0
-            || in_flight > 100_000
-            || record_bytes == 0
-            || record_bytes > 100_000_000
-            || !(10..=86_400_000).contains(&millis)
-            || !timeout.subsec_nanos().is_multiple_of(1_000_000)
-            || in_flight
-                .checked_mul(record_bytes)
-                .is_none_or(|bytes| bytes > 2_000_000_000)
-            || queued
-                .checked_mul(record_bytes)
-                .is_none_or(|bytes| bytes > 2_000_000_000)
-        {
-            return Err(KafkaError::InvalidLimits);
+        let invalid = KafkaError::InvalidLimits;
+        if queued == 0 || in_flight == 0 || record_bytes == 0 || total_budget_bytes == 0 {
+            return Err(invalid);
+        }
+        i32::try_from(in_flight).map_err(|_| invalid)?;
+        let native_message_bytes = record_bytes.checked_add(RECORD_FRAMING_BYTES).ok_or(invalid)?;
+        if native_message_bytes > 1_000_000_000 {
+            return Err(invalid);
+        }
+        let native_bytes = in_flight.checked_mul(record_bytes).ok_or(invalid)?;
+        let native_queue_kbytes = native_bytes.div_ceil(1024);
+        let rounded_native_bytes = native_queue_kbytes.checked_mul(1024).ok_or(invalid)?;
+        let native_queue_kbytes = i32::try_from(native_queue_kbytes).map_err(|_| invalid)?;
+        let required = Self::required_budget(queued, in_flight, record_bytes, rounded_native_bytes)
+            .ok_or(invalid)?;
+        if required > total_budget_bytes {
+            return Err(invalid);
         }
         Ok(Self {
             queued,
             in_flight,
             record_bytes,
-            timeout_ms: millis as u32,
+            timeouts,
+            native_queue_kbytes,
+            native_message_bytes: native_message_bytes.max(1000) as i32,
         })
+    }
+    fn required_budget(queued: usize, in_flight: usize, record: usize, native: usize) -> Option<usize> {
+        // One worker-owned command plus a candidate being encoded (including header pairs/copies).
+        let records = queued.checked_add(3)?.checked_mul(record)?.checked_add(native)?;
+        let commands = queued.checked_add(2)?.checked_mul(std::mem::size_of::<crate::engine::Command>())?;
+        let pending = in_flight.checked_mul(crate::engine::pending_entry_bytes())?;
+        // Rust channel allocation must also be representable independently of its record charge.
+        if commands > isize::MAX as usize {
+            return None;
+        }
+        records.checked_add(commands)?.checked_add(pending)
     }
 }
 
@@ -186,30 +270,28 @@ impl KafkaConfig {
             .set("retries", "2147483647")
             .set(
                 "message.timeout.ms",
-                self.plan.limits.timeout_ms.to_string(),
+                self.plan.limits.timeouts.delivery_ms.to_string(),
             )
             .set(
                 "socket.timeout.ms",
-                self.plan.limits.timeout_ms.min(10_000).to_string(),
+                self.plan.limits.timeouts.socket_ms.to_string(),
             )
             .set(
                 "request.timeout.ms",
-                self.plan.limits.timeout_ms.min(10_000).to_string(),
+                self.plan.limits.timeouts.request_ms.to_string(),
             )
-            .set("linger.ms", "0")
+            .set("linger.ms", self.plan.limits.timeouts.linger_ms.to_string())
             .set(
                 "queue.buffering.max.messages",
                 self.plan.limits.in_flight.to_string(),
             )
             .set(
                 "queue.buffering.max.kbytes",
-                (self.plan.limits.in_flight * self.plan.limits.record_bytes)
-                    .div_ceil(1024)
-                    .to_string(),
+                self.plan.limits.native_queue_kbytes.to_string(),
             )
             .set(
                 "message.max.bytes",
-                (self.plan.limits.record_bytes + 1024).max(1000).to_string(),
+                self.plan.limits.native_message_bytes.to_string(),
             )
             .set("allow.auto.create.topics", "false");
         match &self.credentials.0 {
