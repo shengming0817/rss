@@ -263,6 +263,7 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
             .controlled_tx(self.scope().source(), control, move |tx| {
                 Box::pin(async move {
                     let duplicate = lock(tx, &claim, expected, &event).await?;
+                    tx.check()?;
                     let outcome = if duplicate {
                         ApplyOutcome::Duplicate
                     } else {

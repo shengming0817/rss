@@ -62,6 +62,7 @@ pub(crate) async fn verify(owner: &PgPool, options: &PgConnectOptions) -> anyhow
     sql_budgets(&store, &scope, &timer, &armed, &control).await?;
     interrupted_read(owner, &pool, &store, &projection, &checkpoint, &timer).await?;
     rollback_stage(&store, scope.source(), &timer).await?;
+    post_lock_admission(owner, &pool, &store, &control).await?;
     pool.close().await;
     Ok(())
 }
@@ -300,5 +301,87 @@ async fn sql_budgets(
         })
         .await?;
     assert_eq!(values, "1min");
+    Ok(())
+}
+
+// Suppress the outer timer wake only to isolate the synchronous phase-admission check.
+// Normal Timer wake/cancellation is covered by acquire_wait and interrupted_read above.
+struct PhaseTimer(AtomicBool);
+impl Timer for PhaseTimer {
+    fn now(&self) -> Duration {
+        if self.0.load(Ordering::SeqCst) {
+            Duration::from_secs(60)
+        } else {
+            Duration::ZERO
+        }
+    }
+    async fn sleep_until(&self, _: Duration) {
+        std::future::pending::<()>().await;
+    }
+}
+struct EnteredEffect(Arc<AtomicUsize>);
+impl PgEffect for EnteredEffect {
+    async fn apply(
+        &self,
+        _: &mut PgTransaction<'_>,
+        _: &ProjectionScope,
+        _: &Event,
+    ) -> Result<PgEffectOutcome, PgOperationError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(PgEffectOutcome::Filtered)
+    }
+}
+async fn post_lock_admission(
+    owner: &PgPool,
+    pool: &PgPool,
+    store: &PgStore,
+    control: &Control<'_, ManualTimer>,
+) -> anyhow::Result<()> {
+    let scope = scope("post-lock-budget", TENANT)?;
+    store
+        .initialize(
+            &scope,
+            &DEFINITION,
+            GenerationStart::beginning(),
+            ReplayBound::Live,
+            control,
+        )
+        .await?;
+    let entered = Arc::new(AtomicUsize::new(0));
+    let projection = store.projection(
+        store.takeover(&scope, &DEFINITION, control).await?,
+        EnteredEffect(entered.clone()),
+    )?;
+    let mut held = pool.acquire().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *held)
+        .await?;
+    drop(held);
+    let mut blocker = owner.begin().await?;
+    sqlx::query("LOCK TABLE rss_projection.checkpoints IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let timer = PhaseTimer(AtomicBool::new(false));
+    let cancel = CancellationToken::new();
+    let limited = Control::new(&timer, Duration::from_secs(60), &cancel);
+    let event = event(&scope, 0, "phase-budget", b"one")?;
+    let mut work = Box::pin(projection.execute(None, &event, &limited));
+    tokio::time::timeout(GUARD, async {
+        tokio::select! {
+            result = &mut work => anyhow::bail!("event did not wait for its lock: {result:?}"),
+            result = wait_for_lock(owner,pid) => result,
+        }
+    })
+    .await??;
+    timer.0.store(true, Ordering::SeqCst);
+    blocker.rollback().await?;
+    let result = tokio::time::timeout(GUARD, work).await?;
+    assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Deadline));
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        0,
+        "expired lock stage entered user effect"
+    );
+    assert_eq!(projection.checkpoint(control).await?.position, None);
     Ok(())
 }

@@ -105,8 +105,8 @@ Fresh `MIGRATION_SQL` executes the complete chain; do not nest it inside another
 A live run stops when caught up. Replay captures `Source::high_water` under the caller's `Control`
 and persists `ReplayBound::Through(end)` in a new generation. The source read and high-water share
 the same exact tenant/source predicate. The library never merges source positions or switches readers.
-Public Source/checkpoint reads have a 30-second provider statement bound; `run` additionally enforces
-its caller's total deadline. Public mutating operations require `Control`.
+Public Source/checkpoint reads and writes receive the caller's original Control. The provider
+enforces that budget through acquisition, SQL and settlement; `run` adds no second timeout. Public mutating operations require `Control`.
 
 `receipt_status(&ReceiptQuery, control)` inspects an exact tenant/source/projection/generation,
 expected definition and stable event ID without taking a worker claim. It returns `Uninitialized`,
