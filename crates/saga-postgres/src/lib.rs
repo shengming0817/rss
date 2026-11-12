@@ -17,10 +17,12 @@ use probe::validate;
 pub const MIGRATION_SQL: &str = concat!(
     include_str!("../migrations/0001_create_saga.sql"),
     "\n",
-    include_str!("../migrations/0002_add_history_bounds.sql")
+    include_str!("../migrations/0002_add_history_bounds.sql"),
+    "\n",
+    include_str!("../migrations/0003_expand_lease_range.sql")
 );
-/// One-way upgrade executed only by the external migrator with writers stopped.
-pub const UPGRADE_SQL: &str = include_str!("../migrations/0002_add_history_bounds.sql");
+/// One-way schema 2 to 3 upgrade executed only by the external migrator with writers stopped.
+pub const UPGRADE_SQL: &str = include_str!("../migrations/0003_expand_lease_range.sql");
 #[derive(Clone)]
 /// Adopted PostgreSQL pool implementing the atomic Saga storage contract.
 pub struct PgStore {
@@ -70,7 +72,8 @@ impl PgStore {
         F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<R, Error>> + Send,
     {
         control.check()?;
-        let timeout = control.remaining().as_millis().max(1).to_string() + "ms";
+        let millis = i32::try_from(control.remaining().as_millis().max(1)).map_err(|_| Error::new(ErrorKind::InvalidBudget))?;
+        let timeout = format!("{millis}ms");
         let settlement = std::sync::atomic::AtomicU8::new(0);
         let result = control.run(async {
             let mut lease=ConnectionLease { connection:self.pool.acquire().await.map_err(|e|sql_error_at(DiagnosticPhase::Acquire,e))?,settled:false };
@@ -122,6 +125,7 @@ fn sql_error_at(phase: DiagnosticPhase, error: sqlx::Error) -> Error {
         .and_then(|e| e.code())
         .map(|c| c.into_owned());
     let kind = match code.as_deref() {
+        Some("22008" | "22015") => ErrorKind::LeaseInput,
         Some("RS001") => ErrorKind::Fenced,
         Some("RS002") => ErrorKind::Conflict,
         Some("RS003") => ErrorKind::Integrity,
@@ -155,7 +159,7 @@ fn admission_error(error: Error) -> Error {
 fn ttl_millis(ttl: Duration) -> Result<i64, Error> {
     let millis =
         i64::try_from(ttl.as_millis()).map_err(|_| Error::new(rss_saga::ErrorKind::LeaseInput))?;
-    if !(1..=86_400_000).contains(&millis) {
+    if millis == 0 || ttl.as_micros() > i64::MAX as u128 || !ttl.subsec_nanos().is_multiple_of(1_000_000) {
         return Err(Error::new(rss_saga::ErrorKind::LeaseInput));
     }
     Ok(millis)
@@ -448,12 +452,15 @@ mod tests {
         for ttl in [
             Duration::ZERO,
             Duration::from_nanos(1),
-            Duration::from_millis(86_400_001),
+            Duration::from_millis(9_223_372_036_854_776),
+            Duration::from_nanos(1_000_001),
             Duration::MAX,
         ] {
             assert!(matches!(ttl_millis(ttl),Err(error) if error.kind()==ErrorKind::LeaseInput));
         }
         assert_eq!(ttl_millis(Duration::from_millis(1)), Ok(1));
-        assert_eq!(ttl_millis(Duration::from_secs(86400)), Ok(86_400_000));
+        for millis in [86_400_001, 9_223_372_036_854_775] {
+            assert_eq!(ttl_millis(Duration::from_millis(millis)), Ok(millis as i64));
+        }
     }
 }

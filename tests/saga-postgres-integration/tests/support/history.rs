@@ -47,6 +47,7 @@ pub(super) async fn bounds(
     reject_corrupt_rows(&executor, owner, s, control).await?;
     read_and_byte_bounds(store, &d, effects, s, control).await?;
     capacity_discovery(store, control).await?;
+    accounting_contract(owner).await?;
 
     Ok(())
 }
@@ -363,7 +364,8 @@ async fn verify_upgraded(
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     for (index, (s, events)) in captured.iter().enumerate() {
-        let lease = store.claim(*s, Duration::from_secs(30), control).await?;
+        let lease = store.claim(*s, Duration::from_secs(90_000), control).await?;
+        store.renew(&lease, Duration::from_secs(90_001), control).await?;
         let snapshot = store.snapshot(&lease, read, control).await?;
         assert_eq!(
             serde_json::to_vec(snapshot.events())?,
@@ -423,6 +425,8 @@ async fn measure_upgrade(
     owner: &PgPool,
     connection: &mut sqlx::PgConnection,
 ) -> anyhow::Result<()> {
+    // Recreate the supported V2 starting point through the immutable historical fixture.
+    sqlx::raw_sql(include_str!("../../../../crates/saga-postgres/migrations/0002_add_history_bounds.sql")).execute(&mut *connection).await?;
     let before_lsn: String = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
         .fetch_one(owner)
         .await?;
@@ -622,6 +626,54 @@ async fn verify_candidate_projection(
                 .contains(&s),
             expected == Some(filter)
         );
+    }
+    Ok(())
+}
+
+async fn accounting_contract(owner: &PgPool) -> anyhow::Result<()> {
+    for (bytes, aad, key_ref, key_id) in [
+        (0, 0, String::new(), String::new()),
+        (1, 0, "k".into(), "i".into()),
+        (2, 3, "中\"\\".into(), "键\"\\".into()),
+        (2 * 1024 * 1024, 4096, "\"".repeat(1024), "\\".repeat(64)),
+    ] {
+        let receipt = if bytes == 0 { serde_json::Value::Null } else {
+            serde_json::json!({"ciphertext":{"key_ref":key_ref,"bytes":vec![255;bytes]},
+                "key_id":key_id,"digest":vec![0;32],"aad":vec![255;aad],"format":1,"attempt":u32::MAX,"seq":i64::MAX})
+        };
+        let raw = serde_json::json!({"seq":i64::MAX,"step":0,"attempt":u32::MAX,"kind":if bytes==0 {"ForwardNotApplied"} else {"ForwardApplied"},"receipt":receipt});
+        let event: Event = serde_json::from_value(raw.clone())?;
+        let charged: i64 = sqlx::query_scalar("SELECT rss_saga.history_charge($1)")
+            .bind(sqlx::types::Json(&raw["receipt"])).fetch_one(owner).await?;
+        assert_eq!(event.encoded_bytes()?, charged as u64);
+    }
+    let read = ReadBudget::new(HistoryCapacity::new(10000, 2 * 1024 * 1024 * 1024)?, 2 * 1024 * 1024 * 1024)?;
+    for (status, forward, compensation, attempt, pending, last) in [
+        ("Ready", 0, None, 0, None, None),
+        ("Running", 1023, None, 0, Some("ForwardIntent"), Some("ForwardIntent")),
+        ("Compensating", 1024, Some(1023), 0, None, Some("Abort")),
+        ("Compensating", 1024, Some(1023), 1, Some("CompensationIntent"), Some("CompensationIntent")),
+        ("CompensationFailed", 1, Some(0), 1, None, Some("CompensationFailed")),
+        ("Compensating", 1, Some(0), 1, None, Some("Resume")),
+        ("Succeeded", 1024, None, 0, None, Some("ForwardApplied")),
+        ("Compensated", 1, None, 1, None, Some("CompensationApplied")),
+    ] {
+        let progress = serde_json::json!({"status":status,"forward":forward,"forwardAttempt":1,"forwardFailures":0,
+            "compensation":compensation,"compensationAttempt":attempt,"pending":pending.map(|kind|serde_json::json!({"kind":kind,"step":1023,"attempt":1})),"lastKind":last});
+        let reserved: sqlx::types::Json<serde_json::Value> = sqlx::query_scalar("SELECT rss_saga.history_reserve($1)")
+            .bind(sqlx::types::Json(&progress)).fetch_one(owner).await?;
+        let entries = reserved.0["entries"].as_u64().ok_or(ErrorKind::Integrity)?;
+        let bytes = reserved.0["bytes"].as_u64().ok_or(ErrorKind::Integrity)?;
+        let mut head = serde_json::json!({"revision":0,"encodedBytes":0,"progress":progress,
+            "capacity":{"maxEntries":entries.max(1),"maxEncodedBytes":bytes.max(1)}});
+        let exact: HistoryHead = serde_json::from_value(head.clone())?;
+        assert_eq!(exact.reserve()?, (entries, bytes));
+        exact.check_admission(read)?;
+        if bytes > 1 {
+            head["capacity"]["maxEncodedBytes"] = (bytes - 1).into();
+            let short: HistoryHead = serde_json::from_value(head)?;
+            assert!(matches!(short.check_admission(read), Err(e) if e.kind()==ErrorKind::HistoryLimited(HistoryLimit::DurableCapacity)));
+        }
     }
     Ok(())
 }

@@ -69,10 +69,10 @@ pub struct LeasePolicy {
     ttl: Duration,
 }
 impl LeasePolicy {
-    /// Choose a lease between 30 milliseconds and 24 hours. Renewals run every third of its TTL.
+    /// Choose a whole-millisecond lease of at least 30 milliseconds. Renewals run every third of its TTL.
     /// Prefer the 30-second default; a longer TTL explicitly increases crash recovery latency.
     pub fn new(ttl: Duration) -> Result<Self, Error> {
-        if ttl < Duration::from_millis(30) || ttl > Duration::from_secs(86400) {
+        if ttl < Duration::from_millis(30) || !ttl.subsec_nanos().is_multiple_of(1_000_000) {
             return Err(Error::new(crate::ErrorKind::LeaseInput));
         }
         Ok(Self { ttl })

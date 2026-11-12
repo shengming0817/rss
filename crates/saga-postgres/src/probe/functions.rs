@@ -1,9 +1,19 @@
 //! Read only the bundled declaration grammar; PostgreSQL resolves exact routine identities.
 use crate::{Error, UPGRADE_SQL, sql_error};
 use sqlx::{PgConnection, Row as _};
+const HISTORY_SQL: &str = include_str!("../../migrations/0002_add_history_bounds.sql");
+fn current_definitions() -> Result<Vec<Definition<'static>>, ()> {
+    let mut current = definitions(HISTORY_SQL)?;
+    if current.len() != 12 { return Err(()); }
+    for replacement in definitions(UPGRADE_SQL)? {
+        let existing = current.iter_mut().find(|d| d.signature == replacement.signature).ok_or(())?;
+        *existing = replacement;
+    }
+    Ok(current)
+}
 
 pub(super) async fn validate(conn: &mut PgConnection) -> Result<(), Error> {
-    let definitions = definitions(UPGRADE_SQL).map_err(|()| invalid())?;
+    let definitions = current_definitions().map_err(|()| invalid())?;
     let signatures: Vec<_> = definitions.iter().map(|d| d.signature.as_str()).collect();
     let returns: Vec<_> = definitions.iter().map(|d| d.returns).collect();
     let rows = sqlx::query(
@@ -114,7 +124,7 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
             body,
         });
     }
-    if result.len() != 12 {
+    if result.is_empty() {
         return Err(());
     }
     Ok(result)
@@ -144,7 +154,7 @@ mod tests {
     use super::*;
     #[test]
     fn shipped_declarations_have_exact_signatures() -> Result<(), ()> {
-        let definitions = definitions(UPGRADE_SQL)?;
+        let definitions = current_definitions()?;
         assert_eq!(
             definitions
                 .iter()
@@ -171,11 +181,11 @@ mod tests {
     fn incomplete_or_unknown_migration_grammar_fails_closed() {
         for sql in [
             String::new(),
-            UPGRADE_SQL.replace("rss_saga.lease(", "rss_saga.claim("),
-            UPGRADE_SQL.replace("AS $$", "AS $other$"),
-            UPGRADE_SQL.replace("LANGUAGE plpgsql", "LANGUAGE sql"),
-            UPGRADE_SQL.replace("p_ttl bigint)", "p_ttl bigint DEFAULT 1)"),
-            UPGRADE_SQL.replace("RETURNS void", "RETURNS SETOF void"),
+            HISTORY_SQL.replace("rss_saga.lease(", "rss_saga.claim("),
+            HISTORY_SQL.replace("AS $$", "AS $other$"),
+            HISTORY_SQL.replace("LANGUAGE plpgsql", "LANGUAGE sql"),
+            HISTORY_SQL.replace("p_ttl bigint)", "p_ttl bigint DEFAULT 1)"),
+            HISTORY_SQL.replace("RETURNS void", "RETURNS SETOF void"),
         ] {
             assert!(definitions(&sql).is_err());
         }
