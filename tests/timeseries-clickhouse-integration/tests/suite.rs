@@ -381,6 +381,7 @@ async fn identity_conflict_visibility_and_restart_recovery() -> anyhow::Result<(
     assert_eq!(f.read(&d).await?.rows.len(), 2);
     f.ch.restart().await?;
     assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
+    expanded_dimensions(&f).await?;
     Ok(())
 }
 #[tokio::test]
@@ -1344,5 +1345,31 @@ async fn repeated_recompute_mixed_resolutions_and_summary_only_prune() -> anyhow
         page.buckets[0].value,
         AggregateValue::Sum(Sum::U128(5))
     ));
+    Ok(())
+}
+
+async fn expanded_dimensions(f: &Fixture) -> anyhow::Result<()> {
+    let base = definition(TENANT)?;
+    let mut spec = base.spec().clone();
+    spec.key = id("capacity")?;
+    let keys = (0..1024).map(|i| id(&format!("d{i:04}"))).collect::<anyhow::Result<std::collections::BTreeSet<_>>>()?;
+    spec.dimensions.allowed = keys.clone();
+    spec.dimensions.max_count = 1024;
+    spec.metric = Metric::State { members: keys.clone() };
+    let d = Definition::new(spec)?;
+    f.register(&d).await?;
+    let dimensions = keys.into_iter().map(|k| Ok((k, id("v")?))).collect::<anyhow::Result<_>>()?;
+    let mut input = sample(&base, "capacity", 123, 1)?.input().clone();
+    input.series = Series::new(d.clone(), id("device")?, id("resource")?, dimensions)?;
+    input.reading = Reading::Valid(Value::State(id("d1023")?));
+    let sample = Sample::new(input)?;
+    let b = batch("capacity", vec![sample.clone()])?;
+    confirmed(f.write(&b).await?)?;
+    let query = Query::new(Selection::Exact { stream: sample.input().stream.clone(), series: sample.input().series.clone() },
+        query(&d, QueryMode::History, 1)?.window(), query(&d, QueryMode::History, 1)?.budget(), QueryMode::History)?;
+    let page = f.store.query(&Authorized::<Query>::verify(&authority(TENANT)?, query)?, None, deadline()?).await?;
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].sample, sample);
+    assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
     Ok(())
 }

@@ -3,6 +3,8 @@ use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const MAX_DIMENSIONS: u16 = 1024;
+
 /// Tenant and namespace are mandatory scope, not authentication evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ScopeDto", into = "ScopeDto")]
@@ -100,8 +102,8 @@ pub struct DimensionRules {
 }
 impl DimensionRules {
     fn validate(&self) -> Result<(), Error> {
-        if self.allowed.len() > 64
-            || self.max_count > 64
+        if self.allowed.len() > usize::from(MAX_DIMENSIONS)
+            || self.max_count > MAX_DIMENSIONS
             || self.required.len() > usize::from(self.max_count)
             || !self.required.is_subset(&self.allowed)
             || self.max_value_bytes == 0
@@ -176,7 +178,7 @@ impl Definition {
         }
         spec.dimensions.validate()?;
         if let Metric::State { members } = &spec.metric
-            && (members.is_empty() || members.len() > 256)
+            && (members.is_empty() || members.len() > 1024)
         {
             return Err(Error::InvalidInput);
         }

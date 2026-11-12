@@ -115,10 +115,8 @@ impl Body {
             Self::Snapshot(v) | Self::Partial(v) | Self::Delta { changes: v, .. } => v,
             Self::Failed { .. } => return Ok(()),
         };
-        if changes.len() > 1000
-            || changes.iter().any(|c| {
-                c.value.as_ref().is_some_and(|v| v.len() > 65536) || (snapshot && c.value.is_none())
-            })
+        if changes.len() > 4096
+            || changes.iter().any(|c| snapshot && c.value.is_none())
         {
             return Err(ErrorKind::InvalidInput.into());
         }

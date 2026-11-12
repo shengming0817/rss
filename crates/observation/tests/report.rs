@@ -107,18 +107,20 @@ fn bounds_and_unknown_versions_are_rejected() -> anyhow::Result<()> {
     assert!(batch(Body::Snapshot(vec![Change::delete(id("x")?)])).is_err());
     let item = Change::upsert(id("same")?, vec![]);
     assert!(batch(Body::Snapshot(vec![item.clone(), item.clone()])).is_err());
-    assert!(batch(Body::Snapshot(vec![item; 1001])).is_err());
-    assert!(
-        batch(Body::Snapshot(vec![Change::upsert(
-            id("large")?,
-            vec![0; 65537]
-        )]))
-        .is_err()
-    );
-    let large = (0..100)
-        .map(|i| Ok(Change::upsert(id(&i.to_string())?, vec![255; 65536])))
+    let changes = (0..4097).map(|i| Ok(Change::upsert(id(&format!("key-{i:04}"))?, vec![0])))
         .collect::<Result<Vec<_>, Error>>()?;
-    assert!(batch(Body::Snapshot(large)).is_err());
+    assert!(batch(Body::Snapshot(changes.clone())).is_err());
+    let valid = batch(Body::Snapshot(changes[..4096].to_vec()))?;
+    assert_eq!(Batch::decode(valid.encode())?, valid);
+    let one = batch(Body::Snapshot(vec![Change::upsert(id("large")?, vec![0])]))?;
+    let extra = 4 * 1024 * 1024 - one.encode().len();
+    let mut value = vec![0; 1 + extra / 2];
+    value[0] = if extra % 2 == 1 { 10 } else { 0 };
+    let maximum = batch(Body::Snapshot(vec![Change::upsert(id("large")?, value.clone())]))?;
+    assert_eq!(maximum.encode().len(), 4 * 1024 * 1024);
+    assert_eq!(Batch::decode(maximum.encode())?, maximum);
+    value[0] = if value[0] == 10 { 100 } else { 10 };
+    assert!(batch(Body::Snapshot(vec![Change::upsert(id("large")?, value)])).is_err());
     assert!(Batch::decode(&vec![b' '; 4194305]).is_err());
     let valid = batch(Body::Snapshot(vec![]))?;
     let mut value: serde_json::Value = serde_json::from_slice(valid.encode())?;
