@@ -20,6 +20,8 @@ fn diff_truth_table_and_redaction() {
 fn bounded_policy() -> Result<(), rss_reconcile::Error> {
     let make = |n| {
         Policy::try_from(rss_reconcile::PolicyConfig {
+            claim_batch_size: 64,
+            scan_budget: 64,
             concurrency: n,
             lease_ttl: Duration::from_millis(30),
             attempt_timeout: Duration::from_millis(10),
@@ -31,7 +33,8 @@ fn bounded_policy() -> Result<(), rss_reconcile::Error> {
         })
     };
     assert!(make(0).is_err());
-    assert!(make(65).is_err());
+    assert_eq!(make(65)?.concurrency(), 65);
+    assert_eq!(make(1025)?.concurrency(), 1025);
     assert_eq!(make(2)?.concurrency(), 2);
     Ok(())
 }
@@ -75,7 +78,13 @@ fn resource_sets_are_explicit_bounded_canonical_and_redacted() -> anyhow::Result
     assert_eq!(resources.tenant(), tenant);
     assert!(ResourceSet::empty(tenant).keys().is_empty());
     assert!(ResourceSet::new(tenant, ["bad key"]).is_err());
-    assert!(ResourceSet::new(tenant, std::iter::repeat_n("same", 1001)).is_err());
+    assert!(ResourceSet::new(tenant, std::iter::repeat_n("same", 1025)).is_err());
+    for count in [1001, 1024] {
+        assert_eq!(ResourceSet::new(tenant, (0..count).map(|i| format!("resource-{i}")))?.keys().len(), count);
+    }
+    assert!(ResourceSet::new(tenant, ["r".repeat(255)]).is_ok());
+    assert!(ResourceSet::new(tenant, ["r".repeat(256)]).is_err());
+    assert!(ResourceSet::new(tenant, ["é".repeat(128)]).is_err());
     assert_eq!(format!("{resources:?}"), "ResourceSet(<redacted>)");
     Ok(())
 }

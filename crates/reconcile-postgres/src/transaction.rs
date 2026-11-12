@@ -226,7 +226,8 @@ async fn setup(
     timeout: Duration,
     identity: &Identity,
 ) -> Result<(), Error> {
-    let millis = timeout.as_millis().clamp(1, i32::MAX as u128).to_string();
+    let millis = i32::try_from(timeout.as_millis().max(1))
+        .map_err(|_| Error::new(ErrorKind::InvalidInput))?.to_string();
     let valid: bool = sqlx::query_scalar("SELECT session_user::text=$3 AND current_user::text=$4 AND current_database()::text=$5, set_config('rss.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true)")
         .bind(tenant.to_string()).bind(millis).bind(&identity.login).bind(&identity.role).bind(&identity.database)
         .fetch_one(connection).await.map_err(map_sql)?;
@@ -264,7 +265,7 @@ fn classify(error: &sqlx::Error) -> ErrorKind {
 }
 fn code_kind(code: Option<&str>) -> ErrorKind {
     match code {
-        Some("P1001") => ErrorKind::InvalidInput,
+        Some("P1001" | "22008" | "22015") => ErrorKind::InvalidInput,
         Some("P1002") => ErrorKind::Fenced,
         Some("P1003") => ErrorKind::InvalidInput,
         Some("P1004") => ErrorKind::BindingChanged,

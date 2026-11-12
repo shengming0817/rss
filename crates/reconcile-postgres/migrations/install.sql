@@ -5,8 +5,8 @@ COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:2';
 
 CREATE TABLE rss_reconcile.targets (
     tenant_id uuid NOT NULL,
-    reconciler text NOT NULL CHECK (reconciler ~ '^[A-Za-z0-9_.:-]{1,128}$'),
-    entity text NOT NULL CHECK (entity ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+    reconciler text NOT NULL CHECK (reconciler ~ '^[A-Za-z0-9_.:-]{1,255}$'),
+    entity text NOT NULL CHECK (entity ~ '^[A-Za-z0-9_.:-]{1,255}$'),
     wake_version bigint NOT NULL DEFAULT 1 CHECK (wake_version > 0),
     epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0),
     token uuid,
@@ -40,7 +40,7 @@ CREATE INDEX targets_unbound ON rss_reconcile.targets(tenant_id,reconciler) WHER
 
 CREATE TABLE rss_reconcile.resources (
  tenant_id uuid NOT NULL,
- resource text NOT NULL CHECK(resource ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+ resource text NOT NULL CHECK(resource ~ '^[A-Za-z0-9_.:-]{1,255}$'),
  owner_reconciler text,
  owner_entity text,
  owner_token uuid,
@@ -68,7 +68,7 @@ CREATE INDEX resource_waiters ON rss_reconcile.target_resources(tenant_id,resour
 
 CREATE TABLE rss_reconcile.scans (
  tenant_id uuid NOT NULL,
- reconciler text NOT NULL CHECK(reconciler ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+ reconciler text NOT NULL CHECK(reconciler ~ '^[A-Za-z0-9_.:-]{1,255}$'),
  cursor_ticket bigint NOT NULL DEFAULT 0 CHECK(cursor_ticket>=0),
  high_watermark bigint NOT NULL DEFAULT 0 CHECK(high_watermark>=cursor_ticket),
  PRIMARY KEY(tenant_id,reconciler)
@@ -123,7 +123,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS 
 DECLARE row rss_reconcile.targets; canonical text[]; previous text[]; was_waiting boolean;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
- IF keys IS NULL OR cardinality(keys)>1000 OR EXISTS(SELECT FROM unnest(keys) k WHERE k IS NULL OR k !~ '^[A-Za-z0-9_.:-]{1,128}$') THEN
+ IF keys IS NULL OR cardinality(keys)>1024 OR EXISTS(SELECT FROM unnest(keys) k WHERE k IS NULL OR k !~ '^[A-Za-z0-9_.:-]{1,255}$') THEN
   RAISE EXCEPTION 'invalid resources' USING ERRCODE='P1003';
  END IF;
  SELECT coalesce(array_agg(DISTINCT k ORDER BY k),'{}'::text[]) INTO canonical FROM unnest(keys) k;
@@ -179,13 +179,13 @@ BEGIN
  RETURN true;
 END $$;
 
-CREATE FUNCTION rss_reconcile.claim_due(t uuid,r text,n integer,ttl bigint)
+CREATE FUNCTION rss_reconcile.claim_due(t uuid,r text,n integer,scan_budget integer,ttl bigint)
 RETURNS TABLE(claims rss_reconcile.targets[],more boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS $$
 DECLARE scan rss_reconcile.scans; candidate record; row rss_reconcile.targets; at_time timestamptz; key text; head bigint; blocked boolean;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
- IF n IS NULL OR n NOT BETWEEN 1 AND 64 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 86400000 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
+ IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
  IF EXISTS(SELECT FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND binding_revision=0 AND next_run IS NOT NULL) THEN
   RAISE EXCEPTION 'pending targets require explicit resource binding' USING ERRCODE='P1005';
  END IF;
@@ -197,7 +197,7 @@ BEGIN
   scan.cursor_ticket:=0;
  END IF;
  FOR candidate IN SELECT entity,queue_ticket FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL
-   AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark ORDER BY queue_ticket LIMIT 64
+   AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark ORDER BY queue_ticket LIMIT scan_budget
  LOOP
   scan.cursor_ticket:=candidate.queue_ticket;
   BEGIN
@@ -217,7 +217,7 @@ BEGIN
    IF blocked THEN CONTINUE; END IF;
    UPDATE rss_reconcile.resources SET owner_reconciler=NULL,owner_entity=NULL,owner_token=NULL,owner_epoch=NULL
     WHERE tenant_id=t AND owner_reconciler=r AND owner_entity=row.entity AND owner_token=row.token AND owner_epoch=row.epoch;
-   UPDATE rss_reconcile.targets SET token=gen_random_uuid(),epoch=epoch+1,lease_until=clock_timestamp()+ttl*interval '1 millisecond',result='running'
+   UPDATE rss_reconcile.targets SET token=gen_random_uuid(),epoch=epoch+1,lease_until=clock_timestamp()+(ttl::text||' milliseconds')::interval,result='running'
     WHERE tenant_id=t AND reconciler=r AND entity=row.entity RETURNING * INTO row;
    UPDATE rss_reconcile.resources o SET owner_reconciler=r,owner_entity=row.entity,owner_token=row.token,owner_epoch=row.epoch
     FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r AND d.entity=row.entity AND (o.tenant_id,o.resource)=(d.tenant_id,d.resource);
@@ -240,8 +240,8 @@ CREATE FUNCTION rss_reconcile.renew(t uuid,r text,e text,k uuid,g bigint,b bigin
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS $$
 BEGIN
  IF NOT rss_reconcile.lock_execution(t,r,e,k,g,b) THEN RAISE EXCEPTION 'reconcile binding changed' USING ERRCODE='P1004'; END IF;
- IF ttl IS NULL OR ttl NOT BETWEEN 1 AND 86400000 THEN RAISE EXCEPTION 'invalid lease' USING ERRCODE='P1003'; END IF;
- UPDATE rss_reconcile.targets SET lease_until=clock_timestamp()+ttl*interval '1 millisecond' WHERE tenant_id=t AND reconciler=r AND entity=e;
+ IF ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid lease' USING ERRCODE='P1003'; END IF;
+ UPDATE rss_reconcile.targets SET lease_until=clock_timestamp()+(ttl::text||' milliseconds')::interval WHERE tenant_id=t AND reconciler=r AND entity=e;
 END $$;
 
 CREATE FUNCTION rss_reconcile.finish(t uuid,r text,e text,k uuid,g bigint,b bigint,w bigint,outcome text,delay bigint,f bigint) RETURNS void
@@ -252,10 +252,10 @@ BEGIN
  IF outcome IS DISTINCT FROM 'deferred' AND NOT rss_reconcile.lock_execution(t,r,e,k,g,b) THEN RAISE EXCEPTION 'reconcile binding changed' USING ERRCODE='P1004'; END IF;
  at_time:=clock_timestamp();
  IF outcome IS NULL OR outcome NOT IN ('converged','pending','retry','suspended','deferred') OR f IS NULL OR f NOT BETWEEN 0 AND 4294967295 OR
-  (outcome IN ('pending','retry','deferred') AND (delay IS NULL OR delay NOT BETWEEN 1 AND 86400000)) THEN RAISE EXCEPTION 'invalid completion' USING ERRCODE='P1003'; END IF;
+  (outcome IN ('pending','retry','deferred') AND (delay IS NULL OR delay NOT BETWEEN 1 AND 9223372036854775)) THEN RAISE EXCEPTION 'invalid completion' USING ERRCODE='P1003'; END IF;
  IF w IS NULL OR w>row.wake_version THEN RAISE EXCEPTION 'invalid wake version' USING ERRCODE='P1003'; END IF;
  newer:=row.wake_version<>w;
- next_time:=CASE WHEN newer THEN least(row.next_run,at_time) WHEN outcome IN ('converged','suspended') THEN NULL ELSE at_time+delay*interval '1 millisecond' END;
+ next_time:=CASE WHEN newer THEN least(row.next_run,at_time) WHEN outcome IN ('converged','suspended') THEN NULL ELSE at_time+(delay::text||' milliseconds')::interval END;
  UPDATE rss_reconcile.resources SET owner_reconciler=NULL,owner_entity=NULL,owner_token=NULL,owner_epoch=NULL
   WHERE tenant_id=t AND owner_reconciler=r AND owner_entity=e AND owner_token=k AND owner_epoch=g;
  UPDATE rss_reconcile.target_resources SET waiting_ticket=NULL WHERE tenant_id=t AND reconciler=r AND entity=e;

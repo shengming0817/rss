@@ -14,7 +14,7 @@ async fn unchanged(
     let before = position(owner, scope).await?;
     for _ in 0..10 {
         let batch = store
-            .claim_due(scope, 1, Duration::from_secs(60), c)
+            .claim_due(scope, 1, 64, Duration::from_secs(60), c)
             .await?;
         assert!(batch.claims.is_empty());
         assert!(!batch.more);
@@ -36,7 +36,7 @@ pub(super) async fn run(
     let scope = t.scope();
     assert!(
         store
-            .claim_due(scope, 1, Duration::from_secs(60), c)
+            .claim_due(scope, 1, 64, Duration::from_secs(60), c)
             .await?
             .claims
             .is_empty()
@@ -74,7 +74,7 @@ async fn live_and_future(
     let before = position(owner, scope).await?;
     assert!(
         store
-            .claim_due(scope, 1, Duration::from_secs(60), c)
+            .claim_due(scope, 1, 64, Duration::from_secs(60), c)
             .await?
             .claims
             .is_empty()
@@ -101,7 +101,7 @@ async fn empty_and_locked(
     store.finish(&current, Completion::Converged, c).await?;
     assert!(
         store
-            .claim_due(scope, 1, Duration::from_secs(60), c)
+            .claim_due(scope, 1, 64, Duration::from_secs(60), c)
             .await?
             .claims
             .is_empty()
@@ -119,7 +119,7 @@ async fn empty_and_locked(
     .await?;
     let skipped = tokio::time::timeout(
         Duration::from_secs(2),
-        store.claim_due(scope, 1, Duration::from_secs(60), c),
+        store.claim_due(scope, 1, 64, Duration::from_secs(60), c),
     )
     .await??;
     assert!(skipped.claims.is_empty());
@@ -150,14 +150,14 @@ async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> any
     let scope = seed_window(store, owner, c).await?;
     let before = position(owner, &scope).await?;
     let first = store
-        .claim_due(&scope, 1, Duration::from_secs(60), c)
+        .claim_due(&scope, 1, 64, Duration::from_secs(60), c)
         .await?;
     assert!(first.claims.is_empty() && first.more);
     let middle = position(owner, &scope).await?;
     assert!(middle.0 < middle.1);
     assert_ne!(before, middle);
     let last = store
-        .claim_due(&scope, 1, Duration::from_secs(60), c)
+        .claim_due(&scope, 1, 64, Duration::from_secs(60), c)
         .await?;
     assert!(last.claims.is_empty() && !last.more);
     let end = position(owner, &scope).await?;
@@ -165,7 +165,7 @@ async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> any
     assert_ne!(middle, end);
     assert!(
         store
-            .claim_due(&scope, 1, Duration::from_secs(60), c)
+            .claim_due(&scope, 1, 64, Duration::from_secs(60), c)
             .await?
             .more
     );

@@ -49,7 +49,7 @@ pub(super) async fn run(
             .await?;
     }
     for claim in store
-        .claim_due(&scope, 2, Duration::from_secs(1), c)
+        .claim_due(&scope, 2, 64, Duration::from_secs(1), c)
         .await?
         .claims
     {
@@ -65,6 +65,8 @@ pub(super) async fn run(
             .await?;
     }
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 2,
         lease_ttl: Duration::from_secs(2),
         attempt_timeout: Duration::from_secs(2),
@@ -134,7 +136,7 @@ async fn verify_restart(
     assert_eq!(business.0.load(Ordering::SeqCst), 2);
     assert!(
         restarted
-            .claim_due(scope, 2, Duration::from_secs(1), c)
+            .claim_due(scope, 2, 64, Duration::from_secs(1), c)
             .await?
             .claims
             .is_empty()

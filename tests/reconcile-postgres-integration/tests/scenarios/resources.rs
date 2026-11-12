@@ -26,7 +26,7 @@ async fn owners(owner: &PgPool, key: &str) -> anyhow::Result<i64> {
 async fn blocked(store: &PgStore, scope: &Scope, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     assert!(
         store
-            .claim_due(scope, 2, Duration::from_secs(2), c)
+            .claim_due(scope, 2, 64, Duration::from_secs(2), c)
             .await?
             .claims
             .is_empty()
@@ -45,7 +45,8 @@ pub(super) async fn run(
     rebinding(store, owner, c).await?;
     bounded_pages(store, c).await?;
     uncertainty(store, owner, c).await?;
-    isolation_and_admission(store, pool, owner, c).await
+    isolation_and_admission(store, pool, owner, c).await?;
+    expanded_capacity(store, owner, c).await
 }
 async fn fairness(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     let holder = wake(store, &scope("fair-holder")?, "holder", &["fair:b"], c).await?;
@@ -61,7 +62,7 @@ async fn queued_young(store: &PgStore, c: &Control<'_, Clock>) -> anyhow::Result
     let young = wake(store, &young_scope, "young", &["fair:a"], c).await?;
     let separate = wake(store, &young_scope, "separate", &["fair:c"], c).await?;
     let batch = store
-        .claim_due(&young_scope, 2, Duration::from_secs(5), c)
+        .claim_due(&young_scope, 2, 64, Duration::from_secs(5), c)
         .await?;
     assert_eq!(batch.claims.len(), 1);
     assert_eq!(batch.claims[0].target().entity(), separate.entity());
@@ -187,11 +188,11 @@ async fn bounded_pages(store: &PgStore, c: &Control<'_, Clock>) -> anyhow::Resul
     }
     let free = wake(store, &queued, "free", &["page:free"], c).await?;
     let first = store
-        .claim_due(&queued, 2, Duration::from_secs(3), c)
+        .claim_due(&queued, 2, 64, Duration::from_secs(3), c)
         .await?;
     assert!(first.claims.is_empty() && first.more);
     let second = store
-        .claim_due(&queued, 2, Duration::from_secs(3), c)
+        .claim_due(&queued, 2, 64, Duration::from_secs(3), c)
         .await?;
     assert_eq!(second.claims.len(), 1);
     assert_eq!(second.claims[0].target().entity(), free.entity());
@@ -211,6 +212,8 @@ async fn runner_continues_page(
     let stop = CancellationToken::new();
     let observer = StopOnObserve(&stop);
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 2,
         lease_ttl: Duration::from_secs(2),
         attempt_timeout: Duration::from_secs(1),
@@ -285,7 +288,7 @@ async fn uncertainty(
     .await?;
     store.inject_next_fault(PgFault::CommitUnknownAfterAck);
     assert!(
-        matches!(store.claim_due(first.scope(), 1, Duration::from_millis(100), c).await, Err(e) if e.kind()==ErrorKind::CommitUnknown)
+        matches!(store.claim_due(first.scope(), 1, 64, Duration::from_millis(100), c).await, Err(e) if e.kind()==ErrorKind::CommitUnknown)
     );
     assert_eq!(owners(owner, "unknown:shared").await?, 1);
     blocked(store, other.scope(), c).await?;
@@ -375,7 +378,7 @@ async fn parallel_effects(
     wake(store, &scope, "a", &["parallel:a"], c).await?;
     wake(store, &scope, "b", &["parallel:b"], c).await?;
     let claims = store
-        .claim_due(&scope, 2, Duration::from_secs(5), c)
+        .claim_due(&scope, 2, 64, Duration::from_secs(5), c)
         .await?
         .claims;
     assert_eq!(claims.len(), 2);
@@ -455,5 +458,38 @@ async fn expired_transaction_keeps_conflicting_resources_locked(
     assert_eq!(count(owner, "expired-resource-write").await?, 0);
     let fresh = claim(store, &other, Duration::from_secs(2), c).await?;
     store.finish(&fresh, Completion::Converged, c).await?;
+    Ok(())
+}
+
+// Same durable owner and ACL path as the small fairness cases; no extra fixture service.
+async fn expanded_capacity(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
+    let scope = scope(&"r".repeat(255))?;
+    let target = Target::new(scope.clone(), "e".repeat(255))?;
+    let resources = ResourceSet::new(scope.tenant(), (0..1024).map(|i| format!("{i:04}{}", "x".repeat(251))))?;
+    store.wake(&target, &resources, c).await?;
+    let claim = store.claim_due(&scope, 1024, 4096, Duration::from_secs(90_000), c).await?.claims.remove(0);
+    store.renew(&claim, Duration::from_secs(90_001), c).await?;
+    store.finish(&claim, Completion::Retry { after: Duration::from_secs(90_002), failures: u32::MAX }, c).await?;
+    let persisted: (i64, i64) = sqlx::query_as("SELECT failures,(SELECT count(*) FROM rss_reconcile.target_resources WHERE reconciler=$1) FROM rss_reconcile.targets WHERE reconciler=$1")
+        .bind(scope.reconciler()).fetch_one(owner).await?;
+    assert_eq!(persisted, (i64::from(u32::MAX), 1024));
+    assert!(store.claim_due(&scope, 1025, 4096, Duration::from_secs(1), c).await.is_err());
+    assert!(store.claim_due(&scope, 1, u32::MAX, Duration::from_secs(1), c).await.is_err());
+    let queued = Scope::new(scope.tenant(), "expanded-scan")?;
+    // Seed through the real definer in one fixture transaction, retaining canonical bindings.
+    sqlx::query("SELECT rss_reconcile.wake($1::uuid,$2,'item-'||n,ARRAY[]::text[]) FROM generate_series(1,4096) n")
+        .bind(queued.tenant().to_string()).bind(queued.reconciler()).execute(owner).await?;
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=clock_timestamp()+interval '1 day' WHERE reconciler=$1 AND entity<>'item-4096'")
+        .bind(queued.reconciler()).execute(owner).await?;
+    let page = store.claim_due(&queued, 1024, 4096, Duration::from_secs(30), c).await?;
+    assert!(!page.more);
+    assert_eq!(page.claims.len(), 1);
+    assert_eq!(page.claims[0].target().entity(), "item-4096");
+    store.finish(&page.claims[0], Completion::Converged, c).await?;
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=clock_timestamp() WHERE reconciler=$1 AND next_run IS NOT NULL")
+        .bind(queued.reconciler()).execute(owner).await?;
+    let page = store.claim_due(&queued, 1024, 4096, Duration::from_secs(30), c).await?;
+    assert_eq!(page.claims.len(), 1024);
+    assert!(page.more);
     Ok(())
 }

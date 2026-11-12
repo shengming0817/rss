@@ -10,7 +10,7 @@ WITH expected(table_name,columns,types,required) AS (VALUES
 ), expected_constraints(table_name,definition) AS (VALUES
  ('resources','PRIMARY KEY (tenant_id, resource)'),
  ('resources','FOREIGN KEY (tenant_id, owner_reconciler, owner_entity) REFERENCES rss_reconcile.targets(tenant_id, reconciler, entity)'),
- ('resources','CHECK ((resource ~ ''^[A-Za-z0-9_.:-]{1,128}$''::text))'),
+ ('resources','CHECK ((resource ~ ''^[A-Za-z0-9_.:-]{1,255}$''::text))'),
  ('resources','CHECK ((((owner_token IS NULL) = (owner_reconciler IS NULL)) AND ((owner_token IS NULL) = (owner_entity IS NULL)) AND ((owner_token IS NULL) = (owner_epoch IS NULL))))'),
  ('resources','CHECK (((owner_epoch IS NULL) OR (owner_epoch > 0)))'),
  ('target_resources','PRIMARY KEY (tenant_id, reconciler, entity, resource)'),
@@ -18,7 +18,7 @@ WITH expected(table_name,columns,types,required) AS (VALUES
  ('target_resources','FOREIGN KEY (tenant_id, resource) REFERENCES rss_reconcile.resources(tenant_id, resource)'),
  ('target_resources','CHECK (((waiting_ticket IS NULL) OR (waiting_ticket > 0)))'),
  ('scans','PRIMARY KEY (tenant_id, reconciler)'),
- ('scans','CHECK ((reconciler ~ ''^[A-Za-z0-9_.:-]{1,128}$''::text))'),
+ ('scans','CHECK ((reconciler ~ ''^[A-Za-z0-9_.:-]{1,255}$''::text))'),
  ('scans','CHECK ((cursor_ticket >= 0))'),
  ('scans','CHECK ((high_watermark >= cursor_ticket))')
 ), actual_constraints AS (

@@ -39,7 +39,7 @@ impl<'a, T: Timer> Control<'a, T> {
     pub fn child(&self, timeout: Duration) -> Control<'_, T> {
         Control {
             timer: self.timer,
-            deadline: self.timer.now().saturating_add(timeout).min(self.deadline),
+            deadline: self.timer.now().checked_add(timeout).map_or(self.deadline, |at| at.min(self.deadline)),
             cancel: self.cancel,
         }
     }
@@ -49,7 +49,7 @@ impl<'a, T: Timer> Control<'a, T> {
     /// Sleep on the explicitly injected monotonic clock.
     pub async fn sleep(&self, duration: Duration) {
         self.timer
-            .sleep_until(self.timer.now().saturating_add(duration))
+            .sleep_until(self.timer.now().checked_add(duration).map_or(self.deadline, |at| at.min(self.deadline)))
             .await;
     }
     /// Current coordinate of the caller-injected monotonic clock.

@@ -45,12 +45,12 @@ impl PgClaim {
 }
 pub(crate) fn millis(value: Duration) -> Result<i64, Error> {
     if value.is_zero()
-        || value > Duration::from_secs(86400)
+        || value.as_micros() > i64::MAX as u128
         || !value.subsec_nanos().is_multiple_of(1_000_000)
     {
         return Err(Error::new(ErrorKind::InvalidInput));
     }
-    Ok(value.as_millis() as i64)
+    i64::try_from(value.as_millis()).map_err(|_| Error::new(ErrorKind::InvalidInput))
 }
 impl PgStore {
     /// Atomically protect database effects and schedule another observation. Context may
@@ -196,17 +196,19 @@ impl DurableStore for PgStore {
         &self,
         scope: &Scope,
         limit: usize,
+        scan_budget: u32,
         lease: Duration,
         control: &Control<'_, T>,
     ) -> Result<ClaimBatch<PgClaim>, Error> {
-        if !(1..=64).contains(&limit) {
+        if !(1..=1024).contains(&limit) || scan_budget == 0 {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
+        let scan_budget = i32::try_from(scan_budget).map_err(|_| Error::new(ErrorKind::InvalidInput))?;
         let ttl = millis(lease)?;
         let scope = scope.clone();
         self.controlled_tx(&scope.clone(), control, move |tx| Box::pin(async move {
-            let rows = sqlx::query("SELECT batch.more,c.tenant_id::text,c.reconciler,c.entity,c.token::text,c.epoch,c.wake_version,c.failures,c.binding_revision FROM rss_reconcile.claim_due($1::uuid,$2,$3,$4) batch LEFT JOIN LATERAL unnest(batch.claims) c ON true")
-                .bind(scope.tenant().to_string()).bind(scope.reconciler()).bind(limit as i32).bind(ttl)
+            let rows = sqlx::query("SELECT batch.more,c.tenant_id::text,c.reconciler,c.entity,c.token::text,c.epoch,c.wake_version,c.failures,c.binding_revision FROM rss_reconcile.claim_due($1::uuid,$2,$3,$4,$5) batch LEFT JOIN LATERAL unnest(batch.claims) c ON true")
+                .bind(scope.tenant().to_string()).bind(scope.reconciler()).bind(limit as i32).bind(scan_budget).bind(ttl)
                 .fetch_all(&mut *tx.connection).await.map_err(map_sql)?;
             decode_batch(&scope, rows)
         })).await

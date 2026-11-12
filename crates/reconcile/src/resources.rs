@@ -13,7 +13,7 @@ impl std::fmt::Debug for ResourceSet {
     }
 }
 impl ResourceSet {
-    /// Sort and deduplicate at most 1000 validated resource keys within one tenant.
+    /// Sort and deduplicate at most 1024 validated resource keys within one tenant.
     pub fn new<I, S>(tenant: TenantId, keys: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = S>,
@@ -21,7 +21,7 @@ impl ResourceSet {
     {
         let mut canonical = Vec::new();
         for key in keys {
-            if canonical.len() == 1000 {
+            if canonical.len() == 1024 {
                 return Err(Error::new(ErrorKind::InvalidInput));
             }
             canonical.push(name(key.into())?);
@@ -54,7 +54,7 @@ impl ResourceSet {
 #[derive(Debug)]
 pub enum ReconcileStep<T> {
     Ready(T),
-    /// Persist a positive whole-millisecond delay (at most one day).
+    /// Persist a positive whole-millisecond delay within the provider time range.
     Deferred(std::time::Duration),
 }
 

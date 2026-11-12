@@ -127,7 +127,7 @@ async fn recover(
     if matches!(mode, "finished" | "retry-finished") {
         assert!(
             store
-                .claim_due(t.scope(), 1, Duration::from_secs(1), c)
+                .claim_due(t.scope(), 1, 64, Duration::from_secs(1), c)
                 .await?
                 .claims
                 .is_empty()
@@ -138,6 +138,8 @@ async fn recover(
             key: t.scope().reconciler().to_owned(),
         };
         let policy = Policy::try_from(rss_reconcile::PolicyConfig {
+            claim_batch_size: 64,
+            scan_budget: 64,
             concurrency: 1,
             lease_ttl: Duration::from_secs(1),
             attempt_timeout: Duration::from_millis(300),
@@ -410,6 +412,8 @@ async fn graceful_stop(
         resume: Default::default(),
     };
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 1,
         lease_ttl: Duration::from_secs(1),
         attempt_timeout: Duration::from_secs(3),
@@ -477,10 +481,11 @@ impl DurableStore for DelayedSettlement<'_> {
         &self,
         scope: &Scope,
         limit: usize,
+        scan_budget: u32,
         lease: Duration,
         c: &Control<'_, T>,
     ) -> Result<ClaimBatch<PgClaim>, Error> {
-        self.0.claim_due(scope, limit, lease, c).await
+        self.0.claim_due(scope, limit, scan_budget, lease, c).await
     }
     async fn renew<T: Timer>(
         &self,
@@ -531,7 +536,7 @@ async fn cross_process_blocked(
         )
         .await?;
     let claims = store
-        .claim_due(&scope, 2, Duration::from_secs(1), c)
+        .claim_due(&scope, 2, 64, Duration::from_secs(1), c)
         .await?
         .claims;
     assert_eq!(

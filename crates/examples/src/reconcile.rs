@@ -88,6 +88,8 @@ async fn scenario(
         .await?;
     let business = Business(store);
     let policy = Policy::try_from(PolicyConfig {
+        claim_batch_size: 64,
+        scan_budget: 64,
         concurrency: 1,
         lease_ttl: Duration::from_secs(10),
         attempt_timeout: Duration::from_secs(5),
@@ -142,7 +144,7 @@ async fn scenario(
     );
     anyhow::ensure!(
         store
-            .claim_due(target.scope(), 1, Duration::from_secs(10), c)
+            .claim_due(target.scope(), 1, 64, Duration::from_secs(10), c)
             .await?
             .claims
             .is_empty(),
