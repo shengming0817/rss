@@ -10,7 +10,7 @@ impl OutboxRelayStore<Vec<u8>> for EmptyRelay {
     type Claim = PendingMessage<Vec<u8>>;
     type PublishReceipt = ();
     fn delivery_budget(&self) -> DeliveryBudget { self.0 }
-    async fn claim_partition_heads(&self, limit: NonZeroUsize, _: OperationDeadline) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
+    async fn claim_partition_heads(&self, _: rss_transactional_messaging::fence::ExecutionBinding, limit: NonZeroUsize, _: OperationDeadline) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
         // reason: this external compile probe models a provider with no queued records.
         OutboxClaimBatch::try_from_provider(Vec::new(), limit)
             .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant,error))

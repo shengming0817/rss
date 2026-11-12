@@ -44,3 +44,22 @@ mod outbox;
 mod logging;
 
 mod examples;
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        .expect("fixture tenant")
+}

@@ -3,6 +3,7 @@ pub mod compose;
 use rss_device_command::*;
 use rss_device_command_postgres::{CallerRoles, PgStore};
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::{message::*, outbox::*, policy::*, transaction::LocalTxAttempt};
 use rss_transactional_messaging_postgres::{
     PgConfig, PgError, PgOutboxStore, PgPassword, PgPrivateCa, PgRuntime,
@@ -112,8 +113,9 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
     let s = scope(&input.pg.tenant)?;
     let authority = ExecutionBinding::new(
         StorageIdentity::new(input.target, input.lineage)?,
-        vec![(s.tenant(), Epoch::new(input.epoch)?)],
-    )?;
+        s.tenant(),
+        Epoch::new(input.epoch)?,
+    );
     let config = PgConfig::new(
         &input.pg.host,
         input.pg.port,
@@ -122,7 +124,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         PgPassword::new(input.pg.password),
         PgPrivateCa::from_pem(input.pg.pg_ca.as_bytes().to_vec())?,
     );
-    let runtime = Arc::new(PgRuntime::connect(config, Timer::new(), authority).await?);
+    let runtime = Arc::new(PgRuntime::connect(config, Timer::new(), authority.storage()).await?);
     let outbox = Arc::new(PgOutboxStore::new(
         runtime.clone(),
         MessagingDomain::parse("execution-example")?,
@@ -133,12 +135,13 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
             Duration::from_secs(5),
         )?,
     )?);
-    let result = scenario(&runtime, outbox, s, callers).await;
+    let result = scenario(&runtime, authority, outbox, s, callers).await;
     runtime.close().await;
     result
 }
 async fn scenario(
     runtime: &PgRuntime,
+    binding: ExecutionBinding,
     outbox: Arc<PgOutboxStore<()>>,
     s: Scope,
     callers: CallerRoles,
@@ -147,6 +150,7 @@ async fn scenario(
     committed(
         compose::bootstrap(
             runtime,
+            binding,
             outbox.clone(),
             s,
             coordinate,
@@ -158,6 +162,7 @@ async fn scenario(
     let command = committed(
         compose::enqueue(
             runtime,
+            binding,
             outbox.clone(),
             spec("example", s, coordinate)?,
             message("example", s.tenant())?,
@@ -173,7 +178,7 @@ async fn scenario(
     let selected = outbox.clone();
     let store = committed(
         runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(binding, budget()?, move |tx| {
                 Box::pin(async move {
                     PgStore::new(
                         tx,
@@ -190,7 +195,7 @@ async fn scenario(
     let store = Arc::new(store);
     // A bounded fixture publisher records broker acceptance; this is not proof of device execution.
     let claims = outbox
-        .claim_partition_heads(std::num::NonZeroUsize::MIN, budget()?)
+        .claim_partition_heads(binding, std::num::NonZeroUsize::MIN, budget()?)
         .await?;
     anyhow::ensure!(claims.len() == 1, "atomic command/outbox append missing");
     for claim in claims {
@@ -203,23 +208,32 @@ async fn scenario(
     let id = CommandId::parse("example")?;
     let recovered = committed(
         runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(binding, budget()?, move |tx| {
                 Box::pin(async move { selected.recover_exact(tx, s, &id).await })
             })
             .await,
     )?;
     anyhow::ensure!(recovered.is_some(), "queued command disappeared");
     anyhow::ensure!(
-        load(runtime, store.clone(), s).await?.status() == Status::Published,
+        load(runtime, binding, store.clone(), s).await?.status() == Status::Published,
         "publication not distinct"
     );
-    let received = report(runtime, store.clone(), s, coordinate, DeviceEvent::Received).await?;
+    let received = report(
+        runtime,
+        binding,
+        store.clone(),
+        s,
+        coordinate,
+        DeviceEvent::Received,
+    )
+    .await?;
     anyhow::ensure!(
         received.command.status() == Status::Received,
         "received not distinct"
     );
     let old = report(
         runtime,
+        binding,
         store.clone(),
         s,
         Coordinate::new(1, 1)?,
@@ -228,11 +242,12 @@ async fn scenario(
     .await;
     anyhow::ensure!(old.is_err(), "old command coordinate accepted");
     anyhow::ensure!(
-        load(runtime, store.clone(), s).await? == received.command,
+        load(runtime, binding, store.clone(), s).await? == received.command,
         "stale report changed command"
     );
     let applied = report(
         runtime,
+        binding,
         store.clone(),
         s,
         coordinate,
@@ -244,16 +259,21 @@ async fn scenario(
         "device report did not reach applied"
     );
     anyhow::ensure!(
-        load(runtime, store, s).await? == applied.command,
+        load(runtime, binding, store, s).await? == applied.command,
         "applied command not persisted"
     );
     Ok(())
 }
-async fn load(runtime: &PgRuntime, store: Arc<PgStore<()>>, s: Scope) -> anyhow::Result<Command> {
+async fn load(
+    runtime: &PgRuntime,
+    binding: ExecutionBinding,
+    store: Arc<PgStore<()>>,
+    s: Scope,
+) -> anyhow::Result<Command> {
     let id = CommandId::parse("example")?;
     committed(
         runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(binding, budget()?, move |tx| {
                 Box::pin(async move { store.load(tx, s, &id).await })
             })
             .await,
@@ -262,6 +282,7 @@ async fn load(runtime: &PgRuntime, store: Arc<PgStore<()>>, s: Scope) -> anyhow:
 }
 async fn report(
     runtime: &PgRuntime,
+    binding: ExecutionBinding,
     store: Arc<PgStore<()>>,
     scope: Scope,
     coordinate: Coordinate,
@@ -275,7 +296,7 @@ async fn report(
     };
     committed(
         runtime
-            .local_tx(scope.tenant(), budget()?, move |tx| {
+            .local_tx(binding, budget()?, move |tx| {
                 Box::pin(async move { store.report(tx, &report).await })
             })
             .await,

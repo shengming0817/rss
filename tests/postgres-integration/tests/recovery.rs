@@ -33,7 +33,10 @@ impl IngressValidator<Vec<u8>> for Validator {
         &self,
         c: IngressChallenge<'_, Vec<u8>>,
     ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
-        Ok(c.verified())
+        Ok({
+            let execution = crate::execution(c.message().metadata().tenant_id(), 1);
+            c.verified(execution)
+        })
     }
 }
 fn deadline() -> OperationDeadline {
@@ -100,7 +103,11 @@ async fn capture(
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
     let claim = inbox
-        .claim(binding.identity(), deadline())
+        .claim(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            deadline(),
+        )
         .await
         .context("capture inbox claim")?;
     let IdempotencyDisposition::Acquired(claim) = claim else {
@@ -125,7 +132,13 @@ async fn page<K: rss_data_protection::Aead + Send + Sync>(
 ) -> anyhow::Result<Page> {
     let clock = Timer::new();
     let request = authorize_query(&Allow, query, &clock, clock.cutoff()).await?;
-    Ok(store.query(&request, deadline()).await?)
+    Ok(store
+        .query(
+            crate::execution(request.request().tenant(), 1),
+            &request,
+            deadline(),
+        )
+        .await?)
 }
 async fn request(
     target: Target,
@@ -191,7 +204,7 @@ async fn run() -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE TABLE public.effect (id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect TO recovery_runtime;").execute(&owner).await?;
     fence_fixture::provision(&owner).await?;
     let runtime =
-        Arc::new(PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await?);
+        Arc::new(PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await?);
     assert!(
         PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(1)), deadline())
             .await
@@ -202,7 +215,7 @@ async fn run() -> anyhow::Result<()> {
         PgRecoveryStore::connect(
             config.clone(),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
             Arc::new(Key(1))
         )
         .await
@@ -243,7 +256,13 @@ async fn run() -> anyhow::Result<()> {
     let b = binding(&message("unknown-capture"))?;
     assert!(
         matches!(
-            inbox.claim(b.identity(), deadline()).await?,
+            inbox
+                .claim(
+                    crate::execution((b.identity()).tenant_id(), 1),
+                    b.identity(),
+                    deadline()
+                )
+                .await?,
             IdempotencyDisposition::Terminal(_)
         ),
         "committed rejection survives missing ACK"
@@ -261,7 +280,7 @@ async fn run() -> anyhow::Result<()> {
         PgRuntime::connect(
             operator_config.clone(),
             Timer::new(),
-            fence_fixture::binding()
+            fence_fixture::storage()
         )
         .await
         .is_err(),
@@ -271,7 +290,7 @@ async fn run() -> anyhow::Result<()> {
         PgRecoveryStore::connect(
             operator_config.clone(),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
             Arc::new(Key(1)),
         )
         .await?,
@@ -280,7 +299,7 @@ async fn run() -> anyhow::Result<()> {
     let excess = PgRecoveryStore::connect(
         operator_config.clone(),
         Timer::new(),
-        fence_fixture::binding(),
+        fence_fixture::storage(),
         Arc::new(Key(1)),
     )
     .await;
@@ -319,7 +338,13 @@ async fn run() -> anyhow::Result<()> {
     .await?;
     assert!(
         matches!(
-            store.query(&query, deadline()).await,
+            store
+                .query(
+                    crate::execution(query.request().tenant(), 1),
+                    &query,
+                    deadline()
+                )
+                .await,
             Err(Error::Store(StoreFailureKind::Permanent))
         ),
         "closed pool is not a schema mismatch"
@@ -375,7 +400,17 @@ async fn replay_scenarios(
         ExecutionBudget::new(Duration::from_millis(500), Duration::from_millis(250))?,
     )?;
     let observer = RecordingObserver::default();
-    let receipt = committed(execute(store.as_ref(), &req, &clock, deadlines, &observer).await)?;
+    let receipt = committed(
+        execute(
+            store.as_ref(),
+            crate::execution(req.request().tenant(), 1),
+            &req,
+            &clock,
+            deadlines,
+            &observer,
+        )
+        .await,
+    )?;
     assert_eq!(
         observer
             .0
@@ -396,7 +431,15 @@ async fn replay_scenarios(
         anyhow::bail!("consumer detail")
     }
 
-    let second = committed(store.mutate(&req, deadline()).await)?;
+    let second = committed(
+        store
+            .mutate(
+                crate::execution(req.request().tenant(), 1),
+                &req,
+                deadline(),
+            )
+            .await,
+    )?;
     assert_eq!(receipt.version, second.version);
     let row=sqlx::query("SELECT envelope,fingerprint FROM rss_transactional_messaging.outbox WHERE message_id='replay-1'").fetch_one(owner).await?;
     let envelope: serde_json::Value = row.try_get("envelope")?;
@@ -413,10 +456,27 @@ async fn replay_scenarios(
     )
     .await?;
     assert_eq!(
-        failure(store.mutate(&duplicate, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(duplicate.request().tenant(), 1),
+                    &duplicate,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Conflict)
     );
-    assert!(store.receipt(&duplicate, deadline()).await?.is_none());
+    assert!(
+        store
+            .receipt(
+                crate::execution(duplicate.request().tenant(), 1),
+                &duplicate,
+                deadline()
+            )
+            .await?
+            .is_none()
+    );
     let stale = request(
         entry.target.clone(),
         entry.version,
@@ -424,7 +484,15 @@ async fn replay_scenarios(
     )
     .await?;
     assert_eq!(
-        failure(store.mutate(&stale, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(stale.request().tenant(), 1),
+                    &stale,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Conflict)
     );
     let bad = Mutation::new(
@@ -435,7 +503,15 @@ async fn replay_scenarios(
         Action::Replay(MessageId::parse("different")?),
     )?;
     assert_eq!(
-        failure(store.mutate(&permit(bad).await?, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(bad.tenant(), 1),
+                    &permit(bad).await?,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Conflict)
     );
     let other = rss_request_context::TenantId::parse("22222222-2222-2222-2222-222222222222")?;
@@ -453,7 +529,15 @@ async fn replay_scenarios(
         Action::Replay(MessageId::parse("cross")?),
     )?;
     assert_eq!(
-        failure(store.mutate(&permit(cross).await?, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(cross.tenant(), 1),
+                    &permit(cross).await?,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::NotFound)
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
@@ -463,7 +547,16 @@ async fn replay_scenarios(
     // Simulate the persisted post-purge snapshot; the archive T2 suite proves the purge itself.
     sqlx::query("UPDATE rss_transactional_messaging.consumer_dead_letter SET capsule=NULL WHERE tenant_id=$1::uuid AND id=$2::uuid").bind(tenant().to_string()).bind(entry.target.key()).execute(owner).await?;
     assert_eq!(
-        committed(store.mutate(&req, deadline()).await)?.version,
+        committed(
+            store
+                .mutate(
+                    crate::execution(req.request().tenant(), 1),
+                    &req,
+                    deadline()
+                )
+                .await
+        )?
+        .version,
         receipt.version
     );
     let fresh = request(
@@ -473,7 +566,15 @@ async fn replay_scenarios(
     )
     .await?;
     assert_eq!(
-        failure(store.mutate(&fresh, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(fresh.request().tenant(), 1),
+                    &fresh,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Archived)
     );
     let inspected = page(&store, Query::inspect(tenant(), entry.target.clone())).await?;
@@ -501,29 +602,38 @@ async fn outbox_scenarios(
     for id in ["head", "successor"] {
         committed(
             runtime
-                .local_tx_with_context(tenant(), deadline(), (&outbox, id), |(outbox, id), tx| {
-                    Box::pin(async move {
-                        tx.prepare_outbox_partitions(
-                            &message(id)
-                                .metadata()
-                                .partition()
-                                .cloned()
-                                .into_iter()
-                                .collect::<Vec<_>>(),
-                        )
-                        .await?;
-                        outbox
-                            .append(tx, PendingMessage::new(message(id)))
-                            .await
-                            .map_err(|_| PgError::InvalidConnectionConfig)
-                    })
-                })
+                .local_tx_with_context(
+                    crate::execution(tenant(), 1),
+                    deadline(),
+                    (&outbox, id),
+                    |(outbox, id), tx| {
+                        Box::pin(async move {
+                            tx.prepare_outbox_partitions(
+                                &message(id)
+                                    .metadata()
+                                    .partition()
+                                    .cloned()
+                                    .into_iter()
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await?;
+                            outbox
+                                .append(tx, PendingMessage::new(message(id)))
+                                .await
+                                .map_err(|_| PgError::InvalidConnectionConfig)
+                        })
+                    },
+                )
                 .await,
         )?;
     }
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id LIKE 'replay-%'").execute(owner).await?;
     let batch = outbox
-        .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            std::num::NonZeroUsize::MIN,
+            deadline(),
+        )
         .await
         .context("outbox claim")?;
     let claim = batch
@@ -551,18 +661,39 @@ async fn outbox_scenarios(
     )
     .await?;
     assert_eq!(
-        failure(store.mutate(&premature, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(premature.request().tenant(), 1),
+                    &premature,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::NotExpired)
     );
     let retry = request(entry.target.clone(), entry.version, Action::Redrive).await?;
     assert_eq!(
-        committed(store.mutate(&retry, deadline()).await)?.outcome,
+        committed(
+            store
+                .mutate(
+                    crate::execution(retry.request().tenant(), 1),
+                    &retry,
+                    deadline()
+                )
+                .await
+        )?
+        .outcome,
         Outcome::Redriven
     );
     let after:String=sqlx::query_scalar("SELECT automatic_retry_deadline::text FROM rss_transactional_messaging.outbox WHERE message_id='head'").fetch_one(owner).await?;
     assert_eq!(before, after);
     let batch = outbox
-        .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            std::num::NonZeroUsize::MIN,
+            deadline(),
+        )
         .await
         .context("outbox claim")?;
     let claim = batch
@@ -582,12 +713,24 @@ async fn outbox_scenarios(
         .ok_or_else(|| anyhow::anyhow!("head"))?;
     let expired = request(entry.target.clone(), entry.version, Action::Redrive).await?;
     assert_eq!(
-        failure(store.mutate(&expired, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(expired.request().tenant(), 1),
+                    &expired,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Expired)
     );
     assert!(
         outbox
-            .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                std::num::NonZeroUsize::MIN,
+                deadline()
+            )
             .await
             .context("outbox claim")?
             .is_empty()
@@ -599,7 +742,15 @@ async fn outbox_scenarios(
     )
     .await?;
     assert_eq!(
-        failure(store.mutate(&wrong, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(wrong.request().tenant(), 1),
+                    &wrong,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Evidence)
     );
     let resolve = request(
@@ -608,7 +759,15 @@ async fn outbox_scenarios(
         Action::Resolve(Resolution::AcceptedGap),
     )
     .await?;
-    committed(store.mutate(&resolve, deadline()).await)?;
+    committed(
+        store
+            .mutate(
+                crate::execution(resolve.request().tenant(), 1),
+                &resolve,
+                deadline(),
+            )
+            .await,
+    )?;
     let state: String = sqlx::query_scalar(
         "SELECT status FROM rss_transactional_messaging.outbox WHERE message_id='head'",
     )
@@ -617,7 +776,11 @@ async fn outbox_scenarios(
     assert_eq!(state, "resolved");
     assert_eq!(
         outbox
-            .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                std::num::NonZeroUsize::MIN,
+                deadline()
+            )
             .await
             .context("outbox claim")?
             .len(),
@@ -644,8 +807,16 @@ async fn concurrent_replay(
     )
     .await?;
     let (left, right) = tokio::join!(
-        store.mutate(&req, deadline()),
-        store.mutate(&req, deadline())
+        store.mutate(
+            crate::execution(req.request().tenant(), 1),
+            &req,
+            deadline()
+        ),
+        store.mutate(
+            crate::execution(req.request().tenant(), 1),
+            &req,
+            deadline()
+        )
     );
     let first = committed(left)?;
     let second = committed(right)?;
@@ -664,7 +835,13 @@ async fn concurrent_replay(
         Deadline::from_timeout(&clock, Duration::from_millis(50))?,
         &clock,
     );
-    let result = store.mutate(&pending, timeout).await;
+    let result = store
+        .mutate(
+            crate::execution(pending.request().tenant(), 1),
+            &pending,
+            timeout,
+        )
+        .await;
     assert_eq!(
         result.fold(
             |_| "committed",
@@ -676,7 +853,16 @@ async fn concurrent_replay(
         ),
         "unknown"
     );
-    assert!(store.receipt(&pending, deadline()).await?.is_none());
+    assert!(
+        store
+            .receipt(
+                crate::execution(pending.request().tenant(), 1),
+                &pending,
+                deadline()
+            )
+            .await?
+            .is_none()
+    );
     let old = request(
         entry.target,
         entry.version,
@@ -685,14 +871,21 @@ async fn concurrent_replay(
     .await?;
     store.inject_next_transaction_fault(PgTransactionFault::RollbackFailedAfterAck);
     assert_eq!(
-        store.mutate(&old, deadline()).await.fold(
-            |_| "committed",
-            |_| "not-started",
-            |_| "rollback",
-            |_| "rollback-failed",
-            |_| "unknown",
-            |_| "fenced"
-        ),
+        store
+            .mutate(
+                crate::execution(old.request().tenant(), 1),
+                &old,
+                deadline()
+            )
+            .await
+            .fold(
+                |_| "committed",
+                |_| "not-started",
+                |_| "rollback",
+                |_| "rollback-failed",
+                |_| "unknown",
+                |_| "fenced"
+            ),
         "rollback-failed"
     );
     Ok(())
@@ -719,7 +912,7 @@ async fn privilege_failures(
             PgRecoveryStore::connect(
                 operator.clone(),
                 Timer::new(),
-                fence_fixture::binding(),
+                fence_fixture::storage(),
                 Arc::new(Key(1))
             )
             .await
@@ -748,7 +941,7 @@ async fn schema_failures(operator: &PgConfig, owner: &sqlx::PgPool) -> anyhow::R
             PgRecoveryStore::connect(
                 operator.clone(),
                 Timer::new(),
-                fence_fixture::binding(),
+                fence_fixture::storage(),
                 Arc::new(Key(1))
             )
             .await
@@ -765,7 +958,7 @@ async fn schema_failures(operator: &PgConfig, owner: &sqlx::PgPool) -> anyhow::R
         PgRecoveryStore::connect(
             operator.clone(),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
             Arc::new(Key(1))
         )
         .await
@@ -808,8 +1001,13 @@ async fn capture_failures(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
             runtime.clone(),
             LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
         )?;
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(binding.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             anyhow::bail!("claim")
         };
@@ -873,10 +1071,27 @@ async fn replay_conflicts(
     )
     .await?;
     assert_eq!(
-        failure(store.mutate(&conflict, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(conflict.request().tenant(), 1),
+                    &conflict,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Conflict)
     );
-    assert!(store.receipt(&conflict, deadline()).await?.is_none());
+    assert!(
+        store
+            .receipt(
+                crate::execution(conflict.request().tenant(), 1),
+                &conflict,
+                deadline()
+            )
+            .await?
+            .is_none()
+    );
     // Preoccupy an identity with precisely matching authored facts, but without recovery provenance.
     let original = message("occupied");
     let outbox = PgOutboxStore::<()>::new(
@@ -892,7 +1107,7 @@ async fn replay_conflicts(
     committed(
         runtime
             .local_tx_with_context(
-                tenant(),
+                crate::execution(tenant(), 1),
                 deadline(),
                 (&outbox, original),
                 |(outbox, message), tx| {
@@ -929,7 +1144,15 @@ async fn replay_conflicts(
     )
     .await?;
     assert_eq!(
-        failure(store.mutate(&occupied, deadline()).await),
+        failure(
+            store
+                .mutate(
+                    crate::execution(occupied.request().tenant(), 1),
+                    &occupied,
+                    deadline()
+                )
+                .await
+        ),
         Some(Error::Conflict)
     );
     let current = page(&store, Query::inspect(tenant(), other.target.clone())).await?;
@@ -976,7 +1199,7 @@ async fn compensated(
         committed(
             runtime
                 .local_tx_with_context(
-                    tenant(),
+                    crate::execution(tenant(), 1),
                     deadline(),
                     (&outbox, authored),
                     |(store, message), tx| {
@@ -1022,12 +1245,20 @@ async fn compensated(
         )?)),
     )
     .await?;
-    committed(store.mutate(&req, deadline()).await)?;
+    committed(
+        store
+            .mutate(
+                crate::execution(req.request().tenant(), 1),
+                &req,
+                deadline(),
+            )
+            .await,
+    )?;
     let fact = message("compensated-head");
     let published = committed(
         runtime
             .local_tx_with_context(
-                tenant(),
+                crate::execution(tenant(), 1),
                 deadline(),
                 (&outbox, fact),
                 |(store, fact), tx| {
@@ -1084,8 +1315,13 @@ async fn replay_partition_race(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) =
-        inbox.claim(verified.identity(), deadline()).await?
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((verified.identity()).tenant_id(), 1),
+            verified.identity(),
+            deadline(),
+        )
+        .await?
     else {
         anyhow::bail!("replay source claim");
     };
@@ -1124,7 +1360,7 @@ async fn replay_partition_race(
     let notify = inserted.clone();
     let gate = release.clone();
     let writer = outbox.clone();
-    let first = runtime.local_tx(tenant(), deadline(), move |tx| {
+    let first = runtime.local_tx(crate::execution(tenant(), 1), deadline(), move |tx| {
         Box::pin(async move {
             tx.prepare_outbox_partitions(
                 &predecessor
@@ -1143,7 +1379,13 @@ async fn replay_partition_race(
     });
     let second = async {
         inserted.notified().await;
-        store.mutate(&request, deadline()).await
+        store
+            .mutate(
+                crate::execution(request.request().tenant(), 1),
+                &request,
+                deadline(),
+            )
+            .await
     };
     let unlock = async {
         let waiting = tokio::time::timeout(Duration::from_secs(2),async {
@@ -1162,7 +1404,11 @@ async fn replay_partition_race(
     waiting??;
     for id in ["partition-predecessor", "partition-replayed"] {
         let head = outbox
-            .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                std::num::NonZeroUsize::MIN,
+                deadline(),
+            )
             .await?
             .into_iter()
             .next()
@@ -1173,7 +1419,11 @@ async fn replay_partition_race(
         );
         assert!(
             outbox
-                .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+                .claim_partition_heads(
+                    crate::execution(crate::fixture_tenant(), 1),
+                    std::num::NonZeroUsize::MIN,
+                    deadline()
+                )
                 .await?
                 .is_empty()
         );
@@ -1182,4 +1432,22 @@ async fn replay_partition_race(
             .await?;
     }
     Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    tenant()
 }

@@ -61,7 +61,7 @@ async fn append(f: &Fixture, entries: Vec<(String, String)>) -> anyhow::Result<(
     committed(
         f.producer
             .local_tx_with_context(
-                tenant(),
+                crate::execution(tenant(), 1),
                 OperationDeadline::from_remaining(Duration::from_secs(30)),
                 (writer, messages),
                 |(writer, messages), tx| {
@@ -111,7 +111,7 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
         PgRuntime::connect_consumer(
             f.config.clone().with_pool_limits(0, 3),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -144,7 +144,13 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
         async move {
             use futures::StreamExt;
             let stream = projection
-                .project_batch(&Validator, limit, deadline(), Duration::from_secs(5))
+                .project_batch(
+                    crate::execution(crate::fixture_tenant(), 1),
+                    &Validator,
+                    limit,
+                    deadline(),
+                    Duration::from_secs(5),
+                )
                 .await?;
             futures::pin_mut!(stream);
             while let Some(item) = stream.next().await {
@@ -175,6 +181,7 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
     let refill = tokio::time::timeout(
         Duration::from_secs(2),
         collect_batch(projection.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -227,7 +234,11 @@ async fn above_old_limit(f: &Fixture) -> anyhow::Result<()> {
         )?,
     )?;
     let batch = outbox
-        .claim_partition_heads(NonZeroUsize::try_from(70usize)?, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::try_from(70usize)?,
+            deadline(),
+        )
         .await?;
     assert_eq!(
         batch.len(),
@@ -313,6 +324,7 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
         })
         .await?;
     let items = collect_batch(projection.project_batch(
+        crate::execution(crate::fixture_tenant(), 1),
         &Validator,
         NonZeroUsize::try_from(8usize)?,
         deadline(),
@@ -326,6 +338,7 @@ async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
         TerminalDisposition::Succeeded
     );
     let items = collect_batch(projection.project_batch(
+        crate::execution(crate::fixture_tenant(), 1),
         &Validator,
         NonZeroUsize::MIN,
         deadline(),
@@ -364,6 +377,7 @@ async fn independent_deadline(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     let task = tokio::spawn(async move {
         collect_batch(projection.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             OperationDeadline::from_remaining(Duration::from_secs(1)),
@@ -410,6 +424,7 @@ async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
     let projection = &p;
     let project = async move {
         collect_batch(projection.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             capacity,
             deadline(),
@@ -473,7 +488,7 @@ async fn index_admission(f: &Fixture) -> anyhow::Result<()> {
             .execute(&f.owner)
             .await?;
         let result =
-            PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+            PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
                 .await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(original))
             .execute(&f.owner)
@@ -506,7 +521,7 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
             .execute(&f.owner)
             .await?;
         let result =
-            PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+            PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
                 .await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(original))
             .execute(&f.owner)
@@ -517,7 +532,7 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
         );
     }
     let restored =
-        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
             .await?;
     restored.close().await;
     Ok(())

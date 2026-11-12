@@ -38,7 +38,10 @@ impl IngressValidator<Vec<u8>> for Validator {
         {
             return Err(EnvelopeValidationFailure::MalformedIdentity);
         }
-        Ok(challenge.verified())
+        Ok({
+            let execution = crate::execution(challenge.message().metadata().tenant_id(), 1);
+            challenge.verified(execution)
+        })
     }
 }
 struct Effect(bool);

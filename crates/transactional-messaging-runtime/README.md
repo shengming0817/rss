@@ -3,7 +3,7 @@
 Provider-neutral execution algorithms and managed worker integration for
 `rss-transactional-messaging`.
 
-The producer side owns `relay_once`, bounded concurrent claim dispatch, publish-before-settlement,
+The producer side owns `relay_once(binding, ...)`, bounded concurrent claim dispatch, publish-before-settlement,
 same-ID ambiguous retry, and a polling worker with skipped missed ticks. Every already claimed entry
 is drained before a batch error is returned. Cancellation stops new claims; the active batch may
 finish within the host's explicit shutdown budget. `RelayConfig` accepts polling intervals from
@@ -14,6 +14,14 @@ timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; 
 settlement timeout stop downstream work without inventing durable state.
 The store's `delivery_budget()` is the single lease/admission budget source; relay callers do not
 supply a second budget that could disagree with durable lease TTL.
+
+
+Each relay call explicitly selects one `ExecutionBinding` (storage, tenant, expected epoch).
+`RelayWorker::run(binding, token)` and its managed registration retain that host-assigned task
+identity; hosts select changing tenants through separate single-call operations on shared stores.
+An ownership-lost result stops the task without refreshing its epoch. Consumer workers obtain each
+delivery's execution identity from the existing trusted ingress validator via
+`challenge.verified(binding)`. Once claimed, execution and renewal retain the claim's original identity.
 
 The consumer side owns `consume_once`: validate, claim, periodic lease renewal, bounded handler
 retry, transaction outcome, release/abandon, and commit-before-ACK settlement. Renewal runs across

@@ -171,15 +171,14 @@ impl<K: Aead + Send + Sync> RecoveryStore for PgRecoveryStore<K> {
         request: &AuthorizedMutation,
         deadline: OperationDeadline,
     ) -> Result<Option<Receipt>, Error> {
-        if binding.tenant() != request.request().tenant() { return Err(Error::Unauthorized); }
+        if binding.tenant() != request.request().tenant() {
+            return Err(Error::Unauthorized);
+        }
         let result = self
             .runtime
-            .local_tx_with_context(
-                binding,
-                deadline,
-                request.request(),
-                |request, tx| Box::pin(mutation::read_receipt(tx, request)),
-            )
+            .local_tx_with_context(binding, deadline, request.request(), |request, tx| {
+                Box::pin(mutation::read_receipt(tx, request))
+            })
             .await;
         map_attempt(result).fold(Ok, Err, Err, Err, Err, Err)
     }

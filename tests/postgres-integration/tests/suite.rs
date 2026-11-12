@@ -7,6 +7,7 @@ mod fence_fixture;
 mod adversarial;
 mod companion;
 mod conformance;
+mod dynamic_scope;
 mod examples;
 mod lifecycle;
 mod partition;
@@ -68,18 +69,19 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         Box::pin(examples::run(&fixture, &network, &owner)).await?;
         let timer = Timer::new();
         let config = PgConfig::new(&params.host, params.port, &params.database, "tmsg_runtime", PgPassword::new("fixture-only"), rss_transactional_messaging_postgres::PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?);
+        Box::pin(dynamic_scope::run(config.clone(), &owner)).await?;
         transaction_only_permissions(&fixture, &owner, config.clone()).await?;
         consumer_only_permissions(&owner, config.clone()).await?;
         let raw_runtime = PgPoolOptions::new().max_connections(2).acquire_timeout(Duration::from_secs(5))
             .connect_with(PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database)
                 .username("tmsg_runtime").password("fixture-only").ssl_mode(PgSslMode::VerifyFull)
                 .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec())).await?;
-        let runtime = Arc::new(PgRuntime::connect(config.clone(), timer, fence_fixture::binding()).await?);
+        let runtime = Arc::new(PgRuntime::connect(config.clone(), timer, fence_fixture::storage()).await?);
         eprintln!("pg-suite phase=tls_rejections");
         tls_rejections(&fixture, &network).await?;
         assert!(!runtime.is_closed());
         eprintln!("pg-suite phase=wakeup");
-        Box::pin(wakeup::run(runtime.clone(), &owner, config.clone())).await?;
+        Box::pin(wakeup::run(runtime.clone(), &owner)).await?;
         eprintln!("pg-suite phase=outbox_roundtrip");
         Box::pin(companion::run(runtime.clone(), &owner)).await?;
         outbox_roundtrip(runtime.clone()).await?;
@@ -130,7 +132,7 @@ async fn tls_rejections(
             PgPassword::new(password),
             PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
         );
-        let error = PgRuntime::connect(config, Timer::new(), fence_fixture::binding())
+        let error = PgRuntime::connect(config, Timer::new(), fence_fixture::storage())
             .await
             .err()
             .expect("invalid configuration");
@@ -155,7 +157,7 @@ async fn tls_rejections(
         PgPassword::new("fixture-only"),
         PgPrivateCa::from_pem(fixture.wrong_ca_pem().as_bytes().to_vec())?,
     );
-    let error = PgRuntime::connect(wrong_ca, Timer::new(), fence_fixture::binding())
+    let error = PgRuntime::connect(wrong_ca, Timer::new(), fence_fixture::storage())
         .await
         .err()
         .expect("wrong CA must fail TLS");
@@ -177,7 +179,7 @@ async fn tls_rejections(
         PgPassword::new(&params.password),
         PgPrivateCa::from_pem(wrong_identity.ca_pem().as_bytes().to_vec())?,
     );
-    let result = PgRuntime::connect(wrong_host, Timer::new(), fence_fixture::binding()).await;
+    let result = PgRuntime::connect(wrong_host, Timer::new(), fence_fixture::storage()).await;
     assert_eq!(
         result.err().expect("wrong hostname must fail TLS").kind(),
         MessagingErrorKind::Permanent
@@ -224,7 +226,10 @@ impl rss_transactional_messaging::transaction::IngressValidator<Vec<u8>> for Val
         rss_transactional_messaging::transaction::VerifiedIngress,
         rss_transactional_messaging::transaction::EnvelopeValidationFailure,
     > {
-        Ok(challenge.verified())
+        Ok({
+            let execution = crate::execution(challenge.message().metadata().tenant_id(), 1);
+            challenge.verified(execution)
+        })
     }
 }
 fn message(id: &str) -> rss_transactional_messaging::message::MessageEnvelope<Vec<u8>> {
@@ -298,7 +303,7 @@ async fn localtx_faults(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
     ] {
         runtime.inject_next_transaction_fault(fault);
         let attempt = runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |connection| Box::pin(async move {
                 sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,$2)")
@@ -353,8 +358,13 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
     ] {
         let message = message(id);
         let binding = binding(&message);
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(binding.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("new claim")
         };
@@ -364,13 +374,23 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
             .await;
         assert_eq!(outcome.status(), rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
         let receipt = inbox
-            .read_terminal(binding.identity(), deadline())
+            .read_terminal(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
             .await?
             .expect("durable receipt");
         assert_eq!(receipt.disposition(), disposition);
         assert!(binding.validate_terminal(receipt).is_ok());
         assert!(matches!(
-            inbox.claim(binding.identity(), deadline()).await?,
+            inbox
+                .claim(
+                    crate::execution((binding.identity()).tenant_id(), 1),
+                    binding.identity(),
+                    deadline()
+                )
+                .await?,
             IdempotencyDisposition::Terminal(_)
         ));
         let actual: i64 =
@@ -427,7 +447,7 @@ async fn outbox_roundtrip(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
     };
     let append_store = store.clone();
     runtime
-        .local_tx(tenant, deadline(), move |tx| {
+        .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
             Box::pin(async move { append_store.append(tx, message).await.map_err(Into::into) })
         })
         .await
@@ -443,7 +463,11 @@ async fn outbox_roundtrip(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
             Err,
         )?;
     let claims = store
-        .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            std::num::NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?;
     let claim = claims.into_iter().next().expect("one durable claim");
     assert_eq!(
@@ -458,7 +482,11 @@ async fn outbox_roundtrip(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
         .await?;
     assert_eq!(
         store
-            .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                std::num::NonZeroUsize::MIN,
+                deadline()
+            )
             .await?
             .into_iter()
             .count(),
@@ -478,7 +506,7 @@ async fn transaction_only_permissions(
         .execute(owner)
         .await?;
     let runtime = Arc::new(
-        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding()).await?,
+        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::storage()).await?,
     );
     lifecycle::business_outbox_atomicity(runtime.clone(), owner).await?;
     producer_relay_denied(runtime.clone()).await?;
@@ -494,7 +522,7 @@ async fn producer_admission_rejections(
     config: PgConfig,
 ) -> anyhow::Result<()> {
     assert!(
-        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err()
     );
@@ -503,7 +531,7 @@ async fn producer_admission_rejections(
         .execute(owner)
         .await?;
     assert!(
-        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err()
     );
@@ -513,7 +541,7 @@ async fn producer_admission_rejections(
 
     sqlx::raw_sql("CREATE ROLE tmsg_wakeup_only NOLOGIN; GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_wakeup_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.next_outbox_wakeup(uuid,text) TO tmsg_wakeup_only; GRANT tmsg_wakeup_only TO tmsg_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
     let wakeup_role =
-        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding()).await;
+        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::storage()).await;
     sqlx::raw_sql("REVOKE tmsg_wakeup_only FROM tmsg_runtime; REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.next_outbox_wakeup(uuid,text) FROM tmsg_wakeup_only; REVOKE USAGE ON SCHEMA rss_transactional_messaging FROM tmsg_wakeup_only; DROP ROLE tmsg_wakeup_only").execute(owner).await?;
     assert!(
         wakeup_role.is_err(),
@@ -522,7 +550,7 @@ async fn producer_admission_rejections(
 
     sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime").execute(owner).await?;
     assert!(
-        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err()
     );
@@ -543,7 +571,7 @@ async fn producer_relay_denied(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
         "SELECT rss_transactional_messaging.settle_outbox(NULL,NULL,NULL,NULL,NULL,NULL)",
     ] {
         let failure = runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |connection| {
                         Box::pin(async move {
@@ -571,17 +599,17 @@ async fn consumer_only_permissions(owner: &sqlx::PgPool, config: PgConfig) -> an
     rss_transactional_messaging_postgres::grant_consumer(&mut connection, "tmsg_runtime").await?;
     drop(connection);
     let consumer = Arc::new(
-        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding()).await?,
+        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::storage()).await?,
     );
     assert!(
-        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err()
     );
     consumer_writer_denied(consumer.clone()).await?;
     sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime").execute(owner).await?;
     assert!(
-        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err()
     );
@@ -597,7 +625,7 @@ async fn consumer_writer_denied(consumer: Arc<PgRuntime>) -> anyhow::Result<()> 
     );
     let attempt = consumer
         .local_tx(
-            message("consumer-forgery").metadata().tenant_id(),
+            crate::execution(message("consumer-forgery").metadata().tenant_id(), 1),
             deadline(),
             move |tx| {
                 Box::pin(async move {
@@ -624,10 +652,29 @@ async fn consumer_writer_denied(consumer: Arc<PgRuntime>) -> anyhow::Result<()> 
 async fn consumer_set_role_denied(owner: &sqlx::PgPool, config: PgConfig) -> anyhow::Result<()> {
     sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) FROM tmsg_runtime; CREATE ROLE tmsg_writer_only NOLOGIN; GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_writer_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_writer_only; GRANT tmsg_writer_only TO tmsg_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
     assert!(
-        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_consumer(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err()
     );
     sqlx::raw_sql("REVOKE tmsg_writer_only FROM tmsg_runtime; REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) FROM tmsg_writer_only; REVOKE USAGE ON SCHEMA rss_transactional_messaging FROM tmsg_writer_only; DROP ROLE tmsg_writer_only; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime").execute(owner).await?;
     Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        .expect("fixture tenant")
 }

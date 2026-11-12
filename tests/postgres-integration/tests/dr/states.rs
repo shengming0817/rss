@@ -15,13 +15,12 @@ pub(super) async fn fixture_sql(
 }
 pub(super) async fn runtime(
     config: &PgConfig,
-    epoch: i64,
 ) -> anyhow::Result<(Arc<PgRuntime>, PgOutboxStore<()>)> {
     let r = Arc::new(
         Box::pin(PgRuntime::connect(
             config.clone(),
             Timer::new(),
-            binding(epoch)?,
+            binding(1)?.storage(),
         ))
         .await?,
     );
@@ -114,22 +113,24 @@ pub async fn run(
     let store3 = Box::pin(PgDrStore::connect(
         operator.clone(),
         Timer::new(),
-        binding(3)?,
+        (binding(3)?).storage(),
     ))
     .await?;
     Box::pin(invalid_facts(owner, &store3)).await?;
     let p = plan("published", 3, OperationId::new()).await?;
     committed(store3.apply(&p, deadline()).await)?;
-    let (r4, outbox4) = runtime(config, 4).await?;
+    let (r4, outbox4) = runtime(config).await?;
     let two = std::num::NonZeroUsize::new(2).ok_or_else(|| anyhow::anyhow!("limit"))?;
-    let batch = outbox4.claim_partition_heads(two, deadline()).await?;
+    let batch = outbox4
+        .claim_partition_heads(binding(4)?, two, deadline())
+        .await?;
     assert_eq!(
         batch.len(),
         1,
         "DR head prevents successor admission in the same batch"
     );
     assert_eq!(status(&store3, &p).await?, vec![MemberStatus::Publishing]);
-    let held = outbox4.next_wakeup(deadline()).await?;
+    let held = outbox4.next_wakeup(binding(4)?, deadline()).await?;
     assert!(
         !held.due_now() && held.next_deadline().is_some(),
         "DR member lease controls wakeup while its source is published"
@@ -140,7 +141,7 @@ pub async fn run(
         .ok_or_else(|| anyhow::anyhow!("claim"))?;
     assert!(
         outbox4
-            .claim_partition_heads(two, deadline())
+            .claim_partition_heads(binding(4)?, two, deadline())
             .await?
             .is_empty()
     );
@@ -148,21 +149,26 @@ pub async fn run(
         .settle(claim, OutboxSettlement::Retry, deadline())
         .await?;
     assert_eq!(status(&store3, &p).await?, vec![MemberStatus::Pending]);
-    let retry = outbox4.next_wakeup(deadline()).await?;
+    let retry = outbox4.next_wakeup(binding(4)?, deadline()).await?;
     assert!(
         !retry.due_now() && retry.next_deadline().is_some(),
         "DR member retry controls wakeup"
     );
     assert!(
         outbox4
-            .claim_partition_heads(two, deadline())
+            .claim_partition_heads(binding(4)?, two, deadline())
             .await?
             .is_empty()
     );
     fixture_sql(owner,4,"UPDATE rss_transactional_messaging.dr_members SET retry_after=clock_timestamp()-interval '1 second' WHERE status='pending'").await?;
-    assert!(outbox4.next_wakeup(deadline()).await?.due_now());
+    assert!(
+        outbox4
+            .next_wakeup(binding(4)?, deadline())
+            .await?
+            .due_now()
+    );
     let claim = outbox4
-        .claim_partition_heads(two, deadline())
+        .claim_partition_heads(binding(4)?, two, deadline())
         .await?
         .into_iter()
         .next()
@@ -176,11 +182,11 @@ pub async fn run(
     );
     assert!(
         outbox4
-            .claim_partition_heads(two, deadline())
+            .claim_partition_heads(binding(4)?, two, deadline())
             .await?
             .is_empty()
     );
-    let blocked = outbox4.next_wakeup(deadline()).await?;
+    let blocked = outbox4.next_wakeup(binding(4)?, deadline()).await?;
     assert!(
         !blocked.due_now() && blocked.next_deadline().is_none(),
         "blocked DR head cannot schedule its successor"
@@ -188,7 +194,7 @@ pub async fn run(
     let store4 = Box::pin(PgDrStore::connect(
         operator.clone(),
         Timer::new(),
-        binding(4)?,
+        (binding(4)?).storage(),
     ))
     .await?;
     let expired = plan("published", 4, OperationId::new()).await?;
@@ -196,7 +202,7 @@ pub async fn run(
     let store5 = Box::pin(PgDrStore::connect(
         operator.clone(),
         Timer::new(),
-        binding(5)?,
+        (binding(5)?).storage(),
     ))
     .await?;
     assert_eq!(
@@ -206,10 +212,10 @@ pub async fn run(
         ))]
     );
     fixture_sql(owner,5,"UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 second' WHERE message_id='published'").await?;
-    let (r5, outbox5) = runtime(config, 5).await?;
+    let outbox5 = &outbox4;
     assert!(
         outbox5
-            .claim_partition_heads(two, deadline())
+            .claim_partition_heads(binding(5)?, two, deadline())
             .await?
             .is_empty()
     );
@@ -220,9 +226,9 @@ pub async fn run(
     fixture_sql(owner,5,"UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=(SELECT automatic_retry_deadline FROM public.dr_original) WHERE message_id='published'").await?;
     let completed = plan("published", 5, OperationId::new()).await?;
     committed(store5.apply(&completed, deadline()).await)?;
-    let (r6, outbox6) = runtime(config, 6).await?;
+    let outbox6 = &outbox4;
     let claim = outbox6
-        .claim_partition_heads(two, deadline())
+        .claim_partition_heads(binding(6)?, two, deadline())
         .await?
         .into_iter()
         .next()
@@ -234,7 +240,9 @@ pub async fn run(
         status(&store5, &completed).await?,
         vec![MemberStatus::Completed]
     );
-    let successor = outbox6.claim_partition_heads(two, deadline()).await?;
+    let successor = outbox6
+        .claim_partition_heads(binding(6)?, two, deadline())
+        .await?;
     assert_eq!(successor.len(), 1);
     let claim = successor
         .into_iter()
@@ -253,8 +261,6 @@ pub async fn run(
     let unchanged:bool=sqlx::query_scalar("SELECT o.status='published' AND o.envelope=r.envelope AND o.fingerprint=r.fingerprint AND o.automatic_retry_deadline=r.automatic_retry_deadline FROM rss_transactional_messaging.outbox o CROSS JOIN public.dr_original r WHERE o.message_id='published'").fetch_one(owner).await?;
     assert!(unchanged);
     r4.close().await;
-    r5.close().await;
-    r6.close().await;
     store3.close().await;
     store4.close().await;
     store5.close().await;

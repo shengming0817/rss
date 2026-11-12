@@ -127,7 +127,8 @@ pub(crate) async fn execute_transaction<
     source: Option<(&crate::PgOutboxStore<()>, &crate::PgOutboxClaim)>,
     #[cfg(feature = "integration")] injection: Option<crate::transaction::TransactionInjection>,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
-    if !claim.matches(runtime) || source.is_some_and(|(_, source)| source.binding != claim.binding) {
+    if !claim.matches(runtime) || source.is_some_and(|(_, source)| source.binding != claim.binding)
+    {
         return TransactionOutcome::fenced();
     }
     let timer = &runtime.timer;
@@ -154,12 +155,7 @@ pub(crate) async fn execute_transaction<
             Ok(value) => value,
             _ => return TransactionOutcome::not_started(FailureClass::Infrastructure),
         };
-    let mut tx = PgTransaction::new(
-        transaction.connection(),
-        claim.binding,
-        cutoff,
-        runtime,
-    );
+    let mut tx = PgTransaction::new(transaction.connection(), claim.binding, cutoff, runtime);
     let body = within(timer, cutoff, |_| async {
         let disposition = effect_body(effect, mode, &mut tx, claim, message, &intent).await?;
         if let (Some(disposition), Some((store, source))) = (disposition, source) {

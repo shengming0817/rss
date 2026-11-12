@@ -1,14 +1,10 @@
 //! Real-PG scheduling snapshots share claim eligibility without acquiring message ownership.
-use super::{Timer, deadline, fence_fixture, message, outbox_budget};
+use super::{Timer, deadline, message, outbox_budget};
 use rss_request_context::{Clock, TenantId};
 use rss_transactional_messaging::{
-    error::MessagingErrorKind,
-    fence::{Epoch, ExecutionBinding},
-    message::*,
-    outbox::*,
-    policy::OperationDeadline,
+    error::MessagingErrorKind, message::*, outbox::*, policy::OperationDeadline,
 };
-use rss_transactional_messaging_postgres::{PgConfig, PgOutboxStore, PgRuntime};
+use rss_transactional_messaging_postgres::{PgOutboxStore, PgRuntime};
 use sqlx::PgPool;
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -52,7 +48,7 @@ async fn append(
         outbox_budget(Duration::from_secs(60)),
     )?;
     runtime
-        .local_tx(tenant, deadline(), move |tx| {
+        .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
             Box::pin(async move {
                 let partitions = events
                     .iter()
@@ -73,23 +69,9 @@ async fn append(
     Ok(())
 }
 
-pub(super) async fn run(
-    runtime: Arc<PgRuntime>,
-    owner: &PgPool,
-    config: PgConfig,
-) -> anyhow::Result<()> {
+pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Result<()> {
     let tenant = message("wakeup").metadata().tenant_id();
-    let scoped = Arc::new(
-        PgRuntime::connect(
-            config,
-            Timer::new(),
-            ExecutionBinding::new(
-                fence_fixture::binding().storage(),
-                vec![(tenant, Epoch::new(1)?)],
-            )?,
-        )
-        .await?,
-    );
+    let scoped = runtime.clone();
     snapshots(&runtime, &scoped, owner, tenant).await?;
     partition_and_lease(&scoped, owner, tenant).await?;
     sqlx::query(
@@ -104,7 +86,7 @@ pub(super) async fn run(
         outbox_budget(Duration::from_secs(60)),
     )?;
     let error = store
-        .next_wakeup(deadline())
+        .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
         .await
         .expect_err("fenced scheduling rejected");
     let multi = PgOutboxStore::<()>::new(
@@ -112,10 +94,13 @@ pub(super) async fn run(
         MessagingDomain::parse("wakeup.scope")?,
         outbox_budget(Duration::from_secs(60)),
     )?;
-    let admitted = multi.next_wakeup(deadline()).await?;
+    let other = TenantId::parse("22222222-2222-2222-2222-222222222222")?;
+    let admitted = multi
+        .next_wakeup(crate::execution(other, 1), deadline())
+        .await?;
     assert!(
         admitted.due_now() && admitted.next_deadline().is_none(),
-        "fenced tenant is skipped without hiding another admitted tenant"
+        "explicitly selecting another tenant succeeds on the same runtime"
     );
     sqlx::query(
         "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=1 WHERE tenant_id=$1::uuid",
@@ -124,7 +109,6 @@ pub(super) async fn run(
     .execute(owner)
     .await?;
     assert_eq!(error.kind(), MessagingErrorKind::OwnershipLost);
-    scoped.close().await;
     Ok(())
 }
 
@@ -150,11 +134,13 @@ async fn snapshots(
         vec![event("wakeup.other-domain", tenant, "wakeup.other", None)],
     )
     .await?;
-    let idle = store.next_wakeup(deadline()).await?;
+    let idle = store
+        .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+        .await?;
     assert!(!idle.due_now());
     assert!(
         idle.next_deadline().is_none(),
-        "unbound tenant/domain cannot schedule this store"
+        "unselected tenant/domain cannot affect this operation"
     );
     ready_snapshot(scoped, &store, owner, tenant).await?;
     contended_snapshot(&store, owner).await
@@ -177,7 +163,9 @@ async fn ready_snapshot(
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()+interval '10 seconds' WHERE message_id='wakeup.future'").execute(owner).await?;
     let before: Vec<serde_json::Value> = sqlx::query_scalar("SELECT to_jsonb(o) FROM rss_transactional_messaging.outbox o WHERE domain='wakeup.scope' ORDER BY seq").fetch_all(owner).await?;
     let start = Timer::new().now();
-    let wake = store.next_wakeup(deadline()).await?;
+    let wake = store
+        .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+        .await?;
     assert!(wake.due_now());
     let next = wake
         .next_deadline()
@@ -196,11 +184,17 @@ async fn contended_snapshot(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow
     sqlx::query("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id='wakeup.ready' FOR UPDATE").execute(&mut *locked).await?;
     assert!(
         store
-            .claim_partition_heads(NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::MIN,
+                deadline()
+            )
             .await?
             .is_empty()
     );
-    let contended = store.next_wakeup(deadline()).await?;
+    let contended = store
+        .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+        .await?;
     assert!(
         contended.due_now() && contended.next_deadline().is_some(),
         "a contended due row must not hide a future timer or block the snapshot"
@@ -208,7 +202,10 @@ async fn contended_snapshot(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow
     locked.rollback().await?;
     assert!(
         store
-            .next_wakeup(OperationDeadline::from_remaining(Duration::ZERO))
+            .next_wakeup(
+                crate::execution(crate::fixture_tenant(), 1),
+                OperationDeadline::from_remaining(Duration::ZERO)
+            )
             .await
             .is_err()
     );
@@ -234,12 +231,18 @@ async fn partition_and_lease(
     )
     .await?;
     let claim = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
         .expect("head");
-    let held = store.next_wakeup(deadline()).await?;
+    let held = store
+        .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+        .await?;
     assert!(
         !held.due_now(),
         "a held head blocks its already-due successor"
@@ -257,35 +260,53 @@ async fn partition_and_lease(
 
 async fn retry_and_expiry(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()+interval '10 seconds' WHERE message_id='wakeup.head'").execute(owner).await?;
-    let retry = store.next_wakeup(deadline()).await?;
+    let retry = store
+        .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+        .await?;
     assert!(!retry.due_now());
     assert!(retry.next_deadline().is_some());
     assert!(
         store
-            .claim_partition_heads(NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::MIN,
+                deadline()
+            )
             .await?
             .is_empty()
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()-interval '1 second' WHERE message_id='wakeup.head'").execute(owner).await?;
-    assert!(store.next_wakeup(deadline()).await?.due_now());
+    assert!(
+        store
+            .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+            .await?
+            .due_now()
+    );
     expired_lease(store, owner).await
 }
 
 async fn expired_lease(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow::Result<()> {
     let claim = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
         .expect("retry due");
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='wakeup.head'").execute(owner).await?;
     assert!(
-        store.next_wakeup(deadline()).await?.due_now(),
+        store
+            .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+            .await?
+            .due_now(),
         "expired publishing lease is due"
     );
     assert!(
         store
-            .next_wakeup(deadline())
+            .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
             .await?
             .next_deadline()
             .is_none()
@@ -296,7 +317,11 @@ async fn expired_lease(store: &PgOutboxStore<()>, owner: &PgPool) -> anyhow::Res
 
 async fn drain_ordered(store: &PgOutboxStore<()>) -> anyhow::Result<()> {
     let reclaimed = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
@@ -305,11 +330,18 @@ async fn drain_ordered(store: &PgOutboxStore<()>) -> anyhow::Result<()> {
         .settle(reclaimed, OutboxSettlement::Published(()), deadline())
         .await?;
     assert!(
-        store.next_wakeup(deadline()).await?.due_now(),
+        store
+            .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+            .await?
+            .due_now(),
         "publishing the head admits its successor"
     );
     let tail = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
@@ -317,7 +349,9 @@ async fn drain_ordered(store: &PgOutboxStore<()>) -> anyhow::Result<()> {
     store
         .settle(tail, OutboxSettlement::Published(()), deadline())
         .await?;
-    let idle = store.next_wakeup(deadline()).await?;
+    let idle = store
+        .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+        .await?;
     assert!(!idle.due_now() && idle.next_deadline().is_none());
     Ok(())
 }

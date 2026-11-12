@@ -133,7 +133,7 @@ async fn stores_for(
     callers: CallerRoles,
 ) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore<()>>, Arc<PgOutboxStore<()>>)> {
     let runtime =
-        Arc::new(PgRuntime::connect(config, Timer::new(), fence_fixture::binding()).await?);
+        Arc::new(PgRuntime::connect(config, Timer::new(), fence_fixture::storage()).await?);
     let outbox = Arc::new(PgOutboxStore::new(
         runtime.clone(),
         MessagingDomain::parse("device-tests")?,
@@ -148,11 +148,15 @@ async fn stores_for(
     let supersede_batch_size = BatchLimit::new(2)?;
     let store = Arc::new(committed(
         runtime
-            .local_tx(TenantId::parse(TENANT)?, budget()?, move |tx| {
-                Box::pin(async move {
-                    PgStore::new(tx, selected, clock, &callers, supersede_batch_size).await
-                })
-            })
+            .local_tx(
+                crate::execution(TenantId::parse(TENANT)?, 1),
+                budget()?,
+                move |tx| {
+                    Box::pin(async move {
+                        PgStore::new(tx, selected, clock, &callers, supersede_batch_size).await
+                    })
+                },
+            )
             .await,
     )?);
     Ok((runtime, store, outbox))
@@ -247,7 +251,7 @@ impl Fixture {
         let store = self.store.clone();
         committed(
             self.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.initialize(tx, s, coordinate).await })
                 })
                 .await,
@@ -259,7 +263,7 @@ impl Fixture {
         let store = self.store.clone();
         committed(
             self.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.queue(tx, spec, m).await })
                 })
                 .await,
@@ -270,7 +274,7 @@ impl Fixture {
         let store = self.store.clone();
         committed(
             self.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.load(tx, s, &id).await })
                 })
                 .await,
@@ -292,7 +296,7 @@ impl Fixture {
         let store = self.store.clone();
         committed(
             self.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.report(tx, &input).await })
                 })
                 .await,
@@ -303,7 +307,7 @@ impl Fixture {
         let limit = BatchLimit::new(64)?;
         committed(
             self.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.recover(tx, s, limit, None).await })
                 })
                 .await,
@@ -314,7 +318,7 @@ impl Fixture {
         let store = self.store.clone();
         committed(
             self.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.recover_exact(tx, s, &id).await })
                 })
                 .await,
@@ -329,6 +333,7 @@ impl Fixture {
             let claims = self
                 .outbox
                 .claim_partition_heads(
+                    crate::execution(crate::fixture_tenant(), 1),
                     std::num::NonZeroUsize::MIN.saturating_add(63),
                     OperationDeadline::from_cutoff(deadline, &timer),
                 )
@@ -402,4 +407,23 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
     })
     .await??;
     Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        .expect("fixture tenant")
 }

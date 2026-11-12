@@ -14,7 +14,9 @@ pub(super) async fn query(
     request: &Query,
     deadline: OperationDeadline,
 ) -> Result<Page, Error> {
-    if binding.tenant() != request.tenant() { return Err(Error::Unauthorized); }
+    if binding.tenant() != request.tenant() {
+        return Err(Error::Unauthorized);
+    }
     let result = runtime.local_tx_with_context(binding, deadline, request, |request, tx| Box::pin(async move {
         let sql = match request.source() {
             Source::Consumer => "SELECT capsule IS NOT NULL AS hot_available, id::text AS key, message_id, recovery_version, false AS resolved, consumer_group,contract,contract_version,schema_digest,reason,(extract(epoch FROM created_at)*1000000)::bigint AS captured_at, (SELECT count(*) FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed') AS replay_count, (SELECT replay_message_id FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed' ORDER BY created_at DESC,operation_id DESC LIMIT 1) AS last_replay FROM rss_transactional_messaging.consumer_dead_letter d WHERE tenant_id=$1::uuid AND ($2::text IS NULL OR id::text COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR id::text=$3) ORDER BY id::text COLLATE \"C\" LIMIT $4",

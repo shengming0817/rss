@@ -199,7 +199,9 @@ impl InboxStore for PgInboxStore {
                 .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str()).bind(token).bind(lease_ms)
                 .fetch_optional(&mut *tx.connection).await?;
             Ok(match remaining { Some(value) => LeaseStatus::Held { remaining: Duration::from_micros(value.unsigned_abs()) }, None => LeaseStatus::Lost })
-        })).await).map_err(PgError::port)
+        })).await).map_err(PgError::port).or_else(|error| {
+            if error.kind() == MessagingErrorKind::OwnershipLost { Ok(LeaseStatus::Lost) } else { Err(error) }
+        })
     }
     async fn release(
         &self,

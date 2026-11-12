@@ -72,14 +72,24 @@ pub struct ExecutionBinding {
 impl ExecutionBinding {
     /// Combine validated coordinates without acquiring resources or admitting execution.
     pub const fn new(storage: StorageIdentity, tenant: TenantId, epoch: Epoch) -> Self {
-        Self { storage, tenant, epoch }
+        Self {
+            storage,
+            tenant,
+            epoch,
+        }
     }
     /// Exact physical restore unit and externally established lineage.
-    pub const fn storage(self) -> StorageIdentity { self.storage }
+    pub const fn storage(self) -> StorageIdentity {
+        self.storage
+    }
     /// Tenant selected for this operation.
-    pub const fn tenant(self) -> TenantId { self.tenant }
+    pub const fn tenant(self) -> TenantId {
+        self.tenant
+    }
     /// Expected generation; never refreshed from durable state.
-    pub const fn epoch(self) -> Epoch { self.epoch }
+    pub const fn epoch(self) -> Epoch {
+        self.epoch
+    }
 }
 impl std::fmt::Debug for ExecutionBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -1,12 +1,12 @@
 use super::*;
 use rss_transactional_messaging::{inbox::*, message::*, transaction::*};
-struct Validator;
+struct Validator(ExecutionBinding);
 impl IngressValidator<Vec<u8>> for Validator {
     fn validate(
         &self,
         c: IngressChallenge<'_, Vec<u8>>,
     ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
-        Ok(c.verified())
+        Ok(c.verified(self.0))
     }
 }
 struct Effect;
@@ -32,10 +32,13 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         Ok(TerminalDisposition::Succeeded)
     }
 }
-fn consumer_binding(message: &MessageEnvelope<Vec<u8>>) -> anyhow::Result<VerifiedConsumerBinding> {
+fn consumer_binding(
+    execution: ExecutionBinding,
+    message: &MessageEnvelope<Vec<u8>>,
+) -> anyhow::Result<VerifiedConsumerBinding> {
     let m = message.metadata();
     verify_ingress(
-        &Validator,
+        &Validator(execution),
         ConsumerGroup::parse("test")?,
         &SubscriptionIdentity::new(m.domain().clone(), m.route().clone(), m.contract().clone()),
         message,
@@ -46,7 +49,7 @@ fn consumer_binding(message: &MessageEnvelope<Vec<u8>>) -> anyhow::Result<Verifi
 pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let clock = Timer::new();
     let msg = message("broker-member");
-    let consumer = consumer_binding(&msg)?;
+    let consumer = consumer_binding(binding(9)?, &msg)?;
     let plan = Plan::new(
         tenant(),
         OperationId::new(),
@@ -59,15 +62,19 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         }],
     )?;
     let request = authorize_dr(&Allow, plan, &clock, clock.cutoff()).await?;
-    let store = PgDrStore::connect(operator.clone(), Timer::new(), binding(8)?).await?;
+    let store = PgDrStore::connect(operator.clone(), Timer::new(), (binding(8)?).storage()).await?;
     committed(store.apply(&request, deadline()).await)?;
     sqlx::raw_sql("CREATE TABLE public.dr_effect(id text PRIMARY KEY); GRANT SELECT,INSERT ON public.dr_effect TO dr_runtime;").execute(owner).await?;
-    let runtime = Arc::new(PgRuntime::connect(config.clone(), Timer::new(), binding(9)?).await?);
+    let runtime =
+        Arc::new(PgRuntime::connect(config.clone(), Timer::new(), (binding(9)?).storage()).await?);
     let inbox = PgInboxStore::new(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let claim = match inbox.claim(consumer.identity(), deadline()).await? {
+    let claim = match inbox
+        .claim(consumer.execution(), consumer.identity(), deadline())
+        .await?
+    {
         IdempotencyDisposition::Acquired(c) => c,
         _ => anyhow::bail!("consumer claim"),
     };
@@ -85,7 +92,9 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         vec![MemberStatus::Completed]
     );
     assert!(matches!(
-        inbox.claim(consumer.identity(), deadline()).await?,
+        inbox
+            .claim(consumer.execution(), consumer.identity(), deadline())
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM public.dr_effect")
@@ -94,7 +103,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
     assert_eq!(count, 1);
     // Same tenant/id/group but different trusted authored facts must roll back effects and progress.
     let mismatch = message("broker-mismatch");
-    let identity = consumer_binding(&mismatch)?;
+    let identity = consumer_binding(binding(10)?, &mismatch)?;
     let clock = Timer::new();
     let request = authorize_dr(
         &Allow,
@@ -113,14 +122,18 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         clock.cutoff(),
     )
     .await?;
-    let operator4 = PgDrStore::connect(operator.clone(), Timer::new(), binding(9)?).await?;
+    let operator4 =
+        PgDrStore::connect(operator.clone(), Timer::new(), (binding(9)?).storage()).await?;
     committed(operator4.apply(&request, deadline()).await)?;
-    let next = Arc::new(PgRuntime::connect(config.clone(), Timer::new(), binding(10)?).await?);
+    let next = runtime.clone();
     let inbox = PgInboxStore::new(
         next.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let claim = match inbox.claim(identity.identity(), deadline()).await? {
+    let claim = match inbox
+        .claim(identity.execution(), identity.identity(), deadline())
+        .await?
+    {
         IdempotencyDisposition::Acquired(c) => c,
         _ => anyhow::bail!("mismatch claim"),
     };
@@ -146,11 +159,12 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         .await?;
     let new_binding = ExecutionBinding::new(
         StorageIdentity::new([1; 16], [3; 16])?,
-        vec![(tenant(), Epoch::new(1)?)],
-    )?;
-    let fresh = PgRuntime::connect(config.clone(), Timer::new(), new_binding).await?;
+        tenant(),
+        Epoch::new(1)?,
+    );
+    let fresh = PgRuntime::connect(config.clone(), Timer::new(), (new_binding).storage()).await?;
     let attempt = fresh
-        .local_tx(tenant(), deadline(), |_| Box::pin(async { Ok(()) }))
+        .local_tx(new_binding, deadline(), |_| Box::pin(async { Ok(()) }))
         .await;
     assert!(
         attempt.fold(
@@ -170,25 +184,26 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         .await?;
     committed(
         fresh
-            .local_tx(tenant(), deadline(), |_| Box::pin(async { Ok(()) }))
+            .local_tx(new_binding, deadline(), |_| Box::pin(async { Ok(()) }))
             .await,
     )?;
-    let old = PgRuntime::connect(config, Timer::new(), binding(1)?).await?;
+    let old = PgRuntime::connect(config, Timer::new(), (binding(1)?).storage()).await?;
     assert!(
-        old.local_tx(tenant(), deadline(), |_| Box::pin(async { Ok(()) }))
-            .await
-            .fold(
-                |_| false,
-                |_| false,
-                |_| false,
-                |_| false,
-                |_| false,
-                |_| true
-            )
+        old.local_tx(crate::execution(tenant(), 1), deadline(), |_| Box::pin(
+            async { Ok(()) }
+        ))
+        .await
+        .fold(
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| true
+        )
     );
     old.close().await;
     fresh.close().await;
-    next.close().await;
     operator4.close().await;
     runtime.close().await;
     store.close().await;

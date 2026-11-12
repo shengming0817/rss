@@ -835,9 +835,15 @@ impl PgTransaction<'_> {
             .as_millis()
             .max(1);
         let millis = i32::try_from(millis).map_err(|_| PgError::InvalidOperationTimeout)?;
-        stage(self.timer, self.cutoff, LocalTxDeadlineStage::Setup,
+        stage(
+            self.timer,
+            self.cutoff,
+            LocalTxDeadlineStage::Setup,
             sqlx::query("SELECT set_config('statement_timeout', $1, true)")
-                .bind(format!("{millis}ms")).execute(&mut *self.connection)).await?;
+                .bind(format!("{millis}ms"))
+                .execute(&mut *self.connection),
+        )
+        .await?;
         crate::fence::setup(self.connection, &self.binding, lock).await?;
         Ok(())
     }

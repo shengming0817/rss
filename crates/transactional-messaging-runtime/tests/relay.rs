@@ -89,6 +89,7 @@ impl OutboxRelayStore<Vec<u8>> for Store {
 
     async fn claim_partition_heads(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         limit: NonZeroUsize,
         _deadline: OperationDeadline,
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
@@ -249,6 +250,7 @@ async fn relay_once_dispatches_claimed_batch_concurrently_with_hard_limit() {
         let publisher = Arc::clone(&publisher);
         async move {
             relay_once(
+                crate::execution(crate::fixture_tenant(), 1),
                 store.as_ref(),
                 publisher.as_ref(),
                 &FakeClock::new(),
@@ -289,6 +291,7 @@ async fn provider_cannot_return_more_claims_than_the_admitted_bound() {
     let publisher = ScriptedPublisher::new([]);
 
     let error = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
         &store,
         &publisher,
         &FakeClock::new(),
@@ -319,6 +322,7 @@ async fn relay_deadline_overflow_emits_a_closed_failure_phase() {
 
     let observations = Arc::new(Mutex::new(Vec::new()));
     let error = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
         &Store::new(OutboxLeaseStatus::Held {
             delivery_remaining: None,
             remaining: Duration::from_secs(10),
@@ -354,6 +358,7 @@ impl OutboxRelayStore<Vec<u8>> for AuditedStore {
 
     async fn claim_partition_heads(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         limit: NonZeroUsize,
         _deadline: OperationDeadline,
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
@@ -446,6 +451,7 @@ async fn relay_drains_partial_failures_and_returns_first_error_in_claim_order() 
         events: Arc::clone(&events),
     };
     let error = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
         &store,
         &AuditedPublisher(Arc::clone(&events)),
         &FakeClock::new(),
@@ -507,7 +513,7 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(worker.run(cancellation.clone()));
+    let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), cancellation.clone()));
     tokio::time::timeout(Duration::from_secs(1), async {
         while publisher.started.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -542,6 +548,7 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
     );
     let (registration, status) = worker.into_registration(
+        execution(fixture_tenant(), 1),
         "relay-test",
         ShutdownBudget::new(Duration::from_secs(1)).expect("shutdown budget"),
     );
@@ -582,7 +589,7 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
         RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(worker.run(cancellation.clone()));
+    let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), cancellation.clone()));
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while store.claim_calls.load(Ordering::SeqCst) == 0 {
@@ -612,12 +619,26 @@ async fn ambiguous_retry_reuses_the_persisted_message_id() {
         PublishOutcome::Confirmed(()),
     ]);
 
-    let first = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
-        .await
-        .expect("first relay");
-    let second = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
-        .await
-        .expect("second relay");
+    let first = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
+        &store,
+        &publisher,
+        &FakeClock::new(),
+        &NoopEmitter,
+        limit(),
+    )
+    .await
+    .expect("first relay");
+    let second = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
+        &store,
+        &publisher,
+        &FakeClock::new(),
+        &NoopEmitter,
+        limit(),
+    )
+    .await
+    .expect("second relay");
 
     assert_eq!(first.retried(), 1);
     assert_eq!(second.published(), 1);
@@ -638,6 +659,7 @@ async fn lost_lease_fences_before_publication() {
     let observations = Arc::new(Mutex::new(Vec::new()));
 
     let report = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
         &store,
         &publisher,
         &FakeClock::new(),
@@ -689,6 +711,7 @@ async fn publication_evidence_maps_to_the_complete_settlement_matrix() {
 
     for (outcome, expected) in cases {
         let report = relay_once(
+            crate::execution(crate::fixture_tenant(), 1),
             &Store::new(OutboxLeaseStatus::Held {
                 delivery_remaining: None,
                 remaining: Duration::from_secs(10),
@@ -715,9 +738,16 @@ async fn delivery_window_controls_publication_without_consuming_settlement_budge
             delivery_remaining: Some(window),
         });
         let publisher = ScriptedPublisher::new([]);
-        let report = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
-            .await
-            .expect("valid lease must permit no-publish settlement");
+        let report = relay_once(
+            crate::execution(crate::fixture_tenant(), 1),
+            &store,
+            &publisher,
+            &FakeClock::new(),
+            &NoopEmitter,
+            limit(),
+        )
+        .await
+        .expect("valid lease must permit no-publish settlement");
         assert_eq!((report.retried(), report.dead_lettered()), expected);
         assert!(publisher.message_ids().is_empty());
     }
@@ -736,9 +766,16 @@ async fn provider_elapsed_time_reduces_budgets_without_claiming_database_expiry(
         });
         store.extend_delay = Some((clock.clone(), Duration::from_millis(500)));
         let publisher = ScriptedPublisher::new([]);
-        let report = relay_once(&store, &publisher, &clock, &NoopEmitter, limit())
-            .await
-            .expect("retry retains settlement budget");
+        let report = relay_once(
+            crate::execution(crate::fixture_tenant(), 1),
+            &store,
+            &publisher,
+            &clock,
+            &NoopEmitter,
+            limit(),
+        )
+        .await
+        .expect("retry retains settlement budget");
         assert_eq!(report.retried(), 1);
         assert_eq!(
             report.dead_lettered(),
@@ -757,9 +794,16 @@ async fn insufficient_authoritative_lease_budget_retries_without_publish() {
     });
     let publisher = ScriptedPublisher::new([]);
 
-    let report = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
-        .await
-        .expect("relay");
+    let report = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
+        &store,
+        &publisher,
+        &FakeClock::new(),
+        &NoopEmitter,
+        limit(),
+    )
+    .await
+    .expect("relay");
 
     assert_eq!(report.retried(), 1);
     assert!(publisher.message_ids().is_empty());
@@ -774,9 +818,16 @@ async fn exhausted_authoritative_lease_window_is_recoverable_not_invariant() {
         });
         let publisher = ScriptedPublisher::new([]);
 
-        let error = relay_once(&store, &publisher, &FakeClock::new(), &NoopEmitter, limit())
-            .await
-            .expect_err("no provider-authoritative settlement window remains");
+        let error = relay_once(
+            crate::execution(crate::fixture_tenant(), 1),
+            &store,
+            &publisher,
+            &FakeClock::new(),
+            &NoopEmitter,
+            limit(),
+        )
+        .await
+        .expect_err("no provider-authoritative settlement window remains");
 
         assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
         assert!(publisher.message_ids().is_empty());
@@ -818,6 +869,7 @@ impl OutboxRelayStore<Vec<u8>> for PendingStore {
 
     async fn claim_partition_heads(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         limit: NonZeroUsize,
         _deadline: OperationDeadline,
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
@@ -935,6 +987,7 @@ async fn never_ready_relay_provider_stages_are_bounded_and_stop_downstream_work(
             let publisher = Arc::clone(&publisher);
             async move {
                 relay_once(
+                    crate::execution(crate::fixture_tenant(), 1),
                     store.as_ref(),
                     publisher.as_ref(),
                     timer.as_ref(),
@@ -983,6 +1036,7 @@ async fn publish_timeout_is_ambiguous_retry_and_reuses_the_same_message_id() {
         let observations = Arc::clone(&observations);
         async move {
             relay_once(
+                crate::execution(crate::fixture_tenant(), 1),
                 store.as_ref(),
                 publisher.as_ref(),
                 timer.as_ref(),
@@ -1014,6 +1068,7 @@ async fn publish_timeout_is_ambiguous_retry_and_reuses_the_same_message_id() {
     ));
 
     let second = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
         store.as_ref(),
         publisher.as_ref(),
         timer.as_ref(),
@@ -1048,7 +1103,10 @@ async fn directly_awaited_relay_accepts_borrowed_timer_and_stops_before_claim() 
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     cancellation.cancel();
-    worker.run(cancellation).await.expect("cancelled relay");
+    worker
+        .run(execution(fixture_tenant(), 1), cancellation)
+        .await
+        .expect("cancelled relay");
     assert_eq!(store.claim_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1076,4 +1134,23 @@ fn relay_polling_keeps_only_the_busy_loop_floor() {
             .expect("finite polling");
         assert_eq!(config.poll_interval(), Duration::from_secs(seconds));
     }
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        .expect("fixture tenant")
 }

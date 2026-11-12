@@ -174,7 +174,11 @@ async fn complete_message(runtime: Arc<PgRuntime>, raw: &PgPool) -> anyhow::Resu
         outbox_budget(Duration::from_secs(30)),
     )?;
     let claim = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()

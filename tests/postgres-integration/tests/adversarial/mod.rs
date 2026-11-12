@@ -74,7 +74,14 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         let inbox = inbox.clone();
         contenders.spawn(async move {
             inbox
-                .claim(binding(&message("concurrent-claim")).identity(), deadline())
+                .claim(
+                    crate::execution(
+                        (binding(&message("concurrent-claim")).identity()).tenant_id(),
+                        1,
+                    ),
+                    binding(&message("concurrent-claim")).identity(),
+                    deadline(),
+                )
                 .await
         });
     }
@@ -89,7 +96,13 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
     sqlx::query("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='concurrent-claim'").execute(owner).await?;
     let binding = binding(&message("concurrent-claim"));
     assert!(matches!(
-        inbox.claim(binding.identity(), deadline()).await?,
+        inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline()
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
     assert_eq!(inbox.extend(&old, deadline()).await?, LeaseStatus::Lost);
@@ -130,8 +143,13 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
                 Duration::from_millis(500),
             )?,
         )?;
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(binding.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("new claim")
         };
@@ -186,7 +204,7 @@ async fn cancellation(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::Result
     let runtime = Arc::new(
         tokio::time::timeout(
             Duration::from_secs(5),
-            PgRuntime::connect(config.clone(), clock.clone(), fence_fixture::binding()),
+            PgRuntime::connect(config.clone(), clock.clone(), fence_fixture::storage()),
         )
         .await
         .expect("controlled-clock runtime must connect")?,
@@ -208,7 +226,7 @@ async fn cancellation(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::Result
                 Deadline::from_timeout(&clock, Duration::from_millis(150)).expect("deadline"),
                 &clock,
             );
-            task_runtime.local_tx(tenant, bound, move |tx| Box::pin(async move {
+            task_runtime.local_tx(crate::execution(tenant, 1), bound, move |tx| Box::pin(async move {
                 let backend = tx.with_connection(move |connection| Box::pin(async move {
                     sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,$2)").bind(tenant.to_string()).bind(mode).execute(&mut *connection).await?;
                     sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()").fetch_one(connection).await
@@ -266,7 +284,7 @@ pub(super) async fn run(
     config: PgConfig,
 ) -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE ROLE tmsg_bypass NOLOGIN BYPASSRLS; CREATE ROLE tmsg_bridge NOLOGIN; GRANT tmsg_bypass TO tmsg_bridge; GRANT tmsg_bridge TO tmsg_runtime").execute(owner).await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await
         .is_ok();
     sqlx::raw_sql(
@@ -314,7 +332,7 @@ pub(super) async fn run(
     raw.rollback().await?;
     let original: String = sqlx::query_scalar("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='rss_transactional_messaging.inbox'::regclass AND conname='inbox_receipt_shape'").fetch_one(owner).await?;
     sqlx::raw_sql("ALTER TABLE rss_transactional_messaging.inbox DROP CONSTRAINT inbox_receipt_shape, ADD CONSTRAINT inbox_receipt_shape CHECK(true)").execute(owner).await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await
         .is_ok();
     // SQL safety: The definition comes from pg_get_constraintdef in this fixture-owned schema.
@@ -331,7 +349,7 @@ pub(super) async fn run(
     )
     .execute(owner)
     .await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await
         .is_ok();
     sqlx::raw_sql("DROP POLICY accidental_widening ON rss_transactional_messaging.inbox")
@@ -344,7 +362,7 @@ pub(super) async fn run(
     sqlx::raw_sql("GRANT UPDATE ON rss_transactional_messaging.outbox TO tmsg_runtime")
         .execute(owner)
         .await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await
         .is_ok();
     sqlx::raw_sql("REVOKE UPDATE ON rss_transactional_messaging.outbox FROM tmsg_runtime")
@@ -352,7 +370,7 @@ pub(super) async fn run(
         .await?;
     assert!(!accepted, "excess Outbox privilege must fail connect");
     sqlx::raw_sql("ALTER POLICY inbox_tenant ON rss_transactional_messaging.inbox USING (true) WITH CHECK (true)").execute(owner).await?;
-    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    let accepted = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await
         .is_ok();
     sqlx::raw_sql("ALTER POLICY inbox_tenant ON rss_transactional_messaging.inbox USING (tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK (tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid)").execute(owner).await?;
@@ -378,7 +396,7 @@ pub(super) async fn run(
         .execute(owner)
         .await?;
         let rejected =
-            PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await;
+            PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "REVOKE EXECUTE ON FUNCTION {signature} FROM {role}"
         )))
@@ -391,14 +409,14 @@ pub(super) async fn run(
     }
     sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) TO PUBLIC").execute(owner).await?;
     assert!(
-        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err(),
         "PUBLIC definer entry must fail connect"
     );
     sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) FROM PUBLIC; GRANT rss_tmsg_relay TO tmsg_runtime").execute(owner).await?;
     assert!(
-        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err(),
         "runtime must not inherit relay identity"
@@ -422,7 +440,7 @@ async fn storage_defaults(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::Re
         )))
         .execute(owner)
         .await?;
-        let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .err();
         // SQL safety: SQL fragments are literals from the fixture table below/above.
@@ -445,7 +463,7 @@ async fn storage_mutations(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::R
     )
     .execute(owner)
     .await?;
-    let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await
         .err();
     // SQL safety: The definition comes from pg_get_constraintdef in this fixture-owned schema.
@@ -461,7 +479,7 @@ async fn storage_mutations(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::R
     )
     .execute(owner)
     .await?;
-    let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    let error = PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await
         .err();
     sqlx::raw_sql(
@@ -516,7 +534,11 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
             crate::outbox_budget(Duration::from_secs(60)),
         )?;
         let accepted = store
-            .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                std::num::NonZeroUsize::MIN,
+                deadline(),
+            )
             .await
             .is_ok();
         sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published', tenant_id='f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid, message_id='outbox-roundtrip', domain='integration', partition_key=NULL, partition_seq=NULL, lease_token=NULL, lease_until=NULL WHERE seq=$1").bind(seq).execute(owner).await?;
@@ -568,8 +590,13 @@ async fn tenant_isolation(
                 Duration::from_secs(60),
             )?,
         )?;
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(receipt_binding.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((receipt_binding.identity()).tenant_id(), 1),
+                receipt_binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("tenant claim")
         };
@@ -584,7 +611,7 @@ async fn tenant_isolation(
                 .await;
         assert_eq!(outcome.status(), rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
         runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     store
                         .append(tx, PendingMessage::new(envelope))
@@ -605,13 +632,13 @@ async fn tenant_isolation(
             .fetch_one(raw_runtime)
             .await?;
     assert_eq!(invisible, 0, "empty tenant must not read terminal receipts");
-    let visible = runtime.local_tx(a, deadline(), |tx| Box::pin(async move {
+    let visible = runtime.local_tx(crate::execution(a, 1), deadline(), |tx| Box::pin(async move {
         tx.with_connection(|connection| Box::pin(async move {
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM rss_transactional_messaging.inbox WHERE message_id IN ('tenant-a','tenant-b') AND disposition IS NOT NULL").fetch_one(connection).await
         })).await
     })).await.fold(Ok, Err, Err, Err, Err, Err)?;
     assert_eq!(visible, 1, "tenant A must see only its own durable receipt");
-    let denied = runtime.local_tx(a, deadline(), move |tx| Box::pin(async move {
+    let denied = runtime.local_tx(crate::execution(a, 1), deadline(), move |tx| Box::pin(async move {
         tx.with_connection(move |connection| Box::pin(async move {
             sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until) VALUES($1::uuid,'cross-tenant-inbox-denied','suite','contract',gen_random_uuid(),clock_timestamp()+interval '1 minute')").bind(b.to_string()).execute(connection).await?; Ok(())
         })).await
@@ -627,13 +654,13 @@ async fn tenant_isolation(
         ),
         "cross-tenant Inbox write must roll back"
     );
-    let visible = runtime.local_tx(a, deadline(), |tx| Box::pin(async move {
+    let visible = runtime.local_tx(crate::execution(a, 1), deadline(), |tx| Box::pin(async move {
         tx.with_connection(|connection| Box::pin(async move {
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM rss_transactional_messaging.outbox WHERE domain='cross-tenant-relay'").fetch_one(connection).await
         })).await
     })).await.fold(Ok, Err, Err, Err, Err, Err)?;
     assert_eq!(visible, 1);
-    let denied = runtime.local_tx(a, deadline(), move |tx| Box::pin(async move {
+    let denied = runtime.local_tx(crate::execution(a, 1), deadline(), move |tx| Box::pin(async move {
         tx.with_connection(move |connection| Box::pin(async move {
             sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,'cross-tenant-denied')").bind(b.to_string()).execute(connection).await?; Ok(())
         })).await
@@ -652,8 +679,16 @@ async fn tenant_isolation(
     let store1 = store.clone();
     let store2 = store.clone();
     let (one, two) = tokio::join!(
-        store1.claim_partition_heads(std::num::NonZeroUsize::MIN, deadline()),
-        store2.claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+        store1.claim_partition_heads(
+            crate::execution(a, 1),
+            std::num::NonZeroUsize::MIN,
+            deadline()
+        ),
+        store2.claim_partition_heads(
+            crate::execution(b, 1),
+            std::num::NonZeroUsize::MIN,
+            deadline()
+        )
     );
     let claims: Vec<_> = one?.into_iter().chain(two?).collect();
     assert_eq!(
@@ -687,8 +722,13 @@ async fn inbox_lock_expiry(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> any
             )?,
         )?;
         let binding = binding(&message(id));
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(binding.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("new claim")
         };

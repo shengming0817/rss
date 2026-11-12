@@ -14,7 +14,7 @@ pub async fn check(
     let append = outbox.clone();
     committed(
         runtime
-            .local_tx(tenant(), deadline(), move |tx| {
+            .local_tx(crate::execution(tenant(), 1), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.prepare_outbox_partitions(
                         &message("partial-claim")
@@ -42,15 +42,17 @@ pub async fn check(
     sqlx::query("INSERT INTO rss_transactional_messaging.outbox(tenant_id,message_id,domain,envelope,fingerprint) SELECT $1::uuid,message_id,domain,'{}'::jsonb,fingerprint FROM rss_transactional_messaging.outbox WHERE message_id='partial-claim'").bind(other.to_string()).execute(&mut *tx).await?;
     tx.commit().await?;
     let limit = std::num::NonZeroUsize::new(2).ok_or_else(|| anyhow::anyhow!("limit"))?;
-    let batch = outbox.claim_partition_heads(limit, deadline()).await?;
+    let batch = outbox
+        .claim_partition_heads(crate::binding(1)?, limit, deadline())
+        .await?;
     let claims = batch.into_iter().collect::<Vec<_>>();
     assert_eq!(claims.len(), 1);
     assert!(
         outbox
-            .claim_partition_heads(limit, deadline())
+            .claim_partition_heads(crate::execution(other, 1), limit, deadline())
             .await
             .is_err(),
-        "rotating next batch reaches the malformed tenant"
+        "explicitly selected malformed tenant fails independently"
     );
     for claim in claims {
         outbox

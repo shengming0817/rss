@@ -26,7 +26,7 @@ impl Driver {
         let notify = inserted.clone();
         let gate = release.clone();
         let store = race.store();
-        let predecessor = runtime.local_tx(tenant, deadline(), move |tx| {
+        let predecessor = runtime.local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
             Box::pin(async move {
                 tx.prepare_outbox_partitions(
                     &first
@@ -47,7 +47,7 @@ impl Driver {
         let successor = async {
             inserted.notified().await;
             let result = runtime
-                .local_tx(tenant, deadline(), move |tx| {
+                .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                     Box::pin(async move {
                         tx.prepare_outbox_partitions(
                             &second
@@ -80,7 +80,11 @@ impl Driver {
             }).await;
             let claims = race
                 .store()
-                .claim_partition_heads(NonZeroUsize::MIN, deadline())
+                .claim_partition_heads(
+                    crate::execution(crate::fixture_tenant(), 1),
+                    NonZeroUsize::MIN,
+                    deadline(),
+                )
                 .await;
             release.notify_one();
             (blocked, claims)
@@ -101,7 +105,7 @@ impl Driver {
             count, 0,
             "an uncommitted predecessor must block same-partition admission"
         );
-        let first = race.claim().await?;
+        let first = race.claim(message("scope").metadata().tenant_id()).await?;
         assert!(
             PgOutboxStore::<()>::message(&first)
                 .message_id()
@@ -110,14 +114,18 @@ impl Driver {
         );
         assert!(
             race.store()
-                .claim_partition_heads(NonZeroUsize::MIN, deadline())
+                .claim_partition_heads(
+                    crate::execution(crate::fixture_tenant(), 1),
+                    NonZeroUsize::MIN,
+                    deadline()
+                )
                 .await?
                 .is_empty()
         );
         race.store()
             .settle(first, OutboxSettlement::Published(()), deadline())
             .await?;
-        let second = race.claim().await?;
+        let second = race.claim(message("scope").metadata().tenant_id()).await?;
         assert!(
             PgOutboxStore::<()>::message(&second)
                 .message_id()
@@ -197,7 +205,7 @@ impl Driver {
         let store = self.store();
         self.h
             .runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.prepare_outbox_partitions(
                         &message.partition().cloned().into_iter().collect::<Vec<_>>(),
@@ -216,9 +224,12 @@ impl Driver {
                 MessagingError::new(kind, error)
             })
     }
-    async fn claim(&self) -> Result<PgOutboxClaim, MessagingError> {
+    async fn claim(
+        &self,
+        tenant: rss_request_context::TenantId,
+    ) -> Result<PgOutboxClaim, MessagingError> {
         self.store()
-            .claim_partition_heads(NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(crate::execution(tenant, 1), NonZeroUsize::MIN, deadline())
             .await?
             .into_iter()
             .next()
@@ -267,32 +278,35 @@ impl Driver {
         let store = race.store();
         let notify = inserted.clone();
         let gate = release.clone();
-        let winner = self.h.runtime.local_tx(tenant, deadline(), move |tx| {
-            Box::pin(async move {
-                tx.prepare_outbox_partitions(
-                    &first
-                        .metadata()
-                        .partition()
-                        .cloned()
-                        .into_iter()
-                        .collect::<Vec<_>>(),
-                )
-                .await?;
-                let outcome = store
-                    .append(tx, PendingMessage::new(first))
-                    .await
-                    .map_err(PgError::from)?;
-                notify.notify_one();
-                gate.notified().await;
-                Ok(outcome)
-            })
-        });
+        let winner = self
+            .h
+            .runtime
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
+                Box::pin(async move {
+                    tx.prepare_outbox_partitions(
+                        &first
+                            .metadata()
+                            .partition()
+                            .cloned()
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                    )
+                    .await?;
+                    let outcome = store
+                        .append(tx, PendingMessage::new(first))
+                        .await
+                        .map_err(PgError::from)?;
+                    notify.notify_one();
+                    gate.notified().await;
+                    Ok(outcome)
+                })
+            });
         let store = race.store();
         let loser = async {
             inserted.notified().await;
             self.h
                 .runtime
-                .local_tx(tenant, deadline(), move |tx| {
+                .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                     Box::pin(async move {
                         tx.prepare_outbox_partitions(
                             &second
@@ -384,7 +398,10 @@ impl OutboxDriver for Driver {
         }
         // The provider may return a partial batch while paging tenants. Complete each identity.
         for _ in [a, b] {
-            let claim = self.claim().await.map_err(conformance)?;
+            let claim = self
+                .claim(message(&self.h.id()).metadata().tenant_id())
+                .await
+                .map_err(conformance)?;
             self.settle(claim, OutboxSettlement::Published(()))
                 .await
                 .map_err(conformance)?;
@@ -415,14 +432,20 @@ impl OutboxDriver for Driver {
         &self,
     ) -> Result<ReclaimEvidence, ConformanceError> {
         self.append_first().await.map_err(conformance)?;
-        let first = self.claim().await.map_err(conformance)?;
+        let first = self
+            .claim(message(&self.h.id()).metadata().tenant_id())
+            .await
+            .map_err(conformance)?;
         let first_id = PgOutboxStore::<()>::message(&first).envelope().id().clone();
         let settlement = self
             .settle(first, OutboxSettlement::Retry)
             .await
             .map_err(conformance)?;
         self.retry_ready().await.map_err(conformance)?;
-        let second = self.claim().await.map_err(conformance)?;
+        let second = self
+            .claim(message(&self.h.id()).metadata().tenant_id())
+            .await
+            .map_err(conformance)?;
         let second_id = PgOutboxStore::<()>::message(&second)
             .envelope()
             .id()
@@ -441,11 +464,17 @@ impl OutboxDriver for Driver {
         &self,
     ) -> Result<StaleSettlementEvidence, ConformanceError> {
         self.append_first().await.map_err(conformance)?;
-        let first = self.claim().await.map_err(conformance)?;
+        let first = self
+            .claim(message(&self.h.id()).metadata().tenant_id())
+            .await
+            .map_err(conformance)?;
         let first_id = PgOutboxStore::<()>::message(&first).envelope().id().clone();
         // Keep the old capability to exercise a delayed contender after database lease expiry.
         self.expire().await.map_err(conformance)?;
-        let second = self.claim().await.map_err(conformance)?;
+        let second = self
+            .claim(message(&self.h.id()).metadata().tenant_id())
+            .await
+            .map_err(conformance)?;
         let second_id = PgOutboxStore::<()>::message(&second)
             .envelope()
             .id()
@@ -471,7 +500,9 @@ impl OutboxDriver for Driver {
 
     async fn delivery_window(&self) -> Result<Option<[OutboxLeaseStatus; 3]>, MessagingError> {
         self.append_first().await?;
-        let claim = self.claim().await?;
+        let claim = self
+            .claim(message(&self.h.id()).metadata().tenant_id())
+            .await?;
         let first = self.store().lease_status(&claim, deadline()).await?;
         let renewed = self.store().extend(&claim, deadline()).await?;
         sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 second' WHERE message_id=$1")
@@ -497,7 +528,11 @@ impl OutboxDriver for Driver {
         self.append("-successor", vec![1, 2, 3]).await?;
         let claims: Vec<_> = self
             .store()
-            .claim_partition_heads(NonZeroUsize::new(8).expect("limit"), deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::new(8).expect("limit"),
+                deadline(),
+            )
             .await?
             .into_iter()
             .collect();
@@ -510,14 +545,14 @@ impl OutboxDriver for Driver {
         assert!(
             !self
                 .store()
-                .has_dead_letters(deadline())
+                .has_dead_letters(crate::execution(crate::fixture_tenant(), 1), deadline())
                 .await
                 .map_err(port)?
         );
         self.settle(claim, OutboxSettlement::DeadLetter).await?;
         assert!(
             self.store()
-                .has_dead_letters(deadline())
+                .has_dead_letters(crate::execution(crate::fixture_tenant(), 1), deadline())
                 .await
                 .map_err(port)?
         );
@@ -527,11 +562,20 @@ impl OutboxDriver for Driver {
             crate::outbox_budget(Duration::from_secs(60)),
         )
         .map_err(port)?;
-        assert!(!other.has_dead_letters(deadline()).await.map_err(port)?);
+        assert!(
+            !other
+                .has_dead_letters(crate::execution(crate::fixture_tenant(), 1), deadline())
+                .await
+                .map_err(port)?
+        );
 
         Ok(self
             .store()
-            .claim_partition_heads(NonZeroUsize::new(8).expect("limit"), deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::new(8).expect("limit"),
+                deadline(),
+            )
             .await?
             .into_iter()
             .count())
@@ -540,9 +584,13 @@ impl OutboxDriver for Driver {
     async fn stale_lease(&self) -> Result<OutboxLeaseStatus, MessagingError> {
         self.h.reset_case();
         self.append_first().await?;
-        let old = self.claim().await?;
+        let old = self
+            .claim(message(&self.h.id()).metadata().tenant_id())
+            .await?;
         self.expire().await?;
-        let current = self.claim().await?;
+        let current = self
+            .claim(message(&self.h.id()).metadata().tenant_id())
+            .await?;
         *self.head.lock().await = Some(current);
         let status = self.store().lease_status(&old, deadline()).await?;
         self.fenced_settle(old).await?;
@@ -558,7 +606,11 @@ impl OutboxDriver for Driver {
         )
         .expect("short valid budget");
         let claim = store
-            .claim_partition_heads(NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::MIN,
+                deadline(),
+            )
             .await?
             .into_iter()
             .next()

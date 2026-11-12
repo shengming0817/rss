@@ -76,7 +76,9 @@ impl ArchiveRepository for PgArchiveRepository {
         deadline: OperationDeadline,
     ) -> Result<Option<Outcome>, Error> {
         let r = request.request();
-        if binding.tenant() != r.tenant() { return Err(Error::Unauthorized); }
+        if binding.tenant() != r.tenant() {
+            return Err(Error::Unauthorized);
+        }
         attempt(self.runtime.local_tx_with_context(binding,deadline,r,|r,tx|Box::pin(async move {
             let row=sqlx::query("SELECT j.request_digest,j.held,j.purged,j.fault,o.verified,o.reconciled FROM rss_transactional_messaging.archive_jobs j LEFT JOIN rss_transactional_messaging.archive_objects o ON o.tenant_id=j.tenant_id AND o.generation=j.generation WHERE j.tenant_id=$1::uuid AND j.operation_id=$2::uuid AND j.claim_epoch=current_setting('rss.execution_epoch')::bigint AND j.claim_lineage=decode(current_setting('rss.storage_lineage'),'hex')")
                 .bind(r.tenant().to_string()).bind(r.operation().to_string()).fetch_optional(&mut *tx.connection).await.map_err(super::sql_error)?;
@@ -104,7 +106,9 @@ impl ArchiveRepository for PgArchiveRepository {
         }
         let ttl = ttl as i64;
         let r = request.request();
-        if binding.tenant() != r.tenant() { return LocalTxAttempt::not_started(Error::Unauthorized); }
+        if binding.tenant() != r.tenant() {
+            return LocalTxAttempt::not_started(Error::Unauthorized);
+        }
         let scan = i32::from(self.retired_scan_limit);
         attempt(self.runtime.local_tx_with_context(binding,deadline,(r,ttl,scan),|(r,ttl,scan),tx|Box::pin(async move {
             let v:Value=sqlx::query_scalar("SELECT rss_transactional_messaging.archive_claim($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9)")
@@ -228,7 +232,9 @@ impl PgArchiveRepository {
         d: OperationDeadline,
         command: Command<'_>,
     ) -> LocalTxAttempt<(), Error> {
-        if binding.tenant() != r.request().tenant() { return LocalTxAttempt::not_started(Error::Unauthorized); }
+        if binding.tenant() != r.request().tenant() {
+            return LocalTxAttempt::not_started(Error::Unauthorized);
+        }
         attempt(
             self.runtime
                 .local_tx_with_context(

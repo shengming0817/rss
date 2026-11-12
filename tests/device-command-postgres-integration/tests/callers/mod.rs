@@ -93,18 +93,22 @@ async fn admit(f: &Fixture, callers: CallerRoles) -> anyhow::Result<bool> {
     let outbox = f.outbox.clone();
     let attempt = f
         .runtime
-        .local_tx(scope(TENANT)?.tenant(), budget()?, move |tx| {
-            Box::pin(async move {
-                PgStore::new(
-                    tx,
-                    outbox,
-                    CommandClock::Postgres,
-                    &callers,
-                    BatchLimit::default(),
-                )
-                .await
-            })
-        })
+        .local_tx(
+            crate::execution(scope(TENANT)?.tenant(), 1),
+            budget()?,
+            move |tx| {
+                Box::pin(async move {
+                    PgStore::new(
+                        tx,
+                        outbox,
+                        CommandClock::Postgres,
+                        &callers,
+                        BatchLimit::default(),
+                    )
+                    .await
+                })
+            },
+        )
         .await;
     // A deadline/connection failure cannot masquerade as a successful security rejection.
     attempt.fold(
@@ -191,7 +195,7 @@ async fn rollback(f: &Fixture, name: &str, s: Scope, c: Coordinate) -> anyhow::R
     let msg = message(name, s.tenant())?;
     let attempt = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
                 store.queue(tx, request, msg).await?;
                 Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
@@ -212,7 +216,7 @@ async fn commit_unknown(f: &Fixture, name: &str, s: Scope, c: Coordinate) -> any
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     let attempt = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move { store.queue(tx, request, msg).await })
         })
         .await;
@@ -233,7 +237,7 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
     let outbox = owner.outbox.clone();
     let constructor = other
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
                 PgStore::new(
                     tx,
@@ -252,7 +256,7 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
     let msg = message("foreign-caller", s.tenant())?;
     let operation = other
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move { store.queue(tx, request, msg).await })
         })
         .await;
@@ -262,9 +266,11 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
     let msg = message("foreign-tenant", s.tenant())?;
     let tenant = owner
         .runtime
-        .local_tx(scope(OTHER)?.tenant(), budget()?, move |tx| {
-            Box::pin(async move { store.queue(tx, request, msg).await })
-        })
+        .local_tx(
+            crate::execution(scope(OTHER)?.tenant(), 1),
+            budget()?,
+            move |tx| Box::pin(async move { store.queue(tx, request, msg).await }),
+        )
         .await;
     assert!(committed(tenant).is_err());
     assert_eq!(snapshot(owner).await?, before);

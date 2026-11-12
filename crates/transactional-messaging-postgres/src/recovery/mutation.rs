@@ -21,33 +21,30 @@ pub(super) async fn mutate<K: Aead + Send + Sync>(
     request: &Mutation,
     deadline: OperationDeadline,
 ) -> LocalTxAttempt<Receipt, Error> {
-    if binding.tenant() != request.tenant() { return LocalTxAttempt::not_started(Error::Unauthorized); }
+    if binding.tenant() != request.tenant() {
+        return LocalTxAttempt::not_started(Error::Unauthorized);
+    }
     let result = runtime
-        .local_tx_with_context(
-            binding,
-            deadline,
-            (key, request),
-            |(key, request), tx| {
-                Box::pin(async move {
-                    // A transaction-scoped advisory lock serializes identical operation IDs even before a receipt exists.
-                    // Hash collisions only serialize unrelated requests; they never share receipt identities.
-                    let lock = format!("{}:{}", request.tenant(), request.operation());
-                    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-                        .bind(lock)
-                        .execute(&mut *tx.connection)
-                        .await?;
-                    if let Some(receipt) = read_receipt(tx, request).await? {
-                        return Ok(receipt);
-                    }
-                    let receipt = match request.action() {
-                        Action::Replay(id) => replay(tx, *key, request, id).await?,
-                        Action::Redrive | Action::Resolve(_) => transition(tx, request).await?,
-                    };
-                    write_receipt(tx, &receipt).await?;
-                    Ok(receipt)
-                })
-            },
-        )
+        .local_tx_with_context(binding, deadline, (key, request), |(key, request), tx| {
+            Box::pin(async move {
+                // A transaction-scoped advisory lock serializes identical operation IDs even before a receipt exists.
+                // Hash collisions only serialize unrelated requests; they never share receipt identities.
+                let lock = format!("{}:{}", request.tenant(), request.operation());
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+                    .bind(lock)
+                    .execute(&mut *tx.connection)
+                    .await?;
+                if let Some(receipt) = read_receipt(tx, request).await? {
+                    return Ok(receipt);
+                }
+                let receipt = match request.action() {
+                    Action::Replay(id) => replay(tx, *key, request, id).await?,
+                    Action::Redrive | Action::Resolve(_) => transition(tx, request).await?,
+                };
+                write_receipt(tx, &receipt).await?;
+                Ok(receipt)
+            })
+        })
         .await;
     map_attempt(result)
 }

@@ -43,13 +43,13 @@ pub(super) async fn run(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::Resu
 
 async fn accepted(config: &PgConfig) -> anyhow::Result<()> {
     let runtime =
-        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await?;
+        PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await?;
     runtime.close().await;
     Ok(())
 }
 async fn rejected(config: &PgConfig, category: PgStorageContractFailure) -> anyhow::Result<()> {
     let error =
-        match PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await {
+        match PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await {
             Ok(runtime) => {
                 runtime.close().await;
                 anyhow::bail!("probe accepted role drift");

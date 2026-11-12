@@ -114,14 +114,14 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         Ok(TerminalDisposition::Succeeded)
     }
 }
-struct Validator(TenantId);
+struct Validator(ExecutionBinding);
 impl IngressValidator<Vec<u8>> for Validator {
     fn validate(
         &self,
         challenge: IngressChallenge<'_, Vec<u8>>,
     ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
         // Fixture authority is supplied independently; envelope coordinates are not authentication.
-        if challenge.message().metadata().tenant_id() != self.0 {
+        if challenge.message().metadata().tenant_id() != self.0.tenant() {
             return Err(EnvelopeValidationFailure::MalformedIdentity);
         }
         let metadata = challenge.message().metadata();
@@ -132,7 +132,7 @@ impl IngressValidator<Vec<u8>> for Validator {
         {
             return Err(EnvelopeValidationFailure::UnsupportedContract);
         }
-        Ok(challenge.verified())
+        Ok(challenge.verified(self.0))
     }
 }
 struct Observations;
@@ -194,8 +194,9 @@ async fn run_inner(input: FixtureInput) -> anyhow::Result<()> {
     let tenant = TenantId::parse(&input.tenant)?;
     let authority = ExecutionBinding::new(
         StorageIdentity::new(input.target, input.lineage)?,
-        vec![(tenant, Epoch::new(input.epoch)?)],
-    )?;
+        tenant,
+        Epoch::new(input.epoch)?,
+    );
     let ca = AmqpPrivateCa::from_pem(input.amqp_ca.into_bytes())?;
     let publisher_endpoint = AmqpPublisherEndpoint::parse(input.publisher_url)?;
     let subscriber_endpoint = AmqpSubscriberEndpoint::parse(input.subscriber_url)?;
@@ -219,7 +220,7 @@ async fn run_inner(input: FixtureInput) -> anyhow::Result<()> {
     let runtime = Arc::new(
         tokio::time::timeout(
             Duration::from_secs(10),
-            PgRuntime::connect(config, timer.clone(), authority),
+            PgRuntime::connect(config, timer.clone(), authority.storage()),
         )
         .await??,
     );
@@ -254,6 +255,7 @@ async fn run_inner(input: FixtureInput) -> anyhow::Result<()> {
         startup.stage_resource(rss_runtime::DynManagedResource::new_box(resource));
         transfer(
             &runtime,
+            authority,
             &publisher,
             &subscriber,
             &timer,
@@ -337,6 +339,7 @@ fn subscription(route: &str) -> anyhow::Result<SubscriptionIdentity> {
 
 async fn transfer(
     runtime: &Arc<PgRuntime>,
+    authority: ExecutionBinding,
     publisher: &AmqpPublisher,
     subscriber: &AmqpSubscriber,
     timer: &Timer,
@@ -371,7 +374,7 @@ async fn transfer(
     )?);
     let append = store.clone();
     runtime
-        .local_tx(tenant, timer.deadline()?, move |tx| {
+        .local_tx(authority, timer.deadline()?, move |tx| {
             Box::pin(async move {
                 tx.prepare_outbox_partitions(
                     &message
@@ -402,6 +405,7 @@ async fn transfer(
         )?;
     let mut deliveries = DeliverySource::deliveries(subscriber, &subscription).await?;
     let report = relay_once(
+        authority,
         store.as_ref(),
         publisher,
         timer,
@@ -423,7 +427,7 @@ async fn transfer(
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let tx = PgConsumerTx::receipt_only(runtime.clone(), Effect);
-    let validator = Validator(tenant);
+    let validator = Validator(authority);
     let execution = ConsumerExecution::new(
         ConsumerGroup::parse("example-handler")?,
         &validator,
@@ -445,6 +449,7 @@ async fn transfer(
     drop(deliveries);
     assert_eq!(
         relay_once(
+            authority,
             store.as_ref(),
             publisher,
             timer,

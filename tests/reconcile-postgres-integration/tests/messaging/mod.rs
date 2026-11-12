@@ -64,7 +64,7 @@ pub async fn run(
                 PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
             ),
             MClock(Clock::new()),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -102,7 +102,7 @@ async fn scenario(
 ) -> anyhow::Result<()> {
     let composition = rss_reconcile_postgres::PgMessagingStore::new(
         runtime.clone(),
-        TenantId::parse(TENANT)?,
+        crate::execution(TenantId::parse(TENANT)?, 1),
         rss_transactional_messaging::policy::OperationDeadline::from_remaining(
             Duration::from_secs(5),
         ),
@@ -161,7 +161,7 @@ async fn scenario(
     let status = if borrowed {
         let result = runtime
             .local_tx_with_context(
-                TenantId::parse(TENANT)?,
+                crate::execution(TenantId::parse(TENANT)?, 1),
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                     c.remaining(),
                 ),
@@ -201,14 +201,27 @@ async fn scenario(
         attempt_status(result)
     } else if mode == "wake" {
         let result = composition
-            .wake_with(&t, &ResourceSet::empty(t.scope().tenant()), c, (), callback)
+            .wake_with(
+                crate::execution(t.scope().tenant(), 1),
+                &t,
+                &ResourceSet::empty(t.scope().tenant()),
+                c,
+                (),
+                callback,
+            )
             .await;
         attempt_status(result)
     } else {
         let result = composition
-            .protect(&claim, c, (), |context, tx| {
-                Box::pin(async move { callback(context, tx).await.map(ProtectedStep::Ready) })
-            })
+            .protect(
+                crate::execution(claim.target().scope().tenant(), 1),
+                &claim,
+                c,
+                (),
+                |context, tx| {
+                    Box::pin(async move { callback(context, tx).await.map(ProtectedStep::Ready) })
+                },
+            )
             .await;
         attempt_status(result)
     };
@@ -284,7 +297,7 @@ async fn wake_failure(
 ) -> anyhow::Result<()> {
     let composition = rss_reconcile_postgres::PgMessagingStore::new(
         runtime.clone(),
-        TenantId::parse(TENANT)?,
+        crate::execution(TenantId::parse(TENANT)?, 1),
         rss_transactional_messaging::policy::OperationDeadline::from_remaining(
             Duration::from_secs(5),
         ),
@@ -304,6 +317,7 @@ async fn wake_failure(
     }
     let result = composition
         .wake_with(
+            crate::execution(t.scope().tenant(), 1),
             &t,
             &ResourceSet::empty(t.scope().tenant()),
             c,
@@ -358,7 +372,7 @@ async fn borrowed_scope_rejected(
     use std::sync::atomic::{AtomicBool, Ordering};
     let composition = rss_reconcile_postgres::PgMessagingStore::new(
         runtime.clone(),
-        TenantId::parse(TENANT)?,
+        crate::execution(TenantId::parse(TENANT)?, 1),
         rss_transactional_messaging::policy::OperationDeadline::from_remaining(
             Duration::from_secs(5),
         ),
@@ -377,7 +391,7 @@ async fn borrowed_scope_rejected(
     for wake in [false, true] {
         let result = runtime
             .local_tx_with_context(
-                TenantId::parse("00000000-0000-0000-0000-000000000001")?,
+                crate::execution(TenantId::parse("00000000-0000-0000-0000-000000000001")?, 1),
                 rss_transactional_messaging::policy::OperationDeadline::from_remaining(
                     control.remaining(),
                 ),
@@ -451,13 +465,13 @@ async fn foreign_runtime_rejected(
                 PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
             ),
             MClock(Clock::new()),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
     let composition = rss_reconcile_postgres::PgMessagingStore::new(
         runtime.clone(),
-        TenantId::parse(TENANT)?,
+        crate::execution(TenantId::parse(TENANT)?, 1),
         OperationDeadline::from_remaining(control.remaining()),
     )
     .await?;
@@ -465,7 +479,7 @@ async fn foreign_runtime_rejected(
     let target = target("foreign-runtime", TENANT)?;
     let attempt = other
         .local_tx_with_context(
-            TenantId::parse(TENANT)?,
+            crate::execution(TenantId::parse(TENANT)?, 1),
             OperationDeadline::from_remaining(control.remaining()),
             (&composition, &entered, &target),
             |(composition, entered, target), tx| {
@@ -509,7 +523,7 @@ async fn resource_decisions(
 ) -> anyhow::Result<()> {
     let composition = rss_reconcile_postgres::PgMessagingStore::new(
         runtime.clone(),
-        TenantId::parse(TENANT)?,
+        crate::execution(TenantId::parse(TENANT)?, 1),
         rss_transactional_messaging::policy::OperationDeadline::from_remaining(c.remaining()),
     )
     .await?;
@@ -524,14 +538,20 @@ async fn resource_decisions(
     let old = claim(store, &t, Duration::from_secs(5), c).await?;
     let replacement = ResourceSet::new(t.scope().tenant(), ["messaging:b"])?;
     let decision = composition
-        .protect(&old, c, replacement, |resources, _| {
-            Box::pin(async move {
-                Ok(ProtectedStep::<()>::Rebind(
-                    resources.clone(),
-                    Duration::from_millis(1),
-                ))
-            })
-        })
+        .protect(
+            crate::execution(old.target().scope().tenant(), 1),
+            &old,
+            c,
+            replacement,
+            |resources, _| {
+                Box::pin(async move {
+                    Ok(ProtectedStep::<()>::Rebind(
+                        resources.clone(),
+                        Duration::from_millis(1),
+                    ))
+                })
+            },
+        )
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     assert!(matches!(decision, ReconcileStep::Deferred(_)));
@@ -555,9 +575,17 @@ async fn deferred_message_binding(
         "rebind cannot manufacture an applied effect"
     );
     let skipped = composition
-        .protect(old, c, (), |_, _| {
-            Box::pin(async { Err::<ProtectedStep<()>, _>(PgError::from(sqlx::Error::RowNotFound)) })
-        })
+        .protect(
+            crate::execution((old).target().scope().tenant(), 1),
+            old,
+            c,
+            (),
+            |_, _| {
+                Box::pin(async {
+                    Err::<ProtectedStep<()>, _>(PgError::from(sqlx::Error::RowNotFound))
+                })
+            },
+        )
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     assert!(
@@ -581,7 +609,7 @@ async fn externally_rebind_message(
     let resources = ResourceSet::new(t.scope().tenant(), ["messaging:c"])?;
     runtime
         .local_tx_with_context(
-            t.scope().tenant(),
+            crate::execution(t.scope().tenant(), 1),
             rss_transactional_messaging::policy::OperationDeadline::from_remaining(c.remaining()),
             (composition, t, &resources),
             |state, tx| Box::pin(async move { state.0.bind_in(tx, state.1, state.2).await }),

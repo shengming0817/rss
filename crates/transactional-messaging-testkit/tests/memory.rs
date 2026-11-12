@@ -187,7 +187,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
         )
         .await?;
     let claims = store
-        .claim_partition_heads(NonZeroUsize::new(8).ok_or("limit")?, deadline(&clock)?)
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::new(8).ok_or("limit")?,
+            deadline(&clock)?,
+        )
         .await?;
     assert_eq!(
         claims.len(),
@@ -199,7 +203,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
     let claimed_id = MemoryOutboxStore::message(&claim).message_id().clone();
     assert!(
         store
-            .claim_partition_heads(NonZeroUsize::new(8).ok_or("limit")?, deadline(&clock)?)
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::new(8).ok_or("limit")?,
+                deadline(&clock)?
+            )
             .await?
             .is_empty(),
         "an in-flight partition head must block its successor across claim calls"
@@ -218,7 +226,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
     };
     assert_eq!(error.kind(), MessagingErrorKind::OwnershipLost);
     let reclaimed = store
-        .claim_partition_heads(NonZeroUsize::new(8).ok_or("limit")?, deadline(&clock)?)
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::new(8).ok_or("limit")?,
+            deadline(&clock)?,
+        )
         .await?
         .into_iter()
         .next()
@@ -237,7 +249,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
         )
         .await?;
     let claim = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline(&clock)?)
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(&clock)?,
+        )
         .await?
         .into_iter()
         .next()
@@ -261,7 +277,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
     };
     assert_eq!(error.kind(), MessagingErrorKind::DeadlineElapsed);
     let reclaimed = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline(&clock)?)
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(&clock)?,
+        )
         .await?
         .into_iter()
         .next()
@@ -283,7 +303,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
         )
         .await?;
     let head = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline(&clock)?)
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(&clock)?,
+        )
         .await?
         .into_iter()
         .next()
@@ -293,7 +317,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
         .await?;
     assert!(
         store
-            .claim_partition_heads(NonZeroUsize::MIN, deadline(&clock)?)
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::MIN,
+                deadline(&clock)?
+            )
             .await?
             .is_empty(),
         "an unresolved dead-letter head must block its partition successor"
@@ -301,7 +329,11 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
     store.resolve_partition(&partition);
     assert_eq!(
         store
-            .claim_partition_heads(NonZeroUsize::MIN, deadline(&clock)?)
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::MIN,
+                deadline(&clock)?
+            )
             .await?
             .len(),
         1
@@ -320,12 +352,25 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         message.id().clone(),
         message.metadata().contract().clone(),
     );
-    let claim = match store.claim(&identity, deadline(&clock)?).await? {
+    let claim = match store
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
+    {
         IdempotencyDisposition::Acquired(claim) => claim,
         _ => return Err("first claim must acquire".into()),
     };
     assert!(matches!(
-        store.claim(&identity, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::InProgress
     ));
     assert!(matches!(
@@ -338,7 +383,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         LeaseStatus::Lost
     );
 
-    let successor = match store.claim(&identity, deadline(&clock)?).await? {
+    let successor = match store
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
+    {
         IdempotencyDisposition::Acquired(claim) => claim,
         _ => return Err("successor must acquire".into()),
     };
@@ -360,7 +412,13 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         TerminalDisposition::Succeeded,
     );
     assert!(matches!(
-        store.claim(&identity, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     assert_eq!(
@@ -372,8 +430,13 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         Some(MessagingErrorKind::OwnershipLost)
     );
     store.expire(&identity);
-    let IdempotencyDisposition::Terminal(receipt) =
-        store.claim(&identity, deadline(&clock)?).await?
+    let IdempotencyDisposition::Terminal(receipt) = store
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
     else {
         return Err("terminal lost".into());
     };
@@ -386,7 +449,13 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         identity.contract().clone(),
     );
     assert!(matches!(
-        store.claim(&other, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(other.tenant_id(), 1),
+                &other,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
     store.store_terminal(
@@ -395,22 +464,47 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         TerminalDisposition::Succeeded,
     );
     assert!(matches!(
-        store.claim(&identity, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     assert!(matches!(
-        store.claim(&other, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(other.tenant_id(), 1),
+                &other,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
 
     let releasable = MemoryInboxStore::new();
-    let claim = match releasable.claim(&identity, deadline(&clock)?).await? {
+    let claim = match releasable
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
+    {
         IdempotencyDisposition::Acquired(claim) => claim,
         _ => return Err("release fixture must acquire".into()),
     };
     releasable.release(claim, deadline(&clock)?).await?;
     assert!(matches!(
-        releasable.claim(&identity, deadline(&clock)?).await?,
+        releasable
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
 
@@ -431,13 +525,21 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     );
     assert!(matches!(
         collision_store
-            .claim(&first_identity, deadline(&clock)?)
+            .claim(
+                crate::execution(first_identity.tenant_id(), 1),
+                &first_identity,
+                deadline(&clock)?
+            )
             .await?,
         IdempotencyDisposition::Acquired(_)
     ));
     assert!(matches!(
         collision_store
-            .claim(&second_identity, deadline(&clock)?)
+            .claim(
+                crate::execution(second_identity.tenant_id(), 1),
+                &second_identity,
+                deadline(&clock)?
+            )
             .await?,
         IdempotencyDisposition::Acquired(_)
     ));
@@ -456,7 +558,11 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     );
     assert!(matches!(
         collision_store
-            .claim(&changed_schema_identity, deadline(&clock)?)
+            .claim(
+                crate::execution(changed_schema_identity.tenant_id(), 1),
+                &changed_schema_identity,
+                deadline(&clock)?
+            )
             .await?,
         IdempotencyDisposition::Acquired(_)
     ));
@@ -519,12 +625,26 @@ async fn outbox_same_message_id_is_independent_across_tenants() -> TestResult {
             AppendOutcome::Inserted
         );
     }
-    let mut claims = store
-        .claim_partition_heads(NonZeroUsize::new(2).ok_or("limit")?, deadline(&clock)?)
+    let a = store
+        .claim_partition_heads(
+            execution(tenants[0], 1),
+            NonZeroUsize::MIN,
+            deadline(&clock)?,
+        )
         .await?
-        .into_iter();
-    let a = claims.next().ok_or("tenant A claim")?;
-    let b = claims.next().ok_or("tenant B claim")?;
+        .into_iter()
+        .next()
+        .ok_or("tenant A claim")?;
+    let b = store
+        .claim_partition_heads(
+            execution(tenants[1], 1),
+            NonZeroUsize::MIN,
+            deadline(&clock)?,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("tenant B claim")?;
     store
         .settle(a, OutboxSettlement::Published(()), deadline(&clock)?)
         .await?;
@@ -562,7 +682,11 @@ async fn outbox_old_attempt_cannot_change_successor_or_terminal() -> TestResult 
             .await?;
         let limit = NonZeroUsize::new(1).ok_or("limit")?;
         let old = store
-            .claim_partition_heads(limit, deadline(&clock)?)
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                limit,
+                deadline(&clock)?,
+            )
             .await?
             .into_iter()
             .next()
@@ -575,7 +699,11 @@ async fn outbox_old_attempt_cannot_change_successor_or_terminal() -> TestResult 
             store.fence_claims();
         }
         let current = store
-            .claim_partition_heads(limit, deadline(&clock)?)
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                limit,
+                deadline(&clock)?,
+            )
             .await?
             .into_iter()
             .next()
@@ -609,7 +737,11 @@ async fn outbox_old_attempt_cannot_change_successor_or_terminal() -> TestResult 
         );
         assert!(
             store
-                .claim_partition_heads(limit, deadline(&clock)?)
+                .claim_partition_heads(
+                    crate::execution(crate::fixture_tenant(), 1),
+                    limit,
+                    deadline(&clock)?
+                )
                 .await?
                 .is_empty()
         );
@@ -619,4 +751,23 @@ async fn outbox_old_attempt_cannot_change_successor_or_terminal() -> TestResult 
         );
     }
     Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        .expect("fixture tenant")
 }

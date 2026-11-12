@@ -63,7 +63,7 @@ impl Database {
                     PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
                 ),
                 Timer,
-                fence_fixture::binding(),
+                fence_fixture::storage(),
             )
             .await?,
         );
@@ -92,7 +92,7 @@ impl Database {
         let tenant = envelope.envelope().metadata().tenant_id();
         let append = self.store.clone();
         self.runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move { append.append(tx, envelope).await.map_err(Into::into) })
             })
             .await
@@ -112,6 +112,7 @@ impl Database {
         publisher: &impl Publisher<Vec<u8>, Receipt = WebhookPublishReceipt>,
     ) -> anyhow::Result<()> {
         let report = relay_once(
+            execution(fixture_tenant(), 1),
             &*self.store,
             publisher,
             &self.timer,
@@ -159,9 +160,12 @@ async fn pg_scenario() -> anyhow::Result<()> {
     let writer = database.store.clone();
     let rollback = database
         .runtime
-        .local_tx(TenantId::parse(TENANT)?, deadline(), move |tx| {
-            Box::pin(async move {
-                writer
+        .local_tx(
+            execution(TenantId::parse(TENANT)?, 1),
+            deadline(),
+            move |tx| {
+                Box::pin(async move {
+                    writer
                     .append(
                         tx,
                         message("rollback").map_err(|_| {
@@ -169,9 +173,12 @@ async fn pg_scenario() -> anyhow::Result<()> {
                         })?,
                     )
                     .await?;
-                Err::<(), _>(rss_transactional_messaging_postgres::PgError::InvalidConnectionConfig)
-            })
-        })
+                    Err::<(), _>(
+                        rss_transactional_messaging_postgres::PgError::InvalidConnectionConfig,
+                    )
+                })
+            },
+        )
         .await
         .fold(
             |_| false,
@@ -207,6 +214,7 @@ async fn pg_scenario() -> anyhow::Result<()> {
     database.ready("unknown").await?;
     *receiver.mode.lock().await = response(204);
     let report = relay_once(
+        execution(fixture_tenant(), 1),
         &store,
         &receiver.publisher()?,
         &Timer,
@@ -228,9 +236,12 @@ async fn pg_scenario() -> anyhow::Result<()> {
     let writer = Arc::new(store);
     let append = writer.clone();
     restarted
-        .local_tx(TenantId::parse(TENANT)?, deadline(), move |tx| {
-            Box::pin(async move {
-                append
+        .local_tx(
+            execution(TenantId::parse(TENANT)?, 1),
+            deadline(),
+            move |tx| {
+                Box::pin(async move {
+                    append
                     .append(
                         tx,
                         message("settle-loss").map_err(|_| {
@@ -239,12 +250,17 @@ async fn pg_scenario() -> anyhow::Result<()> {
                     )
                     .await
                     .map_err(Into::into)
-            })
-        })
+                })
+            },
+        )
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     let claim = writer
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            execution(fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
@@ -266,6 +282,7 @@ async fn pg_scenario() -> anyhow::Result<()> {
             .is_err()
     );
     relay_once(
+        execution(fixture_tenant(), 1),
         &*writer,
         &receiver.publisher()?,
         &Timer,
@@ -308,7 +325,7 @@ async fn append_to(
     let pending = message(id)?;
     runtime
         .local_tx(
-            rss_request_context::TenantId::parse(TENANT)?,
+            execution(rss_request_context::TenantId::parse(TENANT)?, 1),
             deadline(),
             move |tx| Box::pin(async move { store.append(tx, pending).await.map_err(Into::into) }),
         )
@@ -344,7 +361,11 @@ async fn expiry_and_redrive(
     use rss_transactional_messaging_recovery as recovery;
     append_to(runtime, store.clone(), "expired").await?;
     let claim = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            execution(fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
@@ -357,6 +378,7 @@ async fn expiry_and_redrive(
         .connections
         .load(std::sync::atomic::Ordering::SeqCst);
     relay_once(
+        execution(fixture_tenant(), 1),
         &**store,
         &receiver.publisher()?,
         &Timer,
@@ -373,7 +395,11 @@ async fn expiry_and_redrive(
     );
     append_to(runtime, store.clone(), "redrive").await?;
     let claim = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            execution(fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
@@ -396,7 +422,7 @@ async fn expiry_and_redrive(
             PgPrivateCa::from_pem(database._fixture.ca_pem().as_bytes().to_vec())?,
         ),
         Timer,
-        fence_fixture::binding(),
+        fence_fixture::storage(),
         Arc::new(rss_examples::ephemeral::EphemeralKey::from_bytes(
             &[1; 32],
             "webhook-fixture",
@@ -414,7 +440,7 @@ async fn expiry_and_redrive(
     )
     .await?;
     let entry = recovery
-        .query(&query, deadline())
+        .query(execution(query.request().tenant(), 1), &query, deadline())
         .await?
         .entries
         .pop()
@@ -433,14 +459,22 @@ async fn expiry_and_redrive(
     )
     .await?;
     let receipt = recovery
-        .mutate(&request, deadline())
+        .mutate(
+            execution(request.request().tenant(), 1),
+            &request,
+            deadline(),
+        )
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     assert_eq!(receipt.outcome, recovery::Outcome::Redriven);
     let after:String=sqlx::query_scalar("SELECT automatic_retry_deadline::text FROM rss_transactional_messaging.outbox WHERE message_id='redrive'").fetch_one(&database.owner).await?;
     assert_eq!(original, after);
     let claim = store
-        .claim_partition_heads(NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(
+            execution(fixture_tenant(), 1),
+            NonZeroUsize::MIN,
+            deadline(),
+        )
         .await?
         .into_iter()
         .next()
@@ -521,4 +555,23 @@ async fn clock_recovery() -> anyhow::Result<()> {
     receiver.stop().await?;
     database.close().await;
     Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        .expect("fixture tenant")
 }

@@ -16,8 +16,13 @@ async fn deliver(
         f.runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) =
-        inbox.claim(binding.identity(), budget()?).await?
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
+        .await?
     else {
         anyhow::bail!("expected fresh ingress claim")
     };
@@ -35,7 +40,13 @@ async fn deliver(
         .execute(&claim, m.envelope(), binding.receipt_intent(), budget()?)
         .await
         .status();
-    let receipt = inbox.read_terminal(binding.identity(), budget()?).await?;
+    let receipt = inbox
+        .read_terminal(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
+        .await?;
     if status != TxStatus::Committed {
         assert!(receipt.is_none());
         inbox.release(claim, budget()?).await?;
@@ -131,7 +142,11 @@ pub(crate) async fn permanent_inputs(f: &Fixture) -> anyhow::Result<()> {
         )?;
         assert!(matches!(
             inbox
-                .claim(binding(m.envelope())?.identity(), budget()?)
+                .claim(
+                    crate::execution((binding(m.envelope())?.identity()).tenant_id(), 1),
+                    binding(m.envelope())?.identity(),
+                    budget()?
+                )
                 .await?,
             IdempotencyDisposition::Terminal(_)
         ));

@@ -774,18 +774,22 @@ mod consumer {
         /// Reject invalid ingress, or requeue a host execution mismatch without condemning content.
         #[must_use]
         pub fn into_decision(self) -> SettlementDecision {
-            SettlementDecision(if self.reason == EnvelopeValidationFailure::ExecutionMismatch {
-                SettlementKind::Requeue
-            } else {
-                SettlementKind::Reject
-            })
+            SettlementDecision(
+                if self.reason == EnvelopeValidationFailure::ExecutionMismatch {
+                    SettlementKind::Requeue
+                } else {
+                    SettlementKind::Reject
+                },
+            )
         }
     }
 
     impl VerifiedConsumerBinding {
         /// Host-selected execution identity for this delivery, never refreshed after claiming.
         #[must_use]
-        pub const fn execution(&self) -> crate::fence::ExecutionBinding { self.execution }
+        pub const fn execution(&self) -> crate::fence::ExecutionBinding {
+            self.execution
+        }
 
         /// Return the exact durable inbox identity bound to the validated message.
         #[must_use]
@@ -843,7 +847,9 @@ mod consumer {
             .map_err(|reason| IngressRejection { reason })?;
         let fingerprint = MessageFingerprint::of(message);
         if verified.execution.tenant() != message.metadata().tenant_id() {
-            return Err(IngressRejection { reason: EnvelopeValidationFailure::ExecutionMismatch });
+            return Err(IngressRejection {
+                reason: EnvelopeValidationFailure::ExecutionMismatch,
+            });
         }
         if verified.subscription != *subscription
             || verified.message_id != *message.id()

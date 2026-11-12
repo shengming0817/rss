@@ -23,6 +23,16 @@ pub(super) async fn run() -> anyhow::Result<()> {
 }
 
 #[cfg(any(feature = "producer", feature = "consumer"))]
+fn binding() -> anyhow::Result<rss_transactional_messaging::fence::ExecutionBinding> {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    Ok(ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16])?,
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+        Epoch::new(1)?,
+    ))
+}
+
+#[cfg(any(feature = "producer", feature = "consumer"))]
 fn envelope() -> anyhow::Result<rss_transactional_messaging::message::MessageEnvelope<Vec<u8>>> {
     use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
     use rss_request_context::TenantId;
@@ -90,7 +100,15 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
         .await?;
     let publisher = CustomPublisher(AtomicUsize::new(0), tokio::sync::Notify::new());
     let observations = Observations(AtomicUsize::new(0));
-    let report = relay_once(&store, &publisher, clock, &observations, NonZeroUsize::MIN).await?;
+    let report = relay_once(
+        binding()?,
+        &store,
+        &publisher,
+        clock,
+        &observations,
+        NonZeroUsize::MIN,
+    )
+    .await?;
     assert_eq!(report.published(), 1);
     assert_eq!(publisher.0.load(Ordering::SeqCst), 1);
     assert_eq!(store.settlements(), [OutboxDisposition::Published]);
@@ -117,6 +135,7 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
             RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN)?,
         );
         let (registration, _) = worker.into_registration(
+            binding()?,
             "example-relay",
             ShutdownBudget::new(Duration::from_secs(2))?,
         );
@@ -153,11 +172,13 @@ async fn consumer(clock: &FakeClock) -> anyhow::Result<()> {
         Deadline::from_timeout(clock, Duration::from_secs(5))?,
         clock,
     );
-    let IdempotencyDisposition::Acquired(claim) = store.claim(&identity, deadline).await? else {
+    let IdempotencyDisposition::Acquired(claim) =
+        store.claim(binding()?, &identity, deadline).await?
+    else {
         anyhow::bail!("initial claim was not acquired")
     };
     assert!(matches!(
-        store.claim(&identity, deadline).await?,
+        store.claim(binding()?, &identity, deadline).await?,
         IdempotencyDisposition::InProgress
     ));
     store.expire(&identity);
@@ -203,19 +224,19 @@ async fn uncertain_consumer(
             TransactionOutcome::commit_unknown()
         }
     }
-    struct Validator(rss_request_context::TenantId);
+    struct Validator(rss_transactional_messaging::fence::ExecutionBinding);
     impl IngressValidator<Vec<u8>> for Validator {
         fn validate(
             &self,
             challenge: IngressChallenge<'_, Vec<u8>>,
         ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
-            if challenge.message().metadata().tenant_id() != self.0 {
+            if challenge.message().metadata().tenant_id() != self.0.tenant() {
                 return Err(EnvelopeValidationFailure::MalformedIdentity);
             }
             if !challenge.subscription().accepts(challenge.message()) {
                 return Err(EnvelopeValidationFailure::UnsupportedContract);
             }
-            Ok(challenge.verified())
+            Ok(challenge.verified(self.0))
         }
     }
     struct Observations;
@@ -224,9 +245,7 @@ async fn uncertain_consumer(
             // reason: this bounded example observes settlement directly instead of installing telemetry.
         }
     }
-    let validator = Validator(rss_request_context::TenantId::parse(
-        "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    )?);
+    let validator = Validator(binding()?);
     let metadata = message.metadata();
     let subscription = SubscriptionIdentity::new(
         metadata.domain().clone(),

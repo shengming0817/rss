@@ -50,7 +50,7 @@ async fn late_queue_and_ownership(
     assert!(
         committed(
             restarted
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { selected.queue(tx, request, msg).await })
                 })
                 .await
@@ -63,7 +63,7 @@ async fn late_queue_and_ownership(
     assert!(
         committed(
             f.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { foreign.now(tx).await })
                 })
                 .await
@@ -81,7 +81,7 @@ async fn postgres_time(f: &Fixture) -> anyhow::Result<()> {
     let selected = f.store.clone();
     let actual = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { selected.now(tx).await })
             })
             .await,
@@ -102,7 +102,7 @@ async fn recover(
     let limit = BatchLimit::new(10)?;
     committed(
         runtime
-            .local_tx(scope.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(scope.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.recover(tx, scope, limit, None).await })
             })
             .await,
@@ -126,7 +126,7 @@ async fn queue(
     let msg = message("clock-boundary", s.tenant())?;
     committed(
         runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { queued.queue(tx, request, msg).await })
             })
             .await,

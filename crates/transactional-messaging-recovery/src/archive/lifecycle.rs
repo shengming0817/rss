@@ -204,7 +204,10 @@ async fn run<
     if request.request().hold() == Hold::Retain {
         return LocalTxAttempt::committed(Outcome::Held);
     }
-    let result = advance(repository, binding, store, hot, archive, request, &claim, deadline).await;
+    let result = advance(
+        repository, binding, store, hot, archive, request, &claim, deadline,
+    )
+    .await;
     match result {
         Ok(outcome) => LocalTxAttempt::committed(outcome),
         Err(attempt) => {
@@ -219,9 +222,11 @@ async fn run<
             );
             if let Some(error) = integrity {
                 integrity_observed.store(true, Ordering::Relaxed);
-                if let Err(failure) =
-                    settled(repository.fault(binding, request, &claim, error, deadline).await)
-                {
+                if let Err(failure) = settled(
+                    repository
+                        .fault(binding, request, &claim, error, deadline)
+                        .await,
+                ) {
                     return failure;
                 }
             }
@@ -290,7 +295,11 @@ async fn advance<
                 digest: request.request().digest(),
                 generation: claim.generation.clone(),
             };
-            settled(repository.reconcile(binding, request, claim, &proof, deadline).await)?;
+            settled(
+                repository
+                    .reconcile(binding, request, claim, &proof, deadline)
+                    .await,
+            )?;
             return Ok(Outcome::Reconciled);
         }
         return Err(failure(Error::Missing));
@@ -304,11 +313,19 @@ async fn advance<
         });
     }
     let proof = verify(archive, request.request(), claim, &object, observed).map_err(failure)?;
-    settled(repository.record(binding, request, claim, &proof, deadline).await)?;
+    settled(
+        repository
+            .record(binding, request, claim, &proof, deadline)
+            .await,
+    )?;
     if claim.now < claim.hot_until {
         return Ok(Outcome::Archived);
     }
-    settled(repository.purge(binding, request, claim, &proof, deadline).await)?;
+    settled(
+        repository
+            .purge(binding, request, claim, &proof, deadline)
+            .await,
+    )?;
     Ok(Outcome::Purged)
 }
 fn validate_object(expected: &Object, observed: &Observation) -> Result<(), Error> {
@@ -398,7 +415,11 @@ async fn reconcile_retired<R: ArchiveRepository, S: ArchiveObjectStore>(
                         digest: request.request().digest(),
                         generation,
                     };
-                    settled(repository.record(binding, request, claim, &proof, deadline).await)?;
+                    settled(
+                        repository
+                            .record(binding, request, claim, &proof, deadline)
+                            .await,
+                    )?;
                 }
             }
             None if object.version.is_some() => {
@@ -408,7 +429,11 @@ async fn reconcile_retired<R: ArchiveRepository, S: ArchiveObjectStore>(
                     digest: request.request().digest(),
                     generation,
                 };
-                settled(repository.reconcile(binding, request, claim, &proof, deadline).await)?;
+                settled(
+                    repository
+                        .reconcile(binding, request, claim, &proof, deadline)
+                        .await,
+                )?;
             }
             // An unknown PUT with no known version is not exact-version missing evidence.
             None => {}

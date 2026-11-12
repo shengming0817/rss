@@ -56,7 +56,7 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         let append_store = store.clone();
         let tenant = envelope.metadata().tenant_id();
         runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     append_store
                         .append(tx, PendingMessage::new(envelope))
@@ -72,6 +72,7 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         }
         let publisher = MemoryPublisher::new([PublishOutcome::Confirmed(())]);
         let report = relay_once(
+            crate::execution(crate::fixture_tenant(), 1),
             &*store,
             &publisher,
             &Timer::new(),

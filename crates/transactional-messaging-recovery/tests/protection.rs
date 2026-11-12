@@ -138,11 +138,17 @@ struct UncertainStore {
     persisted: bool,
 }
 impl RecoveryStore for UncertainStore {
-    async fn query(&self, _: &AuthorizedQuery, _: OperationDeadline) -> Result<Page, Error> {
+    async fn query(
+        &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _: &AuthorizedQuery,
+        _: OperationDeadline,
+    ) -> Result<Page, Error> {
         Err(Error::Store(StoreFailureKind::Transient))
     }
     async fn mutate(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _: &AuthorizedMutation,
         _: OperationDeadline,
     ) -> LocalTxAttempt<Receipt, Error> {
@@ -152,6 +158,7 @@ impl RecoveryStore for UncertainStore {
     #[allow(clippy::expect_used)] // reason: fixed persisted provider revision.
     async fn receipt(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedMutation,
         _: OperationDeadline,
     ) -> Result<Option<Receipt>, Error> {
@@ -201,6 +208,7 @@ async fn uncertain_commit_reads_receipt_without_repeating_mutation() {
         let observer = Observations(AtomicUsize::new(0));
         let result = execute(
             &store,
+            crate::execution(permit.request().tenant(), 1),
             &permit,
             &clock,
             ExecutionDeadlines::from_budget(&clock, ExecutionBudget::STANDARD).expect("deadlines"),
@@ -243,4 +251,17 @@ async fn authorization_is_bounded_before_any_storage_access() {
         authorize_query(&PendingAuthorization, query, &clock, cutoff).await,
         Err(Error::Deadline)
     ));
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
 }

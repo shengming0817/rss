@@ -9,17 +9,17 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
     let target = message("companion").metadata().tenant_id();
     let source = TenantId::parse("00000000-0000-0000-0000-000000000073")?;
     let owner_copy = owner.clone();
-    runtime.local_tx(target, deadline(), move |tx| Box::pin(async move {
-        let scope: (String, String) = tx.with_tenant_connection(source, |c| Box::pin(async move {
-            sqlx::query_as("SELECT current_setting('rss.tenant_id'),current_setting('rss.execution_epoch')")
+    runtime.local_tx(crate::execution(target, 1), deadline(), move |tx| Box::pin(async move {
+        let scope: (String, String, String, String) = tx.with_tenant_connection(crate::execution(source, 1), |c| Box::pin(async move {
+            sqlx::query_as("SELECT current_setting('rss.tenant_id'),current_setting('rss.execution_epoch'),current_setting('rss.storage_target'),current_setting('rss.storage_lineage')")
                 .fetch_one(c).await
         })).await?;
-        assert_eq!(scope, (source.to_string(), "1".into()));
+        assert_eq!(scope, (source.to_string(), "1".into(), "01".repeat(16), "02".repeat(16)));
         assert_eq!(tx.tenant_id(), target);
-        let restored: String = tx.with_connection(|c| Box::pin(async move {
-            sqlx::query_scalar("SELECT current_setting('rss.tenant_id')").fetch_one(c).await
+        let restored: (String, String, String, String) = tx.with_connection(|c| Box::pin(async move {
+            sqlx::query_as("SELECT current_setting('rss.tenant_id'),current_setting('rss.execution_epoch'),current_setting('rss.storage_target'),current_setting('rss.storage_lineage')").fetch_one(c).await
         })).await?;
-        assert_eq!(restored, target.to_string());
+        assert_eq!(restored, (target.to_string(), "1".into(), "01".repeat(16), "02".repeat(16)));
         // Independent owner cannot advance the source epoch before the host settles.
         let mut contender = owner_copy.begin().await?;
         sqlx::query("SET LOCAL lock_timeout='100ms'").execute(&mut *contender).await?;
@@ -36,9 +36,9 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
     .execute(owner)
     .await?;
     let stale = runtime
-        .local_tx(target, deadline(), move |tx| {
+        .local_tx(crate::execution(target, 1), deadline(), move |tx| {
             Box::pin(async move {
-                tx.with_tenant_connection(source, |_| {
+                tx.with_tenant_connection(crate::execution(source, 1), |_| {
                     Box::pin(async move {
                         panic!("stale companion must not run its callback");
                         #[allow(unreachable_code)]
@@ -60,8 +60,8 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         stale.expect_err("source epoch changed").kind(),
         MessagingErrorKind::OwnershipLost
     );
-    let conflict = runtime.local_tx(target, deadline(), move |tx| Box::pin(async move {
-        tx.with_tenant_connection(source, move |c| Box::pin(async move {
+    let conflict = runtime.local_tx(crate::execution(target, 1), deadline(), move |tx| Box::pin(async move {
+        tx.with_tenant_connection(crate::execution(source, 1), move |c| Box::pin(async move {
             for _ in 0..2 {
                 sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,'companion-conflict')")
                     .bind(source.to_string()).execute(&mut *c).await?;
@@ -77,10 +77,12 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
     );
     let missing = TenantId::parse("99999999-9999-9999-9999-999999999999")?;
     let rejected = runtime
-        .local_tx(target, deadline(), move |tx| {
+        .local_tx(crate::execution(target, 1), deadline(), move |tx| {
             Box::pin(async move {
-                tx.with_tenant_connection(missing, |_| Box::pin(async move { Ok(()) }))
-                    .await
+                tx.with_tenant_connection(crate::execution(missing, 1), |_| {
+                    Box::pin(async move { Ok(()) })
+                })
+                .await
             })
         })
         .await
@@ -100,20 +102,24 @@ async fn poison(
     cancel: bool,
 ) {
     let (sent, received) = tokio::sync::oneshot::channel();
-    let mut borrowed = Box::pin(tx.with_tenant_connection(source, move |c| {
-        Box::pin(async move {
-            sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,$2)")
+    let mut borrowed = Box::pin(
+        tx.with_tenant_connection(crate::execution(source, 1), move |c| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,$2)",
+                )
                 .bind(source.to_string())
                 .bind(id)
                 .execute(c)
                 .await?;
-            if cancel {
-                let _ = sent.send(());
-                std::future::pending::<()>().await;
-            }
-            Err::<(), _>(sqlx::Error::RowNotFound)
-        })
-    }));
+                if cancel {
+                    let _ = sent.send(());
+                    std::future::pending::<()>().await;
+                }
+                Err::<(), _>(sqlx::Error::RowNotFound)
+            })
+        }),
+    );
     if cancel {
         tokio::select! {
             result = &mut borrowed => panic!("callback ended before cancellation: {result:?}"),
@@ -135,7 +141,7 @@ async fn poison(
         MessagingErrorKind::Invariant
     );
     assert!(
-        tx.with_tenant_connection(source, |_| Box::pin(async { Ok(()) }))
+        tx.with_tenant_connection(crate::execution(source, 1), |_| Box::pin(async { Ok(()) }))
             .await
             .is_err()
     );
@@ -191,7 +197,7 @@ async fn interrupted_scopes(
     )?;
     for cancel in [false, true] {
         let outcome = runtime
-            .local_tx(target, deadline(), move |tx| {
+            .local_tx(crate::execution(target, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     poison(tx, source, "companion-interrupted-local", cancel).await;
                     Ok(()) // Ignoring the error must not authorize commit.
@@ -211,8 +217,13 @@ async fn interrupted_scopes(
             "companion-failed-consumer"
         });
         let binding = super::binding(&message);
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(binding.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("fresh claim");
         };
@@ -226,7 +237,11 @@ async fn interrupted_scopes(
         );
         assert!(
             inbox
-                .read_terminal(binding.identity(), deadline())
+                .read_terminal(
+                    crate::execution((binding.identity()).tenant_id(), 1),
+                    binding.identity(),
+                    deadline()
+                )
                 .await?
                 .is_none()
         );

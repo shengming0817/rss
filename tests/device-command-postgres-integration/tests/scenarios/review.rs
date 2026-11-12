@@ -101,7 +101,11 @@ pub(crate) async fn full_outbox_states(f: &Fixture) -> anyhow::Result<()> {
     }
     let claims = f
         .outbox
-        .claim_partition_heads(std::num::NonZeroUsize::MIN.saturating_add(1), budget()?)
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            std::num::NonZeroUsize::MIN.saturating_add(1),
+            budget()?,
+        )
         .await?;
     assert_eq!(claims.len(), 2);
     for claim in claims {
@@ -130,7 +134,7 @@ async fn unconfirmed(f: &Fixture, s: Scope, id: &str) -> anyhow::Result<()> {
     let outbox = f.outbox.clone();
     let published = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     outbox
                         .is_published(
@@ -164,7 +168,7 @@ pub(crate) async fn authority_pages(f: &Fixture) -> anyhow::Result<()> {
     let store = f.store.clone();
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     for (request, message) in requests {
                         store.queue(tx, request, message).await?;
@@ -178,7 +182,7 @@ pub(crate) async fn authority_pages(f: &Fixture) -> anyhow::Result<()> {
     let store = f.store.clone();
     let aborted = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
                 store.advance(tx, s, c, next).await?;
                 Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
@@ -190,7 +194,7 @@ pub(crate) async fn authority_pages(f: &Fixture) -> anyhow::Result<()> {
     let store = f.store.clone();
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.advance(tx, s, c, next).await })
             })
             .await,
@@ -227,7 +231,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
     let callers = CallerRoles::new(&["device_runtime"])?;
     let foreign = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     PgStore::new(
                         tx,
@@ -246,7 +250,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
     let id = CommandId::parse("multi-a")?;
     let foreign_operation = committed(
         other_runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.load(tx, s, &id).await })
             })
             .await,
@@ -256,7 +260,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
     let message = message("foreign-append", s.tenant())?;
     let foreign_append = committed(
         other_runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { source.append(tx, message).await.map_err(PgError::from) })
             })
             .await,
@@ -284,7 +288,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
     let selected = alternate.clone();
     let other = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     PgStore::new(
                         tx,
@@ -303,14 +307,18 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
     let msg = message_in_domain("multi-b", s.tenant(), "device-alt")?;
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { other.queue(tx, request, msg).await })
             })
             .await,
     )?;
     let _page = f.recover(s).await?;
     let claims = alternate
-        .claim_partition_heads(std::num::NonZeroUsize::MIN, budget()?)
+        .claim_partition_heads(
+            crate::execution(crate::fixture_tenant(), 1),
+            std::num::NonZeroUsize::MIN,
+            budget()?,
+        )
         .await?;
     for claim in claims {
         alternate

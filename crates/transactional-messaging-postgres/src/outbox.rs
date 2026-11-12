@@ -136,7 +136,11 @@ impl<R> PgOutboxStore<R> {
     }
     /// Read unresolved dead letters for one explicitly selected tenant and this domain.
     /// The host decides how unresolved records affect its admission policy.
-    pub async fn has_dead_letters(&self, binding: ExecutionBinding, deadline: OperationDeadline) -> Result<bool, PgError> {
+    pub async fn has_dead_letters(
+        &self,
+        binding: ExecutionBinding,
+        deadline: OperationDeadline,
+    ) -> Result<bool, PgError> {
         let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
         let tenant = binding.tenant();
@@ -148,7 +152,11 @@ impl<R> PgOutboxStore<R> {
     /// Observe one tenant's durable scheduling without claiming, renewing or settling work.
     /// Shares the claim candidate definition, including active DR generations. A fenced target
     /// returns ownership lost; the host selects any subsequent tenant.
-    pub async fn next_wakeup(&self, binding: ExecutionBinding, deadline: OperationDeadline) -> Result<OutboxWakeup, PgError> {
+    pub async fn next_wakeup(
+        &self,
+        binding: ExecutionBinding,
+        deadline: OperationDeadline,
+    ) -> Result<OutboxWakeup, PgError> {
         let runtime = &self.writer.runtime;
         let cutoff = Deadline::from_timeout(&runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
@@ -160,12 +168,19 @@ impl<R> PgOutboxStore<R> {
                 "SELECT due_now,next_us FROM rss_transactional_messaging.next_outbox_wakeup($1::uuid,$2)",
             ).bind(tenant.to_string()).bind(domain).fetch_one(connection).await?)
         })).await?;
-        let next_deadline = micros.map(|micros| {
-            let micros = u64::try_from(micros).map_err(|_| PgError::invariant())?;
-            observed.checked_add(Duration::from_micros(micros))
-                .map(Deadline::at).ok_or_else(PgError::invariant)
-        }).transpose()?;
-        Ok(OutboxWakeup { due_now, next_deadline })
+        let next_deadline = micros
+            .map(|micros| {
+                let micros = u64::try_from(micros).map_err(|_| PgError::invariant())?;
+                observed
+                    .checked_add(Duration::from_micros(micros))
+                    .map(Deadline::at)
+                    .ok_or_else(PgError::invariant)
+            })
+            .transpose()?;
+        Ok(OutboxWakeup {
+            due_now,
+            next_deadline,
+        })
     }
     /// Reject a transaction from a different runtime before any companion operation.
     pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
@@ -247,6 +262,9 @@ impl<R> PgOutboxStore<R> {
                 })
             })
             .await
+            .or_else(|error| {
+                if error.kind() == MessagingErrorKind::OwnershipLost { Ok(None) } else { Err(error) }
+            })
             .map_err(PgError::port)?;
         match result {
             None => Ok(OutboxLeaseStatus::Lost),
@@ -279,9 +297,7 @@ impl PgOutboxStore<()> {
         disposition: rss_transactional_messaging::transaction::TerminalDisposition,
     ) -> Result<(), PgError> {
         self.writer.validate_transaction(tx)?;
-        if !self.valid_claim(claim)
-            || *tx.binding() != claim.binding
-        {
+        if !self.valid_claim(claim) || *tx.binding() != claim.binding {
             return Err(PgError::lost());
         }
         let lease = claim.lease_us.lock().await;

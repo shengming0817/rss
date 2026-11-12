@@ -197,7 +197,7 @@ async fn run() -> anyhow::Result<()> {
     );
     fence_fixture::provision(&owner).await?;
     let repository =
-        PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::binding())
+        PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await?
             .with_retired_scan_limit(1024)?;
     let raw = PgPoolOptions::new()
@@ -253,6 +253,7 @@ async fn run() -> anyhow::Result<()> {
     )?;
     let result = execute(
         &repository,
+        crate::execution(request.request().tenant(), 1),
         &store,
         &HotKey(Key(1)),
         &ArchiveKey(ArchiveFixtureKey),
@@ -271,6 +272,7 @@ async fn run() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(55)).await;
     let expired = execute(
         &repository,
+        crate::execution(request.request().tenant(), 1),
         &store,
         &HotKey(Key(1)),
         &ArchiveKey(ArchiveFixtureKey),
@@ -374,6 +376,7 @@ async fn is_hot(owner: &sqlx::PgPool, id: DeadLetterId) -> anyhow::Result<bool> 
 }
 async fn invoke<S: ArchiveObjectStore>(
     r: &PgArchiveRepository,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     s: &S,
     q: &AuthorizedRequest,
 ) -> rss_transactional_messaging::transaction::LocalTxAttempt<Outcome, Error> {
@@ -389,6 +392,7 @@ async fn invoke<S: ArchiveObjectStore>(
     };
     execute(
         r,
+        binding,
         s,
         &HotKey(Key(1)),
         &ArchiveKey(ArchiveFixtureKey),
@@ -490,6 +494,7 @@ async fn fault_matrix(
         let r = request(id, 1, Hold::Release).await?;
         let result = invoke(
             repository,
+            crate::execution(r.request().tenant(), 1),
             &FaultStore {
                 real: store,
                 repository,
@@ -518,39 +523,80 @@ async fn fault_matrix(
             } else {
                 Error::Evidence
             };
-            assert_eq!(repository.receipt(&r, deadline()).await, Err(expected));
+            assert_eq!(
+                repository
+                    .receipt(crate::execution(r.request().tenant(), 1), &r, deadline())
+                    .await,
+                Err(expected)
+            );
             expire(owner, &r).await?;
             assert_eq!(
-                invoke(repository, store, &r)
-                    .await
-                    .fold(|_| None, Some, Some, Some, Some, Some),
+                invoke(
+                    repository,
+                    crate::execution(r.request().tenant(), 1),
+                    store,
+                    &r
+                )
+                .await
+                .fold(|_| None, Some, Some, Some, Some, Some),
                 Some(expected)
             );
             assert!(is_hot(owner, id).await?);
             let next = request(id, 2, Hold::Release).await?;
             assert_eq!(
-                settled(invoke(repository, store, &next).await)?,
+                settled(
+                    invoke(
+                        repository,
+                        crate::execution(next.request().tenant(), 1),
+                        store,
+                        &next
+                    )
+                    .await
+                )?,
                 Outcome::Purged
             );
-            assert_eq!(repository.receipt(&r, deadline()).await, Err(expected));
+            assert_eq!(
+                repository
+                    .receipt(crate::execution(r.request().tenant(), 1), &r, deadline())
+                    .await,
+                Err(expected)
+            );
         }
         if matches!(fault, Fault::LostPut | Fault::CommitUnknown) {
             let before:serde_json::Value=sqlx::query_scalar("SELECT object FROM rss_transactional_messaging.archive_objects WHERE operation_id=$1::uuid").bind(r.request().operation().to_string()).fetch_one(owner).await?;
             expire(owner, &r).await?;
             assert_eq!(
-                settled(invoke(repository, store, &r).await)?,
+                settled(
+                    invoke(
+                        repository,
+                        crate::execution(r.request().tenant(), 1),
+                        store,
+                        &r
+                    )
+                    .await
+                )?,
                 Outcome::Purged
             );
             let after:serde_json::Value=sqlx::query_scalar("SELECT object FROM rss_transactional_messaging.archive_objects WHERE operation_id=$1::uuid").bind(r.request().operation().to_string()).fetch_one(owner).await?;
             assert_eq!(before["checksum"], after["checksum"]);
             assert_eq!(before["key"], after["key"]);
             assert_eq!(
-                repository.receipt(&r, deadline()).await?,
+                repository
+                    .receipt(crate::execution(r.request().tenant(), 1), &r, deadline())
+                    .await?,
                 Some(Outcome::Purged)
             );
             expire(owner, &r).await?;
             assert_eq!(
-                settled(invoke(repository, store, &r).await)?,
+                settled(
+                    invoke(
+                        repository,
+                        crate::execution(r.request().tenant(), 1),
+                        store,
+                        &r
+                    )
+                    .await
+                )?,
                 Outcome::Purged
             );
         }
@@ -558,24 +604,49 @@ async fn fault_matrix(
     let id = seed(owner, "held").await?;
     let held = request(id, 1, Hold::Retain).await?;
     assert_eq!(
-        settled(invoke(repository, store, &held).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(held.request().tenant(), 1),
+                store,
+                &held
+            )
+            .await
+        )?,
         Outcome::Held
     );
     assert!(is_hot(owner, id).await?);
     let release = request(id, 2, Hold::Release).await?;
     assert_eq!(
-        settled(invoke(repository, store, &release).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(release.request().tenant(), 1),
+                store,
+                &release
+            )
+            .await
+        )?,
         Outcome::Purged
     );
     assert!(
-        settled(invoke(repository, store, &held).await).is_err(),
+        settled(
+            invoke(
+                repository,
+                crate::execution(held.request().tenant(), 1),
+                store,
+                &held
+            )
+            .await
+        )
+        .is_err(),
         "old policy fenced"
     );
     let id = seed(owner, "concurrent").await?;
     let r = request(id, 1, Hold::Release).await?;
     let (a, b) = tokio::join!(
-        repository.claim(&r, deadline()),
-        repository.claim(&r, deadline())
+        repository.claim(crate::execution(r.request().tenant(), 1), &r, deadline()),
+        repository.claim(crate::execution(r.request().tenant(), 1), &r, deadline())
     );
     let a = a.fold(Ok, Err, Err, Err, Err, Err);
     let b = b.fold(Ok, Err, Err, Err, Err, Err);
@@ -583,7 +654,11 @@ async fn fault_matrix(
     assert_ne!(a.is_ok(), b.is_ok());
     let old = a.or(b)?;
     expire(owner, &r).await?;
-    let new = settled(repository.claim(&r, deadline()).await)?;
+    let new = settled(
+        repository
+            .claim(crate::execution(r.request().tenant(), 1), &r, deadline())
+            .await,
+    )?;
     assert_ne!(old.token, new.token);
     let p = Prepared {
         object: Object {
@@ -596,31 +671,39 @@ async fn fault_matrix(
         bytes: vec![0],
     };
     assert_eq!(
-        repository.prepare(&r, &old, &p, deadline()).await.fold(
-            |_| None,
-            |_| None,
-            |_| None,
-            |_| None,
-            |_| None,
-            Some
-        ),
+        repository
+            .prepare(
+                crate::execution(r.request().tenant(), 1),
+                &r,
+                &old,
+                &p,
+                deadline()
+            )
+            .await
+            .fold(|_| None, |_| None, |_| None, |_| None, |_| None, Some),
         Some(Error::Conflict)
     );
     assert_eq!(
-        repository.prepare(&r, &new, &p, deadline()).await.fold(
-            |_| None,
-            Some,
-            Some,
-            Some,
-            Some,
-            Some
-        ),
+        repository
+            .prepare(
+                crate::execution(r.request().tenant(), 1),
+                &r,
+                &new,
+                &p,
+                deadline()
+            )
+            .await
+            .fold(|_| None, Some, Some, Some, Some, Some),
         Some(Error::Evidence)
     );
     let conflict = request(id, 1, Hold::Release).await?;
     assert_eq!(
         repository
-            .claim(&conflict, deadline())
+            .claim(
+                crate::execution(conflict.request().tenant(), 1),
+                &conflict,
+                deadline()
+            )
             .await
             .fold(|_| None, Some, Some, Some, Some, Some),
         Some(Error::Conflict)
@@ -641,7 +724,11 @@ async fn fault_matrix(
     .await?;
     assert_eq!(
         repository
-            .claim(&short, deadline())
+            .claim(
+                crate::execution(short.request().tenant(), 1),
+                &short,
+                deadline()
+            )
             .await
             .fold(|_| None, Some, Some, Some, Some, Some),
         Some(Error::Retention)
@@ -664,7 +751,7 @@ async fn fault_matrix(
     .await?;
     assert!(matches!(
         repository
-            .claim(&q, deadline())
+            .claim(crate::execution(q.request().tenant(), 1), &q, deadline())
             .await
             .fold(|_| None, Some, Some, Some, Some, Some),
         Some(Error::NotFound)
@@ -678,6 +765,7 @@ async fn fault_matrix(
     )?;
     let result = execute(
         repository,
+        crate::execution(r.request().tenant(), 1),
         store,
         &HotKey(Key(1)),
         &ArchiveKey(Key(1)),
@@ -695,6 +783,7 @@ async fn fault_matrix(
         settled(
             invoke(
                 repository,
+                crate::execution(r.request().tenant(), 1),
                 &FaultStore {
                     real: store,
                     repository,
@@ -709,7 +798,15 @@ async fn fault_matrix(
     sqlx::query("UPDATE rss_transactional_messaging.archive_objects SET object=jsonb_set(object,'{retainUntil}',to_jsonb(1::bigint)) WHERE operation_id=$1::uuid").bind(r.request().operation().to_string()).execute(owner).await?;
     expire(owner, &r).await?;
     assert_eq!(
-        settled(invoke(repository, store, &r).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(r.request().tenant(), 1),
+                store,
+                &r
+            )
+            .await
+        )?,
         Outcome::Purged
     );
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM rss_transactional_messaging.archive_objects WHERE operation_id=$1::uuid AND prepared IS NULL AND verified").bind(r.request().operation().to_string()).fetch_one(owner).await?,2);
@@ -725,7 +822,11 @@ async fn expiry_reconciliation(
 ) -> anyhow::Result<()> {
     let id = seed(owner, "elapsed-horizon").await?;
     let r = request(id, 1, Hold::Release).await?;
-    let c = settled(repository.claim(&r, deadline()).await)?;
+    let c = settled(
+        repository
+            .claim(crate::execution(r.request().tenant(), 1), &r, deadline())
+            .await,
+    )?;
     let bytes = b"expired fixture snapshot".to_vec();
     let p = Prepared {
         object: Object {
@@ -744,13 +845,29 @@ async fn expiry_reconciliation(
     sqlx::query("UPDATE rss_transactional_messaging.archive_jobs SET purged=true WHERE operation_id=$1::uuid").bind(r.request().operation().to_string()).execute(owner).await?;
     expire(owner, &r).await?;
     assert_eq!(
-        settled(invoke(repository, store, &r).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(r.request().tenant(), 1),
+                store,
+                &r
+            )
+            .await
+        )?,
         Outcome::Purged
     );
     tokio::time::sleep(Duration::from_secs(4)).await;
     expire(owner, &r).await?;
     assert_eq!(
-        settled(invoke(repository, store, &r).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(r.request().tenant(), 1),
+                store,
+                &r
+            )
+            .await
+        )?,
         Outcome::Retained
     );
     s3.delete_expired_version(
@@ -763,11 +880,21 @@ async fn expiry_reconciliation(
     .await?;
     expire(owner, &r).await?;
     assert_eq!(
-        settled(invoke(repository, store, &r).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(r.request().tenant(), 1),
+                store,
+                &r
+            )
+            .await
+        )?,
         Outcome::Reconciled
     );
     assert_eq!(
-        repository.receipt(&r, deadline()).await?,
+        repository
+            .receipt(crate::execution(r.request().tenant(), 1), &r, deadline())
+            .await?,
         Some(Outcome::Reconciled)
     );
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM rss_transactional_messaging.consumer_dead_letter WHERE id=$1::uuid").bind(id.to_string()).fetch_one(owner).await?,1);
@@ -878,7 +1005,7 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
                 PgArchiveRepository::connect(
                     config.clone(),
                     Timer::new(),
-                    fence_fixture::binding()
+                    fence_fixture::storage()
                 )
                 .await,
                 Err(Error::StorageContract)
@@ -889,7 +1016,7 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
             .execute(owner)
             .await?;
     }
-    PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::binding())
+    PgArchiveRepository::connect(config.clone(), Timer::new(), fence_fixture::storage())
         .await?
         .close()
         .await;
@@ -899,14 +1026,22 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
 async fn fair_scan(repository: &PgArchiveRepository, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let id = seed(owner, "scan-fairness").await?;
     let r = request(id, 1, Hold::Release).await?;
-    settled(repository.claim(&r, deadline()).await)?;
+    settled(
+        repository
+            .claim(crate::execution(r.request().tenant(), 1), &r, deadline())
+            .await,
+    )?;
     // More unresolved unknown PUTs than a batch must not monopolize every retry.
     sqlx::query("INSERT INTO rss_transactional_messaging.archive_objects(tenant_id,operation_id,generation,object) SELECT $1::uuid,$2::uuid,gen_random_uuid(),jsonb_build_object('key','unknown-'||n,'checksum',to_jsonb(array_fill(0,ARRAY[32])),'length',1,'version',NULL,'retainUntil',1) FROM generate_series(1,2050) n")
         .bind(tenant().to_string()).bind(r.request().operation().to_string()).execute(owner).await?;
     let mut seen = std::collections::BTreeSet::new();
     for _ in 0..3 {
         expire(owner, &r).await?;
-        let c = settled(repository.claim(&r, deadline()).await)?;
+        let c = settled(
+            repository
+                .claim(crate::execution(r.request().tenant(), 1), &r, deadline())
+                .await,
+        )?;
         assert_eq!(c.retired.len(), 1024);
         seen.extend(c.retired.into_iter().map(|o| o.key));
     }
@@ -921,12 +1056,21 @@ async fn fault_receipt(
     let id = seed(owner, "fault-receipt").await?;
     let r = request(id, 1, Hold::Release).await?;
     assert_eq!(
-        settled(invoke(repository, store, &r).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(r.request().tenant(), 1),
+                store,
+                &r
+            )
+            .await
+        )?,
         Outcome::Purged
     );
     expire(owner, &r).await?;
     let result = invoke(
         repository,
+        crate::execution(r.request().tenant(), 1),
         &FaultStore {
             real: store,
             repository,
@@ -944,13 +1088,15 @@ async fn fault_receipt(
         |_| false
     ));
     assert_eq!(
-        repository.receipt(&r, deadline()).await,
+        repository
+            .receipt(crate::execution(r.request().tenant(), 1), &r, deadline())
+            .await,
         Err(Error::Missing)
     );
     expire(owner, &r).await?;
     assert_eq!(
         repository
-            .claim(&r, deadline())
+            .claim(crate::execution(r.request().tenant(), 1), &r, deadline())
             .await
             .fold(|_| None, Some, Some, Some, Some, Some),
         Some(Error::Missing)
@@ -965,7 +1111,15 @@ async fn interrupted_fault_receipt(
     let id = seed(owner, "fault-write-interrupted").await?;
     let r = request(id, 1, Hold::Release).await?;
     assert_eq!(
-        settled(invoke(repository, store, &r).await)?,
+        settled(
+            invoke(
+                repository,
+                crate::execution(r.request().tenant(), 1),
+                store,
+                &r
+            )
+            .await
+        )?,
         Outcome::Purged
     );
     expire(owner, &r).await?;
@@ -976,6 +1130,7 @@ async fn interrupted_fault_receipt(
     )?;
     let result = execute(
         repository,
+        crate::execution(r.request().tenant(), 1),
         &FaultStore {
             real: store,
             repository,
@@ -1001,7 +1156,9 @@ async fn interrupted_fault_receipt(
         "old receipt must not settle the interrupted integrity-fault write"
     );
     assert_eq!(
-        repository.receipt(&r, deadline()).await?,
+        repository
+            .receipt(crate::execution(r.request().tenant(), 1), &r, deadline())
+            .await?,
         Some(Outcome::Purged),
         "fault did not commit, so the old receipt still exists"
     );
@@ -1044,6 +1201,7 @@ async fn unreadable_archive(
     )?;
     let attempt = execute(
         repository,
+        crate::execution(r.request().tenant(), 1),
         store,
         &HotKey(Key(1)),
         &ArchiveKey(FutureFormatKey),
@@ -1114,7 +1272,11 @@ async fn lease_budget(
     let cutoff = Deadline::from_timeout(&clock, Duration::from_secs(90_000))?;
     settled(
         repository
-            .claim(&r, OperationDeadline::from_cutoff(cutoff, &clock))
+            .claim(
+                crate::execution(r.request().tenant(), 1),
+                &r,
+                OperationDeadline::from_cutoff(cutoff, &clock),
+            )
             .await,
     )?;
     let remaining:f64=sqlx::query_scalar("SELECT extract(epoch FROM lease_until-clock_timestamp())::double precision FROM rss_transactional_messaging.archive_jobs WHERE operation_id=$1::uuid").bind(r.request().operation().to_string()).fetch_one(owner).await?;
@@ -1126,7 +1288,11 @@ async fn lease_budget(
     let cutoff = Deadline::from_timeout(&clock, Duration::from_millis(9_223_372_036_854_776))?;
     assert_eq!(
         repository
-            .claim(&other, OperationDeadline::from_cutoff(cutoff, &clock))
+            .claim(
+                crate::execution(other.request().tenant(), 1),
+                &other,
+                OperationDeadline::from_cutoff(cutoff, &clock)
+            )
             .await
             .fold(|_| None, Some, |_| None, |_| None, |_| None, |_| None),
         Some(Error::Invalid)
@@ -1145,3 +1311,16 @@ async fn lease_budget(
 }
 
 mod examples;
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}

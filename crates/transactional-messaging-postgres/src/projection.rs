@@ -190,7 +190,11 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     }
 
     /// Whether this projection has unresolved source dead letters.
-    pub async fn has_dead_letters(&self, binding: ExecutionBinding, deadline: OperationDeadline) -> Result<bool, PgError> {
+    pub async fn has_dead_letters(
+        &self,
+        binding: ExecutionBinding,
+        deadline: OperationDeadline,
+    ) -> Result<bool, PgError> {
         self.outbox.has_dead_letters(binding, deadline).await
     }
 
@@ -307,7 +311,11 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         }
         let acquired = self
             .inbox
-            .claim(binding.execution(), binding.identity(), remaining(self, cutoff))
+            .claim(
+                binding.execution(),
+                binding.identity(),
+                remaining(self, cutoff),
+            )
             .await
             .map_err(pg)?;
         let claim = match acquired {

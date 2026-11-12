@@ -134,7 +134,6 @@ pub fn message(tenant: TenantId, id: &str) -> anyhow::Result<PendingMessage<Vec<
     )?)
 }
 pub async fn runtime(input: &crate::pg::Input) -> anyhow::Result<Arc<PgRuntime>> {
-    let tenant = TenantId::parse(&input.tenant)?;
     Ok(Arc::new(
         PgRuntime::connect(
             PgConfig::new(
@@ -146,16 +145,17 @@ pub async fn runtime(input: &crate::pg::Input) -> anyhow::Result<Arc<PgRuntime>>
                 PgPrivateCa::from_pem(input.pg_ca.as_bytes().to_vec())?,
             ),
             Timer,
-            // The fixture owns this storage lineage. Real hosts supply their admitted binding.
-            ExecutionBinding::new(
-                StorageIdentity::new([1; 16], [2; 16])?,
-                vec![(tenant, Epoch::new(1)?)],
-            )?,
+            StorageIdentity::new([1; 16], [2; 16])?,
         )
         .await?,
     ))
 }
 pub async fn run(input: Input) -> anyhow::Result<()> {
+    let binding = ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16])?,
+        TenantId::parse(&input.pg.tenant)?,
+        Epoch::new(1)?,
+    );
     let runtime = runtime(&input.pg).await?;
     let store = Arc::new(PgOutboxStore::<WebhookPublishReceipt>::new(
         runtime.clone(),
@@ -166,14 +166,22 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
     let writer = store.clone();
     runtime
         .local_tx(
-            TenantId::parse(&input.pg.tenant)?,
+            binding,
             OperationDeadline::from_remaining(Duration::from_secs(5)),
             move |tx| Box::pin(async move { writer.append(tx, pending).await.map_err(Into::into) }),
         )
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     let publisher = WebhookPublisher::new(input.endpoint, Timer, Timer, limits()?);
-    let report = relay_once(&*store, &publisher, &Timer, &Emitter, NonZeroUsize::MIN).await?;
+    let report = relay_once(
+        binding,
+        &*store,
+        &publisher,
+        &Timer,
+        &Emitter,
+        NonZeroUsize::MIN,
+    )
+    .await?;
     anyhow::ensure!(report.claimed() == 1, "expected one claimed delivery");
     // The fixture independently asserts the received signature and durable published status.
     runtime.close().await;
