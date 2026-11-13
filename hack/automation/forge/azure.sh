@@ -174,6 +174,27 @@ _azure_pr_create() { # <title> <body-file> <base> <head> -> PR URL
         'if (.pullRequestId // null) != null then "\($base)/pullrequest/\(.pullRequestId)" else error("pr-create: no pullRequestId in response") end'
 }
 
+_azure_pr_edit() { # <pr> <title> <body-file>; no merge/status mutation
+    local pr="$1" title="$2" body_file="$3" tmp hdr out rc=0
+    [[ "$pr" =~ ^[1-9][0-9]*$ ]] || return 64
+    if _dry "REST PATCH /git/repositories/${ADO_REPO}/pullrequests/${pr} title=<title> description=<body-file>"; then return 0; fi
+    tmp="$(mktemp "${TMPDIR:-/tmp}/forge-azpr-edit.XXXXXX")" || return
+    out="$(mktemp "${TMPDIR:-/tmp}/forge-azpr-readback.XXXXXX")" || { rm -f "$tmp"; return 1; }
+    if ! jq -n --arg title "$title" --rawfile body "$body_file" '{title:$title,description:$body}' > "$tmp"; then
+        rm -f "$tmp" "$out"; return 1
+    fi
+    hdr="$(_az_auth_hdr_file)" || { rm -f "$tmp" "$out"; return 1; }
+    # ref: Azure DevOps REST 7.1 Git/Pull Requests/Update. Body and auth stay off argv.
+    curl -fsS -X PATCH "${ADO_ORG}/${ADO_PROJECT}/_apis/git/repositories/${ADO_REPO}/pullrequests/${pr}?api-version=7.1" \
+        -H @"$hdr" -H 'Content-Type: application/json' --data-binary @"$tmp" -o "$out" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        jq -e --arg title "$title" --rawfile body "$body_file" \
+            '.title == $title and .description == $body' "$out" >/dev/null || rc=1
+    fi
+    rm -f "$tmp" "$hdr" "$out"
+    return "$rc"
+}
+
 _azure_pr_comment() { # <pr> <body-file> -> comment URL
     local pr="$1" body="$2" tmp rc out
     # dry-run: emit a stable placeholder — skip mktemp so no random path leaks (F14).

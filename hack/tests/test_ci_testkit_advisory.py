@@ -1,4 +1,4 @@
-"""Synthetic scope expansion and stale-exception failures for #3183."""
+"""Synthetic scope expansion, SQLite activation and stale-exception failures."""
 import copy
 from datetime import date, timedelta
 import importlib.util
@@ -21,13 +21,14 @@ class AdvisoryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         (self.root / '.cargo').mkdir()
-        names = {'astral-tokio-tar', 'testcontainers', 'testkit'}
+        names = set(guard.PACKAGES) | {'testkit'}
         self.packages = [p for p in tomllib.loads((ROOT / 'Cargo.lock').read_text())['package'] if p['name'] in names]
         self.deny = (ROOT / 'deny.toml').read_text()
         self.audit = (ROOT / '.cargo/audit.toml').read_text()
         self.clock = date(2026, 11, 13)
         self.addCleanup(patch.stopall)
         patch.object(guard, '__file__', str(self.root / 'crates/testkit/check-advisory.py')).start()
+        self.graph = patch.object(guard, 'active_packages', return_value={'sqlx', 'testkit'}).start()
 
     def verify(self, *, packages=None, deny=None, audit=None, today=None):
         entries = packages if packages is not None else self.packages
@@ -47,7 +48,7 @@ class AdvisoryTests(unittest.TestCase):
         self.verify(today=guard.EXPIRES - timedelta(days=1))
 
     def test_changed_or_additional_package_identity_is_rejected(self):
-        for name in ('astral-tokio-tar', 'testcontainers'):
+        for name in guard.PACKAGES:
             for field, value in [('version', '99.0.0'), ('source', 'git+https://example.org/fork'), ('checksum', '0' * 64)]:
                 with self.subTest(name=name, field=field):
                     packages = copy.deepcopy(self.packages)
@@ -61,7 +62,7 @@ class AdvisoryTests(unittest.TestCase):
                     self.verify(packages=packages)
 
     def test_new_parent_or_broken_chain_is_rejected(self):
-        for child in ('astral-tokio-tar', 'testcontainers'):
+        for child in guard.PARENTS:
             with self.subTest(child=child):
                 with self.assertRaisesRegex(ValueError, 'only .* may introduce'):
                     self.verify(packages=self.packages + [{'name': 'unapproved', 'version': '1.0.0', 'dependencies': [child]}])
@@ -72,8 +73,18 @@ class AdvisoryTests(unittest.TestCase):
                     self.verify(packages=packages)
 
     def test_removed_dependency_does_not_leave_silent_ignore(self):
-        with self.assertRaisesRegex(ValueError, 'remove stale exception'):
-            self.verify(packages=[p for p in self.packages if p['name'] != 'astral-tokio-tar'])
+        for name in ('astral-tokio-tar', 'libsqlite3-sys'):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'remove stale exception'):
+                self.verify(packages=[p for p in self.packages if p['name'] != name])
+
+    def test_sqlite_activation_or_empty_graph_revokes_acceptance(self):
+        for name in ('sqlx-sqlite', 'libsqlite3-sys'):
+            self.graph.return_value = {'sqlx', 'testkit', name}
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'SQLite was enabled'):
+                self.verify()
+        self.graph.return_value = set()
+        with self.assertRaisesRegex(ValueError, 'must include'):
+            self.verify()
 
     def test_expiry_is_a_hard_utc_date_boundary(self):
         for today in (guard.EXPIRES, guard.EXPIRES + timedelta(days=1)):
@@ -81,7 +92,8 @@ class AdvisoryTests(unittest.TestCase):
                 self.verify(today=today)
 
     def test_scanner_exceptions_remain_narrow_and_consistent(self):
-        for deny in (self.deny.replace(guard.ADVISORY, 'RUSTSEC-2000-0000'),
+        for deny in (self.deny.replace('RUSTSEC-2026-0440', 'RUSTSEC-2000-0000'),
+                     self.deny.replace('RUSTSEC-2026-0459', 'RUSTSEC-2000-0000'),
                      self.deny.replace('[advisories]', '[advisories]\nunmaintained = "none"')):
             with self.subTest(deny=deny), self.assertRaises(ValueError):
                 self.verify(deny=deny)

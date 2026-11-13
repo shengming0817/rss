@@ -12,7 +12,14 @@ yanked = "deny"
 # unmaintained notice, not a vulnerability exemption. Upstream blocker:
 # https://github.com/testcontainers/testcontainers-rs/issues/1007
 # Revoke on a maintained replacement, dependency removal, or expiry.
-ignore = [{ id = "RUSTSEC-2026-0440", reason = "#3183: RSS testkit owns temporary unmaintained risk; expires 2026-12-13 UTC; revoke when upstream #1007 is resolved." }]
+# #3184: RSS dependency owner accepts only inactive SQLx SQLite lock entries.
+# SQLx 0.9.0 cannot select the fixed SQLite version. The same checker enforces
+# exact package identities/parents and rejects SQLite activation on any target.
+# Revoke on activation, a compatible SQLx release, removal, or the same UTC expiry.
+ignore = [
+  { id = "RUSTSEC-2026-0440", reason = "#3183: RSS testkit owns temporary unmaintained risk; expires 2026-12-13 UTC; revoke when upstream #1007 is resolved." },
+  { id = "RUSTSEC-2026-0459", reason = "#3184: RSS dependency owner accepts inactive SQLx SQLite lock entries only; expires 2026-12-13 UTC; revoke on activation or a compatible SQLx fix." },
+]
 
 [licenses]
 confidence-threshold = 0.93

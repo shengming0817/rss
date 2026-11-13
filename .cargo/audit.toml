@@ -1,4 +1,5 @@
 [advisories]
 # Same bounded risk acceptance as deny.toml; enforced by testkit/check-advisory.py.
-# Owner: RSS testkit, #3183. Revoke on a maintained replacement or 2026-12-13 UTC.
-ignore = ["RUSTSEC-2026-0440"]
+# Owners: RSS testkit (#3183), RSS dependency owner (#3184).
+# SQLite must remain inactive; revoke on a compatible fix or 2026-12-13 UTC.
+ignore = ["RUSTSEC-2026-0440", "RUSTSEC-2026-0459"]
