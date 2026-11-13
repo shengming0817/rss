@@ -6,8 +6,13 @@ all-features = true
 [advisories]
 yanked = "deny"
 # advisories 门双轨（issue #1133）：cargo-deny 检查 feature-resolved 图，cargo-audit 检查完整锁图。
-# rsa 已退出 Cargo.lock，旧 advisory 豁免已撤销（#2376）；两个入口均不忽略 advisory。
-ignore = []
+# #3183: testkit/check-advisory.py limits this temporary exception to the exact
+# crates.io packages and testkit -> testcontainers chain, until 2026-12-13 UTC.
+# Owner: RSS testkit. Local fixture data is encoded for Docker; this is an
+# unmaintained notice, not a vulnerability exemption. Upstream blocker:
+# https://github.com/testcontainers/testcontainers-rs/issues/1007
+# Revoke on a maintained replacement, dependency removal, or expiry.
+ignore = [{ id = "RUSTSEC-2026-0440", reason = "#3183: RSS testkit owns temporary unmaintained risk; expires 2026-12-13 UTC; revoke when upstream #1007 is resolved." }]
 
 [licenses]
 confidence-threshold = 0.93

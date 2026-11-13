@@ -25,6 +25,7 @@ _ci:
 # Keep each group in one shell so every executable check contributes to its verdict.
 _ci-checks:
 	@status=0; \
+	python3 crates/testkit/check-advisory.py --audit || status=$$?; \
 	cargo check --locked $(CI_PACKAGES) || status=$$?; \
 	cargo check --locked --no-default-features $(CI_PACKAGES) || status=$$?; \
 	cargo check --locked --all-features $(CI_PACKAGES) || status=$$?; \
@@ -36,5 +37,8 @@ _ci-checks:
 
 
 audit:
-	cargo deny check advisories
-	cargo audit
+	@status=0; \
+	python3 crates/testkit/check-advisory.py --audit || status=$$?; \
+	cargo deny check advisories || status=$$?; \
+	cargo audit || status=$$?; \
+	exit $$status
