@@ -75,7 +75,7 @@ async fn device_child() -> anyhow::Result<()> {
     let before_marker = marker.clone();
     committed(
         runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     store.queue(tx, request, msg).await?;
                     if !committed_before_kill {

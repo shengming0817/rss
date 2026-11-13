@@ -106,7 +106,7 @@ remains unknown. Application receipt means the plan was installed, not that its 
 
 Same-ID recovery never changes the original Published fact or extends its deadline. Normal relay
 confirmation and real atomic ConsumerTx effects establish member completion. Providers must fence
-all message/recovery/archive execution against a fixed binding; see the PostgreSQL adapter's
+all message/recovery/archive execution against the host-supplied operation binding; see the PostgreSQL adapter's
 migration and external restore prerequisites. The library does not orchestrate restore or broker
 cursors and provides no compatibility execution mode.
 

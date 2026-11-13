@@ -122,7 +122,7 @@ pub(super) async fn authority_changes(f: &Fixture) -> anyhow::Result<()> {
     let next = Coordinate::new(1, 2)?;
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.advance(tx, s, c, next).await })
             })
             .await,
@@ -144,7 +144,7 @@ pub(super) async fn authority_changes(f: &Fixture) -> anyhow::Result<()> {
     let store = f.store.clone();
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.advance(tx, s, c, next).await })
             })
             .await,
@@ -153,7 +153,7 @@ pub(super) async fn authority_changes(f: &Fixture) -> anyhow::Result<()> {
     let newer = Coordinate::new(2, 3)?;
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.advance(tx, s, next, newer).await })
             })
             .await,
@@ -173,7 +173,7 @@ pub(super) async fn atomicity(f: &mut Fixture) -> anyhow::Result<()> {
     let msg = message("rollback", s.tenant())?;
     let attempt = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
                 store.queue(tx, request, msg).await?;
                 Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
@@ -188,7 +188,7 @@ pub(super) async fn atomicity(f: &mut Fixture) -> anyhow::Result<()> {
     let outbox = f.outbox.clone();
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { outbox.append(tx, original).await.map_err(PgError::from) })
             })
             .await,
@@ -204,9 +204,9 @@ pub(super) async fn atomicity(f: &mut Fixture) -> anyhow::Result<()> {
     assert!(
         committed(
             f.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| Box::pin(async move {
-                    store.queue(tx, request, changed).await
-                }))
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                    Box::pin(async move { store.queue(tx, request, changed).await })
+                })
                 .await
         )
         .is_err()
@@ -225,9 +225,9 @@ pub(super) async fn uncertainty(f: &mut Fixture) -> anyhow::Result<()> {
     assert_eq!(
         status(
             f.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| Box::pin(async move {
-                    store.queue(tx, request, msg).await
-                }))
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                    Box::pin(async move { store.queue(tx, request, msg).await })
+                })
                 .await
         ),
         "unknown"
@@ -288,9 +288,9 @@ pub(super) async fn isolation(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(
         status(
             f.runtime
-                .local_tx(first.tenant(), budget()?, move |tx| Box::pin(async move {
-                    store.initialize(tx, s, c).await
-                }))
+                .local_tx(crate::execution(first.tenant(), 1), budget()?, move |tx| {
+                    Box::pin(async move { store.initialize(tx, s, c).await })
+                })
                 .await
         ),
         "fenced"
@@ -299,16 +299,18 @@ pub(super) async fn isolation(f: &Fixture) -> anyhow::Result<()> {
     let m = message("first", s.tenant())?;
     assert!(!committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| Box::pin(async move {
-                outbox
-                    .is_published(
-                        tx,
-                        m.envelope().metadata().domain(),
-                        m.envelope().id(),
-                        m.fingerprint(),
-                    )
-                    .await
-            }))
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move {
+                    outbox
+                        .is_published(
+                            tx,
+                            m.envelope().metadata().domain(),
+                            m.envelope().id(),
+                            m.fingerprint(),
+                        )
+                        .await
+                })
+            })
             .await
     )?);
     let outbox = f.outbox.clone();
@@ -316,16 +318,18 @@ pub(super) async fn isolation(f: &Fixture) -> anyhow::Result<()> {
     assert!(
         committed(
             f.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| Box::pin(async move {
-                    outbox
-                        .is_published(
-                            tx,
-                            m.envelope().metadata().domain(),
-                            m.envelope().id(),
-                            MessageFingerprint::from_bytes([0; 32]),
-                        )
-                        .await
-                }))
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                    Box::pin(async move {
+                        outbox
+                            .is_published(
+                                tx,
+                                m.envelope().metadata().domain(),
+                                m.envelope().id(),
+                                MessageFingerprint::from_bytes([0; 32]),
+                            )
+                            .await
+                    })
+                })
                 .await
         )
         .is_err()
@@ -361,7 +365,10 @@ impl rss_transactional_messaging::transaction::IngressValidator<Vec<u8>> for Val
         rss_transactional_messaging::transaction::VerifiedIngress,
         rss_transactional_messaging::transaction::EnvelopeValidationFailure,
     > {
-        Ok(challenge.verified())
+        Ok({
+            let execution = crate::execution(challenge.message().metadata().tenant_id(), 1);
+            challenge.verified(execution)
+        })
     }
 }
 fn binding(
@@ -407,8 +414,13 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
         f.runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) =
-        inbox.claim(binding.identity(), budget()?).await?
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
+        .await?
     else {
         anyhow::bail!("new claim missing")
     };
@@ -436,15 +448,24 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     );
     assert!(
         inbox
-            .read_terminal(binding.identity(), budget()?)
+            .read_terminal(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                budget()?
+            )
             .await?
             .is_none()
     );
     inbox.release(claim, budget()?).await?;
     f.publish().await?;
     let _page = f.recover(s).await?;
-    let IdempotencyDisposition::Acquired(claim) =
-        inbox.claim(binding.identity(), budget()?).await?
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
+        .await?
     else {
         anyhow::bail!("retry claim missing")
     };
@@ -478,7 +499,7 @@ pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
     let store = f.store.clone();
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.queue(tx, request, msg).await })
             })
             .await,
@@ -497,7 +518,7 @@ pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
     let id = CommandId::parse("cancel")?;
     let transition = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.cancel(tx, s, &id, c).await })
             })
             .await,
@@ -513,24 +534,26 @@ pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
 )]
 async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
     let s = scope(TENANT)?;
-    let leaked:i64=committed(f.runtime.local_tx(s.tenant(),budget()?,|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {
+    let leaked:i64=committed(f.runtime.local_tx(crate::execution(s.tenant(), 1),budget()?,|tx|Box::pin(async move {tx.with_connection(|c|Box::pin(async move {
         sqlx::query_scalar("SELECT count(*) FROM rss_device_command.commands WHERE tenant_id<>current_setting('rss.tenant_id')::uuid").fetch_one(c).await
     })).await})).await)?;
     assert_eq!(leaked, 0);
     assert!(
         committed(
             f.runtime
-                .local_tx(s.tenant(), budget()?, |tx| Box::pin(async move {
-                    tx.with_connection(|c| {
-                        Box::pin(async move {
-                            sqlx::query("DELETE FROM rss_device_command.commands")
-                                .execute(c)
-                                .await
-                                .map(|_| ())
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, |tx| Box::pin(
+                    async move {
+                        tx.with_connection(|c| {
+                            Box::pin(async move {
+                                sqlx::query("DELETE FROM rss_device_command.commands")
+                                    .execute(c)
+                                    .await
+                                    .map(|_| ())
+                            })
                         })
-                    })
-                    .await
-                }))
+                        .await
+                    }
+                ))
                 .await
         )
         .is_err()
@@ -551,11 +574,13 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
         assert!(
             committed(
                 f.runtime
-                    .local_tx(s.tenant(), budget()?, move |tx| Box::pin(async move {
-                        outbox
-                            .is_published(tx, &domain, m.envelope().id(), m.fingerprint())
-                            .await
-                    }))
+                    .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                        Box::pin(async move {
+                            outbox
+                                .is_published(tx, &domain, m.envelope().id(), m.fingerprint())
+                                .await
+                        })
+                    })
                     .await
             )
             .is_err()
@@ -577,7 +602,7 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     let unknown = f
         .runtime
-        .local_tx(s.tenant(), page_budget, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), page_budget, move |tx| {
             Box::pin(async move { store.recover(tx, s, limit, None).await })
         })
         .await;
@@ -587,7 +612,7 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
     let started = Timer::new().now();
     let (page, locks) = committed(
         f.runtime
-            .local_tx(s.tenant(), page_budget, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), page_budget, move |tx| {
                 Box::pin(async move {
                     let page = store.recover(tx, s, limit, None).await?;
                     let locks: i64 = tx.with_connection(|c| Box::pin(async move {
@@ -612,7 +637,7 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
     let next_cursor = after.clone();
     let next = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.recover(tx, s, limit, next_cursor.as_ref()).await })
             })
             .await,
@@ -630,12 +655,22 @@ async fn verify_terminal(
 ) -> anyhow::Result<()> {
     use rss_transactional_messaging::inbox::{IdempotencyDisposition, InboxStore};
     let receipt = inbox
-        .read_terminal(binding.identity(), budget()?)
+        .read_terminal(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
         .await?
         .ok_or_else(|| anyhow::anyhow!("receipt missing"))?;
     assert!(binding.validate_terminal(receipt).is_ok());
     assert!(matches!(
-        inbox.claim(binding.identity(), budget()?).await?,
+        inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                budget()?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     Ok(())
@@ -670,7 +705,7 @@ pub(super) async fn settlement_failures(f: &Fixture) -> anyhow::Result<()> {
         let called = attempts.clone();
         let result = f
             .runtime
-            .local_tx(s.tenant(), deadline, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), deadline, move |tx| {
                 Box::pin(async move {
                     called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     store.queue(tx, request, msg).await?;

@@ -4,6 +4,7 @@ use rss_device_command::{
 };
 use rss_device_command_postgres::{CallerRoles, PgStore};
 use rss_transactional_messaging::{
+    fence::ExecutionBinding,
     outbox::PendingMessage,
     policy::OperationDeadline,
     transaction::{LocalTxAttempt, TerminalDisposition},
@@ -16,6 +17,7 @@ use std::sync::Arc;
 /// Retries of an existing command use `enqueue` directly, even after authority advances.
 pub async fn bootstrap(
     runtime: &PgRuntime,
+    binding: ExecutionBinding,
     outbox: Arc<PgOutboxStore<()>>,
     scope: Scope,
     coordinate: Coordinate,
@@ -23,7 +25,7 @@ pub async fn bootstrap(
     callers: CallerRoles,
 ) -> LocalTxAttempt<(), PgError> {
     runtime
-        .local_tx(scope.tenant(), deadline, move |tx| {
+        .local_tx(binding, deadline, move |tx| {
             Box::pin(async move {
                 let store = PgStore::new(
                     tx,
@@ -41,6 +43,7 @@ pub async fn bootstrap(
 /// Queue or exactly replay an authenticated command/message under previously bootstrapped authority.
 pub async fn enqueue(
     runtime: &PgRuntime,
+    binding: ExecutionBinding,
     outbox: Arc<PgOutboxStore<()>>,
     spec: CommandSpec,
     message: PendingMessage<Vec<u8>>,
@@ -48,7 +51,7 @@ pub async fn enqueue(
     callers: CallerRoles,
 ) -> LocalTxAttempt<Command, PgError> {
     runtime
-        .local_tx(spec.scope().tenant(), deadline, move |tx| {
+        .local_tx(binding, deadline, move |tx| {
             Box::pin(async move {
                 let store = PgStore::new(
                     tx,
@@ -66,6 +69,7 @@ pub async fn enqueue(
 /// A bounded page; inspect the full transaction outcome before advancing a page cursor.
 pub async fn recover(
     runtime: &PgRuntime,
+    binding: ExecutionBinding,
     store: Arc<PgStore<()>>,
     scope: Scope,
     limit: BatchLimit,
@@ -73,7 +77,7 @@ pub async fn recover(
     deadline: OperationDeadline,
 ) -> LocalTxAttempt<rss_device_command::RecoveryPage, PgError> {
     runtime
-        .local_tx(scope.tenant(), deadline, move |tx| {
+        .local_tx(binding, deadline, move |tx| {
             Box::pin(async move { store.recover(tx, scope, limit, after.as_ref()).await })
         })
         .await
@@ -133,6 +137,7 @@ impl<D: ReportDecoder> PgConsumerEffect<Vec<u8>> for ReportEffect<D> {
 /// Ownership handoff is independent from changing desired generation.
 pub async fn takeover(
     runtime: &PgRuntime,
+    binding: ExecutionBinding,
     store: Arc<PgStore<()>>,
     scope: Scope,
     old: Coordinate,
@@ -140,7 +145,7 @@ pub async fn takeover(
     deadline: OperationDeadline,
 ) -> LocalTxAttempt<(), PgError> {
     runtime
-        .local_tx(scope.tenant(), deadline, move |tx| {
+        .local_tx(binding, deadline, move |tx| {
             Box::pin(async move { store.advance(tx, scope, old, next).await })
         })
         .await

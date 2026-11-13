@@ -37,7 +37,7 @@ pub(crate) async fn immutable_facts(f: &Fixture) -> anyhow::Result<()> {
         let store = f.store.clone();
         let attempt = f
             .runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.queue(tx, request, msg).await })
             })
             .await;
@@ -77,13 +77,13 @@ async fn concurrent_conflict(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Re
     let mb = message("racing-facts", s.tenant())?;
     let (a, b) = tokio::join!(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| Box::pin(async move {
-                a.queue(tx, left, ma).await
-            })),
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move { a.queue(tx, left, ma).await })
+            }),
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| Box::pin(async move {
-                b.queue(tx, right, mb).await
-            }))
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move { b.queue(tx, right, mb).await })
+            })
     );
     assert_ne!(committed(a).is_ok(), committed(b).is_ok());
     assert_eq!(f.count("commands", "racing-facts").await?, 1);
@@ -101,7 +101,7 @@ pub(crate) async fn authority_rollback(f: &Fixture) -> anyhow::Result<()> {
     let next = Coordinate::new(2, 4)?;
     let attempt = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
                 store.advance(tx, s, c, next).await?;
                 Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
@@ -136,7 +136,7 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
         let store = f.store.clone();
         committed(
             f.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.queue(tx, request, msg).await })
                 })
                 .await,
@@ -149,7 +149,7 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
     let id = CommandId::parse("late-cancel")?;
     let result = committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.cancel(tx, s, &id, c).await })
             })
             .await,
@@ -166,7 +166,7 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
     let next = Coordinate::new(1, 2)?;
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.advance(tx, s, c, next).await })
             })
             .await,
@@ -207,7 +207,7 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     let store = f.store.clone();
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.queue(tx, request, msg).await })
             })
             .await,
@@ -343,6 +343,7 @@ async fn compose_replay_case(
     committed(
         compose::bootstrap(
             &f.runtime,
+            crate::execution(s.tenant(), 1),
             f.outbox.clone(),
             s,
             c,
@@ -357,6 +358,7 @@ async fn compose_replay_case(
     }
     let attempt = compose::enqueue(
         &f.runtime,
+        crate::execution(s.tenant(), 1),
         f.outbox.clone(),
         spec(name, s, c)?,
         message(name, s.tenant())?,
@@ -392,7 +394,7 @@ async fn assert_compose_replay(
     let next = Coordinate::new(2, 2)?;
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.advance(tx, s, c, next).await })
             })
             .await,
@@ -404,6 +406,7 @@ async fn assert_compose_replay(
     let replay = committed(
         compose::enqueue(
             &f.runtime,
+            crate::execution(s.tenant(), 1),
             f.outbox.clone(),
             spec(name, s, c)?,
             message(name, s.tenant())?,
@@ -418,6 +421,7 @@ async fn assert_compose_replay(
     let fresh = format!("{name}-stale");
     let denied = compose::enqueue(
         &f.runtime,
+        crate::execution(s.tenant(), 1),
         f.outbox.clone(),
         spec(&fresh, s, c)?,
         message(&fresh, s.tenant())?,

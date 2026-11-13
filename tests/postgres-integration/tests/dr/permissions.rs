@@ -128,7 +128,7 @@ pub async fn check(
             match Box::pin(PgDrStore::connect(
                 operator.clone(),
                 Timer::new(),
-                binding(1)?,
+                (binding(1)?).storage(),
             ))
             .await
             {
@@ -145,7 +145,7 @@ pub async fn check(
             match Box::pin(PgRuntime::connect(
                 runtime.clone(),
                 Timer::new(),
-                binding(1)?,
+                (binding(1)?).storage(),
             ))
             .await
             {
@@ -165,11 +165,11 @@ pub async fn check(
         .await?;
         assert_eq!(active, 0, "failed startup closed its PostgreSQL sessions");
     }
-    PgRuntime::connect(runtime.clone(), Timer::new(), binding(1)?)
+    PgRuntime::connect(runtime.clone(), Timer::new(), (binding(1)?).storage())
         .await?
         .close()
         .await;
-    PgDrStore::connect(operator.clone(), Timer::new(), binding(1)?)
+    PgDrStore::connect(operator.clone(), Timer::new(), (binding(1)?).storage())
         .await?
         .close()
         .await;

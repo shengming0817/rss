@@ -33,7 +33,7 @@ async fn append(
         committed(
             f.producer
                 .local_tx_with_context(
-                    tenant(),
+                    crate::execution(tenant(), 1),
                     OperationDeadline::from_remaining(Duration::from_secs(60)),
                     (writer, messages),
                     |(writer, messages), tx| {
@@ -186,11 +186,17 @@ async fn drain(f: &Fixture, limit: usize, expected: usize) -> anyhow::Result<()>
     let started = timer.now();
     loop {
         let at = timer.now();
-        let wake = store.next_wakeup(deadline()).await?;
+        let wake = store
+            .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+            .await?;
         wakeups.push((timer.now() - at).as_micros());
         let at = timer.now();
         let batch = store
-            .claim_partition_heads(NonZeroUsize::try_from(limit)?, deadline())
+            .claim_partition_heads(
+                crate::execution(crate::fixture_tenant(), 1),
+                NonZeroUsize::try_from(limit)?,
+                deadline(),
+            )
             .await?;
         claims.push((timer.now() - at).as_micros());
         if batch.is_empty() {
@@ -225,7 +231,12 @@ async fn idle_latency(store: &PgOutboxStore<()>, limit: usize) -> anyhow::Result
     let mut idle = Vec::new();
     for _ in 0..20 {
         let at = timer.now();
-        assert!(!store.next_wakeup(deadline()).await?.due_now());
+        assert!(
+            !store
+                .next_wakeup(crate::execution(crate::fixture_tenant(), 1), deadline())
+                .await?
+                .due_now()
+        );
         idle.push((timer.now() - at).as_micros());
     }
     distribution("idle-wakeup", limit, &mut idle);

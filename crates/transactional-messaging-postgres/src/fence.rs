@@ -1,7 +1,6 @@
 //! Common execution admission, held by PostgreSQL through commit/rollback.
 use crate::{PgError, PgRuntime, transaction::Profile};
 use rss_request_context::Deadline;
-use rss_request_context::TenantId;
 use rss_transactional_messaging::{fence::ExecutionBinding, policy::within};
 use sqlx::PgConnection;
 
@@ -11,15 +10,13 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 pub(crate) async fn setup(
     connection: &mut PgConnection,
     binding: &ExecutionBinding,
-    tenant: TenantId,
     lock: bool,
 ) -> Result<(), PgError> {
-    let epoch = binding.epoch(tenant).ok_or_else(PgError::lost)?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target',$2,true),set_config('rss.storage_lineage',$3,true),set_config('rss.execution_epoch',$4,true)")
-        .bind(tenant.to_string())
+        .bind(binding.tenant().to_string())
         .bind(hex(&binding.storage().target()))
         .bind(hex(&binding.storage().lineage()))
-        .bind(epoch.get().to_string())
+        .bind(binding.epoch().get().to_string())
         .execute(&mut *connection)
         .await?;
     if lock {

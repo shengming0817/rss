@@ -25,7 +25,7 @@ pub(super) async fn run(
     .await?;
     let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("integration")?);
     let outcome = runtime
-        .local_tx(tenant, deadline(), move |tx| {
+        .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
             Box::pin(async move {
                 writer
                     .append(tx, PendingMessage::new(message("writer-fenced")))
@@ -63,7 +63,7 @@ async fn interoperability(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
         )?;
         let tenant = message(id).metadata().tenant_id();
         runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     writer.validate_transaction(tx)?;
                     let first = PendingMessage::new(message(id));
@@ -89,7 +89,7 @@ async fn interoperability(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
         // A conflict no longer preserves the legacy ability to swallow an Outbox error and commit.
         let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("integration")?);
         let rejected = runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     let original = message(id);
                     let conflict = MessageEnvelope::new(
@@ -123,7 +123,7 @@ async fn interoperability(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
 
 async fn rejection(runtime: Arc<PgRuntime>, config: PgConfig) -> anyhow::Result<()> {
     let foreign = Arc::new(
-        PgRuntime::connect_producer(config, Timer::new(), fence_fixture::binding()).await?,
+        PgRuntime::connect_producer(config, Timer::new(), fence_fixture::storage()).await?,
     );
     let tenant = message("writer-rejected").metadata().tenant_id();
     let other_tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d480")?;
@@ -135,7 +135,7 @@ async fn rejection(runtime: Arc<PgRuntime>, config: PgConfig) -> anyhow::Result<
         let same_runtime = Arc::ptr_eq(&owner, &runtime);
         let writer = PgOutboxWriter::new(owner, MessagingDomain::parse(domain)?);
         let outcome = runtime
-            .local_tx(tx_tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tx_tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     let validated = writer.validate_transaction(tx);
                     if same_runtime {

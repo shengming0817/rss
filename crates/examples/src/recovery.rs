@@ -48,8 +48,9 @@ pub fn config(input: &crate::pg::Input) -> anyhow::Result<PgConfig> {
 pub fn binding(input: &crate::pg::Input) -> anyhow::Result<ExecutionBinding> {
     Ok(ExecutionBinding::new(
         StorageIdentity::new([1; 16], [2; 16])?,
-        vec![(TenantId::parse(&input.tenant)?, Epoch::new(1)?)],
-    )?)
+        TenantId::parse(&input.tenant)?,
+        Epoch::new(1)?,
+    ))
 }
 pub fn settled<T, E: std::fmt::Display>(value: LocalTxAttempt<T, E>) -> anyhow::Result<T> {
     value.fold(
@@ -127,8 +128,13 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         &input.hot_key,
         "example-hot",
     )?);
-    let store =
-        PgRecoveryStore::connect(config(&input.pg)?, Timer, binding(&input.pg)?, key).await?;
+    let store = PgRecoveryStore::connect(
+        config(&input.pg)?,
+        Timer,
+        binding(&input.pg)?.storage(),
+        key,
+    )
+    .await?;
     let target = Target::Outbox(rss_transactional_messaging::message::MessageId::parse(
         "redrive-example",
     )?);
@@ -140,7 +146,9 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         cutoff,
     )
     .await?;
-    let page = store.query(&query, deadline()?).await?;
+    let page = store
+        .query(binding(&input.pg)?, &query, deadline()?)
+        .await?;
     let entry = page
         .entries
         .into_iter()
@@ -154,9 +162,17 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         cutoff,
     )
     .await?;
-    let receipt = settled(store.mutate(&request, deadline()?).await)?;
+    let receipt = settled(
+        store
+            .mutate(binding(&input.pg)?, &request, deadline()?)
+            .await,
+    )?;
     anyhow::ensure!(receipt.outcome == Outcome::Redriven, "redrive did not run");
-    let retry = settled(store.mutate(&request, deadline()?).await)?;
+    let retry = settled(
+        store
+            .mutate(binding(&input.pg)?, &request, deadline()?)
+            .await,
+    )?;
     anyhow::ensure!(
         receipt.request.digest() == retry.request.digest()
             && receipt.version == retry.version
@@ -196,11 +212,12 @@ async fn seed_outbox(input: &crate::pg::Input) -> anyhow::Result<String> {
         PgPassword::new(input.password.clone()),
         PgPrivateCa::from_pem(input.pg_ca.as_bytes().to_vec())?,
     );
-    let runtime = Arc::new(PgRuntime::connect(seed_config, Timer, binding(input)?).await?);
+    let runtime =
+        Arc::new(PgRuntime::connect(seed_config, Timer, binding(input)?.storage()).await?);
     let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("writer-example")?);
     let message = crate::sample_message::message(tenant, "redrive-example")?;
     let result = runtime
-        .local_tx(tenant, deadline()?, move |tx| {
+        .local_tx(binding(input)?, deadline()?, move |tx| {
             Box::pin(async move {
                 tx.prepare_outbox_partitions(
                     &message.partition().cloned().into_iter().collect::<Vec<_>>(),
@@ -228,7 +245,7 @@ async fn seed_outbox(input: &crate::pg::Input) -> anyhow::Result<String> {
         )?,
     )?;
     let claim = relay
-        .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline()?)
+        .claim_partition_heads(binding(input)?, std::num::NonZeroUsize::MIN, deadline()?)
         .await?
         .into_iter()
         .next()

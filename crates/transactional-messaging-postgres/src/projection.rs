@@ -12,6 +12,7 @@ use rss_request_context::{Deadline, ExecutionTimer};
 use rss_transactional_messaging::message::MessageId;
 use rss_transactional_messaging::{
     error::MessagingError,
+    fence::ExecutionBinding,
     inbox::{ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
     message::{MessageEnvelope, MessageFingerprint, MessagingDomain, SubscriptionIdentity},
     outbox::{OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement},
@@ -38,6 +39,7 @@ impl PgProjectionReceipt {
 
 /// Original identity retained after an unconfirmed transaction. It grants no retry authority.
 pub struct PgProjectionRecovery {
+    binding: ExecutionBinding,
     source: crate::outbox::LocalSourceIdentity,
     runtime: Arc<PgRuntime>,
     identity: ConsumerIdentity,
@@ -181,14 +183,19 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     /// Durable scheduling hint; notifications remain optional and callers own bounded waiting.
     pub async fn next_wakeup(
         &self,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
     ) -> Result<crate::OutboxWakeup, PgError> {
-        self.outbox.next_wakeup(deadline).await
+        self.outbox.next_wakeup(binding, deadline).await
     }
 
     /// Whether this projection has unresolved source dead letters.
-    pub async fn has_dead_letters(&self, deadline: OperationDeadline) -> Result<bool, PgError> {
-        self.outbox.has_dead_letters(deadline).await
+    pub async fn has_dead_letters(
+        &self,
+        binding: ExecutionBinding,
+        deadline: OperationDeadline,
+    ) -> Result<bool, PgError> {
+        self.outbox.has_dead_letters(binding, deadline).await
     }
 
     /// Claim once up to the currently available runtime capacity, then settle each event independently.
@@ -201,11 +208,13 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     /// authoritative after cancellation. An item error does not cancel its siblings.
     pub async fn project_batch<'a, V: IngressValidator<Vec<u8>>>(
         &'a self,
+        binding: ExecutionBinding,
         validator: &'a V,
         limit: NonZeroUsize,
         claim_deadline: OperationDeadline,
         execution_budget: Duration,
     ) -> Result<impl Stream<Item = PgProjectionItem> + Send + 'a, PgError> {
+        self.runtime.validate_binding(binding)?;
         if execution_budget.is_zero() {
             return Err(PgError::invariant());
         }
@@ -228,7 +237,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let capacity = NonZeroUsize::new(permits.len()).ok_or_else(PgError::invariant)?;
         let claims = self
             .outbox
-            .claim_partition_heads(capacity, remaining(self, cutoff))
+            .claim_partition_heads(binding, capacity, remaining(self, cutoff))
             .await
             .map_err(pg)?;
         permits.truncate(claims.len());
@@ -283,6 +292,9 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             Ok(binding) => binding,
             Err(error) => {
                 let reason = error.reason();
+                if reason == EnvelopeValidationFailure::ExecutionMismatch {
+                    return Err(PgError::lost());
+                }
                 self.outbox
                     .settle(
                         source,
@@ -294,9 +306,16 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                 return Ok(PgProjectionOutcome::Rejected(reason));
             }
         };
+        if binding.execution() != source.binding {
+            return Err(PgError::lost());
+        }
         let acquired = self
             .inbox
-            .claim(binding.identity(), remaining(self, cutoff))
+            .claim(
+                binding.execution(),
+                binding.identity(),
+                remaining(self, cutoff),
+            )
             .await
             .map_err(pg)?;
         let claim = match acquired {
@@ -318,6 +337,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             }
         };
         let recovery = PgProjectionRecovery {
+            binding: source.binding,
             source: source.local_identity(),
             runtime: self.runtime.clone(),
             identity: binding.identity().clone(),
@@ -391,7 +411,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let fingerprint = intent.fingerprint();
         #[cfg(feature = "integration")]
         let injection = self.take_projection_fault()?;
-        let attempt = self.runtime.transaction_with_context(identity.tenant_id(), remaining(self, cutoff),
+        let attempt = self.runtime.transaction_with_context(source.binding, remaining(self, cutoff),
             (self, source, identity, fingerprint), true, #[cfg(feature = "integration")] injection, |(owner, source, identity, fingerprint), tx| Box::pin(async move {
                 let row = sqlx::query("SELECT contract,fingerprint,disposition FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
                     .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str())
@@ -403,6 +423,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                 Ok(disposition)
             })).await;
         let recovery = PgProjectionRecovery {
+            binding: source.binding,
             source: source.local_identity(),
             runtime: self.runtime.clone(),
             identity: identity.clone(),
@@ -435,7 +456,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         {
             return Err(PgError::invariant());
         }
-        crate::transaction::settled(self.runtime.local_tx_with_context(pending.identity.tenant_id(), deadline, pending,
+        crate::transaction::settled(self.runtime.local_tx_with_context(pending.binding, deadline, pending,
             |pending, tx| Box::pin(async move {
                 let row = sqlx::query("SELECT i.contract,i.fingerprint,i.disposition,o.domain,o.fingerprint AS source_fingerprint,o.status,d.status AS dr_status,d.fingerprint AS dr_fingerprint FROM rss_transactional_messaging.inbox i JOIN rss_transactional_messaging.outbox o USING(tenant_id,message_id) LEFT JOIN LATERAL rss_transactional_messaging.local_projection_dr_status(o.tenant_id,o.seq,$4::uuid) d ON true WHERE o.seq=$5 AND i.tenant_id=$1::uuid AND i.message_id=$2 AND i.consumer_group=$3")
                     .bind(pending.identity.tenant_id().to_string()).bind(pending.identity.message_id().as_str()).bind(pending.identity.group().as_str()).bind(&pending.source.dr_operation).bind(pending.source.seq)

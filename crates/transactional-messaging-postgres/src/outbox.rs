@@ -7,6 +7,7 @@ use crate::{
 use rss_request_context::{Clock, Deadline};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
+    fence::ExecutionBinding,
     message::MessagingDomain,
     outbox::*,
     policy::{DeliveryBudget, OperationDeadline, within},
@@ -69,8 +70,7 @@ pub struct PgOutboxClaim {
     message: PendingMessage<Vec<u8>>,
     seq: i64,
     dr_operation: Option<String>,
-    storage: rss_transactional_messaging::fence::StorageIdentity,
-    epoch: rss_transactional_messaging::fence::Epoch,
+    pub(crate) binding: ExecutionBinding,
     token: String,
     lease_us: Mutex<i64>,
 }
@@ -89,7 +89,7 @@ impl PgOutboxClaim {
         }
     }
 }
-/// Read-only scheduling hints for the store's admitted tenants and domain.
+/// Read-only scheduling hints for the selected tenant and store domain.
 ///
 /// Due candidates may be locked or claimed by another relay. Neither hint grants a claim or proves
 /// delivery. Keep a periodic recovery scan: commits and concurrent settlements can change this snapshot.
@@ -119,7 +119,6 @@ pub struct PgOutboxStore<R> {
     lease_ms: i64,
     budget: DeliveryBudget,
     receipt: PhantomData<fn() -> R>,
-    next_tenant: std::sync::atomic::AtomicUsize,
 }
 impl<R> PgOutboxStore<R> {
     /// Bind one domain and the explicit lease duration.
@@ -133,81 +132,55 @@ impl<R> PgOutboxStore<R> {
             lease_ms: milliseconds(budget.lease_ttl())?,
             budget,
             receipt: PhantomData,
-            next_tenant: std::sync::atomic::AtomicUsize::new(0),
         })
     }
-    /// Read whether this domain has unresolved dead letters in any bound tenant.
-    /// One absolute budget covers every tenant. This is a read, not permission to resolve records;
-    /// the consuming host decides how an unresolved record affects its admission policy.
-    pub async fn has_dead_letters(&self, deadline: OperationDeadline) -> Result<bool, PgError> {
+    /// Read unresolved dead letters for one explicitly selected tenant and this domain.
+    /// The host decides how unresolved records affect its admission policy.
+    pub async fn has_dead_letters(
+        &self,
+        binding: ExecutionBinding,
+        deadline: OperationDeadline,
+    ) -> Result<bool, PgError> {
         let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
-        for &(tenant, _) in self.writer.runtime.binding.tenants() {
-            let domain = self.writer.domain.as_str().to_owned();
-            let found=self.writer.runtime.relay(tenant,cutoff,move|c|Box::pin(async move {
-                Ok(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND status='dead_letter')").bind(tenant.to_string()).bind(domain).fetch_one(c).await?)
-            })).await?;
-            if found {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let tenant = binding.tenant();
+        let domain = self.writer.domain.as_str().to_owned();
+        self.writer.runtime.relay(binding, cutoff, move |c| Box::pin(async move {
+            Ok(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND status='dead_letter')").bind(tenant.to_string()).bind(domain).fetch_one(c).await?)
+        })).await
     }
-    /// Observe durable scheduling without claiming, renewing or settling work.
-    ///
-    /// Shares the claim candidate definition, including partition heads, retry times, leases and
-    /// active DR generations. One absolute operation budget covers all bound tenants. As in claim,
-    /// fenced tenants are skipped and loss of every tenant returns ownership lost.
-    pub async fn next_wakeup(&self, deadline: OperationDeadline) -> Result<OutboxWakeup, PgError> {
+    /// Observe one tenant's durable scheduling without claiming, renewing or settling work.
+    /// Shares the claim candidate definition, including active DR generations. A fenced target
+    /// returns ownership lost; the host selects any subsequent tenant.
+    pub async fn next_wakeup(
+        &self,
+        binding: ExecutionBinding,
+        deadline: OperationDeadline,
+    ) -> Result<OutboxWakeup, PgError> {
         let runtime = &self.writer.runtime;
         let cutoff = Deadline::from_timeout(&runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
-        let mut admitted = false;
-        let mut wakeup = OutboxWakeup {
-            due_now: false,
-            next_deadline: None,
-        };
-        for &(tenant, _) in runtime.binding.tenants() {
-            let domain = self.writer.domain.as_str().to_owned();
-            let observed = runtime.timer.now();
-            let result = runtime
-                .relay(tenant, cutoff, move |connection| {
-                    Box::pin(async move {
-                        Ok(sqlx::query_as::<_, (bool, Option<i64>)>(
-                            "SELECT due_now,next_us FROM rss_transactional_messaging.next_outbox_wakeup($1::uuid,$2)",
-                        )
-                        .bind(tenant.to_string())
-                        .bind(domain)
-                        .fetch_one(connection)
-                        .await?)
-                    })
-                })
-                .await;
-            match result {
-                Ok((due_now, micros)) => {
-                    admitted = true;
-                    wakeup.due_now |= due_now;
-                    if let Some(micros) = micros {
-                        let micros = u64::try_from(micros).map_err(|_| PgError::invariant())?;
-                        let instant = observed
-                            .checked_add(Duration::from_micros(micros))
-                            .ok_or_else(PgError::invariant)?;
-                        let next = Deadline::at(instant);
-                        wakeup.next_deadline = Some(
-                            wakeup
-                                .next_deadline
-                                .map_or(next, |old| old.shortened_to(instant)),
-                        );
-                    }
-                }
-                Err(error) if error.kind() == MessagingErrorKind::OwnershipLost => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        if !admitted {
-            return Err(PgError::lost());
-        }
-        Ok(wakeup)
+        let tenant = binding.tenant();
+        let domain = self.writer.domain.as_str().to_owned();
+        let observed = runtime.timer.now();
+        let (due_now, micros) = runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
+            Ok(sqlx::query_as::<_, (bool, Option<i64>)>(
+                "SELECT due_now,next_us FROM rss_transactional_messaging.next_outbox_wakeup($1::uuid,$2)",
+            ).bind(tenant.to_string()).bind(domain).fetch_one(connection).await?)
+        })).await?;
+        let next_deadline = micros
+            .map(|micros| {
+                let micros = u64::try_from(micros).map_err(|_| PgError::invariant())?;
+                observed
+                    .checked_add(Duration::from_micros(micros))
+                    .map(Deadline::at)
+                    .ok_or_else(PgError::invariant)
+            })
+            .transpose()?;
+        Ok(OutboxWakeup {
+            due_now,
+            next_deadline,
+        })
     }
     /// Reject a transaction from a different runtime before any companion operation.
     pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
@@ -248,13 +221,8 @@ impl<R> PgOutboxStore<R> {
     }
     fn valid_claim(&self, claim: &PgOutboxClaim) -> bool {
         self.writer.domain == *claim.message.envelope().metadata().domain()
-            && self.writer.runtime.binding.storage() == claim.storage
-            && self
-                .writer
-                .runtime
-                .binding
-                .epoch(claim.message.envelope().metadata().tenant_id())
-                == Some(claim.epoch)
+            && self.writer.runtime.storage == claim.binding.storage()
+            && claim.binding.tenant() == claim.message.envelope().metadata().tenant_id()
     }
     async fn lease(
         &self,
@@ -278,7 +246,7 @@ impl<R> PgOutboxStore<R> {
         let token = claim.token.clone();
         let result = self
             .writer.runtime
-            .relay(tenant, cutoff, move |connection| {
+            .relay(claim.binding, cutoff, move |connection| {
                 Box::pin(async move {
                     Ok(sqlx::query(
                         "SELECT * FROM rss_transactional_messaging.outbox_lease($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
@@ -294,6 +262,9 @@ impl<R> PgOutboxStore<R> {
                 })
             })
             .await
+            .or_else(|error| {
+                if error.kind() == MessagingErrorKind::OwnershipLost { Ok(None) } else { Err(error) }
+            })
             .map_err(PgError::port)?;
         match result {
             None => Ok(OutboxLeaseStatus::Lost),
@@ -326,9 +297,7 @@ impl PgOutboxStore<()> {
         disposition: rss_transactional_messaging::transaction::TerminalDisposition,
     ) -> Result<(), PgError> {
         self.writer.validate_transaction(tx)?;
-        if !self.valid_claim(claim)
-            || tx.tenant_id() != claim.message.envelope().metadata().tenant_id()
-        {
+        if !self.valid_claim(claim) || *tx.binding() != claim.binding {
             return Err(PgError::lost());
         }
         let lease = claim.lease_us.lock().await;
@@ -374,6 +343,7 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
     type PublishReceipt = R;
     async fn claim_partition_heads(
         &self,
+        binding: ExecutionBinding,
         limit: NonZeroUsize,
         deadline: OperationDeadline,
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
@@ -381,17 +351,9 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
             .map_err(|_| PgError::invariant().port())?;
         let count = i32::try_from(limit.get()).map_err(|_| PgError::invariant().port())?;
         let ttl = self.lease_ms;
-        let mut admitted = false;
-        let tenants = self.writer.runtime.binding.tenants();
-        let first = self
-            .next_tenant
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            % tenants.len();
-        for offset in 0..tenants.len() {
-            let (tenant, epoch) = tenants[(first + offset) % tenants.len()];
-            let storage = self.writer.runtime.binding.storage();
-            let domain = self.writer.domain.as_str().to_owned();
-            let batch = self.writer.runtime.relay(tenant, cutoff, move |connection| Box::pin(async move {
+        let tenant = binding.tenant();
+        let domain = self.writer.domain.as_str().to_owned();
+        let batch = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
                 let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
                     .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
                 rows.into_iter().map(|row| {
@@ -406,35 +368,10 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
                         || row.try_get::<Option<String>,_>("partition_key")?.as_deref() != message.partition().map(|p| p.key().as_str()) {
                         return Err(PgError::invariant());
                     }
-                    Ok(PgOutboxClaim { message, storage, epoch, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
+                    Ok(PgOutboxClaim { message, binding, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
                 }).collect::<Result<Vec<_>, PgError>>()
-            })).await;
-            let batch = match batch {
-                Ok(batch) => {
-                    admitted = true;
-                    batch
-                }
-                Err(error) if error.kind() == MessagingErrorKind::OwnershipLost => {
-                    tracing::warn!(
-                        phase = "relay_claim",
-                        reason = "tenant_fenced",
-                        "bound tenant execution was fenced"
-                    );
-                    continue;
-                }
-                Err(error) => return Err(error.port()),
-            };
-            // Return the committed tenant batch before awaiting any other transaction. This
-            // preserves its claims even when the next tenant fails or the outer budget expires.
-            if !batch.is_empty() {
-                return OutboxClaimBatch::try_from_provider(batch, limit)
-                    .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e));
-            }
-        }
-        if !admitted {
-            return Err(PgError::lost().port());
-        }
-        OutboxClaimBatch::try_from_provider(Vec::new(), limit)
+        })).await.map_err(PgError::port)?;
+        OutboxClaimBatch::try_from_provider(batch, limit)
             .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))
     }
     async fn lease_status(
@@ -473,7 +410,7 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         };
         let lease = claim.lease_us.into_inner();
         self.writer.runtime
-            .relay(tenant, cutoff, move |connection| {
+            .relay(claim.binding, cutoff, move |connection| {
                 Box::pin(async move {
                     let result: String = sqlx::query_scalar(
                         "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",

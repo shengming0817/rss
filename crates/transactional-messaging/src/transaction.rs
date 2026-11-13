@@ -580,6 +580,8 @@ mod consumer {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     /// Safe reason for rejecting decoded input or mismatched ingress evidence.
     pub enum EnvelopeValidationFailure {
+        /// Host execution coordinates do not match this delivery; requeue without rejecting content.
+        ExecutionMismatch,
         /// Message identity or tenant authority could not be accepted.
         MalformedIdentity,
         /// Required authored metadata is invalid.
@@ -595,6 +597,7 @@ mod consumer {
         #[must_use]
         pub const fn as_label(self) -> &'static str {
             match self {
+                Self::ExecutionMismatch => "execution_mismatch",
                 Self::MalformedIdentity => "malformed_identity",
                 Self::MalformedMetadata => "malformed_metadata",
                 Self::UnsupportedContract => "unsupported_contract",
@@ -675,15 +678,16 @@ mod consumer {
         /// Bind the current facts after the validator has authenticated tenant authority and
         /// checked
         /// subscription compatibility. This method records the facts; it does not perform those
-        /// checks.
+        /// checks. The execution coordinates must come from the host's explicit authorized
+        /// context, not an untrusted envelope or an automatic latest-epoch lookup.
         #[must_use]
-        pub fn verified(self) -> VerifiedIngress
+        pub fn verified(self, execution: crate::fence::ExecutionBinding) -> VerifiedIngress
         where
             P: AsRef<[u8]>,
         {
             VerifiedIngress {
                 subscription: self.subscription.clone(),
-                tenant_id: self.message.metadata().tenant_id(),
+                execution,
                 message_id: self.message.id().clone(),
                 contract: self.message.metadata().contract().clone(),
                 fingerprint: MessageFingerprint::of(self.message),
@@ -694,7 +698,7 @@ mod consumer {
     /// Opaque evidence that ingress authority was checked for the exact delivered envelope.
     pub struct VerifiedIngress {
         subscription: SubscriptionIdentity,
-        tenant_id: rss_request_context::TenantId,
+        execution: crate::fence::ExecutionBinding,
         message_id: MessageId,
         contract: crate::message::ContractIdentity,
         fingerprint: MessageFingerprint,
@@ -724,6 +728,7 @@ mod consumer {
 
     /// Exact consumer identity and fingerprint proven by one ingress validation.
     pub struct VerifiedConsumerBinding {
+        execution: crate::fence::ExecutionBinding,
         identity: ConsumerIdentity,
         fingerprint: MessageFingerprint,
     }
@@ -766,14 +771,26 @@ mod consumer {
             self.reason
         }
 
-        /// Consume verified rejection authority into a one-shot broker Reject decision.
+        /// Reject invalid ingress, or requeue a host execution mismatch without condemning content.
         #[must_use]
         pub fn into_decision(self) -> SettlementDecision {
-            SettlementDecision(SettlementKind::Reject)
+            SettlementDecision(
+                if self.reason == EnvelopeValidationFailure::ExecutionMismatch {
+                    SettlementKind::Requeue
+                } else {
+                    SettlementKind::Reject
+                },
+            )
         }
     }
 
     impl VerifiedConsumerBinding {
+        /// Host-selected execution identity for this delivery, never refreshed after claiming.
+        #[must_use]
+        pub const fn execution(&self) -> crate::fence::ExecutionBinding {
+            self.execution
+        }
+
         /// Return the exact durable inbox identity bound to the validated message.
         #[must_use]
         pub const fn identity(&self) -> &ConsumerIdentity {
@@ -829,8 +846,12 @@ mod consumer {
             .validate(IngressChallenge::new(subscription, message))
             .map_err(|reason| IngressRejection { reason })?;
         let fingerprint = MessageFingerprint::of(message);
+        if verified.execution.tenant() != message.metadata().tenant_id() {
+            return Err(IngressRejection {
+                reason: EnvelopeValidationFailure::ExecutionMismatch,
+            });
+        }
         if verified.subscription != *subscription
-            || verified.tenant_id != message.metadata().tenant_id()
             || verified.message_id != *message.id()
             || verified.contract != *message.metadata().contract()
             || verified.fingerprint != fingerprint
@@ -840,8 +861,9 @@ mod consumer {
             });
         }
         Ok(VerifiedConsumerBinding {
+            execution: verified.execution,
             identity: ConsumerIdentity::new(
-                verified.tenant_id,
+                verified.execution.tenant(),
                 group,
                 verified.message_id,
                 verified.contract,

@@ -38,8 +38,9 @@ impl Authorizer for Allow {
 fn binding(epoch: i64) -> anyhow::Result<ExecutionBinding> {
     Ok(ExecutionBinding::new(
         StorageIdentity::new([1; 16], [2; 16])?,
-        vec![(tenant(), Epoch::new(epoch)?)],
-    )?)
+        tenant(),
+        Epoch::new(epoch)?,
+    ))
 }
 fn deadline() -> OperationDeadline {
     let timer = Timer::new();
@@ -129,7 +130,7 @@ async fn run() -> anyhow::Result<()> {
         ))
     };
     assert!(matches!(
-        PgDrStore::connect(config("dr_missing")?, Timer::new(), binding(1)?).await,
+        PgDrStore::connect(config("dr_missing")?, Timer::new(), (binding(1)?).storage()).await,
         Err(Error::Store(
             rss_transactional_messaging_recovery::StoreFailureKind::Permanent
         ))
@@ -140,30 +141,15 @@ async fn run() -> anyhow::Result<()> {
         &config("dr_operator")?,
     ))
     .await?;
+    let runtime = Arc::new(
+        PgRuntime::connect(config("dr_runtime")?, Timer::new(), binding(1)?.storage()).await?,
+    );
     let other = rss_request_context::TenantId::parse("22222222-2222-2222-2222-222222222222")?;
     sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
         .bind(other.to_string())
         .execute(&owner)
         .await?;
-    let multi = Arc::new(
-        PgRuntime::connect(
-            config("dr_runtime")?,
-            Timer::new(),
-            ExecutionBinding::new(
-                binding(1)?.storage(),
-                vec![(tenant(), Epoch::new(1)?), (other, Epoch::new(1)?)],
-            )?,
-        )
-        .await?,
-    );
-    Box::pin(claim::check(&owner, multi.clone(), other)).await?;
-    let multi_outbox = PgOutboxStore::<()>::new(
-        multi.clone(),
-        rss_transactional_messaging::message::MessagingDomain::parse("orders")?,
-        budget()?,
-    )?;
-    let runtime =
-        Arc::new(PgRuntime::connect(config("dr_runtime")?, Timer::new(), binding(1)?).await?);
+    Box::pin(claim::check(&owner, runtime.clone(), other)).await?;
     let outbox = Arc::new(PgOutboxStore::<()>::new(
         runtime.clone(),
         rss_transactional_messaging::message::MessagingDomain::parse("orders")?,
@@ -193,19 +179,32 @@ async fn run() -> anyhow::Result<()> {
     );
     assert!(
         matches!(
-            inbox.claim(&legacy_identity, deadline()).await?,
+            inbox
+                .claim(
+                    crate::execution(legacy_identity.tenant_id(), 1),
+                    &legacy_identity,
+                    deadline()
+                )
+                .await?,
             IdempotencyDisposition::Terminal(_)
         ),
         "existing terminal receipt remains terminal"
     );
-    let old_inbox = match inbox.claim(&identity, deadline()).await? {
+    let old_inbox = match inbox
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(),
+        )
+        .await?
+    {
         IdempotencyDisposition::Acquired(c) => c,
         _ => anyhow::bail!("inbox claim"),
     };
     let append = outbox.clone();
     committed(
         runtime
-            .local_tx(tenant(), deadline(), move |tx| {
+            .local_tx(crate::execution(tenant(), 1), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.prepare_outbox_partitions(
                         &message("old-lease")
@@ -225,13 +224,19 @@ async fn run() -> anyhow::Result<()> {
             .await,
     )?;
     let old_outbox = outbox
-        .claim_partition_heads(one, deadline())
+        .claim_partition_heads(crate::binding(1)?, one, deadline())
         .await?
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("old lease"))?;
-    let store =
-        Arc::new(PgDrStore::connect(config("dr_operator")?, Timer::new(), binding(1)?).await?);
+    let store = Arc::new(
+        PgDrStore::connect(
+            config("dr_operator")?,
+            Timer::new(),
+            (binding(1)?).storage(),
+        )
+        .await?,
+    );
     let request = Arc::new(plan("published", 1, OperationId::new()).await?);
     store.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     let (entered_tx, entered) = tokio::sync::oneshot::channel();
@@ -239,7 +244,7 @@ async fn run() -> anyhow::Result<()> {
     let old_runtime = runtime.clone();
     let old_tx = tokio::spawn(async move {
         old_runtime
-            .local_tx(tenant(), deadline(), move |_tx| {
+            .local_tx(crate::execution(tenant(), 1), deadline(), move |_tx| {
                 Box::pin(async move {
                     let _ = entered_tx.send(());
                     wait.await.map_err(|_| PgError::InvalidConnectionConfig)?;
@@ -274,7 +279,12 @@ async fn run() -> anyhow::Result<()> {
         .await?
         .ok_or_else(|| anyhow::anyhow!("receipt"))?;
     assert_eq!(receipt.epoch, Epoch::new(2)?);
-    let restarted = PgDrStore::connect(config("dr_operator")?, Timer::new(), binding(2)?).await?;
+    let restarted = PgDrStore::connect(
+        config("dr_operator")?,
+        Timer::new(),
+        (binding(2)?).storage(),
+    )
+    .await?;
     assert_eq!(
         restarted.receipt(&request, deadline()).await?,
         Some(receipt.clone())
@@ -285,20 +295,26 @@ async fn run() -> anyhow::Result<()> {
     );
     restarted.close().await;
     assert_eq!(committed(store.apply(&request, deadline()).await)?, receipt);
-    assert!(outbox.claim_partition_heads(one, deadline()).await.is_err());
+    assert!(
+        outbox
+            .claim_partition_heads(crate::binding(1)?, one, deadline())
+            .await
+            .is_err()
+    );
     committed(
-        multi
-            .local_tx(other, deadline(), |_| Box::pin(async { Ok(()) }))
+        runtime
+            .local_tx(crate::execution(other, 1), deadline(), |_| {
+                Box::pin(async { Ok(()) })
+            })
             .await,
     )?;
     assert!(
-        multi_outbox
-            .claim_partition_heads(one, deadline())
+        outbox
+            .claim_partition_heads(crate::execution(other, 1), one, deadline())
             .await?
             .is_empty(),
         "fenced tenant A cannot stop valid tenant B relay"
     );
-    multi.close().await;
     let conflicting = plan("different-member", 1, request.request().operation()).await?;
     assert!(
         store.apply(&conflicting, deadline()).await.fold(
@@ -313,7 +329,7 @@ async fn run() -> anyhow::Result<()> {
     );
 
     let late = runtime
-        .local_tx(tenant(), deadline(), |tx| {
+        .local_tx(crate::execution(tenant(), 1), deadline(), |tx| {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async move {
@@ -333,8 +349,7 @@ async fn run() -> anyhow::Result<()> {
         |_| false,
         |_| true
     ));
-    let next =
-        Arc::new(PgRuntime::connect(config("dr_runtime")?, Timer::new(), binding(2)?).await?);
+    let next = runtime.clone();
     let restored = PgOutboxStore::<()>::new(
         next.clone(),
         rss_transactional_messaging::message::MessagingDomain::parse("orders")?,
@@ -360,14 +375,20 @@ async fn run() -> anyhow::Result<()> {
     );
     assert!(
         matches!(
-            next_inbox.claim(&identity, deadline()).await?,
+            next_inbox
+                .claim(
+                    crate::execution(identity.tenant_id(), 2),
+                    &identity,
+                    deadline()
+                )
+                .await?,
             IdempotencyDisposition::Acquired(_)
         ),
         "new epoch reclaims old lease immediately"
     );
     let original_deadline: i64=sqlx::query_scalar("SELECT (extract(epoch FROM automatic_retry_deadline)*1000000)::bigint FROM rss_transactional_messaging.outbox WHERE message_id='published'").fetch_one(&owner).await?;
     let claim = restored
-        .claim_partition_heads(one, deadline())
+        .claim_partition_heads(binding(2)?, one, deadline())
         .await?
         .into_iter()
         .next()
@@ -393,8 +414,14 @@ async fn run() -> anyhow::Result<()> {
     let preserved:(String,i64)=sqlx::query_as("SELECT status,(extract(epoch FROM automatic_retry_deadline)*1000000)::bigint FROM rss_transactional_messaging.outbox WHERE message_id='published'").fetch_one(&owner).await?;
     assert_eq!(preserved, ("published".into(), original_deadline));
     // Full-set atomicity: a valid first member cannot survive a later absent member.
-    let operator2 =
-        Arc::new(PgDrStore::connect(config("dr_operator")?, Timer::new(), binding(2)?).await?);
+    let operator2 = Arc::new(
+        PgDrStore::connect(
+            config("dr_operator")?,
+            Timer::new(),
+            (binding(2)?).storage(),
+        )
+        .await?,
+    );
     let clock = Timer::new();
     let first = plan("published", 2, OperationId::new()).await?;
     let mut members = first.request().members().to_vec();
@@ -463,7 +490,6 @@ async fn run() -> anyhow::Result<()> {
         &owner,
     ))
     .await?;
-    next.close().await;
     store.close().await;
     runtime.close().await;
     owner.close().await;
@@ -479,8 +505,8 @@ async fn expanded_members(
         message::{MessageFingerprint, MessageId},
     };
     let storage = binding(1)?.storage();
-    let bound = ExecutionBinding::new(storage, vec![(tenant, Epoch::new(1)?)])?;
-    let store = PgDrStore::connect(config, Timer::new(), bound).await?;
+    let bound = ExecutionBinding::new(storage, tenant, Epoch::new(1)?);
+    let store = PgDrStore::connect(config, Timer::new(), (bound).storage()).await?;
     let envelope = message("capacity");
     let members = (0..1024)
         .map(|i| {
@@ -523,4 +549,17 @@ async fn expanded_members(
     assert_eq!(committed(store.apply(&plan, deadline()).await)?, receipt);
     store.close().await;
     Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
 }

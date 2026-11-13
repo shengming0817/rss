@@ -111,6 +111,7 @@ impl RelayReport {
 /// Claims are processed concurrently up to `limit`. If several entries fail, all already claimed
 /// entries are still driven to completion and the first error in original claim order is returned.
 pub async fn relay_once<P, S, U, C, E>(
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     store: &S,
     publisher: &U,
     clock: &C,
@@ -128,7 +129,7 @@ where
     let claim_started = clock.now();
     let claim_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
     let claims = match within(clock, claim_deadline, |deadline| {
-        store.claim_partition_heads(limit, deadline)
+        store.claim_partition_heads(binding, limit, deadline)
     })
     .await
     .and_then(std::convert::identity)
@@ -396,6 +397,7 @@ where
     /// This method does not spawn a task or catch provider panics.
     pub async fn run(
         self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<(), MessagingError> {
         absolute_deadline(
@@ -417,6 +419,7 @@ where
                 _ = ticker.tick() => {}
             }
             let result = relay_once(
+                binding,
                 self.store.as_ref(),
                 self.publisher.as_ref(),
                 self.clock.as_ref(),

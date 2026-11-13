@@ -31,12 +31,13 @@ where
     /// Transfer the worker into the `rss-runtime` startup token funnel.
     pub fn into_registration(
         self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         name: impl Into<String>,
         shutdown_budget: ShutdownBudget,
     ) -> (ManagedTaskRegistration, TaskStatus) {
         let (start, status) = ManagedTask::prepare(name, shutdown_budget.timeout());
         let registration = start.into_registration(move |token| async move {
-            self.run(token).await.map_err(ShutdownError::new)
+            self.run(binding, token).await.map_err(ShutdownError::new)
         });
         (registration, status)
     }

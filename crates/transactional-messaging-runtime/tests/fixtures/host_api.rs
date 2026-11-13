@@ -13,6 +13,7 @@ mod relay {
 
     pub async fn run<P, S, U, C, E>(
         worker: RelayWorker<P, S, U, C, E>,
+    binding: message_core::fence::ExecutionBinding,
         stop: CancellationToken,
     ) -> Result<(), MessagingError>
     where
@@ -23,12 +24,13 @@ mod relay {
         C: ExecutionTimer,
         E: TransactionalMessagingEmitter,
     {
-        worker.run(stop).await
+        worker.run(binding, stop).await
     }
 
     #[cfg(feature = "registration-probe")]
     pub fn register<P, S, U, C, E>(
         worker: RelayWorker<P, S, U, C, E>,
+    binding: message_core::fence::ExecutionBinding,
         budget: message_core::policy::ShutdownBudget,
     ) where
         P: Send + Sync + 'static,
@@ -38,7 +40,7 @@ mod relay {
         C: ExecutionTimer + 'static,
         E: TransactionalMessagingEmitter + 'static,
     {
-        let _ = worker.into_registration("relay", budget);
+        let _ = worker.into_registration(binding, "relay", budget);
     }
 }
 

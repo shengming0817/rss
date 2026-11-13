@@ -101,7 +101,7 @@ impl Database {
                     PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
                 ),
                 Timer::new(),
-                fence_fixture::binding(),
+                fence_fixture::storage(),
             )
             .await?,
         );
@@ -130,14 +130,18 @@ impl Database {
         let tenant = envelope.metadata().tenant_id();
         let append = self.store.clone();
         self.runtime
-            .local_tx(tenant, support::deadline(&self.timer), move |tx| {
-                Box::pin(async move {
-                    append
-                        .append(tx, PendingMessage::new(envelope))
-                        .await
-                        .map_err(Into::into)
-                })
-            })
+            .local_tx(
+                crate::execution(tenant, 1),
+                support::deadline(&self.timer),
+                move |tx| {
+                    Box::pin(async move {
+                        append
+                            .append(tx, PendingMessage::new(envelope))
+                            .await
+                            .map_err(Into::into)
+                    })
+                },
+            )
             .await
             .fold(Ok, Err, Err, Err, Err, Err)?;
         Ok(())
@@ -152,6 +156,7 @@ impl Database {
     }
     async fn relay(&self, publisher: &impl Publisher<Vec<u8>, Receipt = ()>) -> anyhow::Result<()> {
         let report = relay_once(
+            crate::execution(crate::fixture_tenant(), 1),
             &*self.store,
             publisher,
             &self.timer,

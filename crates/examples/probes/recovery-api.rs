@@ -3,12 +3,12 @@
 pub async fn dr_store<C: rss_request_context::ExecutionTimer + 'static>(
     config: rss_transactional_messaging_postgres::PgConfig,
     timer: C,
-    binding: rss_transactional_messaging::fence::ExecutionBinding,
+    storage: rss_transactional_messaging::fence::StorageIdentity,
 ) -> Result<
     rss_transactional_messaging_postgres::PgDrStore,
     rss_transactional_messaging_recovery::Error,
 > {
-    rss_transactional_messaging_postgres::PgDrStore::connect(config, timer, binding).await
+    rss_transactional_messaging_postgres::PgDrStore::connect(config, timer, storage).await
 }
 #[cfg(feature = "recovery-pg")]
 pub fn capture<H, K>(

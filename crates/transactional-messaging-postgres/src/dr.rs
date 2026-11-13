@@ -2,7 +2,7 @@
 use crate::{PgConfig, PgError, PgRuntime, fence::hex};
 use rss_request_context::ExecutionTimer;
 use rss_transactional_messaging::{
-    fence::{Epoch, ExecutionBinding},
+    fence::{Epoch, ExecutionBinding, StorageIdentity},
     policy::OperationDeadline,
     transaction::LocalTxAttempt,
 };
@@ -14,14 +14,14 @@ pub struct PgDrStore {
     runtime: PgRuntime,
 }
 impl PgDrStore {
-    /// Validate a dedicated DR operator; execution bindings are immutable even after applying a plan.
+    /// Validate a dedicated DR operator on one fixed storage target and lineage.
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: ExecutionBinding,
+        storage: StorageIdentity,
     ) -> Result<Self, Error> {
         let runtime =
-            PgRuntime::connect_profile(config, timer, binding, crate::transaction::Profile::Dr)
+            PgRuntime::connect_profile(config, timer, storage, crate::transaction::Profile::Dr)
                 .await
                 .map_err(error)?;
         Ok(Self { runtime })
@@ -36,9 +36,7 @@ impl PgDrStore {
         self.runtime.inject_next_transaction_fault(fault);
     }
     fn validate(&self, plan: &Plan) -> Result<(), Error> {
-        if self.runtime.binding.storage() != plan.storage()
-            || self.runtime.binding.epoch(plan.tenant()).is_none()
-        {
+        if self.runtime.storage != plan.storage() {
             return Err(Error::Unauthorized);
         }
         Ok(())
@@ -116,7 +114,7 @@ impl Store for PgDrStore {
         }
         let attempt = self
             .runtime
-            .transaction_with_context(plan.tenant(), deadline, plan, false, #[cfg(feature = "integration")] None, |plan, tx| {
+            .transaction_with_context(ExecutionBinding::new(plan.storage(), plan.tenant(), plan.expected()), deadline, plan, false, #[cfg(feature = "integration")] None, |plan, tx| {
                 Box::pin(async move {
                     let (direction, evidence) = match plan.action() {
                         PlanAction::Recover {direction, evidence,..} => (
@@ -170,7 +168,7 @@ impl Store for PgDrStore {
         map(self
             .runtime
             .transaction_with_context(
-                plan.tenant(),
+                ExecutionBinding::new(plan.storage(), plan.tenant(), plan.expected()),
                 deadline,
                 plan,
                 false,

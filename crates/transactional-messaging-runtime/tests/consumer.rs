@@ -35,8 +35,9 @@ use rss_transactional_messaging::policy::{
     ExecutionBudgetError, ExecutionDeadlines, OperationDeadline, RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
-    ConsumerTx, FailureClass, LocalTxAttempt, RejectKind, SettlementKind, TerminalDisposition,
-    TerminalReceipt, TransactionOutcome,
+    ConsumerTx, EnvelopeValidationFailure, FailureClass, IngressChallenge, IngressValidator,
+    LocalTxAttempt, RejectKind, SettlementKind, TerminalDisposition, TerminalReceipt,
+    TransactionOutcome, VerifiedIngress,
 };
 use rss_transactional_messaging::transport::{
     Delivery, DeliverySettlement, DeliverySource, IncomingDelivery, ManagedDeliveryStream,
@@ -434,6 +435,7 @@ impl InboxStore for ClaimErrorInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -445,6 +447,7 @@ impl InboxStore for ClaimErrorInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -479,6 +482,7 @@ impl InboxStore for ExtendErrorInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -487,6 +491,7 @@ impl InboxStore for ExtendErrorInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -525,6 +530,7 @@ impl InboxStore for FakeInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -542,6 +548,7 @@ impl InboxStore for FakeInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -647,7 +654,7 @@ impl rss_transactional_messaging::transaction::IngressValidator<Vec<u8>> for Tru
         challenge
             .subscription()
             .accepts(challenge.message())
-            .then(|| challenge.verified())
+            .then(|| { let execution = crate::execution(challenge.message().metadata().tenant_id(), 1); challenge.verified(execution) })
             .ok_or(rss_transactional_messaging::transaction::EnvelopeValidationFailure::UnsupportedContract)
     }
 }
@@ -1369,6 +1376,7 @@ impl InboxStore for PendingInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -1381,6 +1389,7 @@ impl InboxStore for PendingInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -1907,6 +1916,7 @@ impl InboxStore for RenewingInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -1924,6 +1934,7 @@ impl InboxStore for RenewingInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -2195,6 +2206,7 @@ impl InboxStore for RenewalErrorAfterInitialInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -2203,6 +2215,7 @@ impl InboxStore for RenewalErrorAfterInitialInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -2332,6 +2345,7 @@ impl InboxStore for TransientThenAcquiredInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -2347,6 +2361,7 @@ impl InboxStore for TransientThenAcquiredInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -2515,6 +2530,7 @@ impl InboxStore for BlockingClaimInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -2525,6 +2541,7 @@ impl InboxStore for BlockingClaimInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -3107,6 +3124,7 @@ impl InboxStore for UnlimitedInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -3115,6 +3133,7 @@ impl InboxStore for UnlimitedInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
@@ -3572,4 +3591,159 @@ async fn host_forced_shutdown_during_claim_drops_without_settlement_or_cleanup()
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(actions.lock().expect("actions").is_empty());
     assert_eq!(abandoned.load(Ordering::SeqCst), 0);
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+struct ScopedInbox(Mutex<Vec<rss_transactional_messaging::fence::ExecutionBinding>>);
+impl InboxStore for ScopedInbox {
+    type Claim = Claim;
+    fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
+        UnlimitedInbox.lease_policy()
+    }
+    async fn claim(
+        &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
+        identity: &ConsumerIdentity,
+        deadline: OperationDeadline,
+    ) -> Result<IdempotencyDisposition<Claim>, MessagingError> {
+        assert_eq!(binding.tenant(), identity.tenant_id());
+        self.0.lock().expect("scopes").push(binding);
+        UnlimitedInbox.claim(binding, identity, deadline).await
+    }
+    async fn read_terminal(
+        &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
+        identity: &ConsumerIdentity,
+        deadline: OperationDeadline,
+    ) -> Result<Option<TerminalReceipt>, MessagingError> {
+        UnlimitedInbox
+            .read_terminal(binding, identity, deadline)
+            .await
+    }
+    async fn extend(
+        &self,
+        claim: &Claim,
+        deadline: OperationDeadline,
+    ) -> Result<LeaseStatus, MessagingError> {
+        UnlimitedInbox.extend(claim, deadline).await
+    }
+    async fn release(
+        &self,
+        claim: Claim,
+        deadline: OperationDeadline,
+    ) -> Result<(), MessagingError> {
+        UnlimitedInbox.release(claim, deadline).await
+    }
+}
+struct ScopedIngress;
+impl IngressValidator<Vec<u8>> for ScopedIngress {
+    fn validate(
+        &self,
+        c: IngressChallenge<'_, Vec<u8>>,
+    ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+        let binding = if c.message().metadata().tenant_id() == tenant(TENANT_A) {
+            execution(tenant(TENANT_A), 2)
+        } else if c.message().metadata().tenant_id() == tenant(TENANT_B) {
+            execution(tenant(TENANT_B), 7)
+        } else {
+            return Err(EnvelopeValidationFailure::MalformedIdentity);
+        };
+        Ok(c.verified(binding))
+    }
+}
+#[tokio::test]
+async fn shared_consumer_worker_uses_each_deliveries_explicit_execution() {
+    let a = envelope(|_| {});
+    let expected = subscription(&a);
+    let b = envelope(|f| {
+        f.tenant = TENANT_B;
+        f.id = "second-tenant";
+    });
+    let settled = Arc::new(AtomicUsize::new(0));
+    let delivery = |m| {
+        IncomingDelivery::Valid(Box::new(Delivery::new(
+            m,
+            BlockingSettlement {
+                gate: None,
+                settled: settled.clone(),
+            },
+        )))
+    };
+    let source = Arc::new(TwoDeliverySource {
+        deliveries: Mutex::new(vec![delivery(a), delivery(b)]),
+    });
+    let inbox = Arc::new(ScopedInbox(Mutex::new(Vec::new())));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker = ConsumerWorker::new(
+        source,
+        inbox.clone(),
+        Arc::new(FakeTx {
+            calls: calls.clone(),
+            disposition: TerminalDisposition::Succeeded,
+        }),
+        ConsumerGroup::parse("shared-scopes").expect("group"),
+        Arc::new(ScopedIngress),
+        expected,
+        Arc::new(RealtimeClock::new()),
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(1))
+            .expect("backoff"),
+    );
+    let token = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(token.clone()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while settled.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both tenants settled");
+    token.cancel();
+    support::join_worker(task)
+        .await
+        .expect("shared worker stopped");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *inbox.0.lock().expect("scopes"),
+        [
+            execution(tenant(TENANT_A), 2),
+            execution(tenant(TENANT_B), 7)
+        ]
+    );
+}
+#[test]
+fn wrong_execution_tenant_requeues_instead_of_rejecting_message_content() {
+    struct Wrong;
+    impl IngressValidator<Vec<u8>> for Wrong {
+        fn validate(
+            &self,
+            c: IngressChallenge<'_, Vec<u8>>,
+        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+            Ok(c.verified(execution(tenant(TENANT_B), 7)))
+        }
+    }
+    let message = envelope(|_| {});
+    let error = rss_transactional_messaging::transaction::verify_ingress(
+        &Wrong,
+        ConsumerGroup::parse("wrong-scope").expect("group"),
+        &subscription(&message),
+        &message,
+    )
+    .err()
+    .expect("mismatched tenant must be rejected");
+    assert_eq!(error.reason(), EnvelopeValidationFailure::ExecutionMismatch);
+    assert_eq!(error.into_decision().kind(), SettlementKind::Requeue);
 }

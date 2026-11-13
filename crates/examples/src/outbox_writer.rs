@@ -74,8 +74,9 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
     let tenant = TenantId::parse(&input.pg.tenant)?;
     let binding = ExecutionBinding::new(
         StorageIdentity::new(input.target, input.lineage)?,
-        vec![(tenant, Epoch::new(input.epoch)?)],
-    )?;
+        tenant,
+        Epoch::new(input.epoch)?,
+    );
     let config = PgConfig::new(
         input.pg.host,
         input.pg.port,
@@ -84,12 +85,17 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         PgPassword::new(input.pg.password),
         PgPrivateCa::from_pem(input.pg.pg_ca.into_bytes())?,
     );
-    let runtime = Arc::new(PgRuntime::connect_producer(config, Timer, binding).await?);
-    let result = atomicity(runtime.clone(), tenant, &input.id).await;
+    let runtime = Arc::new(PgRuntime::connect_producer(config, Timer, binding.storage()).await?);
+    let result = atomicity(runtime.clone(), binding, &input.id).await;
     tokio::time::timeout(Duration::from_secs(10), runtime.close()).await?;
     result
 }
-async fn atomicity(runtime: Arc<PgRuntime>, tenant: TenantId, prefix: &str) -> anyhow::Result<()> {
+async fn atomicity(
+    runtime: Arc<PgRuntime>,
+    binding: ExecutionBinding,
+    prefix: &str,
+) -> anyhow::Result<()> {
+    let tenant = binding.tenant();
     for rollback in [false, true] {
         let id = format!("{prefix}-{}", if rollback { "rollback" } else { "commit" });
         let writer =
@@ -97,7 +103,7 @@ async fn atomicity(runtime: Arc<PgRuntime>, tenant: TenantId, prefix: &str) -> a
         let pending = message(tenant, &id)?;
         let business_id = id.clone();
         let attempt = runtime
-            .local_tx(tenant, deadline()?, move |tx| {
+            .local_tx(binding, deadline()?, move |tx| {
                 Box::pin(async move {
                     tx.prepare_outbox_partitions(
                         &pending.partition().cloned().into_iter().collect::<Vec<_>>(),
@@ -119,7 +125,7 @@ async fn atomicity(runtime: Arc<PgRuntime>, tenant: TenantId, prefix: &str) -> a
             .await;
         let committed = attempt.fold(|()| Ok(true), Err, |_| Ok(false), Err, Err, Err)?;
         anyhow::ensure!(committed != rollback, "unexpected transaction outcome");
-        let counts = runtime.local_tx(tenant,deadline()?,move |tx| Box::pin(async move {
+        let counts = runtime.local_tx(binding,deadline()?,move |tx| Box::pin(async move {
             tx.with_connection(move |connection| Box::pin(async move {
                 sqlx::query_as::<_,(i64,i64)>("SELECT (SELECT count(*) FROM public.business_effects WHERE id=$1), (SELECT count(*) FROM rss_transactional_messaging.outbox WHERE message_id=$1)")
                     .bind(id).fetch_one(connection).await

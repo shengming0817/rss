@@ -4,7 +4,7 @@ use futures::future::BoxFuture;
 use rss_redact::RedactedSource;
 use rss_request_context::TenantId;
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
-use rss_transactional_messaging::fence::ExecutionBinding;
+use rss_transactional_messaging::fence::{ExecutionBinding, StorageIdentity};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     policy::{OperationDeadline, within},
@@ -279,7 +279,7 @@ where
 /// Shared bounded pool. A caller supplies a timer sharing the runtime's monotonic time domain.
 pub struct PgRuntime {
     pub(crate) pool: PgPool,
-    pub(crate) binding: ExecutionBinding,
+    pub(crate) storage: StorageIdentity,
     pub(crate) timer: PgTimer,
     #[cfg(feature = "recovery")]
     pub(crate) projection_slots: tokio::sync::Semaphore,
@@ -325,13 +325,20 @@ impl PgRuntime {
         Ok(())
     }
 
+    pub(crate) fn validate_binding(&self, binding: ExecutionBinding) -> Result<(), PgError> {
+        if binding.storage() != self.storage {
+            return Err(PgError::lost());
+        }
+        Ok(())
+    }
+
     /// Connect and validate only this package's schema and effective permissions.
     pub async fn connect<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: ExecutionBinding,
+        storage: StorageIdentity,
     ) -> Result<Self, PgError> {
-        Self::connect_profile(config, timer, binding, Profile::Runtime).await
+        Self::connect_profile(config, timer, storage, Profile::Runtime).await
     }
     /// Connect a producer that only writes business state and appends/reads its tenant Outbox.
     /// Requires no Inbox privileges and rejects effective relay function EXECUTE grants.
@@ -339,33 +346,33 @@ impl PgRuntime {
     pub async fn connect_producer<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: ExecutionBinding,
+        storage: StorageIdentity,
     ) -> Result<Self, PgError> {
-        Self::connect_profile(config, timer, binding, Profile::Producer).await
+        Self::connect_profile(config, timer, storage, Profile::Producer).await
     }
     /// Connect a relay/Inbox consumer without permission to author Outbox messages.
     /// Producer function EXECUTE must also be absent from every SET-accessible role.
     pub async fn connect_consumer<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: ExecutionBinding,
+        storage: StorageIdentity,
     ) -> Result<Self, PgError> {
-        Self::connect_profile(config, timer, binding, Profile::Consumer).await
+        Self::connect_profile(config, timer, storage, Profile::Consumer).await
     }
     pub(crate) async fn connect_profile<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: ExecutionBinding,
+        storage: StorageIdentity,
         profile: Profile,
     ) -> Result<Self, PgError> {
         // Admission includes several catalog probes; do not multiply their inline state in
         // hosts composing multiple runtimes or running sequential admission damage scenarios.
-        Box::pin(Self::open_profile(config, timer, binding, profile)).await
+        Box::pin(Self::open_profile(config, timer, storage, profile)).await
     }
     async fn open_profile<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
-        binding: ExecutionBinding,
+        storage: StorageIdentity,
         profile: Profile,
     ) -> Result<Self, PgError> {
         config.validate()?;
@@ -384,7 +391,7 @@ impl PgRuntime {
         .await??;
         let runtime = Self {
             pool,
-            binding,
+            storage,
             timer,
             #[cfg(feature = "recovery")]
             projection_slots: tokio::sync::Semaphore::new(
@@ -481,14 +488,14 @@ impl PgRuntime {
     /// their connection; cancellation alone does not prove that effects were rolled back.
     pub async fn local_tx<T: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         operation: F,
     ) -> LocalTxAttempt<T, PgError>
     where
         F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>> + Send,
     {
-        self.local_tx_with_context(tenant, deadline, (), move |_, tx| operation(tx))
+        self.local_tx_with_context(binding, deadline, (), move |_, tx| operation(tx))
             .await
     }
 
@@ -496,7 +503,7 @@ impl PgRuntime {
     /// non-static references; this retains the same single cutoff and settlement owner.
     pub async fn local_tx_with_context<T: Send, C: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         context: C,
         operation: F,
@@ -509,7 +516,7 @@ impl PgRuntime {
             + Send,
     {
         self.transaction_with_context(
-            tenant,
+            binding,
             deadline,
             context,
             true,
@@ -522,7 +529,7 @@ impl PgRuntime {
 
     pub(crate) async fn transaction_with_context<T: Send, C: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
         mut context: C,
         lock: bool,
@@ -536,6 +543,9 @@ impl PgRuntime {
             ) -> BoxFuture<'a, Result<T, PgError>>
             + Send,
     {
+        if let Err(error) = self.validate_binding(binding) {
+            return LocalTxAttempt::not_started(error);
+        }
         let cutoff = match Deadline::from_timeout(&self.timer, deadline.timeout()) {
             Ok(value) => value,
             Err(_) => return LocalTxAttempt::not_started(PgError::invariant()),
@@ -565,7 +575,7 @@ impl PgRuntime {
             Ok(value) => value,
             Err(error) => return LocalTxAttempt::not_started(error),
         };
-        let mut view = PgTransaction::new(transaction.connection(), tenant, cutoff, self);
+        let mut view = PgTransaction::new(transaction.connection(), binding, cutoff, self);
         let result = within(&self.timer, cutoff, |_| async {
             view.setup_context(lock).await?;
             let value = operation(&mut context, &mut view).await?;
@@ -684,13 +694,14 @@ impl PgRuntime {
     // SECURITY DEFINER calls use the same quarantine lease but no fabricated tenant identity.
     pub(crate) async fn relay<T: Send, F>(
         &self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         cutoff: Deadline,
         operation: F,
     ) -> Result<T, PgError>
     where
         F: for<'a> FnOnce(&'a mut PgConnection) -> BoxFuture<'a, Result<T, PgError>> + Send,
     {
+        self.validate_binding(binding)?;
         let mut lease = stage(
             &self.timer,
             cutoff,
@@ -716,7 +727,7 @@ impl PgRuntime {
                 .bind(format!("{millis}ms"))
                 .execute(transaction.connection())
                 .await?;
-            crate::fence::setup(transaction.connection(), &self.binding, tenant, true).await?;
+            crate::fence::setup(transaction.connection(), &binding, true).await?;
             operation(transaction.connection()).await
         })
         .await
@@ -775,7 +786,7 @@ pub struct PgTransaction<'tx> {
     pub(crate) connection: &'tx mut PgConnection,
     pub(crate) outbox_admission: crate::outbox_admission::Admission,
     scope_restored: bool,
-    tenant: TenantId,
+    binding: ExecutionBinding,
     cutoff: Deadline,
     timer: &'tx PgTimer,
     owner: &'tx PgRuntime,
@@ -783,7 +794,7 @@ pub struct PgTransaction<'tx> {
 impl PgTransaction<'_> {
     pub(crate) fn new<'a>(
         connection: &'a mut PgConnection,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         cutoff: Deadline,
         owner: &'a PgRuntime,
     ) -> PgTransaction<'a> {
@@ -791,7 +802,7 @@ impl PgTransaction<'_> {
             connection,
             outbox_admission: crate::outbox_admission::Admission::Open,
             scope_restored: true,
-            tenant,
+            binding,
             cutoff,
             timer: &owner.timer,
             owner,
@@ -808,7 +819,7 @@ impl PgTransaction<'_> {
         self.outbox_admission.check_commit()
     }
     pub(crate) fn binding(&self) -> &ExecutionBinding {
-        &self.owner.binding
+        &self.binding
     }
     pub(crate) fn belongs_to(&self, owner: &PgRuntime) -> bool {
         std::ptr::eq(self.owner, owner)
@@ -824,16 +835,22 @@ impl PgTransaction<'_> {
             .as_millis()
             .max(1);
         let millis = i32::try_from(millis).map_err(|_| PgError::InvalidOperationTimeout)?;
-        stage(self.timer, self.cutoff, LocalTxDeadlineStage::Setup,
-            sqlx::query("SELECT set_config('rss.tenant_id', $1, true), set_config('statement_timeout', $2, true)")
-                .bind(self.tenant.to_string()).bind(format!("{millis}ms")).execute(&mut *self.connection)).await?;
-        crate::fence::setup(self.connection, &self.owner.binding, self.tenant, lock).await?;
+        stage(
+            self.timer,
+            self.cutoff,
+            LocalTxDeadlineStage::Setup,
+            sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+                .bind(format!("{millis}ms"))
+                .execute(&mut *self.connection),
+        )
+        .await?;
+        crate::fence::setup(self.connection, &self.binding, lock).await?;
         Ok(())
     }
     /// Tenant bound by the transaction owner.
     #[must_use]
     pub const fn tenant_id(&self) -> TenantId {
-        self.tenant
+        self.binding.tenant()
     }
     /// Current remaining budget, never a fresh timeout.
     #[must_use]
@@ -842,14 +859,14 @@ impl PgTransaction<'_> {
     }
     /// Borrow a companion tenant's SQL scope while retaining this transaction's owner.
     ///
-    /// The companion must be admitted by the runtime's fixed execution binding. Its
-    /// execution fence is checked and held through the outer commit or rollback.
+    /// The host supplies the exact companion execution identity on the same storage.
+    /// Its execution fence is checked and held through the outer commit or rollback.
     /// On success the original tenant and execution context are restored; `tenant_id`
     /// and outbox ownership never change. This grants no product authorization.
     /// Errors or cancellation permanently prevent further SQL and commit on this view.
     pub async fn with_tenant_connection<T: Send, F>(
         &mut self,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         operation: F,
     ) -> Result<T, PgError>
     where
@@ -858,10 +875,11 @@ impl PgTransaction<'_> {
         self.check_scope()?;
         // ref: sqlx-core 0.9.0 transaction.rs: mark unfinished before awaiting I/O.
         self.scope_restored = false;
+        self.owner.validate_binding(binding)?;
         within(self.timer, self.cutoff, |_| async {
-            crate::fence::setup(self.connection, &self.owner.binding, tenant, true).await?;
+            crate::fence::setup(self.connection, &binding, true).await?;
             let result = operation(self.connection).await?;
-            crate::fence::setup(self.connection, &self.owner.binding, self.tenant, false).await?;
+            crate::fence::setup(self.connection, &self.binding, false).await?;
             self.scope_restored = true;
             Ok(result)
         })
@@ -1014,13 +1032,7 @@ mod tests {
             .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
         pool.close().await;
         let runtime = PgRuntime {
-            binding: ExecutionBinding::new(
-                rss_transactional_messaging::fence::StorageIdentity::new([1; 16], [2; 16])?,
-                vec![(
-                    TenantId::parse("11111111-1111-1111-1111-111111111111")?,
-                    rss_transactional_messaging::fence::Epoch::new(1)?,
-                )],
-            )?,
+            storage: StorageIdentity::new([1; 16], [2; 16])?,
             pool,
             timer: PgTimer(Arc::new(Frozen)),
             #[cfg(feature = "recovery")]

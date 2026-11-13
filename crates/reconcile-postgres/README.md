@@ -44,7 +44,7 @@ schema/ACL 变更必须停流并重新准入，空发现不重新扫描 catalog�
 
 ## 可选消息组合
 
-开启 `transactional-messaging` 才引入消息 core/PG 依赖。`PgMessagingStore::new(runtime, tenant, deadline)` 在实际消息 runtime 上完成一次完整准入；其 `protect` 和 `wake_with` 方法接受显式 context，回调取得同一个消息 `PgTransaction`。仅追加消息时，使用共享 runtime 与 domain 构造 `PgOutboxWriter`，在回调中通过 `OutboxWriter::append` 写入，无需 receipt 类型或投递预算。确实同时承担投递的消费者才组合使用 `PgOutboxStore<R>`。Reconcile 校验、业务 SQL、canonical Outbox 和调度状态同事务；消息 runtime 唯一拥有结算。它们返回 `LocalTxAttempt`，必须穷尽区分 committed、not-started、rolled-back、fenced、rollback-failed、commit-unknown。
+开启 `transactional-messaging` 才引入消息 core/PG 依赖。`PgMessagingStore::new(runtime, binding, deadline)` 在实际消息 runtime 上完成一次完整准入；其 `protect` 和 `wake_with` 方法接受本次 `ExecutionBinding` 及显式 context，回调取得同一个消息 `PgTransaction`。仅追加消息时，使用共享 runtime 与 domain 构造 `PgOutboxWriter`，在回调中通过 `OutboxWriter::append` 写入，无需 receipt 类型或投递预算。确实同时承担投递的消费者才组合使用 `PgOutboxStore<R>`。Reconcile 校验、业务 SQL、canonical Outbox 和调度状态同事务；消息 runtime 唯一拥有结算。它们返回 `LocalTxAttempt`，必须穷尽区分 committed、not-started、rolled-back、fenced、rollback-failed、commit-unknown。
 
 `PgMessagingStore::protect_in` 借用调用方已经打开的 `PgTransaction`，供宿主先取得 Audit/Ledger 等上层锁，再锁 claim、执行业务并标记 Applied。它首先验证事务属于构造时绑定的同一 runtime，并核对实际连接身份；随后继承原连接和剩余预算，不改会话、不取得第二连接、不接管提交；成功只是 staged，错误必须交回原 owner 回滚。独立 `protect` 与该接口共用同一 claim 校验及写入实现。`PgMessagingStore::wake_in` 对称地在已有事务内登记 wake 并执行回调，与独立 `wake_with` 共用准入和 wake SQL，适用于上层锁必须先于调度目标锁的原子业务提交。
 

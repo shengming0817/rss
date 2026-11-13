@@ -79,8 +79,13 @@ pub(super) async fn run(
     ] {
         let message = message(id);
         let binding = binding(&message);
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(binding.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("new claim")
         };
@@ -107,7 +112,11 @@ pub(super) async fn run(
         assert_eq!(count(owner, id).await, 0);
         assert!(
             inbox
-                .read_terminal(binding.identity(), deadline())
+                .read_terminal(
+                    crate::execution((binding.identity()).tenant_id(), 1),
+                    binding.identity(),
+                    deadline()
+                )
                 .await?
                 .is_none()
         );
@@ -119,7 +128,7 @@ pub(super) async fn run(
     let timed_runtime = Arc::new(
         tokio::time::timeout(
             Duration::from_secs(5),
-            PgRuntime::connect(config.clone(), clock.clone(), fence_fixture::binding()),
+            PgRuntime::connect(config.clone(), clock.clone(), fence_fixture::storage()),
         )
         .await
         .expect("controlled-clock runtime must connect")?,
@@ -133,7 +142,13 @@ pub(super) async fn run(
         let message = message(id);
         let binding = binding(&message);
         let identity = binding.identity().clone();
-        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&identity, deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(),
+            )
+            .await?
         else {
             panic!("new claim")
         };
@@ -180,7 +195,16 @@ pub(super) async fn run(
         }
         connection_gone(owner, pid.load(Ordering::SeqCst)).await;
         assert_eq!(count(owner, id).await, 0);
-        assert!(inbox.read_terminal(&identity, deadline()).await?.is_none());
+        assert!(
+            inbox
+                .read_terminal(
+                    crate::execution(identity.tenant_id(), 1),
+                    &identity,
+                    deadline()
+                )
+                .await?
+                .is_none()
+        );
     }
     tokio::time::timeout(Duration::from_secs(5), timed_runtime.close())
         .await

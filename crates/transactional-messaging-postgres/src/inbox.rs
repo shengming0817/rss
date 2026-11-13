@@ -22,13 +22,9 @@ pub struct PgInboxClaim {
     pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
 }
 impl PgInboxClaim {
-    pub(crate) fn matches(
-        &self,
-        binding: &rss_transactional_messaging::fence::ExecutionBinding,
-    ) -> bool {
-        self.binding.storage() == binding.storage()
-            && self.binding.epoch(self.identity.tenant_id())
-                == binding.epoch(self.identity.tenant_id())
+    pub(crate) fn matches(&self, runtime: &PgRuntime) -> bool {
+        self.binding.storage() == runtime.storage
+            && self.binding.tenant() == self.identity.tenant_id()
     }
 }
 /// PostgreSQL inbox. Lease duration uses exact PostgreSQL interval microseconds.
@@ -122,14 +118,18 @@ impl InboxStore for PgInboxStore {
     type Claim = PgInboxClaim;
     async fn claim(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        if binding.tenant() != identity.tenant_id() {
+            return Err(PgError::lost().port());
+        }
         let identity = identity.clone();
         let lease_ms = self.lease_ms;
         settled(
             self.runtime
-                .local_tx(identity.tenant_id(), deadline, move |tx| {
+                .local_tx(binding, deadline, move |tx| {
                     Box::pin(async move {
                         let row = sqlx::query(CLAIM_SQL)
                             .bind(identity.tenant_id().to_string())
@@ -141,7 +141,7 @@ impl InboxStore for PgInboxStore {
                             .await?;
                         if let Some(row) = row {
                             return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
-                                binding: tx.binding().clone(),
+                                binding: *tx.binding(),
                                 identity,
                                 token: row.try_get("token")?,
                             }));
@@ -159,13 +159,17 @@ impl InboxStore for PgInboxStore {
     }
     async fn read_terminal(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
+        if binding.tenant() != identity.tenant_id() {
+            return Err(PgError::lost().port());
+        }
         let identity = identity.clone();
         settled(
             self.runtime
-                .local_tx(identity.tenant_id(), deadline, move |tx| {
+                .local_tx(binding, deadline, move |tx| {
                     Box::pin(async move {
                         read(tx, &identity)
                             .await?
@@ -183,29 +187,31 @@ impl InboxStore for PgInboxStore {
         claim: &Self::Claim,
         deadline: OperationDeadline,
     ) -> Result<LeaseStatus, MessagingError> {
-        if !claim.matches(&self.runtime.binding) {
+        if !claim.matches(&self.runtime) {
             return Ok(LeaseStatus::Lost);
         }
         let identity = claim.identity.clone();
         let token = claim.token.clone();
         let lease_ms = self.lease_ms;
-        settled(self.runtime.local_tx(identity.tenant_id(), deadline, move |tx| Box::pin(async move {
+        settled(self.runtime.local_tx(claim.binding, deadline, move |tx| Box::pin(async move {
             lock_identity(tx, &identity).await?;
             let remaining = sqlx::query_scalar::<_, i64>("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()+($5::bigint::text || ' milliseconds')::interval WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp() RETURNING GREATEST(0,(extract(epoch FROM lease_until-clock_timestamp())*1000000)::bigint)")
                 .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str()).bind(token).bind(lease_ms)
                 .fetch_optional(&mut *tx.connection).await?;
             Ok(match remaining { Some(value) => LeaseStatus::Held { remaining: Duration::from_micros(value.unsigned_abs()) }, None => LeaseStatus::Lost })
-        })).await).map_err(PgError::port)
+        })).await).map_err(PgError::port).or_else(|error| {
+            if error.kind() == MessagingErrorKind::OwnershipLost { Ok(LeaseStatus::Lost) } else { Err(error) }
+        })
     }
     async fn release(
         &self,
         claim: Self::Claim,
         deadline: OperationDeadline,
     ) -> Result<(), MessagingError> {
-        if !claim.matches(&self.runtime.binding) {
+        if !claim.matches(&self.runtime) {
             return Err(PgError::lost().port());
         }
-        settled(self.runtime.local_tx(claim.identity.tenant_id(), deadline, move |tx| Box::pin(async move {
+        settled(self.runtime.local_tx(claim.binding, deadline, move |tx| Box::pin(async move {
             lock_identity(tx, &claim.identity).await?;
             let count = sqlx::query("DELETE FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(claim.token)

@@ -110,7 +110,10 @@ impl IngressValidator<Vec<u8>> for Validator {
         &self,
         c: IngressChallenge<'_, Vec<u8>>,
     ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
-        Ok(c.verified())
+        Ok({
+            let execution = crate::execution(c.message().metadata().tenant_id(), 1);
+            c.verified(execution)
+        })
     }
 }
 struct RejectIngress;
@@ -194,7 +197,7 @@ impl Fixture {
         committed(
             self.producer
                 .local_tx_with_context(
-                    tenant(),
+                    crate::execution(tenant(), 1),
                     deadline(),
                     (writer, Some(message)),
                     |(writer, message), tx| {
@@ -320,7 +323,7 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
         PgRuntime::connect_producer(
             config("projection_producer")?,
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -329,10 +332,7 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
         PgRuntime::connect_consumer(
             worker_config.clone(),
             Timer::new(),
-            rss_transactional_messaging::fence::ExecutionBinding::new(
-                fence_fixture::binding().storage(),
-                vec![(tenant(), rss_transactional_messaging::fence::Epoch::new(1)?)],
-            )?,
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -359,6 +359,7 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
         })
         .await?;
     let items = collect_batch(projection.project_batch(
+        crate::execution(crate::fixture_tenant(), 1),
         &Validator,
         NonZeroUsize::try_from(2usize)?,
         deadline(),
@@ -375,6 +376,7 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
     } else {
         Box::pin(batch::run(&f)).await?;
         Box::pin(success_and_duplicate(&f)).await?;
+        Box::pin(mismatched_execution_preserves_valid_source(&f)).await?;
         Box::pin(ingress_rejection(&f)).await?;
         Box::pin(rejected_and_failed(&f)).await?;
         Box::pin(redrive_unknown(&f)).await?;
@@ -412,6 +414,7 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
         async move {
             only(
                 collect_batch(projection.project_batch(
+                    crate::execution(crate::fixture_tenant(), 1),
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
@@ -428,6 +431,7 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
     );
     assert!(
         collect_batch(projection.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -445,6 +449,7 @@ async fn success_and_duplicate(f: &Fixture) -> anyhow::Result<()> {
     );
     assert!(
         collect_batch(projection.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -464,11 +469,15 @@ async fn ingress_rejection(f: &Fixture) -> anyhow::Result<()> {
             fail: true,
         })
         .await?;
-    assert!(!p.has_dead_letters(deadline()).await?);
+    assert!(
+        !p.has_dead_letters(crate::execution(crate::fixture_tenant(), 1), deadline())
+            .await?
+    );
     f.append("ingress-denied", "orders").await?;
     assert!(matches!(
         only(
             collect_batch(p.project_batch(
+                crate::execution(crate::fixture_tenant(), 1),
                 &RejectIngress,
                 NonZeroUsize::MIN,
                 deadline(),
@@ -488,7 +497,10 @@ async fn ingress_rejection(f: &Fixture) -> anyhow::Result<()> {
     .fetch_one(&f.owner)
     .await?;
     assert_eq!(count, 0, "ingress rejection must precede Inbox claiming");
-    assert!(p.has_dead_letters(deadline()).await?);
+    assert!(
+        p.has_dead_letters(crate::execution(crate::fixture_tenant(), 1), deadline())
+            .await?
+    );
     Ok(())
 }
 
@@ -510,6 +522,7 @@ async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
     p.inject_next_projection_fault(PgTransactionFault::CommitPending, std::future::ready(()))?;
     let pending = uncertain_projection(only(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -528,6 +541,7 @@ async fn redrive_unknown(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-rejected' AND status='publishing'").execute(&f.owner).await?;
     let receipt = committed_projection(only(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -572,6 +586,7 @@ async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     let receipt = committed_projection(only(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -605,6 +620,7 @@ async fn rejected_and_failed(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(
         attempt_status(only(
             collect_batch(p.project_batch(
+                crate::execution(crate::fixture_tenant(), 1),
                 &Validator,
                 NonZeroUsize::MIN,
                 deadline(),
@@ -637,6 +653,7 @@ async fn unknown_rollback(f: &Fixture) -> anyhow::Result<()> {
     )?;
     let (outcome, recovery) = projection_attempt(only(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -671,6 +688,7 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
     )?;
     let pending = uncertain_projection(only(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -689,6 +707,7 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(receipt.disposition(), TerminalDisposition::Succeeded);
     assert!(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -718,6 +737,7 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
         async move {
             only(
                 collect_batch(p.project_batch(
+                    crate::execution(crate::fixture_tenant(), 1),
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
@@ -731,6 +751,7 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(2500)).await;
     assert!(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -763,6 +784,7 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
         async move {
             only(
                 collect_batch(p.project_batch(
+                    crate::execution(crate::fixture_tenant(), 1),
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
@@ -866,7 +888,7 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.owner)
     .await?;
     assert!(
-        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err(),
         "hidden scope bindings must fail admission"
@@ -877,7 +899,7 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.owner)
     .await?;
     assert!(
-        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_ok()
     );
@@ -887,7 +909,7 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.owner)
     .await?;
     assert!(
-        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err(),
         "weakened restrictive policy must fail admission"
@@ -915,6 +937,7 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
         async move {
             only(
                 collect_batch(projection.project_batch(
+                    crate::execution(crate::fixture_tenant(), 1),
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
@@ -935,7 +958,7 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-cancelled'").execute(&f.owner).await?;
     sqlx::query("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-cancelled'").execute(&f.owner).await?;
     let runtime = Arc::new(
-        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::binding())
+        PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
             .await?,
     );
     let capture = PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(1)), deadline()).await?;
@@ -961,6 +984,7 @@ async fn cancellation_and_restart(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(
         committed_projection(only(
             collect_batch(restarted.project_batch(
+                crate::execution(crate::fixture_tenant(), 1),
                 &Validator,
                 NonZeroUsize::MIN,
                 deadline(),
@@ -988,7 +1012,7 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
         PgRuntime::connect_consumer(
             f.config.clone().with_pool_limits(0, 1),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -1010,7 +1034,7 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
         PgRuntime::connect_consumer(
             f.config.clone().with_pool_limits(0, 2),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -1040,6 +1064,7 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
         async move {
             only(
                 collect_batch(a.project_batch(
+                    crate::execution(crate::fixture_tenant(), 1),
                     &Validator,
                     NonZeroUsize::MIN,
                     deadline(),
@@ -1053,6 +1078,7 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
     let second = tokio::spawn(async move {
         only(
             collect_batch(b.project_batch(
+                crate::execution(crate::fixture_tenant(), 1),
                 &Validator,
                 NonZeroUsize::MIN,
                 deadline(),
@@ -1105,6 +1131,7 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
     p.inject_next_projection_fault(PgTransactionFault::CommitPending, std::future::ready(()))?;
     let pending = uncertain_projection(only(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -1124,6 +1151,7 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(
         committed_projection(only(
             collect_batch(p.project_batch(
+                crate::execution(crate::fixture_tenant(), 1),
                 &Validator,
                 NonZeroUsize::MIN,
                 deadline(),
@@ -1149,6 +1177,7 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
     )?;
     let pending = uncertain_projection(only(
         collect_batch(p.project_batch(
+            crate::execution(crate::fixture_tenant(), 1),
             &Validator,
             NonZeroUsize::MIN,
             deadline(),
@@ -1209,5 +1238,98 @@ fn only(mut batch: Vec<PgProjectionItem>) -> Result<PgProjectionOutcome, PgError
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outbox_partition_head_scale() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(1200), Box::pin(run(true))).await??;
+    Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    tenant()
+}
+
+async fn mismatched_execution_preserves_valid_source(f: &Fixture) -> anyhow::Result<()> {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    struct Wrong(ExecutionBinding);
+    impl IngressValidator<Vec<u8>> for Wrong {
+        fn validate(
+            &self,
+            c: IngressChallenge<'_, Vec<u8>>,
+        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+            Ok(c.verified(self.0))
+        }
+    }
+    let original = execution(tenant(), 1);
+    let wrong = [
+        execution(tenant(), 2),
+        execution(
+            rss_request_context::TenantId::parse("22222222-2222-2222-2222-222222222222")?,
+            1,
+        ),
+        ExecutionBinding::new(
+            StorageIdentity::new([3; 16], [2; 16])?,
+            tenant(),
+            Epoch::new(1)?,
+        ),
+        ExecutionBinding::new(
+            StorageIdentity::new([1; 16], [3; 16])?,
+            tenant(),
+            Epoch::new(1)?,
+        ),
+    ];
+    let p = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: false,
+        })
+        .await?;
+    for (index, scope) in wrong.into_iter().enumerate() {
+        let id = format!("execution-mismatch-{index}");
+        f.append(&id, "orders").await?;
+        let items = collect_batch(p.project_batch(
+            original,
+            &Wrong(scope),
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        ))
+        .await?;
+        assert_eq!(items.len(), 1);
+        let item = items
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing result"))?;
+        assert!(
+            matches!(item.into_outcome(), Err(error) if error.kind() == rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost)
+        );
+        assert_eq!(f.state(&id).await?, (0, 0, None, "publishing".into()));
+        sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id=$1").bind(&id).execute(&f.owner).await?;
+        let _ = only(
+            collect_batch(p.project_batch(
+                original,
+                &Validator,
+                NonZeroUsize::MIN,
+                deadline(),
+                Duration::from_secs(5),
+            ))
+            .await?,
+        )?;
+        assert_eq!(
+            f.state(&id).await?,
+            (1, 1, Some("succeeded".into()), "published".into())
+        );
+    }
     Ok(())
 }

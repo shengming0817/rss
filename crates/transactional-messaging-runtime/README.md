@@ -3,7 +3,7 @@
 Provider-neutral execution algorithms and managed worker integration for
 `rss-transactional-messaging`.
 
-The producer side owns `relay_once`, bounded concurrent claim dispatch, publish-before-settlement,
+The producer side owns `relay_once(binding, ...)`, bounded concurrent claim dispatch, publish-before-settlement,
 same-ID ambiguous retry, and a polling worker with skipped missed ticks. Every already claimed entry
 is drained before a batch error is returned. Cancellation stops new claims; the active batch may
 finish within the host's explicit shutdown budget. `RelayConfig` accepts polling intervals from
@@ -14,6 +14,14 @@ timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; 
 settlement timeout stop downstream work without inventing durable state.
 The store's `delivery_budget()` is the single lease/admission budget source; relay callers do not
 supply a second budget that could disagree with durable lease TTL.
+
+
+Each relay call explicitly selects one `ExecutionBinding` (storage, tenant, expected epoch).
+`RelayWorker::run(binding, token)` and its managed registration retain that host-assigned task
+identity; hosts select changing tenants through separate single-call operations on shared stores.
+An ownership-lost result stops the task without refreshing its epoch. Consumer workers obtain each
+delivery's execution identity from the existing trusted ingress validator via
+`challenge.verified(binding)`. Once claimed, execution and renewal retain the claim's original identity.
 
 The consumer side owns `consume_once`: validate, claim, periodic lease renewal, bounded handler
 retry, transaction outcome, release/abandon, and commit-before-ACK settlement. Renewal runs across
@@ -70,7 +78,7 @@ use rss_transactional_messaging::transport::Publisher;
 use rss_transactional_messaging_runtime::relay::RelayWorker;
 use tokio_util::sync::CancellationToken;
 
-async fn drive<P, S, U, C, E>(worker: RelayWorker<P, S, U, C, E>, stop: CancellationToken)
+async fn drive<P, S, U, C, E>(worker: RelayWorker<P, S, U, C, E>, binding: rss_transactional_messaging::fence::ExecutionBinding, stop: CancellationToken)
 where
     P: Send + Sync,
     S: OutboxRelayStore<P>,
@@ -80,7 +88,7 @@ where
     E: TransactionalMessagingEmitter,
 {
     // The host cancels a clone of `stop` and continues polling this future to drain.
-    worker.run(stop).await.expect("relay completes");
+    worker.run(binding, stop).await.expect("relay completes");
 }
 # }
 ```
@@ -100,6 +108,7 @@ use tokio_util::sync::CancellationToken;
 
 async fn host<P, S, U, C, E>(
     worker: RelayWorker<P, S, U, C, E>,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     stop: impl std::future::Future<Output = ()>,
     budget: ShutdownBudget,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -112,7 +121,7 @@ where
     E: TransactionalMessagingEmitter + 'static,
 {
     let cancellation = CancellationToken::new();
-    let mut task = tokio::spawn(worker.run(cancellation.clone()));
+    let mut task = tokio::spawn(worker.run(binding, cancellation.clone()));
     tokio::select! {
         result = &mut task => return result?.map_err(Into::into),
         () = stop => cancellation.cancel(),
@@ -151,6 +160,7 @@ use rss_transactional_messaging_runtime::relay::RelayWorker;
 
 fn prepare<P, S, U, C, E>(
     worker: RelayWorker<P, S, U, C, E>,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     shutdown: ShutdownBudget,
 ) -> (ManagedTaskRegistration, TaskStatus)
 where
@@ -161,7 +171,7 @@ where
     C: ExecutionTimer + 'static,
     E: TransactionalMessagingEmitter + 'static,
 {
-    worker.into_registration("transactional-relay", shutdown)
+    worker.into_registration(binding, "transactional-relay", shutdown)
 }
 # }
 ```

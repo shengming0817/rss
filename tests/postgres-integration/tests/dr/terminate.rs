@@ -34,7 +34,7 @@ pub async fn run(
     let store6 = Box::pin(PgDrStore::connect(
         operator.clone(),
         Timer::new(),
-        binding(6)?,
+        (binding(6)?).storage(),
     ))
     .await?;
     let version = Version::new(1)?;
@@ -56,11 +56,11 @@ pub async fn run(
     )?)
     .await?;
     committed(store6.apply(&p, deadline()).await)?;
-    let (r7, outbox7) = runtime(config, 7).await?;
+    let (r7, outbox7) = runtime(config).await?;
     let outbox7 = Arc::new(outbox7);
     let append = outbox7.clone();
     committed(
-        r7.local_tx(tenant(), deadline(), move |tx| {
+        r7.local_tx(binding(7)?, deadline(), move |tx| {
             Box::pin(async move {
                 tx.prepare_outbox_partitions(
                     &message("terminate-successor")
@@ -81,7 +81,7 @@ pub async fn run(
     )?;
     let one = std::num::NonZeroUsize::new(1).ok_or_else(|| anyhow::anyhow!("limit"))?;
     let first = outbox7
-        .claim_partition_heads(one, deadline())
+        .claim_partition_heads(binding(7)?, one, deadline())
         .await?
         .into_iter()
         .next()
@@ -90,7 +90,7 @@ pub async fn run(
         .settle(first, OutboxSettlement::Published(()), deadline())
         .await?;
     let old = outbox7
-        .claim_partition_heads(one, deadline())
+        .claim_partition_heads(binding(7)?, one, deadline())
         .await?
         .into_iter()
         .next()
@@ -99,14 +99,14 @@ pub async fn run(
     fixture_sql(owner,7,"UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 second' WHERE message_id IN ('published','old-lease'); UPDATE rss_transactional_messaging.dr_members SET lease_until=clock_timestamp()-interval '1 second' WHERE status='publishing'").await?;
     assert!(
         outbox7
-            .claim_partition_heads(one, deadline())
+            .claim_partition_heads(binding(7)?, one, deadline())
             .await?
             .is_empty()
     );
     let store7 = Box::pin(PgDrStore::connect(
         operator.clone(),
         Timer::new(),
-        binding(7)?,
+        (binding(7)?).storage(),
     ))
     .await?;
     assert_eq!(
@@ -174,7 +174,7 @@ pub async fn run(
     let racer7 = Box::pin(PgDrStore::connect(
         operator.clone(),
         Timer::new(),
-        binding(7)?,
+        (binding(7)?).storage(),
     ))
     .await?;
     store7.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
@@ -206,7 +206,7 @@ pub async fn run(
     let next = Box::pin(PgDrStore::connect(
         operator.clone(),
         Timer::new(),
-        binding(8)?,
+        (binding(8)?).storage(),
     ))
     .await?;
     assert_eq!(
@@ -272,13 +272,13 @@ pub async fn run(
     );
     assert!(
         outbox7
-            .claim_partition_heads(one, deadline())
+            .claim_partition_heads(binding(7)?, one, deadline())
             .await
             .is_err()
     );
-    let (r8, outbox8) = runtime(config, 8).await?;
+    let outbox8 = &outbox7;
     let successor = outbox8
-        .claim_partition_heads(one, deadline())
+        .claim_partition_heads(binding(8)?, one, deadline())
         .await?
         .into_iter()
         .next()
@@ -294,7 +294,6 @@ pub async fn run(
         .settle(successor, OutboxSettlement::Published(()), deadline())
         .await?;
     r7.close().await;
-    r8.close().await;
     store6.close().await;
     store7.close().await;
     racer7.close().await;

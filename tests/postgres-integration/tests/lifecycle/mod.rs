@@ -38,7 +38,7 @@ pub(super) async fn business_outbox_atomicity(
         let tenant = envelope.metadata().tenant_id();
         let store = PgOutboxWriter::new(runtime.clone(), envelope.metadata().domain().clone());
         let attempt = runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     write_business(tx, id).await?;
                     assert_eq!(
@@ -70,7 +70,7 @@ pub(super) async fn close_during_transaction(
         PgRuntime::connect(
             config.with_pool_limits(2, 2),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -80,7 +80,7 @@ pub(super) async fn close_during_transaction(
     let transaction_runtime = runtime.clone();
     let transaction = tokio::spawn(async move {
         transaction_runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     write_business(tx, "close-commit").await?;
                     entered_tx.send(()).expect("owner waiting for transaction");
@@ -135,7 +135,7 @@ pub(super) async fn close_during_transaction(
 async fn assert_admission_stopped(runtime: &PgRuntime) {
     let tenant = message("closed-pool").metadata().tenant_id();
     let rejected: LocalTxAttempt<(), PgError> = runtime
-        .local_tx(tenant, deadline(), |_| {
+        .local_tx(crate::execution(tenant, 1), deadline(), |_| {
             Box::pin(async { panic!("closed pool must not start the operation") })
         })
         .await;
@@ -155,7 +155,7 @@ async fn assert_admission_stopped(runtime: &PgRuntime) {
 
 #[cfg(feature = "rss-runtime")]
 pub(super) async fn managed_close(config: PgConfig) -> anyhow::Result<()> {
-    let runtime = PgRuntime::connect(config, Timer::new(), fence_fixture::binding()).await?;
+    let runtime = PgRuntime::connect(config, Timer::new(), fence_fixture::storage()).await?;
     assert!(!runtime.is_closed());
     rss_runtime::ManagedResource::shutdown(&runtime).await?;
     assert!(runtime.is_closed());

@@ -1,5 +1,5 @@
 //! Explicit fixture authority shared by real message-provider consumers. Never a production default.
-use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+use rss_transactional_messaging::fence::StorageIdentity;
 const TENANTS: &[&str] = &[
     "00000000-0000-0000-0000-000000000001",
     "00000000-0000-0000-0000-000000000002",
@@ -26,21 +26,9 @@ const TENANTS: &[&str] = &[
     "f47ac10b-58cc-4372-a567-0e02b2c3d479",
     "f47ac10b-58cc-4372-a567-0e02b2c3d480",
 ];
-#[allow(clippy::expect_used)] // reason: fixed test authority, independent of restored database state.
-pub fn binding() -> ExecutionBinding {
-    ExecutionBinding::new(
-        StorageIdentity::new([1; 16], [2; 16]).expect("storage"),
-        TENANTS
-            .iter()
-            .map(|id| {
-                (
-                    rss_request_context::TenantId::parse(id).expect("tenant"),
-                    Epoch::new(1).expect("epoch"),
-                )
-            })
-            .collect(),
-    )
-    .expect("binding")
+#[allow(clippy::expect_used)] // reason: fixed independently provisioned fixture storage.
+pub fn storage() -> StorageIdentity {
+    StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage")
 }
 #[allow(dead_code)] // reason: compile-only consumers do not install a schema.
 pub async fn provision(owner: &sqlx::PgPool) -> anyhow::Result<()> {

@@ -10,6 +10,7 @@ use rss_reconcile::{Control, Error, ErrorKind, ReconcileStep, ResourceSet, Targe
 use rss_request_context::TenantId;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
+    fence::ExecutionBinding,
     policy::OperationDeadline,
     transaction::LocalTxAttempt,
 };
@@ -38,15 +39,15 @@ pub struct PgMessagingStore {
     identity: Identity,
 }
 impl PgMessagingStore {
-    /// Validate the complete reconcile contract using a tenant already bound to this runtime.
+    /// Validate the complete reconcile contract using one explicit execution scope.
     /// Neither migrations nor grants are executed.
     pub async fn new(
         runtime: Arc<PgRuntime>,
-        tenant: TenantId,
+        binding: ExecutionBinding,
         deadline: OperationDeadline,
     ) -> Result<Self, PgError> {
         let identity = runtime
-            .local_tx(tenant, deadline, |tx| {
+            .local_tx(binding, deadline, |tx| {
                 Box::pin(async move {
                     tx.with_connection(|conn| {
                         Box::pin(async move { Ok(crate::probe::validate_connection(conn).await) })
@@ -73,6 +74,7 @@ impl PgMessagingStore {
     /// Protect SQL/messages in the bound runtime's transaction; preserve the owner's outcome.
     pub async fn protect<T: Timer, R: Send, C: Send, F>(
         &self,
+        binding: ExecutionBinding,
         claim: &PgClaim,
         control: &Control<'_, T>,
         context: C,
@@ -85,11 +87,14 @@ impl PgMessagingStore {
             ) -> BoxFuture<'c, Result<ProtectedStep<R>, PgError>>
             + Send,
     {
+        if binding.tenant() != claim.target().scope().tenant() {
+            return LocalTxAttempt::not_started(convert(Error::new(ErrorKind::Fenced)));
+        }
         if let Err(error) = control.check() {
             return LocalTxAttempt::not_started(convert(error));
         }
         let transaction = self.runtime.local_tx_with_context(
-            claim.target().scope().tenant(),
+            binding,
             deadline(control),
             (self, Key::from(claim), context, Some(operation)),
             |state, tx| {
@@ -152,8 +157,10 @@ impl PgMessagingStore {
         component_finish(tx, key, value).await
     }
     /// Atomically register a wake and SQL/messages in the bound runtime.
+    #[allow(clippy::too_many_arguments)] // reason: the caller supplies execution identity independently from reconcile resources and control.
     pub async fn wake_with<T: Timer, R: Send, C: Send, F>(
         &self,
+        binding: ExecutionBinding,
         target: &Target,
         resources: &ResourceSet,
         control: &Control<'_, T>,
@@ -167,11 +174,14 @@ impl PgMessagingStore {
             ) -> BoxFuture<'c, Result<R, PgError>>
             + Send,
     {
+        if binding.tenant() != target.scope().tenant() {
+            return LocalTxAttempt::not_started(convert(Error::new(ErrorKind::Fenced)));
+        }
         if let Err(error) = control.check() {
             return LocalTxAttempt::not_started(convert(error));
         }
         let transaction = self.runtime.local_tx_with_context(
-            target.scope().tenant(),
+            binding,
             deadline(control),
             (
                 self,

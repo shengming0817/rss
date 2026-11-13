@@ -148,12 +148,16 @@ where
                     execution.emitter,
                 )
                 .await?;
-                return Ok(ProcessingDisposition::Rejected(failure));
+                return Ok(if failure == EnvelopeValidationFailure::ExecutionMismatch {
+                    ProcessingDisposition::Fenced
+                } else {
+                    ProcessingDisposition::Rejected(failure)
+                });
             }
         };
 
     let claimed = match within(execution.timer, deadlines.operation(), |deadline| {
-        inbox.claim(binding.identity(), deadline)
+        inbox.claim(binding.execution(), binding.identity(), deadline)
     })
     .await
     .and_then(std::convert::identity)

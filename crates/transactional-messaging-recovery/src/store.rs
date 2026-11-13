@@ -10,18 +10,21 @@ pub trait RecoveryStore: Send + Sync {
     /// Payload-free bounded query under the authorized scope.
     fn query(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedQuery,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<Page, Error>> + Send;
     /// Apply and record one mutation atomically. Preserve all transaction settlement states.
     fn mutate(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedMutation,
         deadline: OperationDeadline,
     ) -> impl Future<Output = LocalTxAttempt<Receipt, Error>> + Send;
     /// Read an exact operation receipt after checking its complete request digest. Absence does not prove rollback.
     fn receipt(
         &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
         request: &AuthorizedMutation,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<Option<Receipt>, Error>> + Send;
@@ -74,6 +77,7 @@ pub trait Observer {
 /// Bound a mutation and preserve uncertainty. Never automatically rerun a mutation.
 pub async fn execute<S: RecoveryStore, C: ExecutionTimer, O: Observer>(
     store: &S,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
     request: &AuthorizedMutation,
     clock: &C,
     deadlines: ExecutionDeadlines,
@@ -88,8 +92,8 @@ pub async fn execute<S: RecoveryStore, C: ExecutionTimer, O: Observer>(
         clock,
         deadlines,
         Error::Deadline,
-        |deadline| store.mutate(request, deadline),
-        |deadline| store.receipt(request, deadline),
+        |deadline| store.mutate(binding, request, deadline),
+        |deadline| store.receipt(binding, request, deadline),
         |status, _, error| {
             observer.observe(Observation {
                 action,

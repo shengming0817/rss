@@ -90,7 +90,11 @@ impl Harness {
     ) -> Result<PgInboxClaim, MessagingError> {
         match self
             .inbox()
-            .claim(binding(message).identity(), deadline())
+            .claim(
+                crate::execution((binding(message).identity()).tenant_id(), 1),
+                binding(message).identity(),
+                deadline(),
+            )
             .await?
         {
             IdempotencyDisposition::Acquired(claim) => Ok(claim),
@@ -103,7 +107,11 @@ impl Harness {
     ) -> Result<TerminalReceipt, MessagingError> {
         match self
             .inbox()
-            .claim(binding(message).identity(), deadline())
+            .claim(
+                crate::execution((binding(message).identity()).tenant_id(), 1),
+                binding(message).identity(),
+                deadline(),
+            )
             .await?
         {
             IdempotencyDisposition::Terminal(receipt) => Ok(receipt),
@@ -136,7 +144,11 @@ impl Harness {
         let message = message(&self.id());
         if let IdempotencyDisposition::Acquired(claim) = self
             .inbox()
-            .claim(binding(&message).identity(), deadline())
+            .claim(
+                crate::execution((binding(&message).identity()).tenant_id(), 1),
+                binding(&message).identity(),
+                deadline(),
+            )
             .await?
         {
             self.commit_claim(&claim, &message).await?;
@@ -163,7 +175,7 @@ impl Harness {
         let id = self.id();
         let result = self
             .runtime
-            .local_tx(tenant, deadline(), move |tx| {
+            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.with_connection(move |connection| Box::pin(async move {
                 sqlx::query("INSERT INTO public.business_effects(tenant_id,id) VALUES($1::uuid,$2)")
@@ -307,7 +319,11 @@ impl InboxDriver for Harness {
     }
     async fn first_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.inbox()
-            .claim(binding(&message(&self.id())).identity(), deadline())
+            .claim(
+                crate::execution((binding(&message(&self.id())).identity()).tenant_id(), 1),
+                binding(&message(&self.id())).identity(),
+                deadline(),
+            )
             .await
     }
     async fn active_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -323,7 +339,13 @@ impl InboxDriver for Harness {
             message.id().clone(),
             message.metadata().contract().clone(),
         );
-        self.inbox().claim(&identity, deadline()).await
+        self.inbox()
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(),
+            )
+            .await
     }
     async fn terminal_duplicate(
         &self,
@@ -350,13 +372,25 @@ impl InboxDriver for Harness {
         &self,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let identity = binding(&message(&format!("{}-release", self.id())));
-        let IdempotencyDisposition::Acquired(claim) =
-            self.inbox().claim(identity.identity(), deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = self
+            .inbox()
+            .claim(
+                crate::execution((identity.identity()).tenant_id(), 1),
+                identity.identity(),
+                deadline(),
+            )
+            .await?
         else {
             return Err(port(std::io::Error::other("new claim")));
         };
         self.inbox().release(claim, deadline()).await?;
-        self.inbox().claim(identity.identity(), deadline()).await
+        self.inbox()
+            .claim(
+                crate::execution((identity.identity()).tenant_id(), 1),
+                identity.identity(),
+                deadline(),
+            )
+            .await
     }
     async fn stale_lease(&self) -> Result<LeaseStatus, MessagingError> {
         let old = self

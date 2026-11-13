@@ -24,7 +24,7 @@ pub async fn publish_current(
     let writer = outbox.clone();
     committed(
         runtime
-            .local_tx(tenant(), deadline(), move |tx| {
+            .local_tx(crate::execution(tenant(), 1), deadline(), move |tx| {
                 Box::pin(async move {
                     tx.prepare_outbox_partitions(
                         &published
@@ -44,7 +44,7 @@ pub async fn publish_current(
             .await,
     )?;
     let published = outbox
-        .claim_partition_heads(std::num::NonZeroUsize::MIN, deadline())
+        .claim_partition_heads(crate::binding(1)?, std::num::NonZeroUsize::MIN, deadline())
         .await?
         .into_iter()
         .next()

@@ -93,3 +93,16 @@ async fn reconcile_postgres_suite() -> anyhow::Result<()> {
     }).await??;
     Ok(())
 }
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}

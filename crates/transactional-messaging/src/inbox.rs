@@ -157,6 +157,7 @@ pub trait InboxStore: Send + Sync {
     /// identity.
     fn claim(
         &self,
+        binding: crate::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<IdempotencyDisposition<Self::Claim>, MessagingError>> + Send;
@@ -165,6 +166,7 @@ pub trait InboxStore: Send + Sync {
     /// `None` means no terminal result was observed, not permission to execute a handler.
     fn read_terminal(
         &self,
+        binding: crate::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<Option<TerminalReceipt>, MessagingError>> + Send;

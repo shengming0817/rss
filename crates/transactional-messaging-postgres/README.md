@@ -32,8 +32,8 @@ and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or 
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
-`PgOutboxStore::next_wakeup(deadline)` reads the same candidate definition as claim across its
-admitted tenants and domain. `OutboxWakeup::due_now()` reports already-due work;
+`PgOutboxStore::next_wakeup(binding, deadline)` reads the same candidate definition as claim for the selected
+tenant and configured domain. Hosts query other tenants separately when composing a waiting strategy. `OutboxWakeup::due_now()` reports already-due work;
 `next_deadline()` separately reports the earliest future eligibility, including retry/lease and active
 DR state. The deadline uses the injected runtime clock and is anchored before database I/O, so the
 query cannot extend the wait. Due work may be locked or claimed concurrently: bound immediate rescans
@@ -42,7 +42,7 @@ The external migrator grants `next_outbox_wakeup(uuid,text)` to relay/consumer r
 `outbox_candidates(uuid,text)` remains accessible only to the relay function owner.
 
 A producer that only commits business state and appends/reads Outbox uses
-`PgRuntime::connect_producer(config, timer, binding)`. Grant schema USAGE, policy/Outbox SELECT,
+`PgRuntime::connect_producer(config, timer, storage)`. Grant schema USAGE, policy/Outbox SELECT,
 `check_execution()`, `prepare_outbox_partitions(jsonb)` and `append_outbox(bytea,jsonb)` EXECUTE, but no Inbox privileges and no
 `claim_outbox`, `next_outbox_wakeup`, `outbox_lease` or `settle_outbox` EXECUTE. Admission rejects those extra
 capabilities, including inherited grants; PostgreSQL also denies relay calls at execution.
@@ -75,7 +75,7 @@ Role semantics reference: [PostgreSQL 16 acl.c](https://github.com/postgres/post
 (`pg_has_role` and membership traversal). The PG TLS suite exercises attribute drift and direct/indirect
 MEMBER/USAGE/SET capability combinations, then reconnects after restoring each fixture.
 
-Construct `PgRuntime::connect(config, timer, binding)` with the same monotonic `ExecutionTimer` used by the
+Construct `PgRuntime::connect(config, timer, storage)` with the same monotonic `ExecutionTimer` used by the
 consumer/relay. `PgInboxStore` takes a core `LeaseRenewalPolicy`; `PgOutboxStore<R>` takes a
 `DeliveryBudget`. Each store owns its policy and the runtime reads it through the port: there is
 no separate runtime TTL or renewal setting to mismatch. Use `local_tx` to bind repositories and Outbox append to one transaction.
@@ -233,9 +233,9 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         Ok(TerminalDisposition::Succeeded)
     }
 }
-async fn compose<C: ExecutionTimer + Clone + 'static>(config: PgConfig, timer: &C, binding: rss_transactional_messaging::fence::ExecutionBinding,
+async fn compose<C: ExecutionTimer + Clone + 'static>(config: PgConfig, timer: &C, storage: rss_transactional_messaging::fence::StorageIdentity,
     domain: MessagingDomain, budget: DeliveryBudget) -> Result<(Arc<PgRuntime>, Arc<PgOutboxStore<()>>, PgConsumerTx<Effect>), PgError> {
-    let runtime = Arc::new(PgRuntime::connect(config, timer.clone(), binding).await?);
+    let runtime = Arc::new(PgRuntime::connect(config, timer.clone(), storage).await?);
     let outbox = Arc::new(PgOutboxStore::new(runtime.clone(), domain, budget)?);
     let consumer = PgConsumerTx::receipt_only(runtime.clone(), Effect);
     Ok((runtime, outbox, consumer))
@@ -245,8 +245,8 @@ async fn close(runtime: &PgRuntime) {
     runtime.close().await;
 }
 async fn append(runtime: &PgRuntime, store: Arc<PgOutboxStore<()>>,
-    message: MessageEnvelope<Vec<u8>>, deadline: OperationDeadline) -> LocalTxAttempt<AppendOutcome, PgError> {
-    runtime.local_tx(message.metadata().tenant_id(), deadline, move |tx| Box::pin(async move {
+    binding: rss_transactional_messaging::fence::ExecutionBinding, message: MessageEnvelope<Vec<u8>>, deadline: OperationDeadline) -> LocalTxAttempt<AppendOutcome, PgError> {
+    runtime.local_tx(binding, deadline, move |tx| Box::pin(async move {
         tx.prepare_outbox_partitions(&message.metadata().partition().cloned().into_iter().collect::<Vec<_>>()).await?;
         // Consumer-owned repository writes use this same prepared tx before append.
         store.append(tx, PendingMessage::new(message)).await.map_err(Into::into)
@@ -296,8 +296,9 @@ Configure an `rss-data-protection::Aead` implementation with external key owners
 or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
 An existing terminal Inbox receipt with no saved payload is not retroactively replayable.
 
-Create the opaque operator store with `PgRecoveryStore::connect(config, timer, binding, protector)` after
-provisioning its privileges. The store privately owns the same PG pool/transaction implementation;
+Create the opaque operator store with `PgRecoveryStore::connect(config, timer, storage, protector)` after
+provisioning its privileges. Each query, mutation and receipt read supplies its own explicit
+`ExecutionBinding`, alongside the authorized request. The store privately owns the same PG pool/transaction implementation;
 it has no runtime, pool, raw SQL, Deref or generic transaction accessor. Ordinary `PgRuntime::connect`
 continues to reject operator UPDATE rights. Provision the operator using the single
 [maintenance grant contract below](#consumer-archive-schema-and-role-cutover-2302); ordinary consumer
@@ -373,12 +374,17 @@ persisted integrity faults over earlier verified/purged progress. Expired genera
 
 ## Message disaster recovery and execution fencing (#2303)
 
-Every runtime, recovery operator and archive repository requires an immutable `ExecutionBinding`:
-`StorageIdentity` identifies the externally selected physical restore unit and lineage, and the
-nonempty tenant/`Epoch` map defines its exact execution scope. There is no default epoch, implicit
-single-tenant mode, automatic adoption of database values or legacy SQL overload. An epoch change
-fences only that tenant; a multi-tenant relay skips fenced tenants while serving its remaining scope.
-Reconstruct the affected runtime with a newly authorized binding after cutover.
+Every runtime, recovery operator and archive repository fixes only its `StorageIdentity` (physical
+restore target and externally established lineage). The bounded pool is shared across tenants;
+creating or discarding an operation binding neither creates nor closes a pool.
+
+`ExecutionBinding::new(storage, tenant, epoch)` selects one operation's exact coordinates.
+Pass it to `local_tx`, Inbox claim/read, relay claim/wakeup/dead-letter queries, recovery and archive
+operations. The trusted ingress validator supplies it through `challenge.verified(binding)` for
+each message. Claims retain that identity through execution, renewal and settlement; no API
+implicitly discovers or adopts the database's latest epoch. A host can admit a newly provisioned
+tenant or explicitly select a new epoch using the same runtime. Bindings are coordinates, not
+product authentication or authorization.
 
 The external installer executes `MIGRATION_SQL` and must provision the singleton `storage_lineage` row with
 nonzero 16-byte target/lineage identifiers and each `tenant_epoch` row with a positive epoch before
@@ -404,15 +410,15 @@ TO application_runtime;
 
 A separate DR operator role gets schema USAGE and EXECUTE on `check_execution()`,
 `apply_dr(uuid,bytea,text,jsonb,jsonb,bigint)` and `read_dr(uuid,bytea)`. Give it no direct table writes,
-relay ownership or inherited privileged roles. `PgDrStore::connect(config, timer, binding)` verifies
+relay ownership or inherited privileged roles. `PgDrStore::connect(config, timer, storage)` verifies
 this contract; ordinary runtime profiles reject DR application authority. Migration owners administer
 lineage/epoch provisioning; application roles cannot write the control tables.
 
 For recovery, construct and product-authorize a bounded `recovery::dr::Plan` (1–1024 exact members) with target,
 lineage, expected tenant epoch, operation identity and both restore-evidence digests. Application
 atomically compares the epoch, advances it by one, installs the selected members and writes the
-exact receipt. After a crash, a newly constructed operator with the current binding can retry the exact authorized
-operation or query its receipt/progress. Storage identity and tenant scope remain mandatory; SQL
+exact receipt. After a crash, an operator on the same storage can retry the exact authorized
+plan or query its receipt/progress. The plan supplies storage, tenant and expected epoch; SQL
 checks the plan's expected epoch separately before any first application. Identical retries read the
 receipt even after the epoch advances;
 conflicting digests fail. The shared transaction fence is acquired before message/archive locks,
@@ -439,10 +445,12 @@ Source provenance: historical extraction uses commit
 [SQLx v0.9.0 transaction.rs](https://github.com/launchbadge/sqlx/blob/v0.9.0/sqlx-core/src/transaction.rs)
 and row-lock/trigger behavior against PostgreSQL REL_17_STABLE `heapam.c` and `trigger.c`.
 
-A relay claim call returns at most one tenant's committed batch. Calls rotate the starting tenant
-and scan empty or fenced tenants; no further tenant transaction runs after a nonempty commit.
-This preserves already acquired claims when another tenant fails, without promising to fill the
-requested limit across tenants. Fenced skips emit only closed, low-cardinality diagnostic labels.
+Each relay claim, scheduling hint and dead-letter query selects one explicit tenant binding.
+A fenced target returns ownership lost; the host selects other tenants through separate calls.
+`relay_once(binding, ...)` is the dynamic scheduling entrypoint. `RelayWorker::run(binding, token)`
+and its managed registration retain one host-assigned task identity, with the existing polling,
+retry and cancellation/drain behavior. Neither the store nor worker constructor maintains a tenant
+list. The consumer worker instead obtains a binding from trusted ingress for each delivery.
 The definer role may lock the external storage witness through `UPDATE(singleton)`; the checked
 singleton key permits a no-op only, and neither `target` nor `lineage` is writable by that role.
 
@@ -456,7 +464,7 @@ same-tenant foreign key enforce the recovery/termination row shapes; `dr_member_
 `dr_member_reason` forbid a blocked row without a closed reason. Startup probes reject drift.
 
 Use an exact-authorized termination when a blocked plan must stop, including an all-expired plan.
-Create new runtime bindings for the committed epoch before resuming work. Normal successors can
+Supply new operation bindings for the committed epoch before resuming work on the existing pool. Normal successors can
 then proceed because the old DR partition barrier has lost execution authority. The original
 same-ID deadline is never extended; product policy decides whether later new-ID recovery is needed.
 
@@ -482,8 +490,10 @@ changed ownership/search paths or leaked decoder EXECUTE.
 ### Same-database local projection
 
 With `recovery`, `PgLocalProjection` consumes a fixed source domain and group on the
-`PgRecoveryCapture` runtime. `project_batch` reserves available runtime capacity, claims multiple
+`PgRecoveryCapture` runtime. `project_batch(binding, ...)` reserves available runtime capacity, claims multiple
 partition heads in one provider call, and validates each exact route/contract with the mandatory host validator.
+The source claim, trusted ingress execution identity and Inbox claim must agree completely. A host
+identity mismatch preserves the source for recovery rather than declaring its content a dead letter.
 Each admitted event runs concurrently in its own transaction. The claim deadline covers capacity
 waiting and acquisition; each event starts its own execution budget, shared by all of its substeps.
 The batch returns an identity-bearing result per event and never fails fast after claiming. Empty

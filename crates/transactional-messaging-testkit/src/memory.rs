@@ -1,4 +1,6 @@
 //! Deterministic, non-durable transactional messaging test doubles.
+//! These non-durable doubles select explicit tenants but do not administer physical storage
+//! lineage or execution epochs; real-provider tests own that fencing proof.
 
 use rss_request_context::{Clock, Deadline, DeadlineOverflow, ExecutionTimer};
 use std::future::{Future, poll_fn};
@@ -302,6 +304,7 @@ mod producer {
 
         async fn claim_partition_heads(
             &self,
+            binding: rss_transactional_messaging::fence::ExecutionBinding,
             limit: NonZeroUsize,
             _deadline: OperationDeadline,
         ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
@@ -324,6 +327,9 @@ mod producer {
                 ..
             } = &mut *state;
             for entry in entries {
+                if entry.message.envelope().metadata().tenant_id() != binding.tenant() {
+                    continue;
+                }
                 let partition = entry.message.partition().cloned();
                 if partition
                     .as_ref()
@@ -644,9 +650,16 @@ mod consumer {
 
         async fn claim(
             &self,
+            binding: rss_transactional_messaging::fence::ExecutionBinding,
             identity: &ConsumerIdentity,
             _deadline: OperationDeadline,
         ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+            if binding.tenant() != identity.tenant_id() {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::OwnershipLost,
+                    std::io::Error::other("fixture execution tenant mismatch"),
+                ));
+            }
             let key = identity_key(identity);
             let mut state = self
                 .inner
@@ -674,9 +687,16 @@ mod consumer {
 
         async fn read_terminal(
             &self,
+            binding: rss_transactional_messaging::fence::ExecutionBinding,
             identity: &ConsumerIdentity,
             _deadline: OperationDeadline,
         ) -> Result<Option<TerminalReceipt>, MessagingError> {
+            if binding.tenant() != identity.tenant_id() {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::OwnershipLost,
+                    std::io::Error::other("fixture execution tenant mismatch"),
+                ));
+            }
             let state = self
                 .inner
                 .lock()

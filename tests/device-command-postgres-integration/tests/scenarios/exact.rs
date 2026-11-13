@@ -32,7 +32,7 @@ async fn queued_expiry(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow:
     let store = f.store.clone();
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.queue(tx, request, msg).await })
             })
             .await,
@@ -80,7 +80,7 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
     let store = f.store.clone();
     let attempt = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move { store.recover_exact(tx, foreign_scope, &id).await })
         })
         .await;
@@ -105,7 +105,7 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
     assert!(
         committed(
             f.runtime
-                .local_tx(s.tenant(), budget()?, move |tx| {
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move { store.recover_exact(tx, s, &id).await })
                 })
                 .await
@@ -131,7 +131,7 @@ async fn rollback(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Resu
     let store = f.store.clone();
     let attempt = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
                 let recovered = store.recover_exact(tx, s, &id).await?;
                 assert_eq!(recovered.map(|c| c.status()), Some(Status::Published));
@@ -156,7 +156,7 @@ async fn supersession(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::
     let next = Coordinate::new(2, 2)?;
     committed(
         f.runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.advance(tx, s, coordinate, next).await })
             })
             .await,
@@ -183,7 +183,7 @@ async fn unknown_settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> an
     let id = CommandId::parse("exact-unknown")?;
     let attempt = f
         .runtime
-        .local_tx(s.tenant(), budget()?, move |tx| {
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move { store.recover_exact(tx, s, &id).await })
         })
         .await;
@@ -198,7 +198,7 @@ async fn unknown_settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> an
     let id = CommandId::parse("exact-unknown")?;
     let durable = committed(
         runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { selected.load(tx, s, &id).await })
             })
             .await,
@@ -210,7 +210,7 @@ async fn unknown_settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> an
     let id = CommandId::parse("exact-unknown")?;
     let repeated = committed(
         runtime
-            .local_tx(s.tenant(), budget()?, move |tx| {
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move { store.recover_exact(tx, s, &id).await })
             })
             .await,

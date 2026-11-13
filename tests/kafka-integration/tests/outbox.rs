@@ -73,7 +73,7 @@ async fn run() -> anyhow::Result<()> {
                 PgPrivateCa::from_pem(pg.ca_pem().as_bytes().to_vec())?,
             ),
             Timer::new(),
-            fence_fixture::binding(),
+            fence_fixture::storage(),
         )
         .await?,
     );
@@ -133,21 +133,25 @@ async fn append_message(
     let tenant = envelope.metadata().tenant_id();
     let append = store.clone();
     runtime
-        .local_tx(tenant, deadline(Duration::from_secs(3))?, move |tx| {
-            Box::pin(async move {
-                let partitions = envelope
-                    .metadata()
-                    .partition()
-                    .cloned()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                tx.prepare_outbox_partitions(&partitions).await?;
-                append
-                    .append(tx, PendingMessage::new(envelope))
-                    .await
-                    .map_err(Into::into)
-            })
-        })
+        .local_tx(
+            crate::execution(tenant, 1),
+            deadline(Duration::from_secs(3))?,
+            move |tx| {
+                Box::pin(async move {
+                    let partitions = envelope
+                        .metadata()
+                        .partition()
+                        .cloned()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    tx.prepare_outbox_partitions(&partitions).await?;
+                    append
+                        .append(tx, PendingMessage::new(envelope))
+                        .await
+                        .map_err(Into::into)
+                })
+            },
+        )
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     Ok(())
@@ -165,6 +169,7 @@ async fn retry_published(
     drained(publisher).await?;
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let report = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
         &**store,
         publisher,
         &Timer::new(),
@@ -200,6 +205,7 @@ async fn first_relay(
     let task = tokio::spawn(async move {
         Ok::<_, anyhow::Error>(
             relay_once(
+                crate::execution(crate::fixture_tenant(), 1),
                 &*store,
                 &publisher,
                 &Timer::new(),
@@ -216,4 +222,23 @@ async fn first_relay(
         None
     };
     Ok((task.await??, release))
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
+}
+
+#[allow(clippy::expect_used)] // reason: independently selected fixture tenant, not envelope authority.
+fn fixture_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000000001")
+        .expect("fixture tenant")
 }

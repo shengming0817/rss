@@ -425,7 +425,7 @@ async fn opposite_declarations(owner: &PgPool, raw: &PgPool) -> anyhow::Result<(
 async fn ignored_errors(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Result<()> {
     let tenant = message("ignored-error").metadata().tenant_id();
     let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("ignored-error")?);
-    let outcome = runtime.local_tx(tenant,deadline(),move |tx| Box::pin(async move {
+    let outcome = runtime.local_tx(crate::execution(tenant, 1),deadline(),move |tx| Box::pin(async move {
         tx.with_connection(|c| Box::pin(async {
             sqlx::query("INSERT INTO public.business_effects VALUES(current_setting('rss.tenant_id')::uuid,'ignored-partition-error')").execute(c).await.map(|_| ())
         })).await?;
@@ -461,7 +461,7 @@ async fn cancelled_preparation(
     let (cancelled, acknowledgment) = tokio::sync::oneshot::channel();
     let cancel = Arc::new(tokio::sync::Notify::new());
     let signal = cancel.clone();
-    let operation = runtime.local_tx(tenant,deadline(),move |tx| Box::pin(async move {
+    let operation = runtime.local_tx(crate::execution(tenant, 1),deadline(),move |tx| Box::pin(async move {
         let pid: i32 = tx.with_connection(|c|Box::pin(sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(c))).await?;
         let _ = send.send(pid);
         let partitions: Vec<_> = ["a","z"].into_iter().map(|key| ordered("cancel","cancel-order",key).metadata().partition().expect("partition").clone()).collect();
@@ -528,8 +528,13 @@ async fn rejected_effect(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Res
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) =
-        inbox.claim(verified.identity(), deadline()).await?
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((verified.identity()).tenant_id(), 1),
+            verified.identity(),
+            deadline(),
+        )
+        .await?
     else {
         anyhow::bail!("fresh inbox");
     };
@@ -543,7 +548,11 @@ async fn rejected_effect(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Res
     assert_eq!(outcome.status(),rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
     assert!(
         inbox
-            .read_terminal(verified.identity(), deadline())
+            .read_terminal(
+                crate::execution((verified.identity()).tenant_id(), 1),
+                verified.identity(),
+                deadline()
+            )
             .await?
             .is_some()
     );
@@ -614,7 +623,7 @@ async fn cached_order(runtime: Arc<PgRuntime>, owner: &PgPool, raw: &PgPool) -> 
     )?;
     for id in ["cache-first", "cache-second"] {
         let claim = store
-            .claim_partition_heads(NonZeroUsize::MIN, deadline())
+            .claim_partition_heads(crate::execution(tenant, 1), NonZeroUsize::MIN, deadline())
             .await?
             .into_iter()
             .next()
@@ -650,7 +659,7 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
             .execute(owner)
             .await?;
         let result =
-            PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await;
+            PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(revoke))
             .execute(owner)
             .await?;
@@ -697,7 +706,7 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
             .execute(owner)
             .await?;
         let result =
-            PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::binding()).await;
+            PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(restore))
             .execute(owner)
             .await?;
@@ -717,7 +726,7 @@ async fn timed_out_preparation(
     let mut blocker = sql_tx(raw, tenant).await?;
     sql_prepare(&mut blocker, serde_json::json!([["timeout-order", "z"]])).await?;
     let outcome = runtime
-        .local_tx(tenant, deadline(), |tx| {
+        .local_tx(crate::execution(tenant, 1), deadline(), |tx| {
             Box::pin(async move {
                 tx.with_connection(|c| {
                     Box::pin(async {
@@ -762,7 +771,7 @@ async fn ignored_conflict(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Re
     let conflict = MessageEnvelope::new(first.id().clone(), first.metadata().clone(), vec![9]);
     let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("ignored-conflict")?);
     runtime
-        .local_tx(tenant, deadline(), move |tx| {
+        .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
             Box::pin(async move {
                 tx.prepare_outbox_partitions(
                     &first
@@ -782,7 +791,7 @@ async fn ignored_conflict(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Re
         .await
         .fold(Ok, Err, Err, Err, Err, Err)?;
     let writer = PgOutboxWriter::new(runtime.clone(), MessagingDomain::parse("ignored-conflict")?);
-    let result=runtime.local_tx(tenant,deadline(),move |tx|Box::pin(async move {
+    let result=runtime.local_tx(crate::execution(tenant, 1),deadline(),move |tx|Box::pin(async move {
         tx.prepare_outbox_partitions(&conflict.metadata().partition().cloned().into_iter().collect::<Vec<_>>()).await?;
         tx.with_connection(|c|Box::pin(async {sqlx::query("INSERT INTO public.business_effects VALUES(current_setting('rss.tenant_id')::uuid,'ignored-conflict-effect')").execute(c).await.map(|_|())})).await?;
         assert_eq!(writer.append(tx,PendingMessage::new(conflict)).await.expect_err("fingerprint conflict").kind(),rss_transactional_messaging::error::MessagingErrorKind::Conflict);
@@ -816,7 +825,7 @@ async fn ignored_foreign_partition(runtime: Arc<PgRuntime>, owner: &PgPool) -> a
         .partition()
         .expect("partition")
         .clone();
-    let result=runtime.local_tx(tenant,deadline(),move |tx|Box::pin(async move {
+    let result=runtime.local_tx(crate::execution(tenant, 1),deadline(),move |tx|Box::pin(async move {
         tx.with_connection(|c|Box::pin(async {sqlx::query("INSERT INTO public.business_effects VALUES(current_setting('rss.tenant_id')::uuid,'ignored-foreign-partition')").execute(c).await.map(|_|())})).await?;
         assert!(tx.prepare_outbox_partitions(&[partition]).await.is_err());
         Ok(())

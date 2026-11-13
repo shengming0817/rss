@@ -31,13 +31,14 @@ pub async fn run(
     repository: &PgArchiveRepository,
     store: &rss_transactional_messaging_recovery_s3::S3ArchiveStore,
     owner: &sqlx::PgPool,
-    config: &PgConfig,
+    _config: &PgConfig,
 ) -> anyhow::Result<()> {
     let recorded = recorded_before_switch(repository, store, owner).await?;
     let id = seed(owner, "dr-race").await?;
     let r = request(id, 1, Hold::Release).await?;
     let raced = invoke(
         repository,
+        crate::execution(r.request().tenant(), 1),
         &SwitchAfterInspection { real: store, owner },
         &r,
     )
@@ -55,20 +56,29 @@ pub async fn run(
     );
     assert!(is_hot(owner, id).await?);
     assert!(
-        repository.receipt(&r, deadline()).await.is_err(),
+        repository
+            .receipt(crate::execution(r.request().tenant(), 1), &r, deadline())
+            .await
+            .is_err(),
         "old runtime must not settle through historical receipts"
     );
-    let binding = rss_transactional_messaging::fence::ExecutionBinding::new(
-        fence_fixture::binding().storage(),
-        vec![(tenant(), rss_transactional_messaging::fence::Epoch::new(2)?)],
-    )?;
-    let next = PgArchiveRepository::connect(config.clone(), Timer::new(), binding).await?;
-    resume_recorded(&next, store, owner, recorded).await?;
+    let next = repository;
+    resume_recorded(next, store, owner, recorded).await?;
     assert!(
-        next.receipt(&r, deadline()).await?.is_none(),
+        next.receipt(crate::execution(r.request().tenant(), 2), &r, deadline())
+            .await?
+            .is_none(),
         "old job receipt does not authorize current-lineage cleanup"
     );
-    let outcome = settled(invoke(&next, store, &r).await)?;
+    let outcome = settled(
+        invoke(
+            repository,
+            crate::execution(r.request().tenant(), 2),
+            store,
+            &r,
+        )
+        .await,
+    )?;
     assert_eq!(
         outcome,
         Outcome::Purged,
@@ -77,7 +87,6 @@ pub async fn run(
     assert!(!is_hot(owner, id).await?);
     let verified:i64=sqlx::query_scalar("SELECT o.verified_epoch FROM rss_transactional_messaging.archive_objects o JOIN rss_transactional_messaging.archive_jobs j ON j.tenant_id=o.tenant_id AND j.generation=o.generation WHERE j.dead_letter_id=$1::uuid").bind(id.to_string()).fetch_one(owner).await?;
     assert_eq!(verified, 2);
-    next.close().await;
     Ok(())
 }
 
@@ -110,7 +119,13 @@ async fn recorded_before_switch(
     let r = request(id, 1, Hold::Release).await?;
     // Interrupt cleanup after real encryption, PUT, inspection and durable record. No proof is forged.
     sqlx::raw_sql("CREATE FUNCTION public.stop_recorded_purge() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture cut' USING ERRCODE='PZ001'; END $$; CREATE TRIGGER stop_recorded_purge BEFORE UPDATE OF capsule ON rss_transactional_messaging.consumer_dead_letter FOR EACH ROW WHEN (OLD.message_id='recorded-resume' AND NEW.capsule IS NULL) EXECUTE FUNCTION public.stop_recorded_purge()").execute(owner).await?;
-    let result = invoke(repository, store, &r).await;
+    let result = invoke(
+        repository,
+        crate::execution(r.request().tenant(), 1),
+        store,
+        &r,
+    )
+    .await;
     sqlx::raw_sql("DROP TRIGGER stop_recorded_purge ON rss_transactional_messaging.consumer_dead_letter; DROP FUNCTION public.stop_recorded_purge()").execute(owner).await?;
     assert!(result.fold(
         |_| false,
@@ -130,13 +145,28 @@ async fn resume_recorded(
     owner: &sqlx::PgPool,
     (id, r): (DeadLetterId, AuthorizedRequest),
 ) -> anyhow::Result<()> {
-    assert!(next.receipt(&r, deadline()).await?.is_none());
+    assert!(
+        next.receipt(crate::execution(r.request().tenant(), 2), &r, deadline())
+            .await?
+            .is_none()
+    );
     reject_old_proof(owner, &r).await?;
     let counted = CountInspection {
         store,
         count: AtomicUsize::new(0),
     };
-    assert_eq!(settled(invoke(next, &counted, &r).await)?, Outcome::Purged);
+    assert_eq!(
+        settled(
+            invoke(
+                next,
+                crate::execution(r.request().tenant(), 2),
+                &counted,
+                &r
+            )
+            .await
+        )?,
+        Outcome::Purged
+    );
     assert!(
         counted.count.load(Ordering::Relaxed) > 0,
         "resume reinspects the exact durable object"

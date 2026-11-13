@@ -170,6 +170,7 @@ impl InboxStore for LiveInbox {
 
     async fn claim(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &rss_transactional_messaging::inbox::ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -178,6 +179,7 @@ impl InboxStore for LiveInbox {
 
     async fn read_terminal(
         &self,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &rss_transactional_messaging::inbox::ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<Option<rss_transactional_messaging::transaction::TerminalReceipt>, MessagingError>
@@ -277,7 +279,10 @@ impl IngressValidator<Vec<u8>> for LiveIngress {
         challenge
             .subscription()
             .accepts(challenge.message())
-            .then(|| challenge.verified())
+            .then(|| {
+                let execution = crate::execution(challenge.message().metadata().tenant_id(), 1);
+                challenge.verified(execution)
+            })
             .ok_or(EnvelopeValidationFailure::UnsupportedContract)
     }
 }
@@ -995,4 +1000,17 @@ async fn assert_tls_roundtrip(
         matches!(publisher.publish(&envelope(&forbidden, "private-ca-forbidden"), provider_deadline()).await, PublishOutcome::DefinitelyNotPublished(failure) if failure.kind() == PublishFailureKind::Permanent)
     );
     Ok(())
+}
+
+#[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.
+fn execution(
+    tenant: rss_request_context::TenantId,
+    epoch: i64,
+) -> rss_transactional_messaging::fence::ExecutionBinding {
+    use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
+    ExecutionBinding::new(
+        StorageIdentity::new([1; 16], [2; 16]).expect("fixture storage"),
+        tenant,
+        Epoch::new(epoch).expect("fixture epoch"),
+    )
 }
