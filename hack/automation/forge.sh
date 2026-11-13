@@ -99,6 +99,7 @@ usage() {
 usage: forge.sh [--dry-run] <verb> [args...]
   meta : forge-active repo-slug remote has-ci issue-ref <N> pr-close-ref <N>
   pr   : pr-create <title> <body-file> <base> <head>
+         pr-edit <pr> <title> <body-file>  (Azure title/description only)
          pr-comment <pr> <body-file>        (prints created comment URL)
          pr-add-label <pr> <label> | pr-remove-label <pr> <label>
          pr-set-labels <pr> --add a,b --remove c,d

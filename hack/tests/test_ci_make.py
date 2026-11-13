@@ -20,6 +20,11 @@ class MakeTests(unittest.TestCase):
         shutil.copy(ROOT / "Makefile", self.root)
         shutil.copy(ROOT / "hack/ci-run.py", self.root / "hack")
         shutil.copy(ROOT / "hack/ci-pipeline.py", self.root / "hack")
+        (self.root / 'crates/testkit').mkdir(parents=True)
+        (self.root / 'crates/testkit/check-advisory.py').write_text(
+            'import os, sys\n'
+            'with open(os.environ["COMMAND_LOG"], "a") as log: log.write("advisory-guard " + " ".join(sys.argv[1:]) + "\\n")\n'
+            'sys.exit(7 if os.environ.get("FAIL_ADVISORY_GUARD") else 0)\n')
         (self.root / "hack/ci-impact.py").write_text("import os; print(os.environ['DECISION'])\n")
         (self.root / 'hack/ci-semver.py').write_text('def select(*a, **k): return {"selected": False, "reason": "no-protected-packages"}\n')
         self.bin = self.root / "bin"
@@ -69,7 +74,7 @@ class MakeTests(unittest.TestCase):
         ]:
             result, commands = self.run_make("checks", target=target, DECISION=decision)
             self.assertEqual(result.returncode, 0, result.stderr)
-            expected = [f'check --locked {packages}',
+            expected = ['advisory-guard --audit', f'check --locked {packages}',
                         f'check --locked --no-default-features {packages}',
                         f'check --locked --all-features {packages}',
                         f'clippy --locked --all-targets --all-features {packages} -- -D warnings']
@@ -99,14 +104,21 @@ class MakeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(commands, ['semver'])
 
-    def test_audit_runs_both_scanners_without_advisory_exemption(self):
+    def test_audit_runs_guard_and_both_scanners_and_preserves_each_failure(self):
         result, commands = self.run_make("all", target="audit")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(commands, ['deny check advisories', 'audit'])
+        self.assertEqual(commands, ['advisory-guard --audit', 'deny check advisories', 'audit'])
+        expected = commands
         for failure in ('deny check advisories', 'audit'):
             with self.subTest(failure=failure):
-                result, _ = self.run_make("all", target="audit", FAIL_COMMAND=failure)
+                result, commands = self.run_make("all", target="audit", FAIL_COMMAND=failure)
                 self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(commands, expected)
+        for target in ('audit', 'ci-full'):
+            result, commands = self.run_make('checks', target=target, FAIL_ADVISORY_GUARD='1')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('advisory-guard --audit', commands)
+            self.assertTrue(any('deny check' in command for command in commands))
 
     def test_invalid_part_and_empty_selection(self):
         result, commands = self.run_make("typo")
