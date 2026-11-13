@@ -68,7 +68,13 @@ fn configured(f: &testkit::KafkaTlsFixture, case: Case) -> anyhow::Result<KafkaC
         credentials,
         MessagingDomain::parse("events")?,
         [(MessageRoute::parse("event:v1")?, f.topic().into())],
-        KafkaLimits::new(1, 1, 4096, Duration::from_secs(2))?,
+        KafkaLimits::new(
+            1,
+            1,
+            4096,
+            1_048_576,
+            KafkaTimeouts::low_latency(Duration::from_secs(2))?,
+        )?,
     )?)
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

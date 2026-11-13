@@ -1,3 +1,5 @@
+#[path = "suite/resources.rs"]
+mod resources;
 mod support;
 use rss_transactional_messaging::{
     error::MessagingErrorKind, policy::ExecutionBudget, transport::*,
