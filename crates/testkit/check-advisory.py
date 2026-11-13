@@ -25,7 +25,7 @@ REGISTRY = 'registry+https://github.com/rust-lang/crates.io-index'
 PACKAGES = {
     'astral-tokio-tar': ('0.6.4', 'b18457efd137254e016bbde5e1d88df61c4e1a5ae2223746e56123bac6af2463'),
     'testcontainers': ('0.27.3', 'bfd5785b5483672915ed5fe3cddf9f546802779fc1eceff0a6fb7321fac81c1e'),
-    'libsqlite3-sys': ('0.30.1', '2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149'),
+    'libsqlite3-sys': ('0.37.0', 'b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1'),
     'sqlx-sqlite': ('0.9.0', '488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c'),
     'sqlx': ('0.9.0', '378620ccc25c62c89d8be1c819e76a88d59bdcc3304733330788948e619bfd71'),
     'sqlx-macros': ('0.9.0', 'bd2b84f2bc39a5705ef27ec785a11c934a41bbd4a24941e257927cddc26b60bf'),
