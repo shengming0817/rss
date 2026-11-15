@@ -161,7 +161,8 @@ impl<C: Clock> Operation<'_, C> {
             literal(&attempt.digest),
             literal(&self.instance)
         );
-        let mut payload = Vec::new();
+        let mut payload = sql.into_bytes();
+        payload.push(b'\n');
         for row in rows {
             serde_json::to_writer(&mut payload, row).map_err(|_| Error::Invariant)?;
             payload.push(b'\n');
@@ -172,16 +173,23 @@ impl<C: Clock> Operation<'_, C> {
         // ref: ClickHouse/clickhouse-rs src/query.rs@v0.15.3
         // query_raw keeps JSON question marks literal and awaits the response in
         // this operation, unlike InsertFormatted's detached response task.
-        let mut request = sql;
-        request.push('\n');
-        request.push_str(std::str::from_utf8(&payload).map_err(|_| Error::Invariant)?);
-        self.resources.ch.writer.query_raw(&request)
+        let request = String::from_utf8(payload).map_err(|_| Error::Invariant)?;
+        self.resources
+            .ch
+            .writer
+            .query_raw(&request)
             .with_setting("query_id", &attempt.query)
-            .with_setting("insert_deduplication_token", if attempt.target == "summaries" {
-                format!("{}:summaries:{}", self.instance, attempt.id)
-            } else {
-                format!("{}:raw:{}:{}", self.instance, attempt.revision, attempt.digest)
-            })
+            .with_setting(
+                "insert_deduplication_token",
+                if attempt.target == "summaries" {
+                    format!("{}:summaries:{}", self.instance, attempt.id)
+                } else {
+                    format!(
+                        "{}:raw:{}:{}",
+                        self.instance, attempt.revision, attempt.digest
+                    )
+                },
+            )
             .with_setting("max_execution_time", remaining.as_secs_f64().to_string())
             .with_setting("input_format_json_read_numbers_as_strings", "0")
             .with_setting("max_insert_threads", "1")
@@ -190,7 +198,9 @@ impl<C: Clock> Operation<'_, C> {
             .with_setting("min_insert_block_size_bytes", "0")
             .with_setting("input_format_parallel_parsing", "0")
             .with_setting("max_threads", "1")
-            .execute().await.map_err(|e| provider_error("insert-response", e))
+            .execute()
+            .await
+            .map_err(|e| provider_error("insert-response", e))
     }
     /// Revocation must already be committed. A zero-result kill is safe only because
     /// late arrivals must start a new PG guard read and cannot acquire that permit.
@@ -207,11 +217,14 @@ impl<C: Clock> Operation<'_, C> {
         // KILL on an already finished query can return no result header at all.
         // Consume its complete HTTP response, then independently verify termination;
         // a successful HTTP status or a sent cancellation alone is not sufficient.
-        self.resources.ch_query(&self.resources.ch.maintenance, &sql, deadline)?
+        self.resources
+            .ch_query(&self.resources.ch.maintenance, &sql, deadline)?
             .execute()
             .await
             .map_err(|e| provider_error("drain-kill", e))?;
-        let remaining = self.resources.ch_query(
+        let remaining = self
+            .resources
+            .ch_query(
                 &self.resources.ch.maintenance,
                 &format!("SELECT count() FROM system.processes WHERE query_id IN ({ids})"),
                 deadline,

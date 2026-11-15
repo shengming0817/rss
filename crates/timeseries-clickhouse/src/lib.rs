@@ -17,8 +17,8 @@ mod write;
 pub use config::{ConnectionConfig, Credentials, Limits};
 pub use cursor::CursorKey;
 pub use install::{CONTROL_SQL, installation_sql};
-pub use lifecycle::{ChOwner, ChStore};
 use lifecycle::Operation;
+pub use lifecycle::{ChOwner, ChStore};
 #[cfg(feature = "integration")]
 pub use write::Fault;
 pub use write::ProjectionProgress;

@@ -6,7 +6,10 @@ use sqlx::PgPool;
 use std::{
     future::Future,
     num::NonZeroU64,
-    sync::{Arc, Weak, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::sync::{RwLock, RwLockReadGuard, Semaphore, SemaphorePermit};
 
@@ -69,7 +72,9 @@ pub(crate) async fn bounded<C: Clock, T>(
     future: impl Future<Output = Result<T, Error>>,
 ) -> Result<T, Error> {
     let remaining = deadline.remaining(clock.now()).ok_or(Error::Deadline)?;
-    tokio::time::timeout(remaining, future).await.map_err(|_| Error::Deadline)?
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| Error::Deadline)?
 }
 
 impl<C: Clock> ChOwner<C> {
@@ -89,14 +94,16 @@ impl<C: Clock> ChOwner<C> {
         }
         let ch = config.connect();
         let instance = bounded(&clock, deadline, probe::installation(&pool, &ch)).await?;
-        Ok(Self { inner: Arc::new(Shared {
-            clock: Arc::new(clock),
-            capacity: Semaphore::new(limits.max_concurrent_operations.get() as usize),
-            limits,
-            instance,
-            closed: AtomicBool::new(false),
-            resources: RwLock::new(Some(Resources { pool, ch })),
-        }) })
+        Ok(Self {
+            inner: Arc::new(Shared {
+                clock: Arc::new(clock),
+                capacity: Semaphore::new(limits.max_concurrent_operations.get() as usize),
+                limits,
+                instance,
+                closed: AtomicBool::new(false),
+                resources: RwLock::new(Some(Resources { pool, ch })),
+            }),
+        })
     }
 
     /// Validate a new immutable reader capability on this exact installation.
@@ -115,7 +122,14 @@ impl<C: Clock> ChOwner<C> {
                 return Err(Error::Unauthorized);
             }
             let client = resources.ch.reader(&reader);
-            probe::tenant(&resources.ch, &client, &reader.user, tenant, &self.inner.instance).await?;
+            probe::tenant(
+                &resources.ch,
+                &client,
+                &reader.user,
+                tenant,
+                &self.inner.instance,
+            )
+            .await?;
             self.inner.open()?;
             Ok(ChStore {
                 owner: Arc::downgrade(&self.inner),
@@ -131,7 +145,8 @@ impl<C: Clock> ChOwner<C> {
                 #[cfg(feature = "integration")]
                 fault: std::sync::atomic::AtomicU8::new(0),
             })
-        }).await
+        })
+        .await
     }
 
     /// Stop admission, drain calls, close PG and release the shared HTTP clients.
@@ -146,7 +161,8 @@ impl<C: Clock> ChOwner<C> {
             }
             resources.take();
             Ok(())
-        }).await
+        })
+        .await
     }
 }
 impl<C> Drop for ChOwner<C> {
@@ -160,15 +176,23 @@ impl<C> Shared<C> {
         self.capacity.close();
     }
     fn open(&self) -> Result<(), Error> {
-        if self.closed.load(Ordering::Acquire) { Err(Error::Unavailable) } else { Ok(()) }
+        if self.closed.load(Ordering::Acquire) {
+            Err(Error::Unavailable)
+        } else {
+            Ok(())
+        }
     }
     async fn enter(&self) -> Result<(SemaphorePermit<'_>, RwLockReadGuard<'_, Resources>), Error> {
         self.open()?;
-        let capacity = self.capacity.acquire().await.map_err(|_| Error::Unavailable)?;
+        let capacity = self
+            .capacity
+            .acquire()
+            .await
+            .map_err(|_| Error::Unavailable)?;
         let resources = self.resources.read().await;
         self.open()?;
-        let resources = RwLockReadGuard::try_map(resources, Option::as_ref)
-            .map_err(|_| Error::Unavailable)?;
+        let resources =
+            RwLockReadGuard::try_map(resources, Option::as_ref).map_err(|_| Error::Unavailable)?;
         Ok((capacity, resources))
     }
 }
@@ -199,17 +223,26 @@ impl<C: Clock> Shared<C> {
                 #[cfg(feature = "integration")]
                 fault: &store.fault,
             })
-        }).await
+        })
+        .await
     }
 }
 impl<C: Clock> ChStore<C> {
     /// The fixed tenant whose reader was admitted for this capability.
-    pub fn tenant(&self) -> TenantId { self.tenant }
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
     /// Host-provided identity of this immutable material set, not a fencing epoch.
-    pub fn material_version(&self) -> NonZeroU64 { self.version }
+    pub fn material_version(&self) -> NonZeroU64 {
+        self.version
+    }
     fn admit(&self, scope: &Scope) -> Result<(), Error> {
-        if scope.tenant() != self.tenant { return Err(Error::Unauthorized); }
-        if self.retired.load(Ordering::Acquire) { return Err(Error::Unavailable); }
+        if scope.tenant() != self.tenant {
+            return Err(Error::Unauthorized);
+        }
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Error::Unavailable);
+        }
         Ok(())
     }
     /// Permanently stop this capability and drain its calls, leaving other stores open.
@@ -219,6 +252,7 @@ impl<C: Clock> ChStore<C> {
         bounded(self.clock.as_ref(), deadline, async {
             self.material.write().await.take();
             Ok(())
-        }).await
+        })
+        .await
     }
 }

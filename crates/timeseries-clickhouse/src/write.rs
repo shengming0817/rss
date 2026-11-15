@@ -332,27 +332,28 @@ impl<C: Clock> ChStore<C> {
         let q = request.request();
         let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
         let operation = owner.operation(self, q.stream.scope(), deadline).await?;
-        operation.bounded(deadline, async {
-            let mut tx = operation.begin(q.stream.scope(), false, deadline).await?;
-            let result = async {
-                Ok(match lookup(tx.connection(), q).await? {
-                    None => ProjectionProgress::NotVisible,
-                    Some(r) => {
-                        receipt(&r, q)?;
-                        if r.try_get("expired").map_err(sql_error)? {
-                            ProjectionProgress::Expired
-                        } else if r.try_get("published").map_err(sql_error)? {
-                            ProjectionProgress::Published
-                        } else {
-                            ProjectionProgress::Prepared
+        operation
+            .bounded(deadline, async {
+                let mut tx = operation.begin(q.stream.scope(), false, deadline).await?;
+                let result = async {
+                    Ok(match lookup(tx.connection(), q).await? {
+                        None => ProjectionProgress::NotVisible,
+                        Some(r) => {
+                            receipt(&r, q)?;
+                            if r.try_get("expired").map_err(sql_error)? {
+                                ProjectionProgress::Expired
+                            } else if r.try_get("published").map_err(sql_error)? {
+                                ProjectionProgress::Published
+                            } else {
+                                ProjectionProgress::Prepared
+                            }
                         }
-                    }
-                })
-            }
-            .await;
-            tx.read(result).await
-        })
-        .await
+                    })
+                }
+                .await;
+                tx.read(result).await
+            })
+            .await
     }
     /// Recover one fixed pending batch; no background task or retained authorization.
     pub async fn recover(
@@ -383,8 +384,11 @@ impl<C: Clock> Writer for ChStore<C> {
         deadline: Deadline,
     ) -> Result<Outcome<Receipt>, Error> {
         let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
-        let operation = owner.operation(self, b.request().stream().scope(), deadline).await?;
-        operation.mutation(deadline, operation.advance(b.request(), deadline))
+        let operation = owner
+            .operation(self, b.request().stream().scope(), deadline)
+            .await?;
+        operation
+            .mutation(deadline, operation.advance(b.request(), deadline))
             .await
     }
     async fn receipt(

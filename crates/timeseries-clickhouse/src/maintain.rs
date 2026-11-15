@@ -138,7 +138,8 @@ impl<C: Clock> Operation<'_, C> {
             let time = now(tx.connection()).await?;
             let ordinal = after
                 .map(|t| {
-                    self.material.key
+                    self.material
+                        .key
                         .open::<u64>(DOMAIN, t, r.binding()?, &self.instance, time)
                 })
                 .transpose()?
@@ -273,7 +274,11 @@ impl<C: Clock> Maintainer for ChStore<C> {
     ) -> Result<Outcome<MaintenanceProgress>, Error> {
         let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
         let operation = owner.operation(self, r.request().scope(), deadline).await?;
-        operation.mutation(deadline, operation.maintenance(r.request(), after, deadline))
+        operation
+            .mutation(
+                deadline,
+                operation.maintenance(r.request(), after, deadline),
+            )
             .await
     }
 }

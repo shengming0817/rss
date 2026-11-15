@@ -108,7 +108,9 @@ impl<C: Clock> Operation<'_, C> {
         limit: u32,
         deadline: Deadline,
     ) -> Result<Vec<Raw>, Error> {
-        let mut cursor = self.resources.ch_query(&self.reader, sql, deadline)?
+        let mut cursor = self
+            .resources
+            .ch_query(&self.reader, sql, deadline)?
             .fetch::<Raw>()
             .map_err(|_| Error::Unavailable)?;
         let mut size = 0usize;
@@ -172,8 +174,11 @@ impl<C: Clock> Reader for ChStore<C> {
         deadline: Deadline,
     ) -> Result<Page, Error> {
         let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
-        let operation = owner.operation(self, q.request().selection().scope(), deadline).await?;
-        operation.bounded(deadline, operation.history(q.request(), after, deadline))
+        let operation = owner
+            .operation(self, q.request().selection().scope(), deadline)
+            .await?;
+        operation
+            .bounded(deadline, operation.history(q.request(), after, deadline))
             .await
     }
     async fn aggregate(
@@ -183,11 +188,14 @@ impl<C: Clock> Reader for ChStore<C> {
         deadline: Deadline,
     ) -> Result<AggregatePage, Error> {
         let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
-        let operation = owner.operation(self, q.request().spec().stream().scope(), deadline).await?;
-        operation.bounded(
-            deadline,
-            crate::aggregate::read(&operation, q.request(), after, deadline),
-        )
-        .await
+        let operation = owner
+            .operation(self, q.request().spec().stream().scope(), deadline)
+            .await?;
+        operation
+            .bounded(
+                deadline,
+                crate::aggregate::read(&operation, q.request(), after, deadline),
+            )
+            .await
     }
 }

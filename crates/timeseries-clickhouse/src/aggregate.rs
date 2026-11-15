@@ -167,7 +167,9 @@ impl<C: Clock> Operation<'_, C> {
             literal(scope.namespace().as_str()),
             literal(id)
         );
-        let rows = self.resources.ch_query(&self.reader, &sql, deadline)?
+        let rows = self
+            .resources
+            .ch_query(&self.reader, &sql, deadline)?
             .fetch_all::<SummaryRow>()
             .await
             .map_err(|_| Error::Unavailable)?;
@@ -268,10 +270,13 @@ pub(crate) async fn read<C: Clock>(
     let result = async {
         let time = now(tx.connection()).await?;
         let (expires, mut at) = match after {
-            Some(t) => {
-                store.material.key
-                    .open::<Timestamp>(DOMAIN, t, q.binding()?, &store.instance, time)?
-            }
+            Some(t) => store.material.key.open::<Timestamp>(
+                DOMAIN,
+                t,
+                q.binding()?,
+                &store.instance,
+                time,
+            )?,
             None => (
                 time.checked_add(store.limits.cursor_micros.get() as i64)
                     .ok_or(Error::NumericRange)?,
@@ -330,7 +335,9 @@ pub(crate) async fn read<C: Clock>(
         }
         let next = if at < q.query().window().end() {
             Some(
-                store.material.key
+                store
+                    .material
+                    .key
                     .seal(DOMAIN, q.binding()?, &store.instance, expires, &at)?,
             )
         } else {

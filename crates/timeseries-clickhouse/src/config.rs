@@ -64,7 +64,12 @@ impl ConnectionConfig {
         .map_err(|_| Error::InvalidInput)?
         .with_root_certificates(roots)
         .with_no_client_auth();
-        Ok(Self { endpoint: endpoint.into(), tls: config, writer, maintenance })
+        Ok(Self {
+            endpoint: endpoint.into(),
+            tls: config,
+            writer,
+            maintenance,
+        })
     }
     pub(crate) fn connect(self) -> Connections {
         let connector = hyper_rustls::HttpsConnectorBuilder::new()
@@ -83,7 +88,12 @@ impl ConnectionConfig {
             .with_setting("use_query_cache", "0");
         let writer = authenticated(&base, &self.writer);
         let maintenance = authenticated(&base, &self.maintenance);
-        Connections { base, writer, maintenance, users: [self.writer.user, self.maintenance.user] }
+        Connections {
+            base,
+            writer,
+            maintenance,
+            users: [self.writer.user, self.maintenance.user],
+        }
     }
 }
 // ref: ClickHouse/clickhouse-rs src/lib.rs@v0.15.3
@@ -99,7 +109,9 @@ impl Connections {
     }
 }
 fn authenticated(base: &clickhouse::Client, credentials: &Credentials) -> clickhouse::Client {
-    base.clone().with_user(&credentials.user).with_password(credentials.password.as_str())
+    base.clone()
+        .with_user(&credentials.user)
+        .with_password(credentials.password.as_str())
 }
 /// Explicit host caps; there are no unlimited/default budgets.
 #[derive(Clone, Debug)]

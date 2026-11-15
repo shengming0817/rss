@@ -4,10 +4,7 @@ use rss_timeseries::Error;
 use sqlx::{PgPool, postgres::PgSslMode};
 use std::collections::BTreeSet;
 
-pub(crate) async fn installation(
-    pool: &PgPool,
-    ch: &Connections,
-) -> Result<String, Error> {
+pub(crate) async fn installation(pool: &PgPool, ch: &Connections) -> Result<String, Error> {
     if !matches!(pool.connect_options().get_ssl_mode(), PgSslMode::VerifyFull) {
         return Err(Error::Unauthorized);
     }
@@ -56,20 +53,36 @@ pub(crate) async fn installation(
     Ok(instance)
 }
 async fn identity(client: &clickhouse::Client, user: &str, instance: &str) -> Result<(), Error> {
-    let rows = client.query("SELECT version(),currentUser()")
-        .fetch_all::<(String, String)>().await.map_err(|_| Error::Unavailable)?;
-    if rows != vec![("25.8.12.129".into(), user.into())] { return Err(Error::Unsupported); }
-    if client.query("SELECT id FROM rss_ts_ch.installation").fetch_all::<String>()
-        .await.map_err(|_| Error::Unavailable)? != vec![instance.to_owned()] {
+    let rows = client
+        .query("SELECT version(),currentUser()")
+        .fetch_all::<(String, String)>()
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    if rows != vec![("25.8.12.129".into(), user.into())] {
+        return Err(Error::Unsupported);
+    }
+    if client
+        .query("SELECT id FROM rss_ts_ch.installation")
+        .fetch_all::<String>()
+        .await
+        .map_err(|_| Error::Unavailable)?
+        != vec![instance.to_owned()]
+    {
         return Err(Error::Invariant);
     }
     Ok(())
 }
 pub(crate) async fn tenant(
-    ch: &Connections, client: &clickhouse::Client, user: &str, tenant: TenantId, instance: &str,
+    ch: &Connections,
+    client: &clickhouse::Client,
+    user: &str,
+    tenant: TenantId,
+    instance: &str,
 ) -> Result<(), Error> {
     identity(client, user, instance).await?;
-    reader(ch, user, tenant).await.map_err(|e| diagnose("tenant-reader", e))
+    reader(ch, user, tenant)
+        .await
+        .map_err(|e| diagnose("tenant-reader", e))
 }
 fn compact(s: &str) -> String {
     s.chars().filter(|c| !c.is_ascii_whitespace()).collect()

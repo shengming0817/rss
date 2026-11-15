@@ -192,7 +192,9 @@ async fn delete<C: Clock>(
     predicate: &str,
     deadline: Deadline,
 ) -> Result<(), Error> {
-    store.resources.ch_query(
+    store
+        .resources
+        .ch_query(
             &store.resources.ch.maintenance,
             &format!("ALTER TABLE rss_ts_ch.{table} DELETE WHERE {predicate}"),
             deadline,
@@ -201,7 +203,9 @@ async fn delete<C: Clock>(
         .execute()
         .await
         .map_err(|_| Error::Unavailable)?;
-    let count = store.resources.ch_query(
+    let count = store
+        .resources
+        .ch_query(
             &store.resources.ch.maintenance,
             &format!("SELECT count() FROM rss_ts_ch.{table} WHERE {predicate}"),
             deadline,
@@ -290,7 +294,9 @@ async fn prune_summaries<C: Clock>(
         literal(r.scope().namespace().as_str()),
         exclude
     );
-    let orphans = store.resources.ch_query(
+    let orphans = store
+        .resources
+        .ch_query(
             &store.resources.ch.maintenance,
             &format!(
                 "SELECT object_id FROM rss_ts_ch.summaries FINAL WHERE {base} LIMIT {}",
