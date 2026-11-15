@@ -1,5 +1,5 @@
 use crate::{
-    ChStore,
+    ChStore, Operation,
     control::{self, Fence},
     cursor::Position,
     projection::{RAW_FIELDS, Raw, hex, literal},
@@ -88,7 +88,7 @@ fn position(p: &Position, latest: bool) -> String {
         )
     }
 }
-impl<C: Clock> ChStore<C> {
+impl<C: Clock> Operation<'_, C> {
     pub(crate) async fn raw_rows(
         &self,
         condition: &str,
@@ -109,7 +109,7 @@ impl<C: Clock> ChStore<C> {
         deadline: Deadline,
     ) -> Result<Vec<Raw>, Error> {
         let mut cursor = self
-            .ch_query(&self.ch.reader, sql, deadline)?
+            .ch_query(&self.reader, sql, deadline)?
             .fetch::<Raw>()
             .map_err(|_| Error::Unavailable)?;
         let mut size = 0usize;
@@ -140,7 +140,7 @@ impl<C: Clock> ChStore<C> {
         let mut tx = self.begin(q.selection().scope(), false, deadline).await?;
         let result=async {
             let time=now(tx.connection()).await?;
-            let (expires,previous)=match after {Some(t)=>{let (e,v)=self.key.open::<Cursor>(DOMAIN,t,q.binding()?,&self.instance,time)?;(e,Some(v))},None=>(time.checked_add(self.limits.cursor_micros.get() as i64).ok_or(Error::NumericRange)?,None)};
+            let (expires,previous)=match after {Some(t)=>{let (e,v)=self.material.key.open::<Cursor>(DOMAIN,t,q.binding()?,self.instance,time)?;(e,Some(v))},None=>(time.checked_add(self.limits.cursor_micros.get() as i64).ok_or(Error::NumericRange)?,None)};
             let boundary=previous.as_ref().map_or(tx.published,|c|c.boundary);
             if boundary>tx.published || boundary<0 {return Err(Error::InvalidCursor);}
             let fences=control::fences(tx.connection(),q.selection().scope(),self.limits.max_points.get()).await?;
@@ -159,7 +159,7 @@ impl<C: Clock> ChStore<C> {
                 groups.insert(group);last=Some(p);rows.push(ObservedSample {sample:s,received_at:Timestamp::new(r.received_at)?});
             }
             q.validate_page(&rows)?;
-            let next=if more {Some(self.key.seal(DOMAIN,q.binding()?,&self.instance,expires,&Cursor {boundary,last:last.ok_or(Error::BudgetExceeded)?})?)} else {None};
+            let next=if more {Some(self.material.key.seal(DOMAIN,q.binding()?,self.instance,expires,&Cursor {boundary,last:last.ok_or(Error::BudgetExceeded)?})?)} else {None};
             Ok(Page {rows,availability:control::availability(q,&fences)?,next})
         }.await;
         tx.read(result).await
@@ -172,10 +172,12 @@ impl<C: Clock> Reader for ChStore<C> {
         after: Option<&Continuation>,
         deadline: Deadline,
     ) -> Result<Page, Error> {
-        let _guard = self
-            .operation(q.request().selection().scope(), deadline)
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner
+            .operation(self, q.request().selection().scope(), deadline)
             .await?;
-        self.bounded(deadline, self.history(q.request(), after, deadline))
+        operation
+            .bounded(deadline, operation.history(q.request(), after, deadline))
             .await
     }
     async fn aggregate(
@@ -184,13 +186,15 @@ impl<C: Clock> Reader for ChStore<C> {
         after: Option<&Continuation>,
         deadline: Deadline,
     ) -> Result<AggregatePage, Error> {
-        let _guard = self
-            .operation(q.request().spec().stream().scope(), deadline)
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner
+            .operation(self, q.request().spec().stream().scope(), deadline)
             .await?;
-        self.bounded(
-            deadline,
-            crate::aggregate::read(self, q.request(), after, deadline),
-        )
-        .await
+        operation
+            .bounded(
+                deadline,
+                crate::aggregate::read(&operation, q.request(), after, deadline),
+            )
+            .await
     }
 }

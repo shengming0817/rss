@@ -82,15 +82,17 @@ impl<C: Clock> DefinitionStore for ChStore<C> {
         deadline: Deadline,
     ) -> Result<Lookup<DefinitionRecord>, Error> {
         let r = request.request();
-        let _guard = self.operation(&r.scope, deadline).await?;
-        self.bounded(deadline, async {
-            let mut tx = self.begin(&r.scope, false, deadline).await?;
-            let result = exact(tx.connection(), r)
-                .await
-                .map(|v| v.map_or(Lookup::NotVisible, Lookup::Found));
-            tx.read(result).await
-        })
-        .await
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner.operation(self, &r.scope, deadline).await?;
+        operation
+            .bounded(deadline, async {
+                let mut tx = operation.begin(&r.scope, false, deadline).await?;
+                let result = exact(tx.connection(), r)
+                    .await
+                    .map(|v| v.map_or(Lookup::NotVisible, Lookup::Found));
+                tx.read(result).await
+            })
+            .await
     }
     async fn change(
         &self,
@@ -102,12 +104,14 @@ impl<C: Clock> DefinitionStore for ChStore<C> {
             DefinitionMutation::Register { definition, .. } => &definition.spec().scope,
             DefinitionMutation::Retire { id, .. } => &id.scope,
         };
-        let _guard = self.operation(scope, deadline).await?;
-        self.mutation(deadline, async {
-            let mut tx = self.begin(scope, true, deadline).await?;
-            let result = change(tx.connection(), r).await;
-            tx.finish(result, true).await.map(flatten)
-        })
-        .await
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner.operation(self, scope, deadline).await?;
+        operation
+            .mutation(deadline, async {
+                let mut tx = operation.begin(scope, true, deadline).await?;
+                let result = change(tx.connection(), r).await;
+                tx.finish(result, true).await.map(flatten)
+            })
+            .await
     }
 }

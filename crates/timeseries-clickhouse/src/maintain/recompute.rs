@@ -20,7 +20,7 @@ pub(super) struct Publication {
     revision: i64,
 }
 pub(super) async fn step<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     c: &mut PgConnection,
     r: &MaintenanceRequest,
     state: &mut State,
@@ -136,7 +136,7 @@ pub(super) async fn step<C: Clock>(
 }
 
 async fn publish<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     c: &mut PgConnection,
     r: &MaintenanceRequest,
     state: &mut State,

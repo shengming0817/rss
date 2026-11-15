@@ -3843,7 +3843,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "bytes",
  "clickhouse",
  "futures",
  "hmac 0.12.1",

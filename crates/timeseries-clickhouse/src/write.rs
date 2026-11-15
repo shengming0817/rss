@@ -1,5 +1,5 @@
 use crate::{
-    ChStore, control, definition,
+    ChStore, Operation, control, definition,
     projection::{self, Attempt, Raw},
     transaction::{bytes, decode, now, sql_error},
 };
@@ -22,7 +22,6 @@ pub enum Fault {
     AfterPrepare = 1,
     AfterInsert = 2,
     AfterPublish = 3,
-    BeforeInsertEnd = 4,
 }
 impl<C: Clock> ChStore<C> {
     #[cfg(feature = "integration")]
@@ -30,6 +29,8 @@ impl<C: Clock> ChStore<C> {
         self.fault
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     }
+}
+impl<C: Clock> Operation<'_, C> {
     pub(crate) fn fault(&self, stage: u8) -> bool {
         #[cfg(feature = "integration")]
         {
@@ -81,7 +82,7 @@ async fn lookup(c: &mut PgConnection, q: &ReceiptQuery) -> Result<Option<PgRow>,
     sqlx::query("SELECT digest,received_at,replay_until,new_samples,replayed_samples,revision,projection,published,expired FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND batch_id=$5")
         .bind(q.stream.scope().tenant().to_string()).bind(q.stream.scope().namespace().as_str()).bind(q.stream.source().as_str()).bind(q.stream.generation().as_str()).bind(q.batch_id.as_str()).fetch_optional(c).await.map_err(sql_error)
 }
-impl<C: Clock> ChStore<C> {
+impl<C: Clock> Operation<'_, C> {
     async fn prepare(
         &self,
         b: &Batch,
@@ -236,7 +237,7 @@ impl<C: Clock> ChStore<C> {
         p: &Prepared,
         deadline: Deadline,
     ) -> Result<(), Error> {
-        let rows=self.ch_query(&self.ch.reader,"SELECT sample_id,digest,received_at FROM rss_ts_ch.raw FINAL WHERE tenant=? AND namespace=? AND revision=? ORDER BY sample_id",deadline)?
+        let rows=self.ch_query(&self.reader,"SELECT sample_id,digest,received_at FROM rss_ts_ch.raw FINAL WHERE tenant=? AND namespace=? AND revision=? ORDER BY sample_id",deadline)?
             .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).fetch_all::<(String,String,i64)>().await.map_err(|e|projection::provider_error("projection-verification",e))?;
         let mut expected = p
             .rows
@@ -321,34 +322,38 @@ impl<C: Clock> ChStore<C> {
             }
         }
     }
+}
+impl<C: Clock> ChStore<C> {
     pub async fn progress(
         &self,
         request: &Authorized<ReceiptQuery>,
         deadline: Deadline,
     ) -> Result<ProjectionProgress, Error> {
         let q = request.request();
-        let _guard = self.operation(q.stream.scope(), deadline).await?;
-        self.bounded(deadline, async {
-            let mut tx = self.begin(q.stream.scope(), false, deadline).await?;
-            let result = async {
-                Ok(match lookup(tx.connection(), q).await? {
-                    None => ProjectionProgress::NotVisible,
-                    Some(r) => {
-                        receipt(&r, q)?;
-                        if r.try_get("expired").map_err(sql_error)? {
-                            ProjectionProgress::Expired
-                        } else if r.try_get("published").map_err(sql_error)? {
-                            ProjectionProgress::Published
-                        } else {
-                            ProjectionProgress::Prepared
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner.operation(self, q.stream.scope(), deadline).await?;
+        operation
+            .bounded(deadline, async {
+                let mut tx = operation.begin(q.stream.scope(), false, deadline).await?;
+                let result = async {
+                    Ok(match lookup(tx.connection(), q).await? {
+                        None => ProjectionProgress::NotVisible,
+                        Some(r) => {
+                            receipt(&r, q)?;
+                            if r.try_get("expired").map_err(sql_error)? {
+                                ProjectionProgress::Expired
+                            } else if r.try_get("published").map_err(sql_error)? {
+                                ProjectionProgress::Published
+                            } else {
+                                ProjectionProgress::Prepared
+                            }
                         }
-                    }
-                })
-            }
-            .await;
-            tx.read(result).await
-        })
-        .await
+                    })
+                }
+                .await;
+                tx.read(result).await
+            })
+            .await
     }
     /// Recover one fixed pending batch; no background task or retained authorization.
     pub async fn recover(
@@ -357,14 +362,15 @@ impl<C: Clock> ChStore<C> {
         authority: &impl Authority,
         deadline: Deadline,
     ) -> Result<Outcome<Option<Receipt>>, Error> {
-        let _guard = self.operation(scope, deadline).await?;
-        self.mutation(deadline,async {
-            let mut tx=self.begin(scope,false,deadline).await?;
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner.operation(self, scope, deadline).await?;
+        operation.mutation(deadline,async {
+            let mut tx=operation.begin(scope,false,deadline).await?;
             let raw=sqlx::query_scalar::<_,Vec<u8>>("SELECT payload FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND NOT published")
                 .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).fetch_optional(tx.connection()).await.map_err(sql_error);
             let Some(raw)=tx.read(raw).await? else {return Ok(Outcome::Accepted(None));};
             let b=Authorized::<Batch>::verify(authority,Batch::decode(&raw)?)?;
-            Ok(match self.advance(b.request(),deadline).await? {Outcome::Accepted(r)=>Outcome::Accepted(Some(r)),Outcome::Replay(r)=>Outcome::Replay(Some(r)),Outcome::Unknown=>Outcome::Unknown})
+            Ok(match operation.advance(b.request(),deadline).await? {Outcome::Accepted(r)=>Outcome::Accepted(Some(r)),Outcome::Replay(r)=>Outcome::Replay(Some(r)),Outcome::Unknown=>Outcome::Unknown})
         }).await
     }
 }
@@ -377,10 +383,12 @@ impl<C: Clock> Writer for ChStore<C> {
         b: &Authorized<Batch>,
         deadline: Deadline,
     ) -> Result<Outcome<Receipt>, Error> {
-        let _guard = self
-            .operation(b.request().stream().scope(), deadline)
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner
+            .operation(self, b.request().stream().scope(), deadline)
             .await?;
-        self.mutation(deadline, self.advance(b.request(), deadline))
+        operation
+            .mutation(deadline, operation.advance(b.request(), deadline))
             .await
     }
     async fn receipt(
@@ -389,9 +397,10 @@ impl<C: Clock> Writer for ChStore<C> {
         deadline: Deadline,
     ) -> Result<Lookup<Receipt>, Error> {
         let q = request.request();
-        let _guard = self.operation(q.stream.scope(), deadline).await?;
-        self.bounded(deadline,async {
-            let mut tx=self.begin(q.stream.scope(),false,deadline).await?;
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner.operation(self, q.stream.scope(), deadline).await?;
+        operation.bounded(deadline,async {
+            let mut tx=operation.begin(q.stream.scope(),false,deadline).await?;
             let result=async {Ok(match lookup(tx.connection(),q).await? {
                 None=>{
                     let reclaimed:Option<bool>=sqlx::query_scalar("SELECT reclaimed FROM rss_ts_ch.streams WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4").bind(q.stream.scope().tenant().to_string()).bind(q.stream.scope().namespace().as_str()).bind(q.stream.source().as_str()).bind(q.stream.generation().as_str()).fetch_optional(tx.connection()).await.map_err(sql_error)?;

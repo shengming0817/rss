@@ -7,7 +7,7 @@ pub(super) struct Cleanup {
     pending_summaries: Vec<String>,
 }
 async fn safe_limit<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     c: &mut PgConnection,
     r: &MaintenanceRequest,
     boundary: i64,
@@ -88,7 +88,7 @@ async fn safe_limit<C: Clock>(
     Ok(Ok(limit))
 }
 pub(super) async fn step<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     c: &mut PgConnection,
     r: &MaintenanceRequest,
     state: &mut State,
@@ -187,14 +187,14 @@ pub(super) async fn step<C: Clock>(
     prune_summaries(store, c, r, sel, *summaries_before, cleanup, deadline).await
 }
 async fn delete<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     table: &str,
     predicate: &str,
     deadline: Deadline,
 ) -> Result<(), Error> {
     store
         .ch_query(
-            &store.ch.maintenance,
+            &store.resources.ch.maintenance,
             &format!("ALTER TABLE rss_ts_ch.{table} DELETE WHERE {predicate}"),
             deadline,
         )?
@@ -204,7 +204,7 @@ async fn delete<C: Clock>(
         .map_err(|_| Error::Unavailable)?;
     let count = store
         .ch_query(
-            &store.ch.maintenance,
+            &store.resources.ch.maintenance,
             &format!("SELECT count() FROM rss_ts_ch.{table} WHERE {predicate}"),
             deadline,
         )?
@@ -217,7 +217,7 @@ async fn delete<C: Clock>(
     Ok(())
 }
 async fn prune_summaries<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     c: &mut PgConnection,
     r: &MaintenanceRequest,
     sel: &Selection,
@@ -294,7 +294,7 @@ async fn prune_summaries<C: Clock>(
     );
     let orphans = store
         .ch_query(
-            &store.ch.maintenance,
+            &store.resources.ch.maintenance,
             &format!(
                 "SELECT object_id FROM rss_ts_ch.summaries FINAL WHERE {base} LIMIT {}",
                 r.budget().rows.get()
@@ -326,7 +326,7 @@ async fn prune_summaries<C: Clock>(
     Ok(Step::Done(0))
 }
 pub(super) async fn reclaim<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     c: &mut PgConnection,
     s: &Stream,
     limit: u32,

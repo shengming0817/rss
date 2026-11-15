@@ -1,7 +1,7 @@
 # rss-timeseries-clickhouse
 
-Recoverable, tenant-bound ClickHouse storage with PostgreSQL admission. This package
-is being implemented for #2813; verification and release evidence belong to its PR.
+Recoverable, tenant-isolated ClickHouse storage with PostgreSQL admission and shared
+installation resources.
 
 The only deployment profile is ClickHouse 25.8.12.129, one node and one fixed HTTPS
 origin, shared tables with tenant-specific read-only credentials, PostgreSQL 17 control
@@ -22,7 +22,8 @@ and content after product reauthorization; never retry with a new identity.
 ref: ClickHouse/ClickHouse src/Interpreters/executeQuery.cpp@v25.8.12.129-lts
 ref: ClickHouse/ClickHouse src/Processors/Sources/PostgreSQLSource.cpp@v25.8.12.129-lts
 ref: ClickHouse/ClickHouse src/QueryPipeline/BlockIO.cpp@v25.8.12.129-lts
-ref: ClickHouse/clickhouse-rs src/insert_formatted.rs@v0.15.3
+ref: ClickHouse/clickhouse-rs src/query.rs@v0.15.3
+ref: ClickHouse/clickhouse-rs src/lib.rs@v0.15.3
 
 ## Installation and authority
 
@@ -50,15 +51,49 @@ with exact tenant row policies on both data tables and no inherited roles. The w
 has installation/guard SELECT, raw/summary INSERT and CREATE TEMPORARY TABLE for
 ClickHouse's `input()` function. It has no permanent schema DDL authority. Maintenance has metadata/data
 SELECT, scoped ALTER DELETE/SHOW COLUMNS, SHOW ACCESS and KILL QUERY; it cannot install schema or
-change policies. Reader/writer/maintenance credentials are separate constructor inputs.
-All clients verify the explicit CA and server identity. Drain and reconstruct stores
-after external role, DDL or server configuration changes.
+change policies. `ConnectionConfig` takes separate writer/maintenance credentials; each `bind_tenant`
+takes its own reader credentials. All clients verify the explicit CA and server
+identity. Drain and reconstruct the affected capabilities after external reader role
+changes, or the owner after installation/service-role/DDL/server configuration changes.
 
 Construction never repairs or installs schema. The deployment fixes synchronous
 inserts, a 1024-block non-replicated dedup window, fsync of inserted parts/directories,
 no dependent materialized views, no automatic TTL and one local read/write server.
 The fixture pins image digest
 `sha256:356f0bbb1c4bade74ca32637e944d8f42109d18f13c51f991ba334f0f0749d20`.
+
+## Resource ownership and tenant capabilities
+
+Create one `ChOwner::new(pool, config, clock, limits, deadline)` for one installation
+and PG permission role. It adopts the pool, validates PG/CH installation identity and
+service privileges, and creates one HTTPS transport. Endpoint equality never merges
+owners or different pools. Do not share its adopted PG pool with another resource owner;
+closing it also closes host-retained pool clones. Construction does not install schema.
+
+Call `owner.bind_tenant(tenant, reader, cursor_key, material_version, deadline)` to
+validate each reader's real identity, exact SELECT grants, absent inherited roles and
+exact tenant policies before returning a `ChStore`. The store implements the core
+ports and `recover`/`progress`, but has no pool constructor or resource-close method.
+Reader configurations share the transport, never another tenant's authentication.
+`max_concurrent_operations` limits complete calls and tenant admission across this owner;
+all queueing, PG acquisition, HTTP work and settlement use the original absolute deadline.
+Per-call scan/output/memory limits remain explicit and do not become process-wide quotas.
+
+Materials are immutable. Products admit a new version, switch their references, then
+`retire(deadline)` the old capability. Retirement permanently refuses new calls and
+waits for admitted calls before releasing materials; it leaves other capabilities and
+the pool usable. Versions identify materials, not an epoch registry or automatic
+revocation of other capabilities. Cursors retain their existing domain/request/installation
+binding: the same key can continue valid cursors, while replacing the key invalidates them.
+
+Keep the owner alive while using stores. Stores hold only a weak resource reference;
+dropping the owner stops admission even while an admitted call still holds resources.
+Call `owner.close(deadline)` to stop admission, drain calls, close PG and release HTTP
+clients. A timed-out or cancelled close/retire stays closed to new calls and can be
+awaited again. Retirement still works after owner drop. Completed cleanup is idempotent.
+INSERT responses are awaited in the admitted call; there is no detached INSERT response
+worker. Releasing clients is not evidence of synchronous Hyper task/socket termination,
+remote query termination or rollback. Uncertain external effects still require recovery.
 
 ## Recovery, reads and maintenance
 
@@ -93,13 +128,13 @@ progress. Completion concerns active stored data, not backup/media erasure.
 `PendingWrite` means recover the already prepared batch before attempting maintenance.
 Unknown effects never become a confirmed rejection. The caller's one absolute Deadline
 covers pool acquisition, locks, transport and settlement. Unsettled PG connections are
-quarantined. `close` stops admission and waits for current calls and the adopted pool;
-the product owns process/task termination and may resume a timed-out close.
+quarantined. The product owns process/task termination and recovery scheduling.
 
 ## Public consumers and proof
 
 The examples `timeseries-clickhouse-schema` and `timeseries-clickhouse` consume only
-public APIs. `hack/timeseries-package-proof.py --source --scenario clickhouse` runs the
+public APIs: two tenants share one owner, and retiring one leaves the other usable.
+`hack/timeseries-package-proof.py --source --scenario clickhouse` runs the
 same behavior with an isolated workspace; `--artifacts DIR --revision SHA` consumes
 only fixed archives and their declared closure. PostgreSQL is a required control
 service, but `rss-timeseries-postgres`, messaging and runtime crates are not dependencies.
