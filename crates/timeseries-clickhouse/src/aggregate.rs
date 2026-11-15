@@ -168,7 +168,6 @@ impl<C: Clock> Operation<'_, C> {
             literal(id)
         );
         let rows = self
-            .resources
             .ch_query(&self.reader, &sql, deadline)?
             .fetch_all::<SummaryRow>()
             .await
@@ -274,7 +273,7 @@ pub(crate) async fn read<C: Clock>(
                 DOMAIN,
                 t,
                 q.binding()?,
-                &store.instance,
+                store.instance,
                 time,
             )?,
             None => (
@@ -338,7 +337,7 @@ pub(crate) async fn read<C: Clock>(
                 store
                     .material
                     .key
-                    .seal(DOMAIN, q.binding()?, &store.instance, expires, &at)?,
+                    .seal(DOMAIN, q.binding()?, store.instance, expires, &at)?,
             )
         } else {
             None

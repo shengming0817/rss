@@ -109,7 +109,6 @@ impl<C: Clock> Operation<'_, C> {
         deadline: Deadline,
     ) -> Result<Vec<Raw>, Error> {
         let mut cursor = self
-            .resources
             .ch_query(&self.reader, sql, deadline)?
             .fetch::<Raw>()
             .map_err(|_| Error::Unavailable)?;
@@ -141,7 +140,7 @@ impl<C: Clock> Operation<'_, C> {
         let mut tx = self.begin(q.selection().scope(), false, deadline).await?;
         let result=async {
             let time=now(tx.connection()).await?;
-            let (expires,previous)=match after {Some(t)=>{let (e,v)=self.material.key.open::<Cursor>(DOMAIN,t,q.binding()?,&self.instance,time)?;(e,Some(v))},None=>(time.checked_add(self.limits.cursor_micros.get() as i64).ok_or(Error::NumericRange)?,None)};
+            let (expires,previous)=match after {Some(t)=>{let (e,v)=self.material.key.open::<Cursor>(DOMAIN,t,q.binding()?,self.instance,time)?;(e,Some(v))},None=>(time.checked_add(self.limits.cursor_micros.get() as i64).ok_or(Error::NumericRange)?,None)};
             let boundary=previous.as_ref().map_or(tx.published,|c|c.boundary);
             if boundary>tx.published || boundary<0 {return Err(Error::InvalidCursor);}
             let fences=control::fences(tx.connection(),q.selection().scope(),self.limits.max_points.get()).await?;
@@ -160,7 +159,7 @@ impl<C: Clock> Operation<'_, C> {
                 groups.insert(group);last=Some(p);rows.push(ObservedSample {sample:s,received_at:Timestamp::new(r.received_at)?});
             }
             q.validate_page(&rows)?;
-            let next=if more {Some(self.material.key.seal(DOMAIN,q.binding()?,&self.instance,expires,&Cursor {boundary,last:last.ok_or(Error::BudgetExceeded)?})?)} else {None};
+            let next=if more {Some(self.material.key.seal(DOMAIN,q.binding()?,self.instance,expires,&Cursor {boundary,last:last.ok_or(Error::BudgetExceeded)?})?)} else {None};
             Ok(Page {rows,availability:control::availability(q,&fences)?,next})
         }.await;
         tx.read(result).await

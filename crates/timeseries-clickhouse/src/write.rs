@@ -237,7 +237,7 @@ impl<C: Clock> Operation<'_, C> {
         p: &Prepared,
         deadline: Deadline,
     ) -> Result<(), Error> {
-        let rows=self.resources.ch_query(&self.reader,"SELECT sample_id,digest,received_at FROM rss_ts_ch.raw FINAL WHERE tenant=? AND namespace=? AND revision=? ORDER BY sample_id",deadline)?
+        let rows=self.ch_query(&self.reader,"SELECT sample_id,digest,received_at FROM rss_ts_ch.raw FINAL WHERE tenant=? AND namespace=? AND revision=? ORDER BY sample_id",deadline)?
             .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).fetch_all::<(String,String,i64)>().await.map_err(|e|projection::provider_error("projection-verification",e))?;
         let mut expected = p
             .rows

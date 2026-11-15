@@ -159,7 +159,7 @@ impl<C: Clock> Operation<'_, C> {
             literal(&attempt.id),
             literal(attempt.target),
             literal(&attempt.digest),
-            literal(&self.instance)
+            literal(self.instance)
         );
         let mut payload = sql.into_bytes();
         payload.push(b'\n');
@@ -217,13 +217,11 @@ impl<C: Clock> Operation<'_, C> {
         // KILL on an already finished query can return no result header at all.
         // Consume its complete HTTP response, then independently verify termination;
         // a successful HTTP status or a sent cancellation alone is not sufficient.
-        self.resources
-            .ch_query(&self.resources.ch.maintenance, &sql, deadline)?
+        self.ch_query(&self.resources.ch.maintenance, &sql, deadline)?
             .execute()
             .await
             .map_err(|e| provider_error("drain-kill", e))?;
         let remaining = self
-            .resources
             .ch_query(
                 &self.resources.ch.maintenance,
                 &format!("SELECT count() FROM system.processes WHERE query_id IN ({ids})"),

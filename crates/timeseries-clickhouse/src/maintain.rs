@@ -140,7 +140,7 @@ impl<C: Clock> Operation<'_, C> {
                 .map(|t| {
                     self.material
                         .key
-                        .open::<u64>(DOMAIN, t, r.binding()?, &self.instance, time)
+                        .open::<u64>(DOMAIN, t, r.binding()?, self.instance, time)
                 })
                 .transpose()?
                 .map(|(_, n)| n);
@@ -162,7 +162,7 @@ impl<C: Clock> Operation<'_, C> {
                     next: self.material.key.seal(
                         DOMAIN,
                         r.binding()?,
-                        &self.instance,
+                        self.instance,
                         expires,
                         &state.ordinal,
                     )?,
@@ -240,7 +240,7 @@ impl<C: Clock> Operation<'_, C> {
                         next: self.material.key.seal(
                             DOMAIN,
                             r.binding()?,
-                            &self.instance,
+                            self.instance,
                             expires,
                             &state.ordinal,
                         )?,
