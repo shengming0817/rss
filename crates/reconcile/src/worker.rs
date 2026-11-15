@@ -73,7 +73,50 @@ struct Active<'a, F> {
     due: BTreeSet<Duration>,
     idle_scan: Duration,
 }
-impl<F: FnMut(Observation)> Active<'_, F> {
+impl<'a, F: FnMut(Observation)> Active<'a, F> {
+    fn new(policy: Policy, observe: F) -> Self {
+        Self {
+            tasks: FuturesUnordered::new(),
+            targets: HashSet::new(),
+            report: Report::default(),
+            observe,
+            due: BTreeSet::new(),
+            idle_scan: policy.idle_scan,
+        }
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "shared claim admission preserves the original scan budget and lease origin"
+    )]
+    fn enqueue<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
+        &mut self,
+        store: &'a S,
+        reconciler: &'a R,
+        scope: &Scope,
+        claims: Vec<S::Claim>,
+        available: usize,
+        policy: Policy,
+        control: &'a Control<'_, T>,
+        started: Duration,
+    ) -> Result<(), Error> {
+        if claims.len() > available {
+            return Err(Error::new(ErrorKind::Invariant));
+        }
+        for claim in claims {
+            let target = claim.target().clone();
+            if target.scope() != scope || !self.targets.insert(target.clone()) {
+                return Err(Error::new(ErrorKind::Invariant));
+            }
+            self.tasks.push(Box::pin(async move {
+                (
+                    target,
+                    execute(store, reconciler, claim, policy, control, started).await,
+                )
+            }));
+        }
+        Ok(())
+    }
+
     async fn drain<T: Timer>(&mut self, control: &Control<'_, T>) -> Result<(), Error> {
         while !self.tasks.is_empty() {
             if let Some((target, outcome)) =
@@ -179,6 +222,64 @@ pub async fn run<
     )
     .await
 }
+/// Execute at most one bounded claim batch for the explicit scope.
+///
+/// The claim limit is the smaller of the policy's batch size and concurrency.
+/// Empty batches return immediately; scan hints never trigger another claim.
+/// A soft `stop` prevents admission but never discards an in-flight claim or its work.
+/// `control` bounds claiming, execution and settlement; hard interruption returns an error.
+/// Dropping this future aborts its work without detaching tasks or proving rollback.
+///
+/// Scan failures are observed and returned without retry. Target failures, including
+/// unconfirmed settlement, retain their original observations and report counters.
+/// `Ok(report)` means the batch's attempts ended, not that every settlement succeeded
+/// or that durable pending work is empty. Observations delivered before an error remain valid.
+/// Keep the observer nonblocking; panics propagate unchanged.
+pub async fn run_batch<
+    S: DurableStore,
+    R: Reconciler<S::Claim>,
+    T: Timer,
+    F: FnMut(Observation) + Send,
+>(
+    store: &S,
+    reconciler: &R,
+    scope: &Scope,
+    policy: Policy,
+    control: &Control<'_, T>,
+    stop: &CancellationToken,
+    observe: F,
+) -> Result<Report, Error> {
+    control.check()?;
+    let mut active = Active::new(policy, observe);
+    if stop.is_cancelled() {
+        return Ok(active.report);
+    }
+    let started = control.elapsed();
+    let available = policy.concurrency.min(policy.claim_batch_size);
+    let batch = match claim_round(store, scope, available, policy, control, &mut active).await {
+        Ok(batch) => batch,
+        Err(error) => {
+            active.scan_error(scope, error.clone());
+            return Err(error);
+        }
+    };
+    if let Err(error) = active.enqueue(
+        store,
+        reconciler,
+        scope,
+        batch.claims,
+        available,
+        policy,
+        control,
+        started,
+    ) {
+        active.drain(control).await?;
+        return Err(error);
+    }
+    active.drain(control).await?;
+    control.check()?;
+    Ok(active.report)
+}
 /// Additionally accept best-effort wake hints; durable scans remain the recovery authority.
 #[allow(
     clippy::too_many_arguments,
@@ -230,14 +331,7 @@ async fn run_inner<
     notify: Option<&Notify>,
     observe: F,
 ) -> Result<Report, Error> {
-    let mut active = Active {
-        tasks: FuturesUnordered::new(),
-        targets: HashSet::new(),
-        report: Report::default(),
-        observe,
-        due: BTreeSet::new(),
-        idle_scan: policy.idle_scan,
-    };
+    let mut active = Active::new(policy, observe);
     loop {
         if stop.is_cancelled() {
             active.drain(control).await?;
@@ -257,23 +351,18 @@ async fn run_inner<
             match batch {
                 Ok(batch) => {
                     more = batch.more;
-                    let claims = batch.claims;
-                    if claims.len() > available {
+                    if let Err(error) = active.enqueue(
+                        store,
+                        reconciler,
+                        scope,
+                        batch.claims,
+                        available,
+                        policy,
+                        control,
+                        started,
+                    ) {
                         active.drain(control).await?;
-                        return Err(Error::new(ErrorKind::Invariant));
-                    }
-                    for claim in claims {
-                        let target = claim.target().clone();
-                        if target.scope() != scope || !active.targets.insert(target.clone()) {
-                            active.drain(control).await?;
-                            return Err(Error::new(ErrorKind::Invariant));
-                        }
-                        active.tasks.push(Box::pin(async move {
-                            (
-                                target,
-                                execute(store, reconciler, claim, policy, control, started).await,
-                            )
-                        }));
+                        return Err(error);
                     }
                 }
                 Err(e)

@@ -96,3 +96,11 @@ fn borrowed_context_query<'a>(
 fn trusted_extension_reborrows_nonstatic_context() {
     let _ = borrowed_context_query;
 }
+
+#[test]
+fn transaction_exposes_original_epoch_without_a_database_query() {
+    fn read(tx: &PgTransaction<'_>) -> rss_transactional_messaging::fence::Epoch {
+        tx.expected_epoch()
+    }
+    let _ = read;
+}

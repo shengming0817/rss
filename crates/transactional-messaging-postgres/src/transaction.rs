@@ -4,7 +4,7 @@ use futures::future::BoxFuture;
 use rss_redact::RedactedSource;
 use rss_request_context::TenantId;
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
-use rss_transactional_messaging::fence::{ExecutionBinding, StorageIdentity};
+use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     policy::{OperationDeadline, within},
@@ -852,6 +852,14 @@ impl PgTransaction<'_> {
     pub const fn tenant_id(&self) -> TenantId {
         self.binding.tenant()
     }
+    /// Original expected epoch bound by the transaction owner.
+    ///
+    /// Companion SQL scope borrowing does not change this identity. This reads the
+    /// admitted binding, never the database's current epoch, and does not re-admit work.
+    #[must_use]
+    pub const fn expected_epoch(&self) -> Epoch {
+        self.binding.epoch()
+    }
     /// Current remaining budget, never a fresh timeout.
     #[must_use]
     pub fn deadline(&self) -> OperationDeadline {
@@ -861,8 +869,8 @@ impl PgTransaction<'_> {
     ///
     /// The host supplies the exact companion execution identity on the same storage.
     /// Its execution fence is checked and held through the outer commit or rollback.
-    /// On success the original tenant and execution context are restored; `tenant_id`
-    /// and outbox ownership never change. This grants no product authorization.
+    /// On success the original tenant and execution context are restored; `tenant_id`,
+    /// `expected_epoch`, and outbox ownership never change. This grants no product authorization.
     /// Errors or cancellation permanently prevent further SQL and commit on this view.
     pub async fn with_tenant_connection<T: Send, F>(
         &mut self,
