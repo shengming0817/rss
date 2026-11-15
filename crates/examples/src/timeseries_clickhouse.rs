@@ -92,7 +92,7 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         .bind_tenant(
             other_tenant,
             credentials(input.other_reader)?,
-            CursorKey::new([43; 32]),
+            CursorKey::new(input.cursor_key),
             m(1)?,
             deadline()?,
         )
