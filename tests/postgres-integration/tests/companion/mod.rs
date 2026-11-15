@@ -8,14 +8,22 @@ use std::sync::Arc;
 pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let target = message("companion").metadata().tenant_id();
     let source = TenantId::parse("00000000-0000-0000-0000-000000000073")?;
+    sqlx::query(
+        "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",
+    )
+    .bind(source.to_string())
+    .execute(owner)
+    .await?;
     let owner_copy = owner.clone();
     runtime.local_tx(crate::execution(target, 1), deadline(), move |tx| Box::pin(async move {
-        let scope: (String, String, String, String) = tx.with_tenant_connection(crate::execution(source, 1), |c| Box::pin(async move {
+        assert_eq!(tx.expected_epoch(), crate::execution(target, 1).epoch());
+        let scope: (String, String, String, String) = tx.with_tenant_connection(crate::execution(source, 2), |c| Box::pin(async move {
             sqlx::query_as("SELECT current_setting('rss.tenant_id'),current_setting('rss.execution_epoch'),current_setting('rss.storage_target'),current_setting('rss.storage_lineage')")
                 .fetch_one(c).await
         })).await?;
-        assert_eq!(scope, (source.to_string(), "1".into(), "01".repeat(16), "02".repeat(16)));
+        assert_eq!(scope, (source.to_string(), "2".into(), "01".repeat(16), "02".repeat(16)));
         assert_eq!(tx.tenant_id(), target);
+        assert_eq!(tx.expected_epoch(), crate::execution(target, 1).epoch());
         let restored: (String, String, String, String) = tx.with_connection(|c| Box::pin(async move {
             sqlx::query_as("SELECT current_setting('rss.tenant_id'),current_setting('rss.execution_epoch'),current_setting('rss.storage_target'),current_setting('rss.storage_lineage')").fetch_one(c).await
         })).await?;
