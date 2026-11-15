@@ -1,5 +1,5 @@
 // ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
-use crate::ChStore;
+use crate::Operation;
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::{Error, Outcome, Scope};
 use sqlx::{PgConnection, Postgres, Row, pool::PoolConnection};
@@ -71,26 +71,10 @@ impl Session {
         }
     }
 }
-impl<C: Clock> ChStore<C> {
-    pub(crate) async fn operation(
-        &self,
-        scope: &Scope,
-        deadline: Deadline,
-    ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, Error> {
-        self.scope(scope)?;
-        self.bounded(deadline, async {
-            let guard = self.operations.read().await;
-            self.scope(scope)?;
-            Ok(guard)
-        })
-        .await
-    }
+impl<C: Clock> Operation<'_, C> {
     pub(crate) fn scope(&self, scope: &Scope) -> Result<(), Error> {
         if scope.tenant() != self.tenant {
             return Err(Error::Unauthorized);
-        }
-        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(Error::Unavailable);
         }
         Ok(())
     }
@@ -99,12 +83,7 @@ impl<C: Clock> ChStore<C> {
         deadline: Deadline,
         f: impl Future<Output = Result<T, Error>>,
     ) -> Result<T, Error> {
-        let remaining = deadline
-            .remaining(self.clock.now())
-            .ok_or(Error::Deadline)?;
-        tokio::time::timeout(remaining, f)
-            .await
-            .map_err(|_| Error::Deadline)?
+        crate::lifecycle::bounded(self.clock, deadline, f).await
     }
     pub(crate) async fn mutation<T>(
         &self,
@@ -124,7 +103,7 @@ impl<C: Clock> ChStore<C> {
     ) -> Result<Session, Error> {
         self.scope(scope)?;
         let mut s = Session {
-            connection: self.pool.acquire().await.map_err(sql_error)?,
+            connection: self.resources.pool.acquire().await.map_err(sql_error)?,
             settled: false,
             published: 0,
             revision: 0,

@@ -1,7 +1,7 @@
 // ref: ClickHouse/clickhouse-rs src/insert_formatted.rs@v0.15.3
 // ref: ClickHouse/ClickHouse src/Interpreters/InterpreterKillQueryQuery.cpp@v25.8.12.129-lts
 use crate::{
-    ChStore,
+    Operation,
     transaction::{bytes, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
@@ -105,7 +105,7 @@ pub(crate) async fn permit(
         target,
     })
 }
-impl<C: Clock> ChStore<C> {
+impl<C: Clock> Operation<'_, C> {
     pub(crate) fn ch_query(
         &self,
         client: &clickhouse::Client,
@@ -169,22 +169,19 @@ impl<C: Clock> ChStore<C> {
         let remaining = deadline
             .remaining(self.clock.now())
             .ok_or(Error::Deadline)?;
-        let mut insert = self
-            .ch
-            .writer
-            .insert_formatted_with(sql)
+        // ref: ClickHouse/clickhouse-rs src/query.rs@v0.15.3
+        // query_raw keeps JSON question marks literal and awaits the response in
+        // this operation, unlike InsertFormatted's detached response task.
+        let mut request = sql;
+        request.push('\n');
+        request.push_str(std::str::from_utf8(&payload).map_err(|_| Error::Invariant)?);
+        self.resources.ch.writer.query_raw(&request)
             .with_setting("query_id", &attempt.query)
-            .with_setting(
-                "insert_deduplication_token",
-                if attempt.target == "summaries" {
-                    format!("{}:summaries:{}", self.instance, attempt.id)
-                } else {
-                    format!(
-                        "{}:raw:{}:{}",
-                        self.instance, attempt.revision, attempt.digest
-                    )
-                },
-            )
+            .with_setting("insert_deduplication_token", if attempt.target == "summaries" {
+                format!("{}:summaries:{}", self.instance, attempt.id)
+            } else {
+                format!("{}:raw:{}:{}", self.instance, attempt.revision, attempt.digest)
+            })
             .with_setting("max_execution_time", remaining.as_secs_f64().to_string())
             .with_setting("input_format_json_read_numbers_as_strings", "0")
             .with_setting("max_insert_threads", "1")
@@ -193,18 +190,7 @@ impl<C: Clock> ChStore<C> {
             .with_setting("min_insert_block_size_bytes", "0")
             .with_setting("input_format_parallel_parsing", "0")
             .with_setting("max_threads", "1")
-            .with_timeouts(Some(remaining), Some(remaining));
-        insert
-            .send(bytes::Bytes::from(payload))
-            .await
-            .map_err(|e| provider_error("insert-send", e))?;
-        if self.fault(4) {
-            std::future::pending::<()>().await;
-        }
-        insert
-            .end()
-            .await
-            .map_err(|e| provider_error("insert-end", e))
+            .execute().await.map_err(|e| provider_error("insert-response", e))
     }
     /// Revocation must already be committed. A zero-result kill is safe only because
     /// late arrivals must start a new PG guard read and cannot acquire that permit.
@@ -221,13 +207,12 @@ impl<C: Clock> ChStore<C> {
         // KILL on an already finished query can return no result header at all.
         // Consume its complete HTTP response, then independently verify termination;
         // a successful HTTP status or a sent cancellation alone is not sufficient.
-        self.ch_query(&self.ch.maintenance, &sql, deadline)?
+        self.resources.ch_query(&self.resources.ch.maintenance, &sql, deadline)?
             .execute()
             .await
             .map_err(|e| provider_error("drain-kill", e))?;
-        let remaining = self
-            .ch_query(
-                &self.ch.maintenance,
+        let remaining = self.resources.ch_query(
+                &self.resources.ch.maintenance,
                 &format!("SELECT count() FROM system.processes WHERE query_id IN ({ids})"),
                 deadline,
             )?

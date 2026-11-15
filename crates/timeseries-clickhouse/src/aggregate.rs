@@ -1,5 +1,5 @@
 use crate::{
-    ChStore,
+    Operation,
     control::{self, Fence},
     projection::{SummaryRow, literal},
     read::{selection, visible},
@@ -39,7 +39,7 @@ pub(crate) fn mask(
     }
     Ok(())
 }
-impl<C: Clock> ChStore<C> {
+impl<C: Clock> Operation<'_, C> {
     pub(crate) async fn predecessor(
         &self,
         spec: &SummarySpec,
@@ -167,8 +167,7 @@ impl<C: Clock> ChStore<C> {
             literal(scope.namespace().as_str()),
             literal(id)
         );
-        let rows = self
-            .ch_query(&self.ch.reader, &sql, deadline)?
+        let rows = self.resources.ch_query(&self.reader, &sql, deadline)?
             .fetch_all::<SummaryRow>()
             .await
             .map_err(|_| Error::Unavailable)?;
@@ -253,7 +252,7 @@ fn cost(bucket: &AggregateBucket) -> usize {
     }
 }
 pub(crate) async fn read<C: Clock>(
-    store: &ChStore<C>,
+    store: &Operation<'_, C>,
     q: &AggregateQuery,
     after: Option<&Continuation>,
     deadline: Deadline,
@@ -270,8 +269,7 @@ pub(crate) async fn read<C: Clock>(
         let time = now(tx.connection()).await?;
         let (expires, mut at) = match after {
             Some(t) => {
-                store
-                    .key
+                store.material.key
                     .open::<Timestamp>(DOMAIN, t, q.binding()?, &store.instance, time)?
             }
             None => (
@@ -332,8 +330,7 @@ pub(crate) async fn read<C: Clock>(
         }
         let next = if at < q.query().window().end() {
             Some(
-                store
-                    .key
+                store.material.key
                     .seal(DOMAIN, q.binding()?, &store.instance, expires, &at)?,
             )
         } else {

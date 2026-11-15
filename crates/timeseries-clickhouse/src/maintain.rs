@@ -1,5 +1,5 @@
 use crate::{
-    ChStore, control,
+    ChStore, Operation, control,
     transaction::{bytes, decode, flatten, now, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
@@ -121,7 +121,7 @@ async fn simple(
     }
     Ok(Step::Done(1))
 }
-impl<C: Clock> ChStore<C> {
+impl<C: Clock> Operation<'_, C> {
     async fn maintenance(
         &self,
         r: &MaintenanceRequest,
@@ -138,7 +138,7 @@ impl<C: Clock> ChStore<C> {
             let time = now(tx.connection()).await?;
             let ordinal = after
                 .map(|t| {
-                    self.key
+                    self.material.key
                         .open::<u64>(DOMAIN, t, r.binding()?, &self.instance, time)
                 })
                 .transpose()?
@@ -158,7 +158,7 @@ impl<C: Clock> ChStore<C> {
             if ordinal.is_some_and(|n| n < state.ordinal) {
                 return Ok(Outcome::Replay(MaintenanceProgress::More {
                     processed: 0,
-                    next: self.key.seal(
+                    next: self.material.key.seal(
                         DOMAIN,
                         r.binding()?,
                         &self.instance,
@@ -236,7 +236,7 @@ impl<C: Clock> ChStore<C> {
                     state.ordinal = state.ordinal.checked_add(1).ok_or(Error::NumericRange)?;
                     MaintenanceProgress::More {
                         processed,
-                        next: self.key.seal(
+                        next: self.material.key.seal(
                             DOMAIN,
                             r.binding()?,
                             &self.instance,
@@ -271,8 +271,9 @@ impl<C: Clock> Maintainer for ChStore<C> {
         after: Option<&Continuation>,
         deadline: Deadline,
     ) -> Result<Outcome<MaintenanceProgress>, Error> {
-        let _guard = self.operation(r.request().scope(), deadline).await?;
-        self.mutation(deadline, self.maintenance(r.request(), after, deadline))
+        let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
+        let operation = owner.operation(self, r.request().scope(), deadline).await?;
+        operation.mutation(deadline, operation.maintenance(r.request(), after, deadline))
             .await
     }
 }
