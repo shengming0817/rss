@@ -5,6 +5,7 @@ pub(crate) async fn rejects_dangerous_acl(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    restored_identifier_constraints(pool, owner, control).await?;
     for (grant, revoke) in [
         (
             "GRANT UPDATE(position,epoch,worker_token) ON rss_projection.checkpoints TO projection_runtime",
@@ -33,6 +34,61 @@ pub(crate) async fn rejects_dangerous_acl(
     }
     isolation_contract(pool, owner, control).await?;
     required_function_permissions(pool, owner, control).await
+}
+
+async fn restored_identifier_constraints(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    for (table, field) in [
+        ("sources", "source_id"),
+        ("checkpoints", "source_id"),
+        ("checkpoints", "projection_id"),
+    ] {
+        let relation = format!("rss_projection.{table}");
+        let name = format!("{table}_{field}_check");
+        let definition: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid=to_regclass($1) AND conname=$2",
+        )
+        .bind(&relation)
+        .bind(&name)
+        .fetch_one(owner)
+        .await?;
+        let drop_constraint = format!("ALTER TABLE {relation} DROP CONSTRAINT {name}");
+        let restore = format!(
+            "ALTER TABLE {relation} DROP CONSTRAINT IF EXISTS {name}; ALTER TABLE {relation} ADD CONSTRAINT {name} {definition}"
+        );
+        // Reparse PostgreSQL's decompiled DDL, as a logical restore does. BETWEEN's
+        // nested AND becomes a flat AND even though the constraint is unchanged.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(restore.as_str()))
+            .execute(owner)
+            .await?;
+        PgStore::new(pool.clone(), control).await?;
+
+        for invalid in [
+            String::new(),
+            format!("{definition} NOT VALID"),
+            format!(
+                "CHECK (octet_length({field}) >= 0 AND octet_length({field}) <= 255 AND ({field} COLLATE \"C\") !~ '[^A-Za-z0-9_.:-]')"
+            ),
+            format!(
+                "CHECK (octet_length({field}) >= 1 AND octet_length({field}) <= 256 AND ({field} COLLATE \"C\") !~ '[^A-Za-z0-9_.:-]')"
+            ),
+            format!("CHECK (octet_length({field}) >= 1 AND octet_length({field}) <= 255)"),
+            format!(
+                "CHECK ((octet_length({field}) >= 1 OR octet_length({field}) <= 255) AND ({field} COLLATE \"C\") !~ '[^A-Za-z0-9_.:-]')"
+            ),
+        ] {
+            let change = if invalid.is_empty() {
+                drop_constraint.clone()
+            } else {
+                format!("{drop_constraint}; ALTER TABLE {relation} ADD CONSTRAINT {name} {invalid}")
+            };
+            assert_drift(pool, owner, control, &change, &restore).await?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn borrowed_timeout_rolls_back(
