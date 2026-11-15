@@ -43,7 +43,7 @@ saga-pg = ["execution-pg", "dep:rss-saga", "dep:rss-saga-postgres", "dep:rss-con
 reconcile-messaging = ["reconcile-pg", "rss-reconcile-postgres/transactional-messaging", "dep:rss-transactional-messaging", "dep:rss-transactional-messaging-postgres"]
 saga-runtime = ["saga-pg", "rss-saga/rss-runtime", "rss-saga-postgres/rss-runtime", "dep:rss-runtime"]
 
-reconcile-core = ["dep:rss-reconcile", "dep:rss-request-context"]
+reconcile-core = ["dep:rss-reconcile", "dep:rss-request-context", "dep:tokio", "dep:tokio-util"]
 device-command-core = ["dep:rss-device-command", "dep:rss-request-context"]
 projection-core = ["dep:rss-projection", "dep:rss-request-context", "dep:tokio", "dep:tokio-util"]
 saga-core = ["dep:rss-saga", "dep:rss-request-context", "dep:rss-contract"]

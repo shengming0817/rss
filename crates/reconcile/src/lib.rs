@@ -13,4 +13,4 @@ pub use model::{Completion, Error, ErrorKind, Scope, Target};
 pub use policy::{Policy, PolicyConfig};
 pub use ports::{Claim, DurableStore, Reconciler};
 pub use resources::{ClaimBatch, ReconcileStep, ResourceSet};
-pub use worker::{Observation, Report, Stage, run, run_with_notify};
+pub use worker::{Observation, Report, Stage, run, run_batch, run_with_notify};

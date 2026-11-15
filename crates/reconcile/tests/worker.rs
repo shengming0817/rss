@@ -1856,3 +1856,250 @@ async fn capped_retries_survive_runner_restart_and_early_notifications() -> anyh
     );
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn batch_claims_once_with_each_budget_and_returns_on_empty() -> anyhow::Result<()> {
+    for (rows, batch_size, concurrency, scan_budget, expected) in [
+        (0, 4, 4, 4, 0),
+        (5, 1, 4, 4, 1),
+        (5, 4, 1, 4, 1),
+        (5, 4, 4, 1, 1),
+    ] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(1), &cancel);
+        let store = idle_store();
+        let scope = scope()?;
+        for i in 0..rows {
+            store
+                .wake(
+                    &Target::new(scope.clone(), format!("batch-{i}"))?,
+                    &ResourceSet::empty(scope.tenant()),
+                    &control,
+                )
+                .await?;
+        }
+        let policy = Policy::try_from(PolicyConfig {
+            claim_batch_size: batch_size,
+            concurrency,
+            scan_budget,
+            lease_ttl: Duration::from_millis(15),
+            attempt_timeout: Duration::from_millis(100),
+            scan_interval: Duration::from_millis(2),
+            idle_scan_interval: Duration::from_millis(2),
+            initial_backoff: Duration::from_millis(2),
+            max_backoff: Duration::from_millis(8),
+            max_attempts: 2,
+        })?;
+        let work = business(0);
+        let report = run_batch(&store, &work, &scope, policy, &control, &stop, |_| {}).await?;
+        assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(store.finishes.load(Ordering::SeqCst), expected);
+        assert_eq!(report.reobserve, expected as u64);
+        assert!(clock.now() < Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_soft_stop_preserves_inflight_claim_and_settlement() -> anyhow::Result<()> {
+    for (claim_delay, stop_at) in [(Some(20), 1), (None, 1), (None, 5)] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(1), &cancel);
+        let mut store = idle_store();
+        store.scan_delay = claim_delay.map(|ms| (0, Duration::from_millis(ms)));
+        store.finish_delay = Some(Duration::from_millis(20));
+        let scope = scope()?;
+        store
+            .wake(
+                &Target::new(scope.clone(), "batch")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
+            .await?;
+        let work = business(0);
+        let runner = run_batch(&store, &work, &scope, policy()?, &control, &stop, |_| {});
+        tokio::pin!(runner);
+        tokio::select! {
+            result = &mut runner => anyhow::bail!("early batch: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(stop_at)) => stop.cancel(),
+        }
+        let report = runner.await?;
+        assert_eq!(report.reobserve, 1);
+        assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(store.finishes.load(Ordering::SeqCst), 1);
+        assert!(!store.lock()[0].leased);
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_stop_before_admission_and_hard_control_are_distinct() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let store = idle_store();
+    let work = business(0);
+    let scope = scope()?;
+    let control = Control::new(&clock, Duration::from_secs(1), &cancel);
+    let report = run_batch(&store, &work, &scope, policy()?, &control, &stop, |_| {}).await?;
+    assert_eq!(report.execution_failed, 0);
+    cancel.cancel();
+    assert_eq!(
+        run_batch(&store, &work, &scope, policy()?, &control, &stop, |_| {})
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Cancelled
+    );
+    let live = CancellationToken::new();
+    let expired = Control::new(&clock, Duration::ZERO, &live);
+    assert_eq!(
+        run_batch(&store, &work, &scope, policy()?, &expired, &stop, |_| {})
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Deadline
+    );
+    assert_eq!(store.scans.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_hard_interruptions_never_report_success_or_detach_work() -> anyhow::Result<()> {
+    for phase in ["claim", "apply", "finish"] {
+        for deadline in [false, true] {
+            let clock = Clock::new();
+            let cancel = CancellationToken::new();
+            let stop = CancellationToken::new();
+            let control = Control::new(&clock, Duration::from_millis(10), &cancel);
+            let mut store = idle_store();
+            if phase == "claim" {
+                store.scan_delay = Some((0, Duration::from_secs(1)));
+            }
+            if phase == "finish" {
+                store.finish_delay = Some(Duration::from_secs(1));
+            }
+            let scope = scope()?;
+            store
+                .wake(
+                    &Target::new(scope.clone(), "interrupted")?,
+                    &ResourceSet::empty(scope.tenant()),
+                    &control,
+                )
+                .await?;
+            let work = business(if phase == "apply" { 2 } else { 0 });
+            let runner = run_batch(&store, &work, &scope, policy()?, &control, &stop, |_| {});
+            tokio::pin!(runner);
+            if !deadline {
+                tokio::select! {
+                    result = &mut runner => anyhow::bail!("early batch: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(5)) => cancel.cancel(),
+                }
+            }
+            let error = runner.await.unwrap_err();
+            assert_eq!(
+                error.kind(),
+                if deadline {
+                    ErrorKind::Deadline
+                } else {
+                    ErrorKind::Cancelled
+                }
+            );
+            assert_eq!(work.active.load(Ordering::SeqCst), 0);
+            assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
+            assert!(store.lock()[0].leased);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_scan_errors_are_observed_and_returned_without_retry() -> anyhow::Result<()> {
+    for kind in [
+        ErrorKind::Transient,
+        ErrorKind::CommitUnknown,
+        ErrorKind::RollbackFailed,
+    ] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(1), &cancel);
+        let mut store = idle_store();
+        store.scan_failure = Some(kind);
+        let work = business(0);
+        let scope = scope()?;
+        let mut events = Vec::new();
+        let error = run_batch(&store, &work, &scope, policy()?, &control, &stop, |e| {
+            events.push(e)
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), kind);
+        assert!(
+            matches!(events.as_slice(), [Observation::ScanFailed { error, .. }] if error.kind() == kind)
+        );
+        assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(work.observed.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_preserves_uncertain_settlement_and_durable_retry_classification()
+-> anyhow::Result<()> {
+    for case in ["unknown", "finish-timeout", "retry", "suspended"] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(2), &cancel);
+        let mut store = idle_store();
+        if case == "unknown" {
+            store.finish_failure = Some(ErrorKind::CommitUnknown);
+        }
+        if case == "finish-timeout" {
+            store.finish_delay = Some(Duration::from_secs(1));
+        }
+        let work = business(if matches!(case, "retry" | "suspended") {
+            1
+        } else {
+            0
+        });
+        let scope = scope()?;
+        store
+            .wake(
+                &Target::new(scope.clone(), "result")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
+            .await?;
+        let mut events = Vec::new();
+        let report = run_batch(
+            &store,
+            &work,
+            &scope,
+            policy_with_attempts(if case == "suspended" { 1 } else { 2 })?,
+            &control,
+            &stop,
+            |e| events.push(e),
+        )
+        .await?;
+        assert_eq!(report.converged + report.reobserve, 0);
+        if matches!(case, "unknown" | "finish-timeout") {
+            assert_eq!(report.execution_failed, 1);
+            assert_eq!(store.finishes.load(Ordering::SeqCst), 0);
+            assert!(
+                matches!(events.as_slice(), [Observation::AttemptFailed { stage: Stage::Finish, error, .. }] if error.kind() == ErrorKind::CommitUnknown)
+            );
+        } else {
+            assert_eq!(report.retried, u64::from(case == "retry"));
+            assert_eq!(report.suspended, u64::from(case == "suspended"));
+            assert_eq!(store.finishes.load(Ordering::SeqCst), 1);
+        }
+    }
+    Ok(())
+}
