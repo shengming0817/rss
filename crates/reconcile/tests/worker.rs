@@ -1952,7 +1952,8 @@ async fn batch_stop_before_admission_and_hard_control_are_distinct() -> anyhow::
     assert_eq!(
         run_batch(&store, &work, &scope, policy()?, &control, &stop, |_| {})
             .await
-            .unwrap_err()
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("batch must return an error"))?
             .kind(),
         ErrorKind::Cancelled
     );
@@ -1961,7 +1962,8 @@ async fn batch_stop_before_admission_and_hard_control_are_distinct() -> anyhow::
     assert_eq!(
         run_batch(&store, &work, &scope, policy()?, &expired, &stop, |_| {})
             .await
-            .unwrap_err()
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("batch must return an error"))?
             .kind(),
         ErrorKind::Deadline
     );
@@ -2001,7 +2003,10 @@ async fn batch_hard_interruptions_never_report_success_or_detach_work() -> anyho
                     () = tokio::time::sleep(Duration::from_millis(5)) => cancel.cancel(),
                 }
             }
-            let error = runner.await.unwrap_err();
+            let error = runner
+                .await
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("batch must return an error"))?;
             assert_eq!(
                 error.kind(),
                 if deadline {
@@ -2038,7 +2043,8 @@ async fn batch_scan_errors_are_observed_and_returned_without_retry() -> anyhow::
             events.push(e)
         })
         .await
-        .unwrap_err();
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("batch must return an error"))?;
         assert_eq!(error.kind(), kind);
         assert!(
             matches!(events.as_slice(), [Observation::ScanFailed { error, .. }] if error.kind() == kind)
