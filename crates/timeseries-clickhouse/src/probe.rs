@@ -1,13 +1,12 @@
-use crate::{Connections, transaction::sql_error};
+use crate::{config::Connections, transaction::sql_error};
 use rss_request_context::TenantId;
 use rss_timeseries::Error;
 use sqlx::{PgPool, postgres::PgSslMode};
 use std::collections::BTreeSet;
 
-pub(crate) async fn validate(
+pub(crate) async fn installation(
     pool: &PgPool,
     ch: &Connections,
-    tenant: TenantId,
 ) -> Result<String, Error> {
     if !matches!(pool.connect_options().get_ssl_mode(), PgSslMode::VerifyFull) {
         return Err(Error::Unauthorized);
@@ -33,28 +32,8 @@ pub(crate) async fn validate(
     .fetch_one(pool)
     .await
     .map_err(sql_error)?;
-    for (client, user) in [
-        (&ch.reader, &ch.users[0]),
-        (&ch.writer, &ch.users[1]),
-        (&ch.maintenance, &ch.users[2]),
-    ] {
-        let rows = client
-            .query("SELECT version(),currentUser()")
-            .fetch_all::<(String, String)>()
-            .await
-            .map_err(|_| Error::Unavailable)?;
-        if rows != vec![("25.8.12.129".into(), user.clone())] {
-            return Err(Error::Unsupported);
-        }
-        if client
-            .query("SELECT id FROM rss_ts_ch.installation")
-            .fetch_all::<String>()
-            .await
-            .map_err(|_| Error::Unavailable)?
-            != vec![instance.clone()]
-        {
-            return Err(Error::Invariant);
-        }
+    for (client, user) in [(&ch.writer, &ch.users[0]), (&ch.maintenance, &ch.users[1])] {
+        identity(client, user, &instance).await?;
     }
     crate::control_probe::validate(pool)
         .await
@@ -65,9 +44,6 @@ pub(crate) async fn validate(
     service_grants(ch)
         .await
         .map_err(|e| diagnose("service-grants", e))?;
-    reader(ch, tenant)
-        .await
-        .map_err(|e| diagnose("tenant-reader", e))?;
     let guard = ch
         .writer
         .query("SELECT installation,primary_server,tls,guard_user FROM rss_ts_ch.guard_identity")
@@ -78,6 +54,22 @@ pub(crate) async fn validate(
         return Err(Error::Unauthorized);
     }
     Ok(instance)
+}
+async fn identity(client: &clickhouse::Client, user: &str, instance: &str) -> Result<(), Error> {
+    let rows = client.query("SELECT version(),currentUser()")
+        .fetch_all::<(String, String)>().await.map_err(|_| Error::Unavailable)?;
+    if rows != vec![("25.8.12.129".into(), user.into())] { return Err(Error::Unsupported); }
+    if client.query("SELECT id FROM rss_ts_ch.installation").fetch_all::<String>()
+        .await.map_err(|_| Error::Unavailable)? != vec![instance.to_owned()] {
+        return Err(Error::Invariant);
+    }
+    Ok(())
+}
+pub(crate) async fn tenant(
+    ch: &Connections, client: &clickhouse::Client, user: &str, tenant: TenantId, instance: &str,
+) -> Result<(), Error> {
+    identity(client, user, instance).await?;
+    reader(ch, user, tenant).await.map_err(|e| diagnose("tenant-reader", e))
 }
 fn compact(s: &str) -> String {
     s.chars().filter(|c| !c.is_ascii_whitespace()).collect()
@@ -181,18 +173,18 @@ async fn catalog(ch: &Connections) -> Result<(), Error> {
     }
     Ok(())
 }
-async fn reader(ch: &Connections, tenant: TenantId) -> Result<(), Error> {
+async fn reader(ch: &Connections, user: &str, tenant: TenantId) -> Result<(), Error> {
     let roles = ch
         .maintenance
         .query("SELECT count() FROM system.role_grants WHERE user_name=?")
-        .bind(&ch.users[0])
+        .bind(user)
         .fetch_all::<u64>()
         .await
         .map_err(|_| Error::Unauthorized)?;
     if roles != vec![0] {
         return Err(diagnose("reader-check", Error::Unauthorized));
     }
-    let policies=ch.maintenance.query("SELECT table,ifNull(select_filter,''),is_restrictive FROM system.row_policies WHERE database='rss_ts_ch' AND (apply_to_all OR has(apply_to_list,?)) AND NOT has(apply_to_except,?) ORDER BY table,name").bind(&ch.users[0]).bind(&ch.users[0]).fetch_all::<(String,String,u8)>().await.map_err(|_|diagnose("reader-query",Error::Unauthorized))?;
+    let policies=ch.maintenance.query("SELECT table,ifNull(select_filter,''),is_restrictive FROM system.row_policies WHERE database='rss_ts_ch' AND (apply_to_all OR has(apply_to_list,?)) AND NOT has(apply_to_except,?) ORDER BY table,name").bind(user).bind(user).fetch_all::<(String,String,u8)>().await.map_err(|_|diagnose("reader-query",Error::Unauthorized))?;
     let condition = format!("tenant='{}'", tenant);
     let policies = policies
         .into_iter()
@@ -215,7 +207,7 @@ async fn reader(ch: &Connections, tenant: TenantId) -> Result<(), Error> {
         );
         return Err(diagnose("reader-policy-shape", Error::Unauthorized));
     }
-    let grants=ch.maintenance.query("SELECT toString(access_type),ifNull(database,''),ifNull(table,''),ifNull(column,''),grant_option,is_partial_revoke FROM system.grants WHERE user_name=? ORDER BY database,table,access_type").bind(&ch.users[0]).fetch_all::<(String,String,String,String,u8,u8)>().await.map_err(|_|diagnose("reader-query",Error::Unauthorized))?;
+    let grants=ch.maintenance.query("SELECT toString(access_type),ifNull(database,''),ifNull(table,''),ifNull(column,''),grant_option,is_partial_revoke FROM system.grants WHERE user_name=? ORDER BY database,table,access_type").bind(user).fetch_all::<(String,String,String,String,u8,u8)>().await.map_err(|_|diagnose("reader-query",Error::Unauthorized))?;
     let expected = ["installation", "raw", "summaries"]
         .map(|t| {
             (
@@ -237,7 +229,7 @@ async fn reader(ch: &Connections, tenant: TenantId) -> Result<(), Error> {
 }
 
 async fn service_grants(ch: &Connections) -> Result<(), Error> {
-    for (index, user) in ch.users.iter().enumerate().skip(1) {
+    for (index, user) in ch.users.iter().enumerate() {
         let roles = ch
             .maintenance
             .query("SELECT count() FROM system.role_grants WHERE user_name=?")
@@ -254,7 +246,7 @@ async fn service_grants(ch: &Connections) -> Result<(), Error> {
             if !column.is_empty() || grant != 0 || revoke != 0 {
                 return Err(Error::Unauthorized);
             }
-            let valid = if index == 1 {
+            let valid = if index == 0 {
                 (access == "CREATE TEMPORARY TABLE" && db.is_empty() && table.is_empty())
                     || db == "rss_ts_ch"
                         && ((access == "SELECT"
@@ -290,7 +282,7 @@ async fn service_grants(ch: &Connections) -> Result<(), Error> {
             }
             capabilities.insert((access, db, table));
         }
-        let required = if index == 1 {
+        let required = if index == 0 {
             vec![
                 ("CREATE TEMPORARY TABLE", "", ""),
                 ("SELECT", "rss_ts_ch", "installation"),
