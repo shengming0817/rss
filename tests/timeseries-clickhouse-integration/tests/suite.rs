@@ -1,8 +1,11 @@
+mod lifecycle;
 mod regressions;
 mod transport;
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::*;
-use rss_timeseries_clickhouse::{ChStore, Connections, Credentials, CursorKey, Fault, Limits};
+use rss_timeseries_clickhouse::{
+    ChOwner, ChStore, ConnectionConfig, Credentials, CursorKey, Fault, Limits,
+};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
@@ -28,6 +31,7 @@ fn id(s: &str) -> anyhow::Result<Id> {
 }
 fn limits() -> anyhow::Result<Limits> {
     Ok(Limits {
+        max_concurrent_operations: NonZeroU32::new(16).ok_or(Error::InvalidInput)?,
         max_points: NonZeroU32::new(100).ok_or_else(|| anyhow::anyhow!("positive"))?,
         max_series: NonZeroU32::new(20).ok_or_else(|| anyhow::anyhow!("positive"))?,
         max_bytes: NonZeroU32::new(1024 * 1024).ok_or_else(|| anyhow::anyhow!("positive"))?,
@@ -138,10 +142,39 @@ fn confirmed<T>(v: Outcome<T>) -> anyhow::Result<T> {
 
 const ROLES: &str = "CREATE ROLE ch_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE ch_runtime LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; CREATE ROLE ch_guard LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE rss_test TO ch_owner;";
 const GRANTS: &str = "GRANT USAGE ON SCHEMA rss_ts_ch TO ch_runtime,ch_guard; GRANT SELECT ON rss_ts_ch.installation TO ch_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_ts_ch.namespaces,rss_ts_ch.definitions,rss_ts_ch.streams,rss_ts_ch.batches,rss_ts_ch.identities,rss_ts_ch.attempts,rss_ts_ch.fences,rss_ts_ch.plans,rss_ts_ch.summaries,rss_ts_ch.ranges TO ch_runtime; GRANT SELECT ON rss_ts_ch.active_attempts,rss_ts_ch.guard_identity TO ch_guard;";
+// Test assembly retains the explicit resource owner; production has no owning Store facade.
+struct OwnedStore {
+    access: ChStore<Timer>,
+    owner: ChOwner<Timer>,
+}
+impl std::ops::Deref for OwnedStore {
+    type Target = ChStore<Timer>;
+    fn deref(&self) -> &Self::Target {
+        &self.access
+    }
+}
+fn credentials(user: &str) -> Result<Credentials, Error> {
+    Credentials::new(user.into(), "fixture-only".into())
+}
+async fn bind(
+    owner: &ChOwner<Timer>,
+    tenant: &str,
+    reader: &str,
+) -> anyhow::Result<ChStore<Timer>> {
+    Ok(owner
+        .bind_tenant(
+            TenantId::parse(tenant)?,
+            credentials(reader)?,
+            CursorKey::new([42; 32]),
+            NonZeroU64::new(1).ok_or(Error::InvalidInput)?,
+            deadline()?,
+        )
+        .await?)
+}
 struct Fixture {
     admin: PgPool,
     pool: PgPool,
-    store: ChStore<Timer>,
+    store: OwnedStore,
     ch: testkit::ClickHouseFixture,
     pg: testkit::PgTlsFixture,
     _network: testkit::BridgeNetwork,
@@ -237,7 +270,7 @@ impl Fixture {
         pool: PgPool,
         tenant: &str,
         reader: &str,
-    ) -> anyhow::Result<ChStore<Timer>> {
+    ) -> anyhow::Result<OwnedStore> {
         Self::connect_options(ch, pool, tenant, reader, "ch_writer", limits()?).await
     }
     async fn connect_options(
@@ -247,25 +280,16 @@ impl Fixture {
         reader: &str,
         writer: &str,
         limits: Limits,
-    ) -> anyhow::Result<ChStore<Timer>> {
-        let c = |name: &str| Credentials::new(name.into(), "fixture-only".into());
-        let connections = Connections::new(
+    ) -> anyhow::Result<OwnedStore> {
+        let config = ConnectionConfig::new(
             ch.endpoint(),
             ch.ca_pem().as_bytes(),
-            c(reader)?,
-            c(writer)?,
-            c("ch_maint")?,
+            credentials(writer)?,
+            credentials("ch_maint")?,
         )?;
-        Ok(ChStore::new(
-            TenantId::parse(tenant)?,
-            pool,
-            connections,
-            Timer,
-            limits,
-            CursorKey::new([42; 32]),
-            deadline()?,
-        )
-        .await?)
+        let owner = ChOwner::new(pool, config, Timer, limits, deadline()?).await?;
+        let access = bind(&owner, tenant, reader).await?;
+        Ok(OwnedStore { access, owner })
     }
     async fn register(&self, d: &Definition) -> anyhow::Result<()> {
         confirmed(
@@ -453,7 +477,7 @@ async fn isolation_definition_retirement_and_cursors() -> anyhow::Result<()> {
             .await,
         Err(Error::InvalidCursor)
     ));
-    let other = Fixture::connect(&f.ch, f.pool.clone(), OTHER, "ch_other").await?;
+    let other = bind(&f.store.owner, OTHER, "ch_other").await?;
     let oq = Authorized::<Query>::verify(
         &authority(OTHER)?,
         query(&definition(OTHER)?, QueryMode::History, 10)?,
@@ -650,10 +674,9 @@ async fn rejects_unsafe_admission_and_tls_identity() -> anyhow::Result<()> {
     );
     let credentials = || Credentials::new("x".into(), "fixture-only".into());
     assert!(
-        Connections::new(
+        ConnectionConfig::new(
             "http://localhost",
             f.ch.ca_pem().as_bytes(),
-            credentials()?,
             credentials()?,
             credentials()?
         )
@@ -705,6 +728,8 @@ mod examples {
         input["endpoint"] = serde_json::json!(f.ch.endpoint());
         input["ch_ca"] = serde_json::json!(f.ch.ca_pem());
         input["reader"] = serde_json::json!("ch_reader");
+        input["other_tenant"] = serde_json::json!(OTHER);
+        input["other_reader"] = serde_json::json!("ch_other");
         input["writer"] = serde_json::json!("ch_writer");
         input["maintenance"] = serde_json::json!("ch_maint");
         input["ch_password"] = serde_json::json!("fixture-only");
@@ -853,7 +878,7 @@ async fn typed_values_and_custom_dimensions_roundtrip() -> anyhow::Result<()> {
             d.clone(),
             id("device")?,
             id("resource")?,
-            [(id("channel")?, id("温度'\\sensor")?)].into(),
+            [(id("channel")?, id("温度'\\sensor?fields??")?)].into(),
         )?;
         let sample = Sample::new(SampleInput {
             stream: stream.clone(),
@@ -901,16 +926,15 @@ mod crash {
         Ok(Definition::new(spec)?)
     }
     #[tokio::test]
-    async fn process_death_after_partial_publication_recovers() -> anyhow::Result<()> {
+    async fn process_death_before_publication_recovers() -> anyhow::Result<()> {
         use tokio::io::AsyncWriteExt;
         let f = Fixture::new("ch-crash").await?;
         let d = crash_definition()?;
         f.register(&d).await?;
-        let root = std::env::temp_dir().join(format!("rss-ch-crash-{}", std::process::id()));
-        std::fs::create_dir_all(&root)?;
-        let marker = root.join("prepared");
+        let proxy = transport::Proxy::new(&f.ch).await?;
+        proxy.arm(4);
         let p = f.pg.params();
-        let input = serde_json::json!({"host":p.host,"port":p.port,"database":p.database,"pg_ca":f.pg.ca_pem(),"endpoint":f.ch.endpoint(),"ch_ca":f.ch.ca_pem(),"marker":marker});
+        let input = serde_json::json!({"host":p.host,"port":p.port,"database":p.database,"pg_ca":f.pg.ca_pem(),"endpoint":proxy.endpoint,"ch_ca":proxy.ca});
         let mut child = tokio::process::Command::new(std::env::current_exe()?)
             .args(["--exact", "crash::child", "--ignored", "--nocapture"])
             .stdin(std::process::Stdio::piped())
@@ -921,22 +945,11 @@ mod crash {
         let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("stdin"))?;
         stdin.write_all(&serde_json::to_vec(&input)?).await?;
         drop(stdin);
-        let ready = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                if f.ch.sql("SELECT count() FROM system.processes WHERE query LIKE 'INSERT INTO rss_ts_ch.raw%'").await?.trim()!="0" {
-                    break;
-                }
-                if child.try_wait()?.is_some() {
-                    anyhow::bail!("child exited before the real storage boundary");
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Ok::<_, anyhow::Error>(())
-        })
-        .await;
+        let ready = proxy.wait_held().await;
         child.kill().await?;
         child.wait().await?;
-        ready??;
+        ready?;
+        proxy.release();
         assert!(f.read(&d).await?.rows.is_empty());
         let reopened = Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader").await?;
         let result = confirmed(
@@ -951,7 +964,6 @@ mod crash {
             24
         );
         assert_eq!(f.read(&d).await?.rows.len(), 24);
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[tokio::test]
@@ -981,25 +993,14 @@ mod crash {
                     .ssl_root_cert_from_pem(text("pg_ca")?.as_bytes().to_vec()),
             )
             .await?;
-        let c = |user: &str| Credentials::new(user.into(), "fixture-only".into());
-        let connections = Connections::new(
+        let config = ConnectionConfig::new(
             text("endpoint")?,
             text("ch_ca")?.as_bytes(),
-            c("ch_reader")?,
-            c("ch_writer")?,
-            c("ch_maint")?,
+            credentials("ch_writer")?,
+            credentials("ch_maint")?,
         )?;
-        let store = ChStore::new(
-            TenantId::parse(TENANT)?,
-            pool,
-            connections,
-            Timer,
-            limits()?,
-            CursorKey::new([42; 32]),
-            deadline()?,
-        )
-        .await?;
-        store.inject_next_fault(Fault::BeforeInsertEnd);
+        let owner = ChOwner::new(pool, config, Timer, limits()?, deadline()?).await?;
+        let store = bind(&owner, TENANT, "ch_reader").await?;
         let d = crash_definition()?;
         let dimensions = (0..64)
             .map(|n| Ok((Id::new(format!("k{n:02}"))?, Id::new("x".repeat(256))?)))
@@ -1021,7 +1022,6 @@ mod crash {
                 .await?,
             Outcome::Unknown
         ));
-        std::fs::write(text("marker")?, b"projected-not-published")?;
         std::future::pending::<()>().await;
         Ok(())
     }

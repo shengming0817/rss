@@ -26,6 +26,10 @@ struct State {
     saved: Mutex<Option<Captured>>,
     upstream: String,
     http: Http,
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    connections: AtomicUsize,
+    requests: Mutex<Vec<(usize, String)>>,
 }
 pub(super) struct Proxy {
     pub endpoint: String,
@@ -73,6 +77,10 @@ impl Proxy {
             saved: Mutex::new(None),
             upstream: ch.endpoint().into(),
             http,
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            connections: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("https://localhost:{}", listener.local_addr()?.port());
@@ -82,8 +90,8 @@ impl Proxy {
             loop {
                 tokio::select! {
                     accepted=listener.accept()=>{let Ok((tcp,_))=accepted else {break;};let acceptor=acceptor.clone();let state=shared.clone();connections.spawn(async move {
-                        let tls=acceptor.accept(tcp).await?;
-                        hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls),hyper::service::service_fn(move |request|serve(state.clone(),request))).await?;
+                        let tls=acceptor.accept(tcp).await?;let connection=state.connections.fetch_add(1,Ordering::SeqCst);
+                        hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls),hyper::service::service_fn(move |request|serve(state.clone(),connection,request))).await?;
                         Ok::<_,anyhow::Error>(())
                     });}
                     Some(_)=connections.join_next(),if !connections.is_empty()=>{}
@@ -118,26 +126,38 @@ impl Proxy {
         );
         Ok(())
     }
-    pub async fn store(&self, pool: PgPool) -> anyhow::Result<ChStore<Timer>> {
-        let c = |user: &str| Credentials::new(user.into(), "fixture-only".into());
-        Ok(ChStore::new(
-            TenantId::parse(TENANT)?,
-            pool,
-            Connections::new(
-                &self.endpoint,
-                self.ca.as_bytes(),
-                c("ch_reader")?,
-                c("ch_writer")?,
-                c("ch_maint")?,
-            )?,
-            Timer,
-            limits()?,
-            CursorKey::new([42; 32]),
-            deadline()?,
-        )
-        .await?)
+    pub async fn store(&self, pool: PgPool) -> anyhow::Result<OwnedStore> {
+        self.store_with_limits(pool, limits()?).await
+    }
+    pub async fn store_with_limits(
+        &self,
+        pool: PgPool,
+        limits: Limits,
+    ) -> anyhow::Result<OwnedStore> {
+        let config = ConnectionConfig::new(
+            &self.endpoint,
+            self.ca.as_bytes(),
+            credentials("ch_writer")?,
+            credentials("ch_maint")?,
+        )?;
+        let owner = ChOwner::new(pool, config, Timer, limits, deadline()?).await?;
+        let access = bind(&owner, TENANT, "ch_reader").await?;
+        Ok(OwnedStore { access, owner })
+    }
+    pub async fn wait_held(&self) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(15), self.state.entered.acquire())
+            .await??
+            .forget();
+        Ok(())
+    }
+    pub fn release(&self) {
+        self.state.release.add_permits(1);
+    }
+    pub async fn requests(&self) -> Vec<(usize, String)> {
+        self.state.requests.lock().await.clone()
     }
 }
+
 async fn forward(state: &State, request: Captured) -> anyhow::Result<Response<Full<Bytes>>> {
     let target = format!(
         "{}{}",
@@ -167,9 +187,17 @@ async fn forward(state: &State, request: Captured) -> anyhow::Result<Response<Fu
 }
 async fn serve(
     state: Arc<State>,
+    connection: usize,
     request: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, std::io::Error> {
     let (parts, body) = request.into_parts();
+    let user = parts
+        .headers
+        .get("x-clickhouse-user")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    state.requests.lock().await.push((connection, user));
     let data = Limited::new(body, 8 * 1024 * 1024)
         .collect()
         .await
@@ -206,6 +234,15 @@ async fn serve(
     if mode == 1 && response.status().is_success() {
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("discarded real response"));
+    }
+    if mode == 4 && response.status().is_success() {
+        state.entered.add_permits(1);
+        state
+            .release
+            .acquire()
+            .await
+            .map_err(|_| std::io::Error::other("gate closed"))?
+            .forget();
     }
     Ok(response)
 }
@@ -349,7 +386,7 @@ async fn revoke_drains_a_real_query_with_an_old_guard_snapshot() -> anyhow::Resu
     Ok(())
 }
 
-async fn replacement_writer(f: &Fixture) -> anyhow::Result<ChStore<Timer>> {
+async fn replacement_writer(f: &Fixture) -> anyhow::Result<OwnedStore> {
     f.ch.sql("CREATE USER ch_writer_next IDENTIFIED WITH sha256_password BY 'fixture-only'; GRANT SELECT ON rss_ts_ch.installation TO ch_writer_next; GRANT SELECT ON rss_ts_ch.active_attempts TO ch_writer_next; GRANT SELECT ON rss_ts_ch.guard_identity TO ch_writer_next; GRANT INSERT ON rss_ts_ch.raw TO ch_writer_next; GRANT INSERT ON rss_ts_ch.summaries TO ch_writer_next; GRANT CREATE TEMPORARY TABLE ON *.* TO ch_writer_next;").await?;
     Fixture::connect_options(
         &f.ch,

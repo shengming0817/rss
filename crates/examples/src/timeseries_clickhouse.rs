@@ -1,7 +1,9 @@
 //! Public consumption of the single ClickHouse/PG profile; products own provisioning.
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::*;
-use rss_timeseries_clickhouse::{ChStore, Connections, Credentials, CursorKey, Limits};
+use rss_timeseries_clickhouse::{
+    ChOwner, ChStore, ConnectionConfig, Credentials, CursorKey, Limits,
+};
 use std::{
     num::{NonZeroU32, NonZeroU64},
     time::{Duration, Instant},
@@ -13,6 +15,8 @@ pub struct Input {
     pub endpoint: String,
     pub ch_ca: String,
     pub reader: String,
+    pub other_tenant: String,
+    pub other_reader: String,
     pub writer: String,
     pub maintenance: String,
     pub ch_password: String,
@@ -51,18 +55,17 @@ fn deadline() -> anyhow::Result<Deadline> {
 }
 pub async fn run(input: Input) -> anyhow::Result<()> {
     let tenant = TenantId::parse(&input.pg.tenant)?;
-    let product = Product(tenant);
     let credentials = |user: String| Credentials::new(user, input.ch_password.clone());
-    let connections = Connections::new(
+    let config = ConnectionConfig::new(
         &input.endpoint,
         input.ch_ca.as_bytes(),
-        credentials(input.reader)?,
         credentials(input.writer)?,
         credentials(input.maintenance)?,
     )?;
     let n = |v| NonZeroU32::new(v).ok_or(Error::InvalidInput);
     let m = |v| NonZeroU64::new(v).ok_or(Error::InvalidInput);
     let limits = Limits {
+        max_concurrent_operations: n(4)?,
         max_points: n(100)?,
         max_series: n(10)?,
         max_bytes: n(1048576)?,
@@ -72,16 +75,47 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         replay_micros: m(60000000)?,
         cursor_micros: m(60000000)?,
     };
-    let store = ChStore::new(
-        tenant,
-        input.pg.pool().await?,
-        connections,
-        Timer,
-        limits,
-        CursorKey::new(input.cursor_key),
-        deadline()?,
-    )
-    .await?;
+    let owner = ChOwner::new(input.pg.pool().await?, config, Timer, limits, deadline()?).await?;
+    let store = owner
+        .bind_tenant(
+            tenant,
+            credentials(input.reader)?,
+            CursorKey::new(input.cursor_key),
+            m(1)?,
+            deadline()?,
+        )
+        .await?;
+    let query = exercise(&store, tenant).await?;
+    let other_tenant = TenantId::parse(&input.other_tenant)?;
+    anyhow::ensure!(other_tenant != tenant, "two distinct tenant identities");
+    let other = owner
+        .bind_tenant(
+            other_tenant,
+            credentials(input.other_reader)?,
+            CursorKey::new([43; 32]),
+            m(1)?,
+            deadline()?,
+        )
+        .await?;
+    let other_query = exercise(&other, other_tenant).await?;
+    anyhow::ensure!(
+        matches!(
+            store.query(&other_query, None, deadline()?).await,
+            Err(Error::Unauthorized)
+        ),
+        "tenant capability mismatch"
+    );
+    other.retire(deadline()?).await?;
+    anyhow::ensure!(
+        store.query(&query, None, deadline()?).await?.rows.len() == 1,
+        "retiring another tenant preserves the installation"
+    );
+    owner.close(deadline()?).await?;
+    Ok(())
+}
+async fn exercise(store: &ChStore<Timer>, tenant: TenantId) -> anyhow::Result<Authorized<Query>> {
+    let product = Product(tenant);
+    let n = |v| NonZeroU32::new(v).ok_or(Error::InvalidInput);
     let d = Definition::new(DefinitionSpec {
         scope: Scope::new(tenant, Id::new("example")?),
         key: Id::new("custom.counter")?,
@@ -166,6 +200,5 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
         ),
         "exact unsigned integer roundtrip"
     );
-    store.close(deadline()?).await?;
-    Ok(())
+    Ok(query)
 }
