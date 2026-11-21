@@ -177,11 +177,12 @@ impl<R: Send> Store for PgStore<R> {
             return Err(error(Error::Fenced));
         }
         // Each page is bounded in memory. One enclosing transaction/deadline covers the full authority change.
+        let limit = self.supersede_batch_size.get();
+        let mut after = None;
         loop {
-            let rows = page(tx, s, None, i64::from(self.supersede_batch_size.get())).await?;
-            if rows.is_empty() {
-                break;
-            }
+            let rows = page(tx, s, after.as_ref(), i64::from(limit)).await?;
+            let full = rows.len() == usize::from(limit);
+            after = rows.last().map(|row| row.command.spec().id().clone());
             for mut row in rows {
                 let previous = row.command.version();
                 let outcome = row
@@ -192,6 +193,9 @@ impl<R: Send> Store for PgStore<R> {
                     return Err(error(Error::InvalidSnapshot));
                 }
                 save(tx, &row.command, previous).await?;
+            }
+            if !full {
+                break;
             }
         }
         Ok(())

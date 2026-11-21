@@ -1,3 +1,4 @@
+mod query;
 use crate::transaction::Mode;
 use crate::{
     CursorKey, Limits, PgStore,
@@ -51,54 +52,10 @@ impl Read {
                 .ok_or(Error::NumericRange)?,
         };
         let after = token.map(|t| t.last);
-        let (series, source, generation, subject, resource, keys) = match q.selection() {
-            Selection::Exact { stream, series } => (
-                Some(series.digest()?.as_bytes().to_vec()),
-                Some(stream.source().as_str()),
-                Some(stream.generation().as_str()),
-                None,
-                None,
-                Vec::new(),
-            ),
-            Selection::Resource {
-                subject,
-                resource,
-                keys,
-                ..
-            } => (
-                None,
-                None,
-                None,
-                Some(subject.as_str()),
-                Some(resource.as_str()),
-                keys.iter().map(Id::as_str).collect(),
-            ),
-        };
-        let sql = match q.mode() {
-            QueryMode::History => include_str!("history.sql"),
-            QueryMode::Latest => include_str!("latest.sql"),
-        };
-        let mut stream = sqlx::query(sql)
-            .bind(q.selection().scope().tenant().to_string())
-            .bind(q.selection().scope().namespace().as_str())
-            .bind(q.window().start().micros())
-            .bind(q.window().end().micros())
-            .bind(series)
-            .bind(source)
-            .bind(generation)
-            .bind(subject)
-            .bind(resource)
-            .bind(keys)
-            .bind(after.as_ref().map(|p| p.series.to_vec()))
-            .bind(after.as_ref().map(|p| p.source.as_str()))
-            .bind(after.as_ref().map(|p| p.generation.as_str()))
-            .bind(after.as_ref().map(|p| p.time))
-            .bind(after.as_ref().map(|p| p.sequence.to_string()))
-            .bind(after.as_ref().map(|p| p.id.as_str()))
-            .bind(i64::from(q.budget().max_points.get()) + 1)
-            .fetch(c);
+        let mut sql = query::samples(q, after.as_ref())?;
+        let mut stream = sql.build().fetch(c);
         let mut rows = Vec::new();
-        let mut positions: Vec<Position> = Vec::new();
+        let mut last: Option<Position> = None;
         let mut groups = 0u32;
         let mut bytes = 0usize;
         let mut more = false;
@@ -109,9 +66,7 @@ impl Read {
                 break;
             }
             let projected = projected(&row)?;
-            let new_group = positions
-                .last()
-                .is_none_or(|p| p.group() != projected.group());
+            let new_group = last.as_ref().is_none_or(|p| p.group() != projected.group());
             if new_group && groups == q.budget().max_series.get() {
                 more = true;
                 break;
@@ -149,7 +104,7 @@ impl Read {
                 return Err(Error::Invariant);
             }
             groups += u32::from(new_group);
-            positions.push(position);
+            last = Some(position);
             rows.push(ObservedSample {
                 sample,
                 received_at: Timestamp::new(received)?,
@@ -162,7 +117,7 @@ impl Read {
                 binding,
                 &self.instance,
                 expires,
-                positions.pop().ok_or(Error::Invariant)?,
+                last.ok_or(Error::Invariant)?,
             )?)
         } else {
             None
