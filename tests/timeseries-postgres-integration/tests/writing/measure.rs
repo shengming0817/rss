@@ -8,6 +8,7 @@ struct Load {
     series: usize,
     workers: usize,
     separate_namespaces: bool,
+    summaries: bool,
 }
 
 // Each pool connection exposes its own server-side prepared statement execution counters.
@@ -59,6 +60,7 @@ async fn inputs(f: &Fixture, tag: usize, load: &Load) -> anyhow::Result<Vec<Auth
             let mut input = sample(d, &format!("id-{b}-{j}"), j as i64, j as u64)?
                 .input()
                 .clone();
+            input.observed_at = Timestamp::new((b * load.samples + j) as i64)?;
             input.stream = stream.clone();
             input.series = Series::new(
                 d.clone(),
@@ -76,8 +78,46 @@ async fn inputs(f: &Fixture, tag: usize, load: &Load) -> anyhow::Result<Vec<Auth
     Ok(all)
 }
 
+// One fresh bucket per batch and exact series. Materialize the empty ranges before timing
+// so all measured batches exercise clean-to-dirty transitions.
+async fn materialize(
+    f: &Fixture,
+    batches: &[Authorized<Batch>],
+    load: &Load,
+) -> anyhow::Result<()> {
+    use crate::aggregation::{complete, plan, window};
+    let first = batches.first().ok_or(Error::InvalidInput)?.request();
+    let resolution = NonZeroU64::new(load.samples as u64).ok_or(Error::InvalidInput)?;
+    let range = window(0, (batches.len() * load.samples) as i64)?;
+    for (i, item) in first.samples().iter().take(load.series).enumerate() {
+        let spec = SummarySpec::new(
+            first.stream().clone(),
+            item.input().series.clone(),
+            resolution,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )?;
+        complete(
+            &f.store,
+            plan(
+                &format!("prepare-{i}"),
+                MaintenanceAction::Recompute {
+                    spec,
+                    window: range,
+                },
+                100,
+            )?,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn measure(f: Arc<Fixture>, tag: usize, load: Load) -> anyhow::Result<()> {
     let batches = inputs(&f, tag, &load).await?;
+    if load.summaries {
+        materialize(&f, &batches, &load).await?;
+    }
     let committed = batches.len();
     let mut lanes: Vec<Vec<_>> = (0..load.workers).map(|_| Vec::new()).collect();
     for (index, batch) in batches.into_iter().enumerate() {
@@ -130,17 +170,29 @@ async fn measure(f: Arc<Fixture>, tag: usize, load: Load) -> anyhow::Result<()> 
     .fetch_one(&f.admin)
     .await?;
     let calls = calls(&f.pool).await? - start_calls;
+    if load.summaries {
+        let dirtied: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM rss_timeseries.summaries WHERE namespace=$1 AND dirty",
+        )
+        .bind(format!("measure-{tag}-0"))
+        .fetch_one(&f.admin)
+        .await?;
+        anyhow::ensure!(dirtied == (load.series * committed) as i64);
+    }
     latency.sort_unstable();
     let quantile = |q: usize| latency[(q * latency.len()).div_ceil(100) - 1];
     println!(
-        "MEASURE samples={} defs={} series={} workers={} separate={} confirmed_tx={} sql={} wal={} p50_us={} p95_us={} samples_sec={:.0} lock_waiter_observations={} polls={}",
+        "MEASURE samples={} defs={} series={} workers={} separate={} summaries={} confirmed_tx={} prepared={} tx_control={} total_sql={} wal={} p50_us={} p95_us={} samples_sec={:.0} lock_waiter_observations={} polls={}",
         load.samples,
         load.definitions,
         load.series,
         load.workers,
         load.separate_namespaces,
+        load.summaries,
         committed,
         calls,
+        2 * committed,
+        calls + 2 * committed as i64,
         wal,
         quantile(50),
         quantile(95),
@@ -169,8 +221,17 @@ async fn fixed_load() -> anyhow::Result<()> {
             series,
             workers: 1,
             separate_namespaces: false,
+            summaries: false,
         });
     }
+    loads.push(Load {
+        samples: 100,
+        definitions: 4,
+        series: 16,
+        workers: 1,
+        separate_namespaces: false,
+        summaries: true,
+    });
     for workers in [1, 2, 4] {
         for separate_namespaces in [false, true] {
             loads.push(Load {
@@ -179,6 +240,7 @@ async fn fixed_load() -> anyhow::Result<()> {
                 series: 4,
                 workers,
                 separate_namespaces,
+                summaries: false,
             });
         }
     }

@@ -117,6 +117,16 @@ async fn atomic_replay_conflict_retirement_and_recovery() -> anyhow::Result<()> 
         Some(Error::Retired)
     );
     assert_eq!(f.count().await?, 4);
+    let mut missing = d.spec().clone();
+    missing.key = id("never-registered")?;
+    let bad = batch(
+        "mixed-errors",
+        vec![
+            sample(&d, "retired-again", 2, 1)?,
+            sample(&Definition::new(missing)?, "missing", 2, 2)?,
+        ],
+    )?;
+    assert_eq!(f.write(&bad).await.err(), Some(Error::InvalidInput));
     expanded_dimensions(&f).await?;
     Ok(())
 }

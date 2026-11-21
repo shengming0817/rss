@@ -24,7 +24,6 @@ BEGIN
   IF total IS NULL OR total NOT BETWEEN 1 AND 4096 OR cardinality(sample_digests) IS DISTINCT FROM total
      OR cardinality(series_digests) IS DISTINCT FROM total OR cardinality(definition_digests) IS DISTINCT FROM total
   THEN RAISE EXCEPTION USING ERRCODE='TS002',MESSAGE='invalid batch arrays'; END IF;
-  received := floor(extract(epoch FROM clock_timestamp())*1000000)::bigint;
 
   WITH decoded AS MATERIALIZED (
    SELECT u.*, convert_from(raw,'UTF8')::jsonb AS j
@@ -37,34 +36,50 @@ BEGIN
    SELECT d.key,d.version,d.digest,convert_from(d.raw,'UTF8')::jsonb AS definition,d.retired
    FROM rss_timeseries.definitions d JOIN (SELECT DISTINCT key,version FROM input) wanted USING(key,version)
    WHERE d.tenant_id=t AND d.namespace=n ORDER BY d.key,d.version FOR SHARE OF d
+  ), expected AS (
+   -- The final occurrence supplies the expected binding for each definition ID.
+   SELECT DISTINCT ON (key,version) key,version,def_hash,j#>'{series,definition}' AS definition
+   FROM input ORDER BY key,version,ord DESC
+  ), definition_check AS (
+   SELECT e.key,e.version,CASE
+    WHEN d.key IS NULL THEN 'TS002'
+    WHEN d.definition=e.definition AND d.digest IS DISTINCT FROM e.def_hash THEN 'TS005'
+    WHEN d.digest IS DISTINCT FROM e.def_hash THEN 'TS001'
+    WHEN d.definition IS DISTINCT FROM e.definition THEN 'TS005'
+   END AS error_code
+   FROM expected e LEFT JOIN locked d USING(key,version)
+  ), admission_time AS MATERIALIZED (
+   -- Start the replay horizon after all definition lock waits, including retirement races.
+   SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint AS micros
+   FROM locked HAVING count(*)>0
   ), classified AS MATERIALIZED (
    SELECT x.*, old.sample_id IS NULL AS fresh,
     CASE
      WHEN (j#>>'{stream,scope,tenant}')::uuid IS DISTINCT FROM t
        OR j#>>'{stream,scope,namespace}' IS DISTINCT FROM n OR j#>>'{stream,source}' IS DISTINCT FROM s
        OR j#>>'{stream,generation}' IS DISTINCT FROM g THEN '42501'
-     WHEN d.key IS NULL THEN 'TS002'
-     WHEN d.definition=j#>'{series,definition}' AND d.digest IS DISTINCT FROM x.def_hash THEN 'TS005'
-     WHEN d.digest IS DISTINCT FROM x.def_hash THEN 'TS001'
-     WHEN d.definition IS DISTINCT FROM j#>'{series,definition}' THEN 'TS005'
      WHEN old.sample_id IS NOT NULL THEN CASE WHEN old.digest IS DISTINCT FROM x.digest THEN 'TS001' END
      WHEN EXISTS(SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=t AND f.namespace=n
                  AND f.lo<=at_time AND f.hi>at_time AND rss_timeseries.matches(f.selection,j)) THEN 'TS004'
+     WHEN d.definition IS DISTINCT FROM j#>'{series,definition}' THEN 'TS002'
      WHEN d.retired THEN 'TS003'
     END AS error_code
    FROM input x LEFT JOIN locked d USING(key,version)
    LEFT JOIN rss_timeseries.sample_identities old
     ON (old.tenant_id,old.namespace,old.source,old.generation,old.sample_id)=(t,n,s,g,x.id)
   ), rejected AS MATERIALIZED (
-   SELECT error_code FROM classified WHERE error_code IS NOT NULL ORDER BY ord LIMIT 1
+   SELECT coalesce(
+    (SELECT error_code FROM definition_check WHERE error_code IS NOT NULL ORDER BY key COLLATE "C",version LIMIT 1),
+    (SELECT error_code FROM classified WHERE error_code IS NOT NULL ORDER BY ord LIMIT 1)
+   ) AS error_code
   ), admitted AS MATERIALIZED (
-   SELECT * FROM classified WHERE fresh AND NOT EXISTS(SELECT FROM rejected)
+   SELECT * FROM classified WHERE fresh AND (SELECT error_code FROM rejected) IS NULL
   ), identities AS (
    INSERT INTO rss_timeseries.sample_identities(tenant_id,namespace,source,generation,sample_id,digest,observed_at,received_at)
-   SELECT t,n,s,g,id,digest,at_time,received FROM admitted RETURNING sample_id
+   SELECT t,n,s,g,id,digest,at_time,(SELECT micros FROM admission_time) FROM admitted RETURNING sample_id
   ), samples AS (
    INSERT INTO rss_timeseries.samples(tenant_id,namespace,source,generation,sample_id,observed_at,sequence,series_digest,key,version,subject,resource,raw,received_at)
-   SELECT t,n,s,g,id,at_time,(j->>'sequence')::numeric,series_hash,key,version,j#>>'{series,subject}',j#>>'{series,resource}',raw,received
+   SELECT t,n,s,g,id,at_time,(j->>'sequence')::numeric,series_hash,key,version,j#>>'{series,subject}',j#>>'{series,resource}',raw,(SELECT micros FROM admission_time)
    FROM admitted JOIN identities ON sample_id=id RETURNING sample_id
   ), affected AS MATERIALIZED (
    SELECT DISTINCT j->'stream' AS stream,j->'series' AS series,at_time FROM admitted
@@ -74,7 +89,7 @@ BEGIN
      AND a.stream=convert_from(m.spec,'UTF8')::jsonb->'stream' AND a.series=convert_from(m.spec,'UTF8')::jsonb->'series'
      AND rss_timeseries.affects_summary(convert_from(m.spec,'UTF8')::jsonb,m.lo,a.at_time+1))
   )
-  SELECT (SELECT error_code FROM rejected),(SELECT count(*) FROM samples) INTO failure,added;
+  SELECT (SELECT error_code FROM rejected),(SELECT count(*) FROM samples),(SELECT micros FROM admission_time) INTO failure,added,received;
   IF failure IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE=failure,MESSAGE='batch admission failed'; END IF;
   IF added>0 THEN UPDATE rss_timeseries.streams SET revision=revision+1 WHERE (tenant_id,namespace,source,generation)=(t,n,s,g); END IF;
   INSERT INTO rss_timeseries.batches VALUES(t,n,s,g,batch_key,batch_digest,received,added,total-added,received+horizon,false)
