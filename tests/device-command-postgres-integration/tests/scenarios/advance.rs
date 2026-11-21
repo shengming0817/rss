@@ -57,15 +57,7 @@ async fn interrupt_last_page(
     next: Coordinate,
     interruption: Interruption,
 ) -> anyhow::Result<()> {
-    let mut blocker = f.owner.begin().await?;
-    let pid: i32 = sqlx::query_scalar(
-        "SELECT pg_backend_pid() FROM rss_device_command.commands
-        WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' FOR UPDATE",
-    )
-    .bind(s.tenant().to_string())
-    .bind(s.device().as_uuid().to_string())
-    .fetch_one(&mut *blocker)
-    .await?;
+    let (blocker, pid) = lock_last(f, s).await?;
     let deadline = match interruption {
         Interruption::Deadline => OperationDeadline::from_remaining(Duration::from_secs(3)),
         _ => budget()?,
@@ -93,16 +85,7 @@ async fn interrupt_last_page(
             ));
         }
         Interruption::StaleVersion => {
-            let published = sqlx::query(
-                "UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1
-                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' AND version=1",
-            )
-            .bind(s.tenant().to_string())
-            .bind(s.device().as_uuid().to_string())
-            .execute(&mut *blocker)
-            .await?;
-            assert_eq!(published.rows_affected(), 1);
-            blocker.commit().await?;
+            publish_last(blocker, s).await?;
             let fenced = attempt.await.fold(
                 |_| None,
                 |_| None,
@@ -117,6 +100,39 @@ async fn interrupt_last_page(
     }
     blocker.rollback().await?;
     assert_rolled_back(f, s, old, (1, Status::Queued)).await
+}
+
+async fn lock_last(
+    f: &Fixture,
+    s: Scope,
+) -> anyhow::Result<(sqlx::Transaction<'_, sqlx::Postgres>, i32)> {
+    let mut blocker = f.owner.begin().await?;
+    let pid: i32 = sqlx::query_scalar(
+        "SELECT pg_backend_pid() FROM rss_device_command.commands
+        WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' FOR UPDATE",
+    )
+    .bind(s.tenant().to_string())
+    .bind(s.device().as_uuid().to_string())
+    .fetch_one(&mut *blocker)
+    .await?;
+    Ok((blocker, pid))
+}
+
+async fn publish_last(
+    mut blocker: sqlx::Transaction<'_, sqlx::Postgres>,
+    s: Scope,
+) -> anyhow::Result<()> {
+    let published = sqlx::query(
+        "UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' AND version=1",
+    )
+    .bind(s.tenant().to_string())
+    .bind(s.device().as_uuid().to_string())
+    .execute(&mut *blocker)
+    .await?;
+    assert_eq!(published.rows_affected(), 1);
+    blocker.commit().await?;
+    Ok(())
 }
 
 async fn assert_rolled_back(
