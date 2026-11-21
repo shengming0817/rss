@@ -116,8 +116,9 @@ async fn materialize(
 async fn write_lane(
     fixture: Arc<Fixture>,
     lane: Vec<Authorized<Batch>>,
-) -> anyhow::Result<Vec<u128>> {
+) -> anyhow::Result<(Instant, Vec<u128>)> {
     let mut latency = Vec::with_capacity(lane.len());
+    let mut last_ack = None;
     for batch in lane {
         let start = Timer.now();
         let outcome = fixture
@@ -127,17 +128,21 @@ async fn write_lane(
                 Deadline::from_timeout(&Timer, Duration::from_secs(90))?,
             )
             .await?;
+        let ack = Timer.now();
         anyhow::ensure!(matches!(outcome, Outcome::Accepted(_)));
-        latency.push((Timer.now() - start).as_micros());
+        latency.push((ack - start).as_micros());
+        last_ack = Some(ack);
     }
-    Ok(latency)
+    Ok((last_ack.ok_or(Error::InvalidInput)?, latency))
 }
 
 async fn observe(
     admin: &PgPool,
-    mut jobs: tokio::task::JoinSet<anyhow::Result<Vec<u128>>>,
-) -> anyhow::Result<(Vec<u128>, i64, usize)> {
+    start: Instant,
+    mut jobs: tokio::task::JoinSet<anyhow::Result<(Instant, Vec<u128>)>>,
+) -> anyhow::Result<(Duration, Vec<u128>, i64, usize)> {
     let mut latency = Vec::new();
+    let mut end = start;
     let mut waits = 0i64;
     let mut polls = 0;
     let mut interval = tokio::time::interval(Duration::from_millis(5));
@@ -145,7 +150,8 @@ async fn observe(
     while !jobs.is_empty() {
         tokio::select! {
             Some(result) = jobs.join_next() => {
-                let timings = result??;
+                let (ack, timings) = result??;
+                end = end.max(ack);
                 latency.extend(timings);
             }
             _=interval.tick()=>{
@@ -154,7 +160,7 @@ async fn observe(
             }
         }
     }
-    Ok((latency, waits, polls))
+    Ok((end - start, latency, waits, polls))
 }
 
 async fn measure(f: Arc<Fixture>, tag: usize, load: Load) -> anyhow::Result<()> {
@@ -177,8 +183,7 @@ async fn measure(f: Arc<Fixture>, tag: usize, load: Load) -> anyhow::Result<()> 
         let fixture = f.clone();
         jobs.spawn(write_lane(fixture, lane));
     }
-    let (mut latency, waits, polls) = observe(&f.admin, jobs).await?;
-    let elapsed = Timer.now() - start;
+    let (elapsed, mut latency, waits, polls) = observe(&f.admin, start, jobs).await?;
     let wal: i64 = sqlx::query_scalar(
         "SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),$1::pg_lsn)::bigint",
     )

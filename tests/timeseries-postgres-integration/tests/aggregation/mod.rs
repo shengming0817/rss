@@ -622,3 +622,60 @@ async fn mixed_batch_only_invalidates_new_points_in_their_exact_series() -> anyh
     assert_eq!(revisions, (0, 2));
     Ok(())
 }
+
+#[tokio::test]
+async fn refresh_sees_prior_stream_commit_under_host_repeatable_read() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-host-isolation").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let host_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("SET default_transaction_isolation TO 'repeatable read'")
+                    .execute(c)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(f.pool.connect_options().as_ref().clone())
+        .await?;
+    let host = PgStore::new(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(host_pool),
+        Timer,
+        limits()?,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    let mut pending = f.pool.begin().await?;
+    let staged = batch("held", vec![sample(&d, "one", 3, 7)?])?;
+    super::writing::stage_batch(&mut pending, &staged).await?;
+    let sp = spec(&d, 10)?;
+    let refresh = plan(
+        "refresh",
+        MaintenanceAction::Recompute {
+            spec: sp.clone(),
+            window: window(0, 10)?,
+        },
+        10,
+    )?;
+    let release = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock' AND query LIKE '%lock_namespace%')").fetch_one(&f.admin).await? {return anyhow::Ok(());}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        pending.commit().await?;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(complete(&host, refresh), release)?;
+    let page = aggregate(&host, sp, 0, 10).await?;
+    assert_eq!(page.refreshed_through, Some(Timestamp::new(10)?));
+    assert!(
+        matches!(page.buckets[0].value, AggregateValue::Mean {sum: Sum::U128(7), count} if count.get()==1)
+    );
+    Ok(())
+}

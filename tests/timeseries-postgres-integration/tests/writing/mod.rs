@@ -245,7 +245,7 @@ pub(super) async fn expanded_dimensions(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn stage_batch(c: &mut sqlx::PgConnection, batch: &Batch) -> anyhow::Result<()> {
+pub(super) async fn stage_batch(c: &mut sqlx::PgConnection, batch: &Batch) -> anyhow::Result<()> {
     let s = batch.stream();
     let item = &batch.samples()[0];
     let series = &item.input().series;
@@ -254,7 +254,7 @@ async fn stage_batch(c: &mut sqlx::PgConnection, batch: &Batch) -> anyhow::Resul
         .execute(&mut *c)
         .await?;
     sqlx::query(
-        "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
     )
     .bind(s.scope().tenant().to_string())
     .bind(s.scope().namespace().as_str())
@@ -265,6 +265,7 @@ async fn stage_batch(c: &mut sqlx::PgConnection, batch: &Batch) -> anyhow::Resul
     .bind(vec![serde_json::to_vec(item)?])
     .bind(vec![item.digest()?.as_bytes().to_vec()])
     .bind(vec![series.digest()?.as_bytes().to_vec()])
+    .bind(vec![serde_json::to_vec(series.definition())?])
     .bind(vec![series.definition().digest()?.as_bytes().to_vec()])
     .bind(60_000_000i64)
     .fetch_one(c)
@@ -300,5 +301,89 @@ async fn independent_first_streams_commit_while_another_batch_is_staged() -> any
         }
     }
     assert_eq!(f.count().await?, 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn corrupt_definition_precedes_request_conflict_and_leaves_no_receipt() -> anyhow::Result<()>
+{
+    let f = Fixture::new("ts-binding-integrity").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let original = serde_json::to_string(&d)?;
+    let duplicate = original.replacen(r#""key":"#, r#""key":"ignored","key":"#, 1);
+    anyhow::ensure!(serde_json::from_str::<Definition>(&duplicate).is_err());
+    let mut other = d.spec().clone();
+    other.unit = id("changed")?;
+    let other = Definition::new(other)?;
+    let different = batch("attempt", vec![sample(&other, "sample", 1, 1)?])?;
+    assert_eq!(f.write(&different).await.err(), Some(Error::Conflict));
+    let matching = batch("attempt", vec![sample(&d, "sample", 1, 1)?])?;
+    for (raw, hash, request) in [
+        (
+            duplicate.as_bytes(),
+            d.digest()?.as_bytes().to_vec(),
+            &matching,
+        ),
+        (original.as_bytes(), vec![0; 32], &different),
+        (&[0xff], other.digest()?.as_bytes().to_vec(), &matching),
+    ] {
+        sqlx::query("UPDATE rss_timeseries.definitions SET raw=$1, digest=$2")
+            .bind(raw)
+            .bind(hash)
+            .execute(&f.admin)
+            .await?;
+        assert_eq!(f.write(request).await.err(), Some(Error::Invariant));
+        assert_eq!(f.count().await?, 0);
+        let q = Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(request)?)?;
+        assert!(matches!(
+            f.store.receipt(&q, deadline()?).await?,
+            Lookup::NotVisible
+        ));
+    }
+    Ok(())
+}
+
+struct PreparationClock(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Clock for PreparationClock {
+    fn now(&self) -> Instant {
+        let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Timer.now() + Duration::from_secs(if n >= 4 { 60 } else { 0 })
+    }
+}
+#[tokio::test]
+async fn deadline_during_encoding_has_no_transaction_to_recover() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-preparation-cutoff").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = PgStore::new(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        PreparationClock(calls.clone()),
+        limits()?,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    let b = batch(
+        "prepare",
+        (0..8)
+            .map(|i| sample(&d, &format!("s{i}"), i, i as u64))
+            .collect::<anyhow::Result<_>>()?,
+    )?;
+    let request = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+    calls.store(0, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        store.write(&request, deadline()?).await.err(),
+        Some(Error::Deadline)
+    );
+    let q = Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(&b)?)?;
+    assert!(matches!(
+        f.store.receipt(&q, deadline()?).await?,
+        Lookup::NotVisible
+    ));
+    assert_eq!(f.count().await?, 0);
+    assert_eq!(confirmed(f.write(&b).await?)?.new_samples(), 8);
     Ok(())
 }

@@ -76,7 +76,7 @@ impl<C: Clock> PgStore<C> {
             let mut lease=Lease{connection:self.pool.acquire().await.map_err(sql_error)?,settled:false};
             let mut tx = match mode {
                 Mode::Snapshot => lease.connection.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").await,
-                _ => lease.connection.begin().await,
+                _ => lease.connection.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE").await,
             }.map_err(sql_error)?;
             let ms=deadline.remaining(self.clock.now()).ok_or(Error::Deadline)?.as_millis().clamp(1,i32::MAX as u128);
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")

@@ -6,13 +6,18 @@ use crate::{
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::{PgConnection, Row, postgres::PgRow};
-pub(crate) fn definition(row: &PgRow) -> Result<DefinitionRecord, Error> {
-    let raw: Vec<u8> = row.try_get("raw").map_err(sql_error)?;
-    let definition: Definition = serde_json::from_slice(&raw).map_err(|_| Error::Invariant)?;
-    let digest: Vec<u8> = row.try_get("digest").map_err(sql_error)?;
-    if definition.digest()?.as_bytes().as_slice() != digest {
+pub(crate) fn verified(raw: &[u8], digest: &[u8]) -> Result<Definition, Error> {
+    let value: Definition = serde_json::from_slice(raw).map_err(|_| Error::Invariant)?;
+    if value.digest()?.as_bytes().as_slice() != digest {
         return Err(Error::Invariant);
     }
+    Ok(value)
+}
+pub(crate) fn definition(row: &PgRow) -> Result<DefinitionRecord, Error> {
+    let definition = verified(
+        row.try_get("raw").map_err(sql_error)?,
+        row.try_get("digest").map_err(sql_error)?,
+    )?;
     Ok(DefinitionRecord {
         definition,
         state: if row.try_get("retired").map_err(sql_error)? {
