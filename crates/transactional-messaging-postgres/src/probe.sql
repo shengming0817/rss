@@ -72,6 +72,8 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
    OR pg_get_expr(i.indpred,i.indrelid) IS DISTINCT FROM e.predicate
    OR (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(num,ord)
        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num) IS DISTINCT FROM e.columns)),
+ ('functions', pg_get_function_result(to_regprocedure('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'))
+   IS NOT DISTINCT FROM 'TABLE(seq bigint, tenant_id uuid, message_id text, domain text, partition_key text, lease_token uuid, lease_until timestamp with time zone, envelope jsonb, fingerprint bytea, dr_operation uuid, remaining_us bigint, delivery_us bigint)'),
  ('functions', to_regprocedure('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)') IS NULL),
  ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text)')
    AND NOT p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)

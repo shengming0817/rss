@@ -73,6 +73,8 @@ pub struct PgOutboxClaim {
     pub(crate) binding: ExecutionBinding,
     token: String,
     lease_us: Mutex<i64>,
+    #[cfg(feature = "recovery")]
+    pub(crate) initial_window: Deadline,
 }
 #[derive(Clone)]
 #[cfg(feature = "recovery")]
@@ -353,8 +355,10 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         let ttl = self.lease_ms;
         let tenant = binding.tenant();
         let domain = self.writer.domain.as_str().to_owned();
+        #[cfg(feature = "recovery")]
+        let started = self.writer.runtime.timer.now();
         let batch = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
-                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
+                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
                     .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
                 rows.into_iter().map(|row| {
                     let message = PendingMessage::new(Envelope::decode(&row.try_get::<String,_>("envelope")?)?);
@@ -368,7 +372,14 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
                         || row.try_get::<Option<String>,_>("partition_key")?.as_deref() != message.partition().map(|p| p.key().as_str()) {
                         return Err(PgError::invariant());
                     }
-                    Ok(PgOutboxClaim { message, binding, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
+                    Ok(PgOutboxClaim {
+                        #[cfg(feature = "recovery")]
+                        initial_window: {
+                            let window = row.try_get::<i64,_>("remaining_us")?.min(row.try_get("delivery_us")?);
+                            let micros = u64::try_from(window).map_err(|_| PgError::invariant())?;
+                            Deadline::at(started.checked_add(Duration::from_micros(micros)).ok_or_else(PgError::invariant)?)
+                        },
+                        message, binding, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
                 }).collect::<Result<Vec<_>, PgError>>()
         })).await.map_err(PgError::port)?;
         OutboxClaimBatch::try_from_provider(batch, limit)

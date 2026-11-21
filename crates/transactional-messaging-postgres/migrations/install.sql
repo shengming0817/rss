@@ -566,7 +566,7 @@ $f$;
 ALTER FUNCTION rss_transactional_messaging.outbox_candidates(uuid,text) OWNER TO rss_tmsg_relay;
 
 CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain text,p_limit integer,p_ttl_ms bigint)
-RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,fingerprint bytea,dr_operation uuid)
+RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
  candidates NO SCROLL CURSOR FOR
@@ -598,7 +598,10 @@ BEGIN
    o.lease_token:=m.lease_token; o.lease_until:=m.lease_until;
   END IF;
   used:=used+1;
-  RETURN QUERY SELECT o.seq,o.tenant_id,o.message_id,o.domain,o.partition_key,o.lease_token,o.lease_until,o.envelope,o.fingerprint,r.op;
+  n:=clock_timestamp();
+  RETURN QUERY SELECT o.seq,o.tenant_id,o.message_id,o.domain,o.partition_key,o.lease_token,o.lease_until,o.envelope,o.fingerprint,r.op,
+   greatest(0,(extract(epoch FROM o.lease_until-n)*1000000)::bigint),
+   greatest(0,(extract(epoch FROM o.automatic_retry_deadline-n)*1000000)::bigint);
  END LOOP;
  CLOSE candidates;
 END $f$;
