@@ -175,5 +175,7 @@ async fn windows(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Res
         f.state("lease-delivery-expired").await?,
         (0, 0, None, "dead_letter".into())
     );
+    // The later dead-letter discovery scenario starts with a clean domain.
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='resolved' WHERE message_id='lease-delivery-expired'").execute(&f.owner).await?;
     Ok(())
 }
