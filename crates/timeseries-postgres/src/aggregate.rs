@@ -1,6 +1,7 @@
+use crate::transaction::Mode;
 use crate::{
     Limits, PgStore,
-    lifecycle::{availability, bytes, read_lock},
+    lifecycle::{availability, bytes},
     transaction::{certain, check, db_now, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
@@ -143,10 +144,9 @@ pub(crate) async fn read<C: Clock>(
             .transaction(
                 query.spec().stream().scope().tenant(),
                 deadline,
-                false,
+                Mode::Snapshot,
                 move |c, clock| {
                     Box::pin(async move {
-                        read_lock(c, q.spec().stream().scope()).await?;
                         let now = db_now(c).await?;
                         let binding = q.binding()?;
                         let (expires, mut at) = match token {

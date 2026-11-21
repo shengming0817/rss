@@ -227,3 +227,79 @@ async fn injected_deadline_is_checked_before_commit() -> anyhow::Result<()> {
     assert_eq!(count, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn cancelled_writer_and_exhausted_pool_recover_by_original_identity() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-cancel").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch("cancel", vec![sample(&d, "cancel", 1, 1)?])?;
+    let request = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+    let mut occupied = Vec::new();
+    for _ in 0..f.pool.options().get_max_connections() {
+        occupied.push(f.pool.acquire().await?);
+    }
+    assert_eq!(
+        f.store
+            .write(
+                &request,
+                Deadline::from_timeout(&Timer, Duration::from_millis(50))?
+            )
+            .await
+            .err(),
+        Some(Error::Deadline)
+    );
+    drop(occupied);
+    let mut owner = f.admin.begin().await?;
+    sqlx::query("SELECT 1 FROM rss_timeseries.namespaces FOR UPDATE")
+        .execute(&mut *owner)
+        .await?;
+    let waiting = async {
+        loop {
+            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock' AND query LIKE '%admit_batch%')").fetch_one(&f.admin).await?;
+            if blocked {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result=f.store.write(&request,deadline()?) => anyhow::bail!("unexpected early write {result:?}"),
+        observed=tokio::time::timeout(Duration::from_secs(5),waiting) => observed??,
+    }
+    owner.rollback().await?;
+    let received = confirmed(f.write(&b).await?)?;
+    assert_eq!(received.new_samples(), 1);
+    assert_eq!(f.count().await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn definition_lock_wait_precedes_receipt_clock() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-receipt-clock").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch("delayed", vec![sample(&d, "delayed", 1, 1)?])?;
+    let mut blocker = f.admin.begin().await?;
+    sqlx::query("SELECT 1 FROM rss_timeseries.definitions FOR UPDATE")
+        .execute(&mut *blocker)
+        .await?;
+    let release = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock')").fetch_one(&f.admin).await? {return anyhow::Ok(());}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        let before_release = sqlx::query_scalar::<_, i64>(
+            "SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint",
+        )
+        .fetch_one(&mut *blocker)
+        .await?;
+        blocker.commit().await?;
+        anyhow::Ok(before_release)
+    };
+    let (outcome, release) = tokio::join!(f.write(&b), release);
+    assert!(confirmed(outcome?)?.received_at().micros() >= release?);
+    Ok(())
+}

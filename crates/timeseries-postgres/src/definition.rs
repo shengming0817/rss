@@ -1,3 +1,4 @@
+use crate::transaction::Mode;
 use crate::{
     PgStore,
     transaction::{certain, sql_error},
@@ -5,13 +6,18 @@ use crate::{
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::{PgConnection, Row, postgres::PgRow};
-pub(crate) fn definition(row: &PgRow) -> Result<DefinitionRecord, Error> {
-    let raw: Vec<u8> = row.try_get("raw").map_err(sql_error)?;
-    let definition: Definition = serde_json::from_slice(&raw).map_err(|_| Error::Invariant)?;
-    let digest: Vec<u8> = row.try_get("digest").map_err(sql_error)?;
-    if definition.digest()?.as_bytes().as_slice() != digest {
+pub(crate) fn verified(raw: &[u8], digest: &[u8]) -> Result<Definition, Error> {
+    let value: Definition = serde_json::from_slice(raw).map_err(|_| Error::Invariant)?;
+    if value.digest()?.as_bytes().as_slice() != digest {
         return Err(Error::Invariant);
     }
+    Ok(value)
+}
+pub(crate) fn definition(row: &PgRow) -> Result<DefinitionRecord, Error> {
+    let definition = verified(
+        row.try_get("raw").map_err(sql_error)?,
+        row.try_get("digest").map_err(sql_error)?,
+    )?;
     Ok(DefinitionRecord {
         definition,
         state: if row.try_get("retired").map_err(sql_error)? {
@@ -21,17 +27,8 @@ pub(crate) fn definition(row: &PgRow) -> Result<DefinitionRecord, Error> {
         },
     })
 }
-pub(crate) async fn exact(
-    c: &mut PgConnection,
-    id: &DefinitionId,
-    lock: bool,
-) -> Result<Option<DefinitionRecord>, Error> {
-    let sql = if lock {
-        "SELECT raw,digest,retired FROM rss_timeseries.lock_definition($1::text::uuid,$2,$3,$4::text::numeric)"
-    } else {
-        "SELECT raw,digest,retired FROM rss_timeseries.definitions WHERE tenant_id=$1::text::uuid AND namespace=$2 AND key=$3 AND version=$4::text::numeric"
-    };
-    sqlx::query(sql)
+async fn exact(c: &mut PgConnection, id: &DefinitionId) -> Result<Option<DefinitionRecord>, Error> {
+    sqlx::query("SELECT raw,digest,retired FROM rss_timeseries.definitions WHERE tenant_id=$1::text::uuid AND namespace=$2 AND key=$3 AND version=$4::text::numeric")
         .bind(id.scope.tenant().to_string())
         .bind(id.scope.namespace().as_str())
         .bind(id.key.as_str())
@@ -82,7 +79,7 @@ async fn register(
         key: s.key.clone(),
         version: std::num::NonZeroU64::new(s.version).ok_or(Error::Invariant)?,
     };
-    if let Some(old) = exact(c, &id, false).await? {
+    if let Some(old) = exact(c, &id).await? {
         d.compare(&old.definition)?;
         return Ok(Outcome::Replay(old));
     }
@@ -109,9 +106,9 @@ impl<C: Clock> DefinitionStore for PgStore<C> {
     ) -> Result<Lookup<DefinitionRecord>, Error> {
         let id = request.request().clone();
         certain(
-            self.transaction(id.scope.tenant(), deadline, false, move |c, _| {
+            self.transaction(id.scope.tenant(), deadline, Mode::Snapshot, move |c, _| {
                 Box::pin(async move {
-                    Ok(match exact(c, &id, false).await? {
+                    Ok(match exact(c, &id).await? {
                         Some(v) => Lookup::Found(v),
                         None => Lookup::NotVisible,
                     })
@@ -131,7 +128,7 @@ impl<C: Clock> DefinitionStore for PgStore<C> {
             DefinitionMutation::Retire { id, .. } => id.scope.tenant(),
         };
         let out = self
-            .transaction(tenant, deadline, true, move |c, _| {
+            .transaction(tenant, deadline, Mode::Write, move |c, _| {
                 Box::pin(async move {
                     match request {
                         DefinitionMutation::Register {
@@ -140,7 +137,7 @@ impl<C: Clock> DefinitionStore for PgStore<C> {
                         } => register(c, definition, expected_latest).await,
                         DefinitionMutation::Retire { id, expected } => {
                             lock_key(c, &id.scope, &id.key).await?;
-                            let mut old = exact(c, &id, false).await?.ok_or(Error::InvalidInput)?;
+                            let mut old = exact(c, &id).await?.ok_or(Error::InvalidInput)?;
                             if old.definition.digest()? != expected {
                                 return Err(Error::Conflict);
                             }

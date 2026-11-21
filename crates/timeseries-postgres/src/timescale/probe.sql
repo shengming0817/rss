@@ -35,7 +35,7 @@ SELECT session_user=current_user
  AND NOT EXISTS(SELECT FROM reachable r JOIN pg_namespace n ON n.nspname IN ('rss_timeseries','rss_timeseries_chunks','public','_timescaledb_internal','_timescaledb_catalog','_timescaledb_functions') WHERE n.nspowner=r.oid OR has_schema_privilege(r.oid,n.oid,'CREATE'))
  AND NOT EXISTS(SELECT FROM acl a WHERE a.grantee=0 OR (a.is_grantable AND EXISTS(SELECT FROM reachable r WHERE r.oid=a.grantee OR pg_has_role(r.oid,a.grantee,'USAGE'))))
  AND NOT EXISTS(SELECT FROM pg_auth_members m JOIN reachable r ON m.member=r.oid WHERE m.admin_option)
- AND (SELECT count(*)=CASE WHEN $1 THEN 24 ELSE 22 END AND bool_and(proconfig=ARRAY['search_path=pg_catalog, rss_timeseries'] AND CASE WHEN proname IN ('integer_now','project_gauge') THEN NOT has_function_privilege(current_user,oid,'EXECUTE') ELSE prosecdef AND has_function_privilege(current_user,oid,'EXECUTE') END) FROM funcs)
+ AND (SELECT count(*)=CASE WHEN $1 THEN 22 ELSE 20 END AND bool_and(proconfig=ARRAY['search_path=pg_catalog, rss_timeseries'] AND CASE WHEN proname IN ('integer_now','project_gauge') THEN NOT has_function_privilege(current_user,oid,'EXECUTE') ELSE prosecdef AND has_function_privilege(current_user,oid,'EXECUTE') END) FROM funcs)
  AND NOT EXISTS(SELECT FROM funcs f JOIN pg_roles r ON r.oid=f.proowner WHERE r.rolsuper OR r.rolbypassrls OR r.rolcanlogin OR r.rolcreaterole OR r.rolreplication OR r.oid IN(SELECT oid FROM reachable))
  AND NOT EXISTS(SELECT FROM relations c JOIN pg_roles r ON r.oid=c.relowner JOIN pg_namespace n ON n.nspname='rss_timeseries' WHERE r.rolsuper OR r.rolbypassrls OR r.rolcanlogin OR c.relowner<>n.nspowner)
  AND NOT EXISTS(SELECT FROM pg_constraint WHERE conrelid IN(SELECT oid FROM relations) AND NOT convalidated)

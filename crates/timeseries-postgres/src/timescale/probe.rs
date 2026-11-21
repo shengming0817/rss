@@ -4,7 +4,7 @@ use rss_timeseries::Error;
 use sqlx::{Connection, PgConnection, PgPool, Row};
 
 // Fixed PostgreSQL 17 common schema fingerprint, populated from the canonical T2 catalog.
-const COMMON_CATALOG: &str = "0cc0899f0d0209220075419d9b13dcf8";
+const COMMON_CATALOG: &str = "db1143f680e2caf74ea1f5b07bdb083e";
 pub(crate) async fn validate(
     pool: &PgPool,
     profile: &StorageProfile,
@@ -53,7 +53,7 @@ pub(crate) async fn validate(
         }
     }
     let instance:String=sqlx::query_scalar("SELECT obj_description(oid,'pg_namespace') FROM pg_namespace WHERE nspname='rss_timeseries'").fetch_one(&mut *tx).await.map_err(sql_error)?;
-    if !instance.starts_with("rss-timeseries-postgres:3:") || instance.len() != 62 {
+    if !instance.starts_with("rss-timeseries-postgres:4:") || instance.len() != 62 {
         return Err(Error::Invariant);
     }
     tx.rollback().await.map_err(sql_error)?;

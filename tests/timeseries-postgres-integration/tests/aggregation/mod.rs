@@ -573,3 +573,109 @@ async fn delta_after_prune_needs_no_predecessor_for_reads_or_recompute() -> anyh
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn mixed_batch_only_invalidates_new_points_in_their_exact_series() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-mixed-invalidation").await?;
+    let d = definition(TENANT)?;
+    let mut second = d.spec().clone();
+    second.key = id("pressure")?;
+    let other = Definition::new(second)?;
+    f.register(&d).await?;
+    f.register(&other).await?;
+    let middle = sample(&d, "middle", 15, 1)?;
+    confirmed(f.write(&batch("seed", vec![middle.clone()])?).await?)?;
+    for (name, def) in [("first", &d), ("second", &other)] {
+        complete(
+            &f.store,
+            plan(
+                name,
+                MaintenanceAction::Recompute {
+                    spec: spec(def, 10)?,
+                    window: window(0, 30)?,
+                },
+                10,
+            )?,
+        )
+        .await?;
+    }
+    let points = vec![
+        sample(&d, "early", 1, 2)?,
+        middle,
+        sample(&d, "late", 22, 3)?,
+        sample(&other, "other", 16, 4)?,
+    ];
+    let mixed = confirmed(f.write(&batch("mixed", points.clone())?).await?)?;
+    assert_eq!((mixed.new_samples(), mixed.replayed_samples()), (3, 1));
+    let all_old = confirmed(f.write(&batch("all-old", points)?).await?)?;
+    assert_eq!((all_old.new_samples(), all_old.replayed_samples()), (0, 4));
+    let dirty: Vec<(String,i64)> = sqlx::query_as("SELECT convert_from(spec,'UTF8')::jsonb#>>'{series,definition,key}',lo FROM rss_timeseries.summaries WHERE dirty ORDER BY 1,2").fetch_all(&f.admin).await?;
+    assert_eq!(
+        dirty,
+        vec![
+            ("pressure".into(), 10),
+            ("temperature".into(), 0),
+            ("temperature".into(), 20)
+        ]
+    );
+    let revisions:(i64,i64)=sqlx::query_as("SELECT n.revision,s.revision FROM rss_timeseries.namespaces n JOIN rss_timeseries.streams s USING(tenant_id,namespace)").fetch_one(&f.admin).await?;
+    assert_eq!(revisions, (0, 2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_sees_prior_stream_commit_under_host_repeatable_read() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-host-isolation").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let host_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("SET default_transaction_isolation TO 'repeatable read'")
+                    .execute(c)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(f.pool.connect_options().as_ref().clone())
+        .await?;
+    let host = PgStore::new(
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+        rss_timeseries_postgres::StoreConnections::Runtime(host_pool),
+        Timer,
+        limits()?,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    let mut pending = f.pool.begin().await?;
+    let staged = batch("held", vec![sample(&d, "one", 3, 7)?])?;
+    super::writing::stage_batch(&mut pending, &staged).await?;
+    let sp = spec(&d, 10)?;
+    let refresh = plan(
+        "refresh",
+        MaintenanceAction::Recompute {
+            spec: sp.clone(),
+            window: window(0, 10)?,
+        },
+        10,
+    )?;
+    let release = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock' AND query LIKE '%lock_namespace%')").fetch_one(&f.admin).await? {return anyhow::Ok(());}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        pending.commit().await?;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(complete(&host, refresh), release)?;
+    let page = aggregate(&host, sp, 0, 10).await?;
+    assert_eq!(page.refreshed_through, Some(Timestamp::new(10)?));
+    assert!(
+        matches!(page.buckets[0].value, AggregateValue::Mean {sum: Sum::U128(7), count} if count.get()==1)
+    );
+    Ok(())
+}

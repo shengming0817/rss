@@ -438,3 +438,72 @@ async fn native_call_commit_before_publication_and_cleanup_rollback_recover() ->
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn delete_during_native_refresh_prevents_stale_publication() -> anyhow::Result<()> {
+    let f = Fixture::on_profile("ts-native-fence-race", dedicated()?).await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    confirmed(
+        f.write(&batch("seed", vec![sample(&d, "old", 1, 8)?])?)
+            .await?,
+    )?;
+    let sp = spec(&d, 10)?;
+    let r = plan(
+        "publish",
+        MaintenanceAction::Recompute {
+            spec: sp.clone(),
+            window: window(0, 10)?,
+        },
+        2,
+    )?;
+    let auth = Authorized::<MaintenanceRequest>::verify(&authority(TENANT)?, r.clone())?;
+    assert!(matches!(
+        confirmed(f.store.step(&auth, None, deadline()?).await?)?,
+        MaintenanceProgress::More { .. }
+    ));
+    let mut gate = f.admin.begin().await?;
+    let lock:String=sqlx::query_scalar("SELECT format('LOCK TABLE %I.%I IN ACCESS EXCLUSIVE MODE',materialization_hypertable_schema,materialization_hypertable_name) FROM timescaledb_information.continuous_aggregates WHERE view_schema='rss_timeseries' AND view_name='gauge_10'").fetch_one(&mut *gate).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(lock.as_str()))
+        .execute(&mut *gate)
+        .await?;
+    let delete = async {
+        tokio::time::timeout(Duration::from_secs(8),async {
+            loop {
+                let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE query LIKE 'CALL public.refresh_continuous_aggregate%' AND wait_event_type='Lock')").fetch_one(&f.admin).await?;
+                if waiting {return anyhow::Ok(());}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        complete(
+            &f.store,
+            plan(
+                "delete-in-flight",
+                MaintenanceAction::Delete {
+                    selection: sp.selection(),
+                    window: window(0, 10)?,
+                    restore_until: Timestamp::new(i64::MAX)?,
+                },
+                1,
+            )?,
+        )
+        .await?;
+        gate.commit().await?;
+        anyhow::Ok(())
+    };
+    let (progress, ()) = tokio::try_join!(
+        async { anyhow::Ok(confirmed(f.store.step(&auth, None, deadline()?).await?)?) },
+        delete
+    )?;
+    assert!(matches!(progress, MaintenanceProgress::More { .. }));
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_timeseries.summaries")
+        .fetch_one(&f.admin)
+        .await?;
+    assert_eq!(published, 0);
+    complete(&f.store, r).await?;
+    assert!(matches!(
+        aggregate(&f.store, sp, 0, 10).await?.buckets[0].value,
+        AggregateValue::Missing
+    ));
+    Ok(())
+}
