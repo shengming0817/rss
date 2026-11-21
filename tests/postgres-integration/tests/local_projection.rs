@@ -292,25 +292,27 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
         .connect_with(options.clone())
         .await?;
     sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE projection_producer LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE projection_worker LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE ROLE projection_other LOGIN PASSWORD 'fixture-only' NOBYPASSRLS;").execute(&owner).await?;
-    sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO projection_producer; GRANT SELECT ON rss_transactional_messaging.policy,rss_transactional_messaging.outbox TO projection_producer; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO projection_producer;").execute(&owner).await?;
-    {
+    let candidate = std::env::var("RSS_LOCAL_PROJECTION_EXAMPLE").ok();
+    if let Some(binary) = &candidate {
+        let mut input =
+            testkit::example_process::pg_input(&pg, &params.username, &tenant().to_string());
+        input["install"] = true.into();
+        input["password"] = params.password.clone().into();
+        testkit::example_process::run_binary(binary, &input, Duration::from_secs(60)).await?;
+    } else {
+        sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
         let mut tx = owner.begin().await?;
         grant_local_projection(&mut tx, "projection_worker", &domain()?, &group()?).await?;
         grant_consumer(&mut tx, "projection_other").await?;
         tx.commit().await?;
+        sqlx::raw_sql("GRANT projection_other TO projection_worker; GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO projection_other").execute(&owner).await?;
     }
-    sqlx::raw_sql("GRANT projection_other TO projection_worker; GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO projection_worker,projection_other; CREATE TABLE public.effect_a(id text PRIMARY KEY); CREATE TABLE public.effect_b(id text PRIMARY KEY); GRANT SELECT,INSERT ON public.effect_a,public.effect_b TO projection_worker;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO projection_producer; GRANT SELECT ON rss_transactional_messaging.policy,rss_transactional_messaging.outbox TO projection_producer; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO projection_producer;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT SELECT,INSERT ON rss_transactional_messaging.consumer_dead_letter TO projection_worker; CREATE TABLE public.effect_a(id text PRIMARY KEY); CREATE TABLE public.effect_b(id text PRIMARY KEY); GRANT INSERT ON public.effect_a TO projection_worker;").execute(&owner).await?;
+    if candidate.is_none() {
+        sqlx::raw_sql("GRANT SELECT ON public.effect_a TO projection_worker; GRANT SELECT,INSERT ON public.effect_b TO projection_worker").execute(&owner).await?;
+    }
     fence_fixture::provision(&owner).await?;
-    for id in ["existing-pending", "existing-published"] {
-        let message = message(id, "orders")?;
-        sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2)")
-            .bind(message.canonical_bytes())
-            .bind(serde_json::json!({"trace":null,"tenant_authority":null}))
-            .execute(&owner)
-            .await?;
-    }
-    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id='existing-published'").execute(&owner).await?;
     let config = |user| -> anyhow::Result<PgConfig> {
         Ok(PgConfig::new(
             &params.host,
@@ -353,6 +355,40 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
         worker,
         config: worker_config,
     };
+    if let Some(binary) = candidate {
+        for id in ["candidate-success", "candidate-unknown"] {
+            f.append(id, "orders").await?;
+        }
+        let input =
+            testkit::example_process::pg_input(&pg, "projection_worker", &tenant().to_string());
+        testkit::example_process::run_binary(&binary, &input, Duration::from_secs(60)).await?;
+        for id in ["candidate-success", "candidate-unknown"] {
+            assert_eq!(
+                f.state(id).await?,
+                (1, 0, Some("succeeded".into()), "published".into())
+            );
+        }
+        eprintln!("external-provider-consumer PASS {binary}");
+    } else {
+        Box::pin(source_scenarios(&f, scale_only)).await?;
+    }
+    f.worker.close().await;
+    f.producer.close().await;
+    f.raw_worker.close().await;
+    f.owner.close().await;
+    Ok(())
+}
+
+async fn source_scenarios(f: &Fixture, scale_only: bool) -> anyhow::Result<()> {
+    for id in ["existing-pending", "existing-published"] {
+        let message = message(id, "orders")?;
+        sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+            .bind(message.canonical_bytes())
+            .bind(serde_json::json!({"trace":null,"tenant_authority":null}))
+            .execute(&f.owner)
+            .await?;
+    }
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id='existing-published'").execute(&f.owner).await?;
     let projection = f
         .projection(Effect {
             gate: None,
@@ -373,44 +409,26 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
     committed_projection(only(items)?)?;
     assert_eq!(f.state("existing-published").await?.3, "published");
     drop(projection);
-    if let Ok(binary) = std::env::var("RSS_LOCAL_PROJECTION_EXAMPLE") {
-        for id in ["candidate-success", "candidate-unknown"] {
-            f.append(id, "orders").await?;
-        }
-        let input =
-            testkit::example_process::pg_input(&pg, "projection_worker", &tenant().to_string());
-        testkit::example_process::run_binary(&binary, &input, Duration::from_secs(60)).await?;
-        for id in ["candidate-success", "candidate-unknown"] {
-            assert_eq!(
-                f.state(id).await?,
-                (1, 0, Some("succeeded".into()), "published".into())
-            );
-        }
-        eprintln!("external-provider-consumer PASS {binary}");
-    } else if scale_only {
-        Box::pin(batch::history_and_policy(&f)).await?;
-        Box::pin(scale::run(&f)).await?;
+    if scale_only {
+        Box::pin(batch::history_and_policy(f)).await?;
+        Box::pin(scale::run(f)).await?;
     } else {
-        Box::pin(leases::run(&f)).await?;
-        Box::pin(batch::run(&f)).await?;
-        Box::pin(success_and_duplicate(&f)).await?;
-        Box::pin(mismatched_execution_preserves_valid_source(&f)).await?;
-        Box::pin(ingress_rejection(&f)).await?;
-        Box::pin(rejected_and_failed(&f)).await?;
-        Box::pin(redrive_unknown(&f)).await?;
-        Box::pin(unknown_commit(&f)).await?;
-        Box::pin(unknown_rollback(&f)).await?;
-        Box::pin(renewal_and_expiry(&f)).await?;
-        Box::pin(cancellation_and_restart(&f)).await?;
-        Box::pin(pool_capacity(&f)).await?;
-        Box::pin(scoped_permissions(&f)).await?;
-        Box::pin(batch::head_admission(&f)).await?;
-        Box::pin(dr_recovery(&f)).await?;
+        Box::pin(leases::run(f)).await?;
+        Box::pin(batch::run(f)).await?;
+        Box::pin(success_and_duplicate(f)).await?;
+        Box::pin(mismatched_execution_preserves_valid_source(f)).await?;
+        Box::pin(ingress_rejection(f)).await?;
+        Box::pin(rejected_and_failed(f)).await?;
+        Box::pin(redrive_unknown(f)).await?;
+        Box::pin(unknown_commit(f)).await?;
+        Box::pin(unknown_rollback(f)).await?;
+        Box::pin(renewal_and_expiry(f)).await?;
+        Box::pin(cancellation_and_restart(f)).await?;
+        Box::pin(pool_capacity(f)).await?;
+        Box::pin(scoped_permissions(f)).await?;
+        Box::pin(batch::head_admission(f)).await?;
+        Box::pin(dr_recovery(f)).await?;
     }
-    f.worker.close().await;
-    f.producer.close().await;
-    f.raw_worker.close().await;
-    f.owner.close().await;
     Ok(())
 }
 #[allow(

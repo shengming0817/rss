@@ -29,7 +29,8 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     stale_stream(f, &p).await?;
     inbox_contention(f, &p).await?;
-    windows(f, &p).await
+    windows(f, &p).await?;
+    duplicate_crossing_deadline(f, &p).await
 }
 
 async fn stale_stream(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
@@ -177,5 +178,53 @@ async fn windows(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Res
     );
     // The later dead-letter discovery scenario starts with a clean domain.
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='resolved' WHERE message_id='lease-delivery-expired'").execute(&f.owner).await?;
+    Ok(())
+}
+
+async fn duplicate_crossing_deadline(
+    f: &Fixture,
+    p: &PgLocalProjection<Effect, Key>,
+) -> anyhow::Result<()> {
+    struct Entered(Notify);
+    impl IngressValidator<Vec<u8>> for Entered {
+        fn validate(
+            &self,
+            input: IngressChallenge<'_, Vec<u8>>,
+        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+            self.0.notify_one();
+            Validator.validate(input)
+        }
+    }
+    // A redriven source meets the matching success receipt after admission.
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='pending' WHERE message_id='lease-full'").execute(&f.owner).await?;
+    let mut blocker = f.owner.begin().await?;
+    sqlx::query(
+        "SELECT 1 FROM rss_transactional_messaging.inbox WHERE message_id='lease-full' FOR UPDATE",
+    )
+    .execute(&mut *blocker)
+    .await?;
+    let validator = Entered(Notify::new());
+    let stream = p
+        .project_batch(
+            execution(tenant(), 1),
+            &validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    let release = async {
+        validator.0.notified().await;
+        // Model the window crossing while the worker waits for the receipt lock.
+        sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp() WHERE message_id='lease-full'").execute(&mut *blocker).await?;
+        blocker.commit().await
+    };
+    let (items, released) = tokio::join!(stream.collect(), release);
+    released?;
+    committed_projection(only(items)?)?;
+    assert_eq!(
+        f.state("lease-full").await?,
+        (1, 1, Some("succeeded".into()), "published".into())
+    );
     Ok(())
 }

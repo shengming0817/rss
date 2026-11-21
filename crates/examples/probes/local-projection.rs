@@ -52,20 +52,41 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let input: pg::Input = pg::read()?;
+    #[derive(serde::Deserialize)]
+    struct Input {
+        #[serde(flatten)]
+        pg: pg::Input,
+        #[serde(default)]
+        install: bool,
+    }
+    let Input { pg: input, install } = pg::read()?;
+    if install {
+        let pool = input.pool().await?;
+        let mut tx = pool.begin().await?;
+        sqlx::raw_sql(MIGRATION_SQL).execute(&mut *tx).await?;
+        grant_local_projection(
+            &mut tx,
+            "projection_worker",
+            &MessagingDomain::parse("orders")?,
+            &ConsumerGroup::parse("projection")?,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(());
+    }
     let binding = binding(&input)?;
     let runtime =
         Arc::new(PgRuntime::connect_consumer(config(&input)?, Timer, binding.storage()).await?);
     let ttl = Duration::from_secs(8);
     let budget = DeliveryBudget::new(ttl, ttl / 8, ttl / 8, ttl / 8)?;
-    let projection = async |group: &str| {
+    let projection = async |domain: &str, group: &str| {
         let key = Arc::new(EphemeralKey::from_bytes(&[1; 32], "candidate")?);
         let capture = PgRecoveryCapture::new(runtime.clone(), key, deadline()?).await?;
         Ok::<_, anyhow::Error>(
             PgLocalProjection::new(
                 capture,
                 ConsumerGroup::parse(group)?,
-                MessagingDomain::parse("orders")?,
+                MessagingDomain::parse(domain)?,
                 Effect,
                 budget,
                 LeaseRenewalPolicy::from_ttl(ttl)?,
@@ -74,8 +95,22 @@ async fn main() -> anyhow::Result<()> {
             .await?,
         )
     };
-    anyhow::ensure!(projection("another-group").await.is_err());
-    let worker = projection("projection").await?;
+    for (domain, group) in [
+        ("orders", "another-group"),
+        ("another-domain", "projection"),
+    ] {
+        let result = projection(domain, group).await;
+        anyhow::ensure!(matches!(
+            result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<PgError>()),
+            Some(PgError::IncompatibleStorageContract(
+                PgStorageContractFailure::RuntimeAcl
+            ))
+        ));
+    }
+    let worker = projection("orders", "projection").await?;
     let validator = Validator(binding);
     for (id, expected) in [
         ("candidate-success", Status::Committed),

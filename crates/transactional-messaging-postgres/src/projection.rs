@@ -287,9 +287,6 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let binding = match verify_ingress(validator, self.group.clone(), &subscription, message) {
             Ok(binding) => binding,
             Err(error) => {
-                if self.delivery_expired(&source, cutoff).await? {
-                    return self.expire(source, cutoff).await;
-                }
                 let reason = error.reason();
                 if reason == EnvelopeValidationFailure::ExecutionMismatch {
                     return Err(PgError::lost());
@@ -317,11 +314,8 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             )
             .await
             .map_err(pg)?;
-        if !matches!(acquired, IdempotencyDisposition::Acquired(_))
-            && self.delivery_expired(&source, cutoff).await?
-        {
-            return self.expire(source, cutoff).await;
-        }
+        // Ingress ran within the admitted window. The source CAS still fences settlement;
+        // a wait for Inbox must not overturn a matching durable terminal receipt.
         let claim = match acquired {
             IdempotencyDisposition::Acquired(claim) => claim,
             IdempotencyDisposition::InProgress => {
