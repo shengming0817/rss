@@ -28,9 +28,15 @@ pub(super) fn plan(
 }
 pub(super) async fn complete(store: &PgStore<Timer>, r: MaintenanceRequest) -> anyhow::Result<()> {
     let request = Authorized::<MaintenanceRequest>::verify(&authority(TENANT)?, r)?;
-    let mut after = None;
+    complete_after(store, &request, None).await
+}
+pub(super) async fn complete_after(
+    store: &PgStore<Timer>,
+    request: &Authorized<MaintenanceRequest>,
+    mut after: Option<Continuation>,
+) -> anyhow::Result<()> {
     for _ in 0..500 {
-        match confirmed(store.step(&request, after.as_ref(), deadline()?).await?)? {
+        match confirmed(store.step(request, after.as_ref(), deadline()?).await?)? {
             MaintenanceProgress::Complete { .. } => return Ok(()),
             MaintenanceProgress::More { next, .. } => after = Some(next),
             MaintenanceProgress::Blocked { reason } => {

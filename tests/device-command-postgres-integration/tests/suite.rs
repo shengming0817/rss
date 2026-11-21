@@ -398,6 +398,7 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
         crash::recovery(&fixture, &postgres).await?;
         scenarios::full_outbox_states(&fixture).await?;
         scenarios::authority_pages(&fixture).await?;
+        Box::pin(scenarios::atomic_handoff(&fixture)).await?;
         scenarios::composition_boundaries(&fixture).await?;
         scenarios::compose_replay_after_advance(&mut fixture).await?;
         scenarios::controlled_time(&fixture).await?;

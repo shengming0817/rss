@@ -6,6 +6,7 @@ mod clock;
 mod persistence;
 mod probe;
 mod store;
+mod supersede;
 pub use callers::{CallerRoles, CallerRolesError};
 pub use clock::CommandClock;
 #[cfg(feature = "integration")]

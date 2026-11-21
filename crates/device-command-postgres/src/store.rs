@@ -176,25 +176,7 @@ impl<R: Send> Store for PgStore<R> {
         if !changed {
             return Err(error(Error::Fenced));
         }
-        // Each page is bounded in memory. One enclosing transaction/deadline covers the full authority change.
-        loop {
-            let rows = page(tx, s, None, i64::from(self.supersede_batch_size.get())).await?;
-            if rows.is_empty() {
-                break;
-            }
-            for mut row in rows {
-                let previous = row.command.version();
-                let outcome = row
-                    .command
-                    .transition(Event::Supersede, next, self.now(tx).await?)
-                    .map_err(error)?;
-                if outcome != Outcome::Advanced {
-                    return Err(error(Error::InvalidSnapshot));
-                }
-                save(tx, &row.command, previous).await?;
-            }
-        }
-        Ok(())
+        crate::supersede::active_commands(tx, s, next, self.supersede_batch_size, &self.clock).await
     }
     async fn queue(
         &self,
@@ -319,7 +301,11 @@ impl<R: Send> Store for PgStore<R> {
     ) -> Result<RecoveryPage, PgError> {
         self.outbox.validate_transaction(tx)?;
         let current = authority(tx, s).await?;
-        let rows = page(tx, s, after, i64::from(limit.get())).await?;
+        let rows = active_rows(tx, s, after.map(CommandId::as_str), limit, false)
+            .await?
+            .into_iter()
+            .map(decode)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut commands = Vec::with_capacity(rows.len());
         for row in rows {
             commands.push(self.recover_stored(tx, current, row).await?);

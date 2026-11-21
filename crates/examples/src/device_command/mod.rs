@@ -215,7 +215,10 @@ async fn scenario(
     )?;
     anyhow::ensure!(recovered.is_some(), "queued command disappeared");
     anyhow::ensure!(
-        load(runtime, binding, store.clone(), s).await?.status() == Status::Published,
+        load(runtime, binding, store.clone(), s, "example")
+            .await?
+            .status()
+            == Status::Published,
         "publication not distinct"
     );
     let received = report(
@@ -242,7 +245,7 @@ async fn scenario(
     .await;
     anyhow::ensure!(old.is_err(), "old command coordinate accepted");
     anyhow::ensure!(
-        load(runtime, binding, store.clone(), s).await? == received.command,
+        load(runtime, binding, store.clone(), s, "example").await? == received.command,
         "stale report changed command"
     );
     let applied = report(
@@ -258,9 +261,45 @@ async fn scenario(
         applied.command.status() == Status::Applied,
         "device report did not reach applied"
     );
+    handoff(runtime, binding, store.clone(), s, coordinate).await?;
     anyhow::ensure!(
-        load(runtime, binding, store, s).await? == applied.command,
+        load(runtime, binding, store, s, "example").await? == applied.command,
         "applied command not persisted"
+    );
+    Ok(())
+}
+async fn handoff(
+    runtime: &PgRuntime,
+    binding: ExecutionBinding,
+    store: Arc<PgStore<()>>,
+    s: Scope,
+    coordinate: Coordinate,
+) -> anyhow::Result<()> {
+    let pending = spec("handoff", s, coordinate)?;
+    let dispatch = message("handoff", s.tenant())?;
+    let selected = store.clone();
+    committed(
+        runtime
+            .local_tx(binding, budget()?, move |tx| {
+                Box::pin(async move { selected.queue(tx, pending, dispatch).await })
+            })
+            .await,
+    )?;
+    committed(
+        compose::takeover(
+            runtime,
+            binding,
+            store.clone(),
+            s,
+            coordinate,
+            Coordinate::new(2, 4)?,
+            budget()?,
+        )
+        .await,
+    )?;
+    anyhow::ensure!(
+        load(runtime, binding, store, s, "handoff").await?.status() == Status::Superseded,
+        "handoff not persisted"
     );
     Ok(())
 }
@@ -269,8 +308,9 @@ async fn load(
     binding: ExecutionBinding,
     store: Arc<PgStore<()>>,
     s: Scope,
+    name: &str,
 ) -> anyhow::Result<Command> {
-    let id = CommandId::parse("example")?;
+    let id = CommandId::parse(name)?;
     committed(
         runtime
             .local_tx(binding, budget()?, move |tx| {

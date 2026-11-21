@@ -1,4 +1,4 @@
-use super::aggregation::{aggregate, complete, plan, spec, window};
+use super::aggregation::{aggregate, complete, complete_after, plan, spec, window};
 use super::*;
 async fn run(store: &PgStore<Timer>, r: MaintenanceRequest) -> anyhow::Result<MaintenanceProgress> {
     confirmed(
@@ -176,6 +176,27 @@ async fn deletion_restore_retirement_and_overlapping_fences() -> anyhow::Result<
     .await?;
     Ok(())
 }
+async fn prune_in_pages(
+    store: &PgStore<Timer>,
+    f: &Fixture,
+    d: &Definition,
+    prune: MaintenanceRequest,
+) -> anyhow::Result<()> {
+    let request = Authorized::<MaintenanceRequest>::verify(&authority(TENANT)?, prune)?;
+    let first = confirmed(store.step(&request, None, deadline()?).await?)?;
+    let MaintenanceProgress::More { processed: 1, next } = first else {
+        anyhow::bail!("expected the first of two raw rows to be pruned, got {first:?}");
+    };
+    assert_eq!(f.count().await?, 1);
+    let page = raw_page(f, d).await?;
+    assert!(page.rows.is_empty());
+    let [excluded] = page.availability.excluded.as_slice() else {
+        anyhow::bail!("expected one pruned range");
+    };
+    assert_eq!(excluded.reason, UnavailableReason::Pruned);
+    assert_eq!(excluded.window, window(0, 20)?);
+    complete_after(store, &request, Some(next)).await
+}
 #[tokio::test]
 async fn layered_pruning_expiry_and_closed_stream_reclamation() -> anyhow::Result<()> {
     let f = Fixture::new("ts-prune").await?;
@@ -246,7 +267,7 @@ async fn layered_pruning_expiry_and_closed_stream_reclamation() -> anyhow::Resul
         )?,
     )
     .await?;
-    complete(&store, prune).await?;
+    prune_in_pages(&store, &f, &d, prune).await?;
     assert_eq!(f.count().await?, 0);
     let coarse = aggregate(&store, spec(&d, 20)?, 0, 20).await?;
     assert!(
