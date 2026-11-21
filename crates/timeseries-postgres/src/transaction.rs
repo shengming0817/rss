@@ -24,7 +24,8 @@ pub(crate) fn sql_error(e: sqlx::Error) -> Error {
         Some("TS003") => Error::Retired,
         Some("TS004") => Error::HistoryExpired,
         Some("42501") => Error::Unauthorized,
-        Some("23514" | "23503" | "42P01" | "42703") => Error::Invariant,
+        Some("22003") => Error::NumericRange,
+        Some("TS005" | "23514" | "23503" | "42P01" | "42703") => Error::Invariant,
         _ => Error::Unavailable,
     }
 }
@@ -47,12 +48,20 @@ pub(crate) fn certain<T>(outcome: Outcome<T>) -> Result<T, Error> {
         Outcome::Unknown => Err(Error::Unavailable),
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Snapshot,
+    Write,
+    #[cfg(feature = "timescaledb")]
+    RefreshPreflight,
+}
+
 impl<C: Clock> PgStore<C> {
     pub(crate) async fn transaction<T: Send>(
         &self,
         tenant: TenantId,
         deadline: Deadline,
-        mutation: bool,
+        mode: Mode,
         operation: impl for<'a> FnOnce(&'a mut PgConnection, &'a C) -> BoxFuture<'a, Result<T, Error>>
         + Send,
     ) -> Result<Outcome<T>, Error> {
@@ -61,10 +70,14 @@ impl<C: Clock> PgStore<C> {
         let remaining = deadline
             .remaining(self.clock.now())
             .ok_or(Error::Deadline)?;
+        let mutation = mode == Mode::Write;
         let fault = if mutation { self.take_fault() } else { 0 };
         let result=tokio::time::timeout(remaining, async {
             let mut lease=Lease{connection:self.pool.acquire().await.map_err(sql_error)?,settled:false};
-            let mut tx=lease.connection.begin().await.map_err(sql_error)?;
+            let mut tx = match mode {
+                Mode::Snapshot => lease.connection.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").await,
+                _ => lease.connection.begin().await,
+            }.map_err(sql_error)?;
             let ms=deadline.remaining(self.clock.now()).ok_or(Error::Deadline)?.as_millis().clamp(1,i32::MAX as u128);
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")
                 .bind(tenant.to_string()).bind(format!("{ms}ms")).execute(&mut *tx).await.map_err(sql_error)?;

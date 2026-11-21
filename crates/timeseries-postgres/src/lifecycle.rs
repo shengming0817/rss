@@ -16,15 +16,6 @@ pub(crate) async fn lock(c: &mut PgConnection, s: &Scope) -> Result<i64, Error> 
         .await
         .map_err(sql_error)
 }
-pub(crate) async fn read_lock(c: &mut PgConnection, s: &Scope) -> Result<(), Error> {
-    sqlx::query("SELECT rss_timeseries.read_namespace($1::text::uuid,$2)")
-        .bind(s.tenant().to_string())
-        .bind(s.namespace().as_str())
-        .fetch_optional(c)
-        .await
-        .map_err(sql_error)?;
-    Ok(())
-}
 pub(crate) async fn absent_receipt(
     c: &mut PgConnection,
     s: &Stream,
@@ -35,13 +26,6 @@ pub(crate) async fn absent_receipt(
     } else {
         Lookup::NotVisible
     })
-}
-pub(crate) async fn admit_stream(c: &mut PgConnection, s: &Stream) -> Result<(), Error> {
-    if closed(c, s).await? {
-        Err(Error::HistoryExpired)
-    } else {
-        Ok(())
-    }
 }
 pub(crate) async fn closed(c: &mut PgConnection, s: &Stream) -> Result<bool, Error> {
     Ok(sqlx::query_scalar::<_,bool>("SELECT closed FROM rss_timeseries.streams WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4").bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_optional(c).await.map_err(sql_error)?.unwrap_or(false))

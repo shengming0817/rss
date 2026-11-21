@@ -2,7 +2,7 @@ use super::*;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Fold {
     at: Timestamp,
-    revision: i64,
+    revision: Revision,
     builder: Option<SummaryBuilder>,
     last: Option<(Timestamp, u64, Id)>,
 }
@@ -12,7 +12,7 @@ pub(super) async fn step(
     spec: &SummarySpec,
     window: Interval,
     state: &mut State,
-    revision: i64,
+    revision: Revision,
     limits: &Limits,
 ) -> Result<Step, Error> {
     if spec.bucket(window.start())?.start() != window.start()

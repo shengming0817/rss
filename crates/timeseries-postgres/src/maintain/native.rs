@@ -2,12 +2,13 @@
 //! must execute outside a transaction block. Never expose its intermediate results.
 // ref: timescale/timescaledb tsl/src/continuous_aggs/refresh.c@2.30.2
 use super::*;
+use crate::transaction::Mode;
 use crate::{StorageProfile, transaction::certain};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Fold {
     at: Timestamp,
-    revision: i64,
+    revision: Revision,
     phase: Phase,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,7 +20,7 @@ enum Phase {
 pub(super) struct Refreshed {
     ordinal: u64,
     at: Timestamp,
-    revision: i64,
+    revision: Option<Revision>,
     resolution: i64,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -62,52 +63,58 @@ pub(super) async fn refresh<C: Clock>(
     let instance = store.instance.clone();
     let pending = certain(
         store
-            .transaction(r.scope().tenant(), deadline, false, move |c, _| {
-                Box::pin(async move {
-                    let revision = lock(c, request.scope()).await?;
-                    let (state, done) = load(c, &request).await?;
-                    let now = db_now(c).await?;
-                    if let Some(token) = &token {
-                        let (_, ordinal) =
-                            key.open::<u64>(DOMAIN, token, request.binding()?, &instance, now)?;
-                        if ordinal > state.ordinal {
-                            return Err(Error::InvalidCursor);
+            .transaction(
+                r.scope().tenant(),
+                deadline,
+                Mode::RefreshPreflight,
+                move |c, _| {
+                    Box::pin(async move {
+                        let namespace = lock(c, request.scope()).await?;
+                        let (state, done) = load(c, &request).await?;
+                        let now = db_now(c).await?;
+                        if let Some(token) = &token {
+                            let (_, ordinal) =
+                                key.open::<u64>(DOMAIN, token, request.binding()?, &instance, now)?;
+                            if ordinal > state.ordinal {
+                                return Err(Error::InvalidCursor);
+                            }
+                            if ordinal < state.ordinal {
+                                return Ok(None);
+                            }
                         }
-                        if ordinal < state.ordinal {
+                        if done {
                             return Ok(None);
                         }
-                    }
-                    if done {
-                        return Ok(None);
-                    }
-                    if let Some(cleanup) = &state.cleanup {
-                        return cleanup
-                            .pending
-                            .map(|(resolution, at)| {
-                                Ok(Refreshed {
-                                    ordinal: state.ordinal,
-                                    at: Timestamp::new(at)?,
-                                    revision,
-                                    resolution,
+                        if let Some(cleanup) = &state.cleanup {
+                            return cleanup
+                                .pending
+                                .map(|(resolution, at)| {
+                                    Ok(Refreshed {
+                                        ordinal: state.ordinal,
+                                        at: Timestamp::new(at)?,
+                                        revision: None,
+                                        resolution,
+                                    })
                                 })
-                            })
-                            .transpose();
-                    }
-                    let MaintenanceAction::Recompute { spec, .. } = request.action() else {
-                        return Ok(None);
-                    };
-                    let resolution = spec.resolution_micros().get() as i64;
-                    Ok(state
-                        .native
-                        .filter(|f| f.revision == revision && matches!(f.phase, Phase::Refresh))
-                        .map(|f| Refreshed {
-                            ordinal: state.ordinal,
-                            at: f.at,
-                            revision,
-                            resolution,
-                        }))
-                })
-            })
+                                .transpose();
+                        }
+                        let MaintenanceAction::Recompute { spec, .. } = request.action() else {
+                            return Ok(None);
+                        };
+                        let revision = revision(c, namespace, spec.stream()).await?;
+                        let resolution = spec.resolution_micros().get() as i64;
+                        Ok(state
+                            .native
+                            .filter(|f| f.revision == revision && matches!(f.phase, Phase::Refresh))
+                            .map(|f| Refreshed {
+                                ordinal: state.ordinal,
+                                at: f.at,
+                                revision: Some(revision),
+                                resolution,
+                            }))
+                    })
+                },
+            )
             .await?,
     )?;
     let Some(pending) = pending else {
@@ -161,7 +168,7 @@ pub(super) async fn step(
     c: &mut PgConnection,
     r: &MaintenanceRequest,
     state: &mut State,
-    revision: i64,
+    revision: Revision,
     limits: &Limits,
     refreshed: Option<&Refreshed>,
 ) -> Result<Step, Error> {
@@ -243,7 +250,7 @@ pub(super) async fn step(
         }
         Phase::Refresh => {
             if !refreshed.is_some_and(|f| {
-                f.ordinal == state.ordinal && f.at == fold.at && f.revision == revision
+                f.ordinal == state.ordinal && f.at == fold.at && f.revision == Some(revision)
             }) {
                 return Ok(Step::More(0));
             }

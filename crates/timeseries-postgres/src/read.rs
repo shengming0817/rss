@@ -1,3 +1,4 @@
+use crate::transaction::Mode;
 use crate::{
     CursorKey, Limits, PgStore,
     cursor::Position,
@@ -34,7 +35,6 @@ struct Read {
 impl Read {
     async fn run(self, c: &mut PgConnection, clock: &impl Clock) -> Result<Page, Error> {
         let q = &self.query;
-        crate::lifecycle::read_lock(c, q.selection().scope()).await?;
         let availability =
             crate::lifecycle::availability(c, q, self.limits.max_points.get()).await?;
         let now = db_now(c).await?;
@@ -197,7 +197,7 @@ impl<C: Clock> Reader for PgStore<C> {
             deadline,
         };
         certain(
-            self.transaction(tenant, deadline, false, move |c, clock| {
+            self.transaction(tenant, deadline, Mode::Snapshot, move |c, clock| {
                 Box::pin(read.run(c, clock))
             })
             .await?,

@@ -1,6 +1,6 @@
 -- External dedicated NOLOGIN NOSUPERUSER NOBYPASSRLS owner executes this once.
 CREATE SCHEMA rss_timeseries;
-DO $$ BEGIN EXECUTE format('COMMENT ON SCHEMA rss_timeseries IS %L', 'rss-timeseries-postgres:3:' || gen_random_uuid()::text); END $$;
+DO $$ BEGIN EXECUTE format('COMMENT ON SCHEMA rss_timeseries IS %L', 'rss-timeseries-postgres:4:' || gen_random_uuid()::text); END $$;
 CREATE TABLE rss_timeseries.definition_heads (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, key text COLLATE "C" NOT NULL,
  version numeric(20,0), PRIMARY KEY (tenant_id,namespace,key),
@@ -17,6 +17,7 @@ CREATE TABLE rss_timeseries.streams (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
  source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
  closed boolean NOT NULL DEFAULT false, reclaimed boolean NOT NULL DEFAULT false,
+ revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
  PRIMARY KEY (tenant_id,namespace,source,generation)
 );
 CREATE TABLE rss_timeseries.batches (

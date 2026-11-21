@@ -13,11 +13,6 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  INSERT INTO rss_timeseries.definition_heads(tenant_id,namespace,key) VALUES(t,n,k) ON CONFLICT DO NOTHING;
  PERFORM 1 FROM rss_timeseries.definition_heads WHERE tenant_id=t AND namespace=n AND key=k FOR UPDATE;
 END $$;
-CREATE FUNCTION rss_timeseries.lock_definition(t uuid,n text,k text,v numeric) RETURNS SETOF rss_timeseries.definitions
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
- IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='tenant'; END IF;
- RETURN QUERY SELECT * FROM rss_timeseries.definitions WHERE tenant_id=t AND namespace=n AND key=k AND version=v FOR SHARE;
-END $$;
 CREATE FUNCTION rss_timeseries.put_definition(t uuid,n text,k text,v numeric,b bytea,d bytea,retire boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ DECLARE prior rss_timeseries.definitions; BEGIN
  PERFORM rss_timeseries.lock_key(t,n,k);
@@ -27,6 +22,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
   IF retire THEN UPDATE rss_timeseries.definitions SET retired=true WHERE tenant_id=t AND namespace=n AND key=k AND version=v; END IF;
  ELSE
   IF retire THEN RAISE EXCEPTION USING ERRCODE='TS002',MESSAGE='definition missing'; END IF;
+  INSERT INTO rss_timeseries.namespaces(tenant_id,namespace) VALUES(t,n) ON CONFLICT DO NOTHING;
   INSERT INTO rss_timeseries.definitions VALUES(t,n,k,v,b,d,false);
   UPDATE rss_timeseries.definition_heads SET version=v WHERE tenant_id=t AND namespace=n AND key=k;
  END IF;
@@ -78,14 +74,11 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  SELECT revision INTO r FROM rss_timeseries.namespaces WHERE tenant_id=t AND namespace=n FOR UPDATE;
  RETURN r;
 END $$;
-CREATE FUNCTION rss_timeseries.read_namespace(t uuid,n text) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
- IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='tenant'; END IF;
- PERFORM 1 FROM rss_timeseries.namespaces WHERE tenant_id=t AND namespace=n FOR SHARE;
-END $$;
 CREATE FUNCTION rss_timeseries.lock_stream(t uuid,n text,s text,g text) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
- PERFORM rss_timeseries.lock_namespace(t,n);
+ IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='tenant'; END IF;
+ INSERT INTO rss_timeseries.namespaces(tenant_id,namespace) VALUES(t,n) ON CONFLICT DO NOTHING;
+ PERFORM 1 FROM rss_timeseries.namespaces WHERE tenant_id=t AND namespace=n FOR SHARE;
  INSERT INTO rss_timeseries.streams(tenant_id,namespace,source,generation) VALUES(t,n,s,g) ON CONFLICT DO NOTHING;
  PERFORM 1 FROM rss_timeseries.streams WHERE tenant_id=t AND namespace=n AND source=s AND generation=g FOR UPDATE;
 END $$;
@@ -109,12 +102,18 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries A
  SELECT NOT EXISTS(SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=(j#>>'{stream,scope,tenant}')::uuid AND f.namespace=j#>>'{stream,scope,namespace}'
  AND (f.kind='pruned' OR (f.kind='delete' AND NOT f.restored)) AND f.lo<=at_time AND f.hi>at_time AND rss_timeseries.matches(f.selection,j))
 $$;
+-- The lower boundary (summary.hi > change.lo) is checked by the caller.
+CREATE FUNCTION rss_timeseries.affects_summary(spec jsonb,bucket_start bigint,change_end bigint) RETURNS boolean
+LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
+ SELECT (spec#>>'{series,definition,metric,kind}' IN ('bool','state') AND spec#>>'{coverage,coverage}'='observedOnly')
+ OR bucket_start::numeric < change_end::numeric + coalesce((spec->>'maxGap')::numeric,(spec#>>'{coverage,maxHoldMicros}')::numeric,0)
+$$;
 CREATE FUNCTION rss_timeseries.invalidate(t uuid,n text,sel jsonb,lo_time bigint,hi_time bigint) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
  UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
  UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND hi>lo_time
- AND ((convert_from(spec,'UTF8')::jsonb#>>'{series,definition,metric,kind}' IN ('bool','state') AND convert_from(spec,'UTF8')::jsonb#>>'{coverage,coverage}'='observedOnly') OR lo::numeric < hi_time::numeric + coalesce((convert_from(spec,'UTF8')::jsonb->>'maxGap')::numeric,(convert_from(spec,'UTF8')::jsonb#>>'{coverage,maxHoldMicros}')::numeric,0))
+ AND rss_timeseries.affects_summary(convert_from(spec,'UTF8')::jsonb,lo,hi_time)
  AND rss_timeseries.matches(sel,convert_from(spec,'UTF8')::jsonb);
 END $$;
 CREATE FUNCTION rss_timeseries.put_plan(t uuid,n text,i text,b bytea,s bytea,d boolean) RETURNS void
@@ -132,7 +131,12 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
   DELETE FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind=k AND selection=sel;
  END IF;
  INSERT INTO rss_timeseries.fences VALUES(t,n,i,k,sel,l,h,u,false);
- IF k='delete' THEN PERFORM rss_timeseries.invalidate(t,n,sel,l,h); END IF;
+ IF k='delete' THEN
+  PERFORM rss_timeseries.invalidate(t,n,sel,l,h);
+ ELSIF k='pruned' THEN
+  -- In-flight folds must recheck raw availability; retained materialized summaries stay valid.
+  UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
+ END IF;
 END $$;
 CREATE FUNCTION rss_timeseries.restore_fence(t uuid,n text,i text,sel jsonb,l bigint,h bigint) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
@@ -155,35 +159,6 @@ CREATE FUNCTION rss_timeseries.close_stream(t uuid,n text,s text,g text) RETURNS
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_stream(t,n,s,g);
  UPDATE rss_timeseries.streams SET closed=true WHERE tenant_id=t AND namespace=n AND source=s AND generation=g;
-END $$;
-CREATE FUNCTION rss_timeseries.put_sample(b bytea,d bytea,sd bytea,received bigint) RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
-DECLARE j jsonb:=convert_from(b,'UTF8')::jsonb; t uuid:=(j#>>'{stream,scope,tenant}')::uuid;
- n text:=j#>>'{stream,scope,namespace}'; s text:=j#>>'{stream,source}'; g text:=j#>>'{stream,generation}';
- i text:=j->>'id'; old rss_timeseries.sample_identities; def rss_timeseries.definitions;
-BEGIN
- PERFORM rss_timeseries.lock_stream(t,n,s,g);
- SELECT * INTO old FROM rss_timeseries.sample_identities WHERE tenant_id=t AND namespace=n AND source=s AND generation=g AND sample_id=i;
- IF FOUND THEN
-  IF old.digest<>d THEN RAISE EXCEPTION USING ERRCODE='TS001',MESSAGE='sample conflict'; END IF;
-  RETURN false;
- END IF;
- IF EXISTS(SELECT FROM rss_timeseries.streams WHERE tenant_id=t AND namespace=n AND source=s AND generation=g AND closed)
- OR EXISTS(SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=t AND f.namespace=n AND f.lo<=(j->>'observedAt')::bigint AND f.hi>(j->>'observedAt')::bigint AND rss_timeseries.matches(f.selection,j))
- THEN RAISE EXCEPTION USING ERRCODE='TS004',MESSAGE='input fenced'; END IF;
- SELECT * INTO def FROM rss_timeseries.lock_definition(t,n,j#>>'{series,definition,key}',(j#>>'{series,definition,version}')::numeric);
- IF NOT FOUND OR convert_from(def.raw,'UTF8')::jsonb<>j#>'{series,definition}' THEN RAISE EXCEPTION USING ERRCODE='TS002',MESSAGE='definition missing'; END IF;
- IF def.retired THEN RAISE EXCEPTION USING ERRCODE='TS003',MESSAGE='definition retired'; END IF;
- INSERT INTO rss_timeseries.sample_identities VALUES(t,n,s,g,i,d,(j->>'observedAt')::bigint,received);
- INSERT INTO rss_timeseries.samples VALUES(t,n,s,g,i,(j->>'observedAt')::bigint,(j->>'sequence')::numeric,sd,
- j#>>'{series,definition,key}',(j#>>'{series,definition,version}')::numeric,j#>>'{series,subject}',j#>>'{series,resource}',b,received);
- PERFORM rss_timeseries.invalidate(t,n,jsonb_build_object('selection','exact','stream',j->'stream','series',j->'series'),(j->>'observedAt')::bigint,(j->>'observedAt')::bigint+1);
- RETURN true;
-END $$;
-CREATE FUNCTION rss_timeseries.put_batch(t uuid,n text,s text,g text,i text,d bytea,received bigint,added integer,replayed integer,until_time bigint) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
- PERFORM rss_timeseries.lock_stream(t,n,s,g);
- INSERT INTO rss_timeseries.batches VALUES(t,n,s,g,i,d,received,added,replayed,until_time,false);
 END $$;
 CREATE FUNCTION rss_timeseries.prune_rows(t uuid,n text,sel jsonb,r bigint,s bigint,cap integer) RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ DECLARE total integer:=0; changed integer; BEGIN

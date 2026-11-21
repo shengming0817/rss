@@ -21,6 +21,7 @@ impl StorageProfile {
             _ => sql.push_str(";\n"),
         }
         sql.push_str(crate::FUNCTIONS_SQL);
+        sql.push_str(include_str!("../migrations/admission.sql"));
         match self {
             Self::PostgreSQL => sql.push_str(crate::PARTITIONS_SQL),
             #[cfg(feature = "timescaledb")]

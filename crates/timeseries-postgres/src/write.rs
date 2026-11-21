@@ -1,11 +1,11 @@
 use crate::{
     PgStore,
     definition::flatten,
-    transaction::{certain, check, db_now, sql_error},
+    transaction::{Mode, certain, check, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
-use sqlx::{PgConnection, Row};
+use sqlx::{PgConnection, Row, postgres::PgRow};
 pub(crate) async fn lookup(
     c: &mut PgConnection,
     q: &ReceiptQuery,
@@ -24,27 +24,20 @@ pub(crate) async fn lookup(
     if row.try_get::<bool, _>("expired").map_err(sql_error)? {
         return Ok(Lookup::Expired);
     }
+    Ok(Lookup::Found(receipt(&row, q)?))
+}
+
+fn receipt(row: &PgRow, q: &ReceiptQuery) -> Result<Receipt, Error> {
     let count = |key| -> Result<u32, Error> {
         u32::try_from(row.try_get::<i32, _>(key).map_err(sql_error)?).map_err(|_| Error::Invariant)
     };
-    Ok(Lookup::Found(Receipt::from_durable(ReceiptSnapshot {
+    Receipt::from_durable(ReceiptSnapshot {
         identity: q.clone(),
         received_at: Timestamp::new(row.try_get("received_at").map_err(sql_error)?)?,
         new_samples: count("new_samples")?,
         replayed_samples: count("replayed_samples")?,
         replay_until: Timestamp::new(row.try_get("replay_until").map_err(sql_error)?)?,
-    })?))
-}
-async fn lock(c: &mut PgConnection, s: &Stream) -> Result<(), Error> {
-    sqlx::query("SELECT rss_timeseries.lock_stream($1::text::uuid,$2,$3,$4)")
-        .bind(s.scope().tenant().to_string())
-        .bind(s.scope().namespace().as_str())
-        .bind(s.source().as_str())
-        .bind(s.generation().as_str())
-        .execute(c)
-        .await
-        .map_err(sql_error)?;
-    Ok(())
+    })
 }
 async fn admit(
     c: &mut PgConnection,
@@ -53,78 +46,50 @@ async fn admit(
     batch: Batch,
     horizon: u64,
 ) -> Result<Outcome<Receipt>, Error> {
-    let s = batch.stream();
-    lock(c, s).await?;
-    let q = ReceiptQuery {
-        stream: s.clone(),
+    let stream = batch.stream();
+    let identity = ReceiptQuery {
+        stream: stream.clone(),
         batch_id: batch.id().clone(),
         digest: batch.digest()?,
     };
-    match lookup(c, &q).await? {
-        Lookup::Found(old) => return Ok(Outcome::Replay(old)),
-        Lookup::Expired => return Err(Error::HistoryExpired),
-        Lookup::NotVisible => {} // reason: new identity still passes lifecycle admission below.
-    }
-    crate::lifecycle::admit_stream(c, s).await?;
-    // Share-lock definitions in one order before any sample writes; retirement takes UPDATE.
-    let mut definitions = std::collections::BTreeMap::new();
-    for sample in batch.samples() {
-        let d = sample.input().series.definition();
-        definitions.insert((d.spec().key.clone(), d.spec().version), d);
-    }
-    for ((key, version), d) in definitions {
-        check(clock, deadline)?;
-        let id = DefinitionId {
-            scope: s.scope().clone(),
-            key,
-            version: std::num::NonZeroU64::new(version).ok_or(Error::Invariant)?,
-        };
-        let stored = crate::definition::exact(c, &id, true)
-            .await?
-            .ok_or(Error::InvalidInput)?;
-        if stored.definition.digest()? != d.digest()? {
-            return Err(Error::Conflict);
-        }
-    }
-    let received = db_now(c).await?;
-    let until = received
-        .checked_add(i64::try_from(horizon).map_err(|_| Error::NumericRange)?)
-        .ok_or(Error::NumericRange)?;
-    let mut added = 0i32;
+    let mut payloads = Vec::with_capacity(batch.samples().len());
+    let mut sample_digests = Vec::with_capacity(payloads.capacity());
+    let mut series_digests = Vec::with_capacity(payloads.capacity());
+    let mut definition_digests = Vec::with_capacity(payloads.capacity());
     for sample in batch.samples() {
         check(clock, deadline)?;
-        let inserted: bool = sqlx::query_scalar("SELECT rss_timeseries.put_sample($1,$2,$3,$4)")
-            .bind(serde_json::to_vec(sample).map_err(|_| Error::Invariant)?)
-            .bind(sample.digest()?.as_bytes().as_slice())
-            .bind(sample.input().series.digest()?.as_bytes().as_slice())
-            .bind(received)
-            .fetch_one(&mut *c)
-            .await
-            .map_err(sql_error)?;
-        added += i32::from(inserted);
+        let series = &sample.input().series;
+        payloads.push(crate::lifecycle::bytes(sample)?);
+        sample_digests.push(sample.digest()?.as_bytes().to_vec());
+        series_digests.push(series.digest()?.as_bytes().to_vec());
+        definition_digests.push(series.definition().digest()?.as_bytes().to_vec());
     }
-    let total = i32::try_from(batch.samples().len()).map_err(|_| Error::Invariant)?;
-    sqlx::query("SELECT rss_timeseries.put_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
-        .bind(s.scope().tenant().to_string())
-        .bind(s.scope().namespace().as_str())
-        .bind(s.source().as_str())
-        .bind(s.generation().as_str())
-        .bind(batch.id().as_str())
-        .bind(q.digest.as_bytes().as_slice())
-        .bind(received)
-        .bind(added)
-        .bind(total - added)
-        .bind(until)
-        .execute(&mut *c)
-        .await
-        .map_err(sql_error)?;
-    let Lookup::Found(result) = lookup(c, &q).await? else {
-        return Err(Error::Invariant);
-    };
-    if result.new_samples() + result.replayed_samples() != total as u32 {
+    let row = sqlx::query(
+        "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+    )
+    .bind(stream.scope().tenant().to_string())
+    .bind(stream.scope().namespace().as_str())
+    .bind(stream.source().as_str())
+    .bind(stream.generation().as_str())
+    .bind(batch.id().as_str())
+    .bind(identity.digest.as_bytes().as_slice())
+    .bind(payloads)
+    .bind(sample_digests)
+    .bind(series_digests)
+    .bind(definition_digests)
+    .bind(i64::try_from(horizon).map_err(|_| Error::NumericRange)?)
+    .fetch_one(c)
+    .await
+    .map_err(sql_error)?;
+    let result = receipt(&row, &identity)?;
+    if (result.new_samples() + result.replayed_samples()) as usize != batch.samples().len() {
         return Err(Error::Invariant);
     }
-    Ok(Outcome::Accepted(result))
+    Ok(if row.try_get("replay").map_err(sql_error)? {
+        Outcome::Replay(result)
+    } else {
+        Outcome::Accepted(result)
+    })
 }
 impl<C: Clock> Writer for PgStore<C> {
     fn guarantees(&self) -> &Guarantees {
@@ -141,7 +106,7 @@ impl<C: Clock> Writer for PgStore<C> {
             .transaction(
                 batch.stream().scope().tenant(),
                 deadline,
-                true,
+                Mode::Write,
                 move |c, clock| Box::pin(admit(c, clock, deadline, batch, horizon)),
             )
             .await?;
@@ -154,9 +119,12 @@ impl<C: Clock> Writer for PgStore<C> {
     ) -> Result<Lookup<Receipt>, Error> {
         let q = request.request().clone();
         certain(
-            self.transaction(q.stream.scope().tenant(), deadline, false, move |c, _| {
-                Box::pin(async move { lookup(c, &q).await })
-            })
+            self.transaction(
+                q.stream.scope().tenant(),
+                deadline,
+                Mode::Snapshot,
+                move |c, _| Box::pin(async move { lookup(c, &q).await }),
+            )
             .await?,
         )
     }

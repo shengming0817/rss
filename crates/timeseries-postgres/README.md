@@ -61,13 +61,18 @@ with new sample admission on the exact definition row.
 Definitions, stream locks, receipts, sample identities and time-partitioned raw
 samples remain the admission owners. Lifecycle adds namespace coordination, fences,
 current maintenance state, requested summary ranges and sufficient statistics.
-A namespace lock precedes stream and definition locks, covering resource selections
-and streams created concurrently. Queries take a shared namespace lock for a consistent
-operation; pagination is still live across calls. Mutation functions remain the sole
+Each batch takes a shared namespace lock, locks its stream, then share-locks its exact
+definitions in key/version order. Independent streams can commit concurrently. Each
+bounded maintenance step holds the exclusive namespace lock from eligibility check through
+checkpoint. History, Latest and Aggregate use one repeatable-read snapshot per page.
+Pagination stays live across calls. Mutation functions remain the sole
 runtime DML surface. Numeric values and snapshots retain typed JSON bytes without an
 integer-to-float roundtrip. Text ordering uses C collation.
 
-An entire batch commits identities, raw samples and its receipt together. Same batch
+A single set-based SQL call commits the batch identities, raw samples, affected
+summary invalidations and receipt together. A batch with new samples advances its
+stream revision once. Delete, restore and prune visibility changes advance the
+namespace revision. Each recompute checkpoint binds both revisions. Same batch
 ID/content returns `Replay` with the original counts, receipt time and replay horizon;
 changed content conflicts. Cross-batch sample replay preserves first receipt time
 and contributes to replayed_samples. Any conflict rejects the whole new batch.
@@ -234,7 +239,7 @@ The native feature does not change those metric semantics or authorize float coe
 
 Native Recompute uses the existing plan/checkpoint/token and canonical summaries:
 update source visibility under the namespace lock, refresh a whole bucket outside a
-transaction block, then verify revision and phase before publication. Native SQL output
+transaction block, then verify both revisions, the bucket and the plan phase before publication. Native SQL output
 is never returned directly. Each step updates at most `MaintenanceBudget.rows` source
 rows or refreshes at most one bucket (within `MaintenanceBudget.buckets`); bucket scans
 are bounded by statement/lock timeout and the caller deadline, not a row-count claim.
