@@ -270,10 +270,13 @@ impl<R> PgOutboxStore<R> {
         let mut expected = within(&runtime.timer, cutoff, |_| claim.lease_us.lock()).await?;
         let previous = *expected;
         let attempt = runtime
-            .local_tx_with_context(
+            .transaction_until(
                 claim.binding,
-                OperationDeadline::from_cutoff(cutoff, &runtime.timer),
+                cutoff,
                 claim,
+                true,
+                #[cfg(feature = "integration")]
+                None,
                 move |claim, tx| {
                     Box::pin(async move { claim.lease_in(tx, previous, extend_ms).await })
                 },

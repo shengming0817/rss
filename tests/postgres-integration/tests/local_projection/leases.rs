@@ -32,6 +32,7 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     Box::pin(inbox_contention(f, &p)).await?;
     Box::pin(windows(f, &p)).await?;
     Box::pin(delivery_expired(f, &p)).await?;
+    Box::pin(expired_before_poll(f, &p)).await?;
     Box::pin(duplicate_crossing_deadline(f, &p)).await
 }
 
@@ -237,5 +238,60 @@ async fn duplicate_crossing_deadline(
         f.state("lease-full").await?,
         (1, 1, Some("succeeded".into()), "published".into())
     );
+    Ok(())
+}
+
+async fn expired_before_poll(
+    f: &Fixture,
+    p: &PgLocalProjection<Effect, Key>,
+) -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct ValidatorSpy(AtomicBool);
+    impl IngressValidator<Vec<u8>> for ValidatorSpy {
+        fn validate(
+            &self,
+            input: IngressChallenge<'_, Vec<u8>>,
+        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+            self.0.store(true, Ordering::Relaxed);
+            Validator.validate(input)
+        }
+    }
+    let id = "lease-late-poll";
+    f.append(id, "orders").await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+interval '750 milliseconds' WHERE message_id=$1").bind(id).execute(&f.owner).await?;
+    let validator = ValidatorSpy(AtomicBool::new(false));
+    let stream = p
+        .project_batch(
+            execution(tenant(), 1),
+            &validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    let live: bool = sqlx::query_scalar("SELECT automatic_retry_deadline>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE status='publishing' AND message_id=$1").bind(id).fetch_one(&f.owner).await?;
+    assert!(live, "claim must return with a positive delivery window");
+    sqlx::query("SELECT pg_sleep(greatest(0,extract(epoch FROM automatic_retry_deadline-clock_timestamp()))::double precision) FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).execute(&f.owner).await?;
+    let crossed: bool = sqlx::query_scalar("SELECT automatic_retry_deadline<=clock_timestamp() AND lease_until>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).fetch_one(&f.owner).await?;
+    assert!(crossed);
+    assert!(matches!(
+        only(stream.collect().await)?,
+        PgProjectionOutcome::DeliveryExpired
+    ));
+    assert!(!validator.0.load(Ordering::Relaxed));
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_transactional_messaging.inbox WHERE message_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(rows, 0);
+    assert_eq!(f.state(id).await?, (0, 0, None, "dead_letter".into()));
+    sqlx::query(
+        "UPDATE rss_transactional_messaging.outbox SET status='resolved' WHERE message_id=$1",
+    )
+    .bind(id)
+    .execute(&f.owner)
+    .await?;
     Ok(())
 }

@@ -531,6 +531,38 @@ impl PgRuntime {
         &self,
         binding: ExecutionBinding,
         deadline: OperationDeadline,
+        context: C,
+        lock: bool,
+        #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
+        operation: F,
+    ) -> LocalTxAttempt<T, PgError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut C,
+                &'a mut PgTransaction<'_>,
+            ) -> BoxFuture<'a, Result<T, PgError>>
+            + Send,
+    {
+        let cutoff = match Deadline::from_timeout(&self.timer, deadline.timeout()) {
+            Ok(value) => value,
+            Err(_) => return LocalTxAttempt::not_started(PgError::invariant()),
+        };
+        self.transaction_until(
+            binding,
+            cutoff,
+            context,
+            lock,
+            #[cfg(feature = "integration")]
+            injection,
+            operation,
+        )
+        .await
+    }
+
+    pub(crate) async fn transaction_until<T: Send, C: Send, F>(
+        &self,
+        binding: ExecutionBinding,
+        cutoff: Deadline,
         mut context: C,
         lock: bool,
         #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
@@ -546,10 +578,6 @@ impl PgRuntime {
         if let Err(error) = self.validate_binding(binding) {
             return LocalTxAttempt::not_started(error);
         }
-        let cutoff = match Deadline::from_timeout(&self.timer, deadline.timeout()) {
-            Ok(value) => value,
-            Err(_) => return LocalTxAttempt::not_started(PgError::invariant()),
-        };
         let mut lease = match stage(
             &self.timer,
             cutoff,

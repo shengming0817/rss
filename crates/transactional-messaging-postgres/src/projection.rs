@@ -445,7 +445,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let fingerprint = intent.fingerprint();
         #[cfg(feature = "integration")]
         let injection = self.take_projection_fault()?;
-        let attempt = self.runtime.transaction_with_context(source.binding, remaining(self, cutoff),
+        let attempt = self.runtime.transaction_until(source.binding, cutoff,
             (self, source, identity, fingerprint), true, #[cfg(feature = "integration")] injection, |(owner, source, identity, fingerprint), tx| Box::pin(async move {
                 let row = sqlx::query("SELECT contract,fingerprint,disposition FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
                     .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str())
@@ -616,21 +616,27 @@ impl CheckedLeases {
 
     fn next_check(
         &self,
-        timer: &crate::transaction::PgTimer,
+        now: Instant,
         policy: LeaseRenewalPolicy,
         cutoff: Deadline,
-    ) -> Result<Deadline, PgError> {
-        let now = timer.now();
+    ) -> Result<Option<Deadline>, PgError> {
         let elapsed = now
             .checked_duration_since(self.observed)
             .ok_or_else(PgError::invariant)?;
         let lease = self.remaining.saturating_sub(elapsed);
         let delivery = self.delivery.saturating_sub(elapsed);
-        if !policy.fits(lease) || delivery.is_zero() {
+        if lease.is_zero() || delivery.is_zero() {
             return Err(PgError::lost());
         }
-        let wait = policy.interval().min(lease / 2).min(delivery);
-        Ok(cutoff.shortened_to(now.checked_add(wait).ok_or_else(PgError::invariant)?))
+        if !policy.fits(lease) {
+            return Ok(None);
+        }
+        // Leave a full renewal interval for acquiring the connection and both locks.
+        let interval = policy.interval();
+        let wait = interval.min(lease - interval).min(delivery);
+        Ok(Some(cutoff.shortened_to(
+            now.checked_add(wait).ok_or_else(PgError::invariant)?,
+        )))
     }
 }
 
@@ -639,20 +645,33 @@ impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
         let p = self.projection;
         let timer = &p.runtime.timer;
         let mut expected = within(timer, cutoff, |_| self.source.lease_us.lock()).await?;
-        let previous = *expected;
-        // The heartbeat runs nested inside the effect transaction on the same task.
-        let attempt = Box::pin(p.runtime.local_tx_with_context(
-            self.source.binding,
-            remaining(p, cutoff),
-            self,
-            move |effect, tx| {
-                Box::pin(async move { effect.check_locked(tx, previous, cutoff).await })
-            },
-        ))
-        .await;
-        let checked = crate::transaction::settled(attempt)?;
-        *expected = checked.expected;
-        checked.next_check(timer, p.renewal, cutoff)
+        // A delayed ACK may consume the headroom of an otherwise valid observation.
+        // Recheck and renew once under the original cutoff before entering the effect.
+        for force_renewal in [false, true] {
+            let previous = *expected;
+            let attempt = Box::pin(p.runtime.transaction_until(
+                self.source.binding,
+                cutoff,
+                self,
+                true,
+                #[cfg(feature = "integration")]
+                None,
+                move |effect, tx| {
+                    Box::pin(async move {
+                        effect
+                            .check_locked(tx, previous, cutoff, force_renewal)
+                            .await
+                    })
+                },
+            ))
+            .await;
+            let checked = crate::transaction::settled(attempt)?;
+            *expected = checked.expected;
+            if let Some(wake) = checked.next_check(timer.now(), p.renewal, cutoff)? {
+                return Ok(wake);
+            }
+        }
+        Err(insufficient_headroom())
     }
 
     async fn check_locked(
@@ -660,6 +679,7 @@ impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
         tx: &mut PgTransaction<'_>,
         previous: i64,
         cutoff: Deadline,
+        force_renewal: bool,
     ) -> Result<CheckedLeases, PgError> {
         let p = self.projection;
         let timer = &p.runtime.timer;
@@ -691,7 +711,12 @@ impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
             Duration::from_micros(inbox.unsigned_abs()),
             observed,
         );
-        if checked.next_check(timer, p.renewal, cutoff).is_ok() {
+        if !force_renewal
+            && matches!(
+                checked.next_check(timer.now(), p.renewal, cutoff),
+                Ok(Some(_))
+            )
+        {
             return Ok(checked);
         }
 
@@ -707,7 +732,54 @@ impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
             return Err(PgError::lost());
         };
         let checked = CheckedLeases::from_source(source, remaining, observed);
-        checked.next_check(timer, p.renewal, cutoff)?;
+        checked
+            .next_check(timer.now(), p.renewal, cutoff)?
+            .ok_or_else(insufficient_headroom)?;
         Ok(checked)
+    }
+}
+
+fn insufficient_headroom() -> PgError {
+    PgError::classified(
+        rss_transactional_messaging::error::MessagingErrorKind::Transient,
+        std::io::Error::other("insufficient acknowledged lease headroom"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acknowledged_window_distinguishes_renewal_from_expiry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "One arbitrary origin for synthetic ACK and expiry instants."
+        )]
+        let observed = Instant::now();
+        let policy = LeaseRenewalPolicy::from_ttl(Duration::from_millis(999))?;
+        let cutoff = Deadline::at(observed + Duration::from_secs(2));
+        let window = CheckedLeases {
+            expected: 1,
+            observed,
+            remaining: Duration::from_millis(370),
+            delivery: Duration::from_secs(1),
+        };
+        assert_eq!(
+            window
+                .next_check(observed, policy, cutoff)?
+                .map(Deadline::instant),
+            Some(observed + Duration::from_millis(37))
+        );
+        assert!(
+            window
+                .next_check(observed + Duration::from_millis(40), policy, cutoff)?
+                .is_none()
+        );
+        assert!(
+            matches!(window.next_check(observed + Duration::from_millis(370),policy,cutoff),Err(e) if e.kind()==rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost)
+        );
+        Ok(())
     }
 }
