@@ -8,7 +8,7 @@ use crate::{
 use futures::{Stream, stream::FuturesUnordered};
 use rss_data_protection::Aead;
 use rss_request_context::TenantId;
-use rss_request_context::{Deadline, ExecutionTimer};
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::message::MessageId;
 use rss_transactional_messaging::{
     error::MessagingError,
@@ -23,7 +23,11 @@ use rss_transactional_messaging::{
     },
 };
 use sqlx::Row;
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// A local terminal result, minted only from acknowledged commit or matching durable facts.
 pub struct PgProjectionReceipt {
@@ -269,18 +273,10 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     ) -> Result<PgProjectionOutcome, PgError> {
         let cutoff = Deadline::from_timeout(&self.runtime.timer, budget)
             .map_err(|_| PgError::invariant())?;
-        if matches!(self.outbox.lease_status(&source, remaining(self, cutoff)).await.map_err(pg)?,
-            OutboxLeaseStatus::Held { delivery_remaining: Some(time), .. } if time.is_zero())
+        if source.initial_window.is_expired(self.runtime.timer.now())
+            && self.delivery_expired(&source, cutoff).await?
         {
-            self.outbox
-                .settle(
-                    source,
-                    OutboxSettlement::DeadLetter,
-                    remaining(self, cutoff),
-                )
-                .await
-                .map_err(pg)?;
-            return Ok(PgProjectionOutcome::DeliveryExpired);
+            return self.expire(source, cutoff).await;
         }
         let message = PgOutboxStore::<()>::message(&source).envelope();
         let subscription = SubscriptionIdentity::new(
@@ -291,6 +287,9 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let binding = match verify_ingress(validator, self.group.clone(), &subscription, message) {
             Ok(binding) => binding,
             Err(error) => {
+                if self.delivery_expired(&source, cutoff).await? {
+                    return self.expire(source, cutoff).await;
+                }
                 let reason = error.reason();
                 if reason == EnvelopeValidationFailure::ExecutionMismatch {
                     return Err(PgError::lost());
@@ -318,6 +317,11 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             )
             .await
             .map_err(pg)?;
+        if !matches!(acquired, IdempotencyDisposition::Acquired(_))
+            && self.delivery_expired(&source, cutoff).await?
+        {
+            return self.expire(source, cutoff).await;
+        }
         let claim = match acquired {
             IdempotencyDisposition::Acquired(claim) => claim,
             IdempotencyDisposition::InProgress => {
@@ -369,6 +373,42 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         Ok(PgProjectionOutcome::Attempt(Box::new(
             PgProjectionAttempt { outcome, recovery },
         )))
+    }
+
+    async fn delivery_expired(
+        &self,
+        source: &PgOutboxClaim,
+        cutoff: Deadline,
+    ) -> Result<bool, PgError> {
+        match self
+            .outbox
+            .lease_status(source, remaining(self, cutoff))
+            .await
+            .map_err(pg)?
+        {
+            OutboxLeaseStatus::Held {
+                delivery_remaining: Some(window),
+                ..
+            } => Ok(window.is_zero()),
+            OutboxLeaseStatus::Lost => Err(PgError::lost()),
+            _ => Err(PgError::invariant()),
+        }
+    }
+
+    async fn expire(
+        &self,
+        source: PgOutboxClaim,
+        cutoff: Deadline,
+    ) -> Result<PgProjectionOutcome, PgError> {
+        self.outbox
+            .settle(
+                source,
+                OutboxSettlement::DeadLetter,
+                remaining(self, cutoff),
+            )
+            .await
+            .map_err(pg)?;
+        Ok(PgProjectionOutcome::DeliveryExpired)
     }
 
     async fn release_after_rollback(
@@ -527,22 +567,19 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgConsumerEffect<Vec<u
     ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
         let cutoff = Deadline::from_timeout(&self.projection.runtime.timer, deadline.timeout())
             .map_err(PgConsumerEffectFailure::infrastructure)?;
-        self.renew(cutoff)
+        let mut wake = self
+            .check_leases(cutoff)
             .await
             .map_err(PgConsumerEffectFailure::infrastructure)?;
         let stop = tokio::sync::Notify::new();
         let renew = async {
             loop {
-                let wake = cutoff.capped(
-                    &self.projection.runtime.timer,
-                    self.projection.renewal.interval(),
-                );
                 tokio::select! {
                     biased;
                     () = stop.notified() => return Ok::<(), PgError>(()),
                     () = self.projection.runtime.timer.sleep_until(wake) => {},
                 }
-                self.renew(cutoff).await?;
+                wake = self.check_leases(cutoff).await?;
             }
         };
         tokio::pin!(renew);
@@ -562,27 +599,120 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgConsumerEffect<Vec<u
         }
     }
 }
-impl<H, K> RenewedEffect<'_, H, K> {
-    async fn renew(&self, cutoff: Deadline) -> Result<(), PgError> {
-        let timer = &self.projection.runtime.timer;
-        let source = within(timer, cutoff, |budget| {
-            self.projection.outbox.extend(self.source, budget)
-        })
-        .await?
-        .map_err(pg)?;
-        if !matches!(source, OutboxLeaseStatus::Held { remaining, delivery_remaining } if self.projection.renewal.fits(remaining) && delivery_remaining.is_none_or(|time| !time.is_zero()))
-        {
+/// Both durations use the same conservative origin, taken before the first DB sample.
+struct CheckedLeases {
+    expected: i64,
+    observed: Instant,
+    remaining: Duration,
+    delivery: Duration,
+}
+impl CheckedLeases {
+    fn from_source(
+        source: crate::outbox::SourceWindow,
+        inbox: Duration,
+        observed: Instant,
+    ) -> Self {
+        Self {
+            expected: source.lease_us,
+            observed,
+            remaining: source.remaining.min(inbox),
+            delivery: source.delivery,
+        }
+    }
+
+    fn next_check(
+        &self,
+        timer: &crate::transaction::PgTimer,
+        policy: LeaseRenewalPolicy,
+        cutoff: Deadline,
+    ) -> Result<Deadline, PgError> {
+        let now = timer.now();
+        let elapsed = now.duration_since(self.observed);
+        let lease = self.remaining.saturating_sub(elapsed);
+        let delivery = self.delivery.saturating_sub(elapsed);
+        if !policy.fits(lease) || delivery.is_zero() {
             return Err(PgError::lost());
         }
-        let inbox = within(timer, cutoff, |budget| {
-            self.projection.inbox.extend(self.inbox, budget)
-        })
-        .await?
-        .map_err(pg)?;
-        if !matches!(inbox, LeaseStatus::Held { remaining } if self.projection.renewal.fits(remaining))
-        {
+        let wait = policy.interval().min(lease / 2).min(delivery);
+        Ok(cutoff.shortened_to(now.checked_add(wait).ok_or_else(PgError::invariant)?))
+    }
+}
+
+impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
+    async fn check_leases(&self, cutoff: Deadline) -> Result<Deadline, PgError> {
+        let p = self.projection;
+        let timer = &p.runtime.timer;
+        let mut expected = within(timer, cutoff, |_| self.source.lease_us.lock()).await?;
+        let previous = *expected;
+        let attempt = p
+            .runtime
+            .local_tx_with_context(
+                self.source.binding,
+                remaining(p, cutoff),
+                self,
+                move |effect, tx| {
+                    Box::pin(async move { effect.check_locked(tx, previous, cutoff).await })
+                },
+            )
+            .await;
+        let checked = crate::transaction::settled(attempt)?;
+        *expected = checked.expected;
+        checked.next_check(timer, p.renewal, cutoff)
+    }
+
+    async fn check_locked(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        previous: i64,
+        cutoff: Deadline,
+    ) -> Result<CheckedLeases, PgError> {
+        let p = self.projection;
+        let timer = &p.runtime.timer;
+        let claim = self.inbox;
+        if claim.binding != *tx.binding() || !claim.matches(&p.runtime) {
             return Err(PgError::lost());
         }
-        Ok(())
+        // Same order as terminal settlement. Sample expiry only after waiting for both locks.
+        crate::inbox::lock_identity(tx, &claim.identity).await?;
+        let observed = timer.now();
+        let source = self.source.lease_in(tx, previous, 0).await?;
+        let inbox = sqlx::query_scalar::<_, i64>(
+            "SELECT (extract(epoch FROM lease_until-clock_timestamp())*1000000)::bigint
+             FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2
+             AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL",
+        )
+        .bind(claim.identity.tenant_id().to_string())
+        .bind(claim.identity.message_id().as_str())
+        .bind(claim.identity.group().as_str())
+        .bind(&claim.token)
+        .fetch_optional(&mut *tx.connection)
+        .await?
+        .ok_or_else(PgError::lost)?;
+        if inbox <= 0 || source.delivery.is_zero() {
+            return Err(PgError::lost());
+        }
+        let checked = CheckedLeases::from_source(
+            source,
+            Duration::from_micros(inbox.unsigned_abs()),
+            observed,
+        );
+        if checked.next_check(timer, p.renewal, cutoff).is_ok() {
+            return Ok(checked);
+        }
+
+        let observed = timer.now();
+        let source = self
+            .source
+            .lease_in(tx, previous, p.outbox.lease_ms)
+            .await?;
+        let LeaseStatus::Held { remaining } =
+            crate::inbox::extend_locked(tx, &claim.identity, &claim.token, p.inbox.lease_ms)
+                .await?
+        else {
+            return Err(PgError::lost());
+        };
+        let checked = CheckedLeases::from_source(source, remaining, observed);
+        checked.next_check(timer, p.renewal, cutoff)?;
+        Ok(checked)
     }
 }
