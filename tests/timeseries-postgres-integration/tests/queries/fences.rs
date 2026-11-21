@@ -35,7 +35,7 @@ async fn latest_ids(f: &Fixture, selection: Selection) -> anyhow::Result<Vec<Str
 }
 
 #[tokio::test]
-async fn visible_window_winners_follow_exact_and_keyed_resource_fences() -> anyhow::Result<()> {
+async fn visible_window_winners_follow_exact_and_resource_fences() -> anyhow::Result<()> {
     let f = Fixture::new("ts-fenced-pages").await?;
     let temp = definition(TENANT)?;
     let mut spec = temp.spec().clone();
@@ -112,8 +112,22 @@ async fn visible_window_winners_follow_exact_and_keyed_resource_fences() -> anyh
     )
     .await?;
     assert_eq!(
-        latest_ids(&f, both).await?,
+        latest_ids(&f, both.clone()).await?,
         ["latest", "other-generation", "pressure-old"]
     );
+    complete(
+        &f.store,
+        plan(
+            "all-keys",
+            MaintenanceAction::Delete {
+                selection: resource(Default::default())?,
+                window: window(0, 30)?,
+                restore_until: until,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    assert!(latest_ids(&f, both).await?.is_empty());
     Ok(())
 }

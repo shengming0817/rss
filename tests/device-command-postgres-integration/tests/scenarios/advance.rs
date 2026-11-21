@@ -1,5 +1,16 @@
 //! The final page is locked after earlier pages have been staged in the original transaction.
 use super::*;
+use anyhow::Context as _;
+use rss_transactional_messaging::error::MessagingErrorKind;
+
+const COMMANDS: [&str; 4] = ["handoff-a", "handoff-b", "handoff-y", "handoff-z"];
+
+#[derive(Clone, Copy)]
+enum Interruption {
+    Cancel,
+    Deadline,
+    StaleVersion,
+}
 
 async fn advance(
     f: &Fixture,
@@ -19,38 +30,9 @@ async fn advance(
     .await)
 }
 
-async fn interrupt_last_page(
-    f: &Fixture,
-    s: Scope,
-    old: Coordinate,
-    next: Coordinate,
-    cancel: bool,
-) -> anyhow::Result<()> {
-    let mut blocker = f.owner.begin().await?;
-    let pid: i32 = sqlx::query_scalar(
-        "SELECT pg_backend_pid() FROM rss_device_command.commands
-        WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' FOR UPDATE",
-    )
-    .bind(s.tenant().to_string())
-    .bind(s.device().as_uuid().to_string())
-    .fetch_one(&mut *blocker)
-    .await?;
-    let deadline = if cancel {
-        budget()?
-    } else {
-        OperationDeadline::from_remaining(Duration::from_secs(3))
-    };
-    let mut attempt = Box::pin(compose::takeover(
-        &f.runtime,
-        crate::execution(s.tenant(), 1),
-        f.store.clone(),
-        s,
-        old,
-        next,
-        deadline,
-    ));
-    // pg_blocking_pids ties this observation to this fixture's final-row lock.
-    let blocked = tokio::time::timeout(Duration::from_secs(8), async {
+// pg_blocking_pids ties the observed wait to the fixture's final-row lock.
+async fn wait_for_blocked(f: &Fixture, pid: i32) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT FROM pg_stat_activity
@@ -64,43 +46,113 @@ async fn interrupt_last_page(
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    });
-    tokio::select! {
-        observed = blocked => observed??,
-        result = &mut attempt => anyhow::bail!("advance settled before the final-row lock: {}", status(result)),
-    }
-    if cancel {
-        drop(attempt);
-    } else {
-        let result = attempt.await;
-        // The outer cutoff may quarantine a transaction before settlement is confirmed.
-        assert!(matches!(
-            status(result),
-            "rolled-back" | "rollback-failed" | "unknown"
-        ));
-    }
-    blocker.rollback().await?;
-    assert_rolled_back(f, s, old).await
+    })
+    .await?
 }
 
-async fn assert_rolled_back(f: &Fixture, s: Scope, old: Coordinate) -> anyhow::Result<()> {
+async fn interrupt_last_page(
+    f: &Fixture,
+    s: Scope,
+    old: Coordinate,
+    next: Coordinate,
+    interruption: Interruption,
+) -> anyhow::Result<()> {
+    let mut blocker = f.owner.begin().await?;
+    let pid: i32 = sqlx::query_scalar(
+        "SELECT pg_backend_pid() FROM rss_device_command.commands
+        WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' FOR UPDATE",
+    )
+    .bind(s.tenant().to_string())
+    .bind(s.device().as_uuid().to_string())
+    .fetch_one(&mut *blocker)
+    .await?;
+    let deadline = match interruption {
+        Interruption::Deadline => OperationDeadline::from_remaining(Duration::from_secs(3)),
+        _ => budget()?,
+    };
+    let mut attempt = Box::pin(compose::takeover(
+        &f.runtime,
+        crate::execution(s.tenant(), 1),
+        f.store.clone(),
+        s,
+        old,
+        next,
+        deadline,
+    ));
+    tokio::select! {
+        observed = wait_for_blocked(f, pid) => observed?,
+        result = &mut attempt => anyhow::bail!("advance settled before the final-row lock: {}", status(result)),
+    }
+    match interruption {
+        Interruption::Cancel => drop(attempt),
+        Interruption::Deadline => {
+            // The outer cutoff can quarantine a transaction before settlement is confirmed.
+            assert!(matches!(
+                status(attempt.await),
+                "rolled-back" | "rollback-failed" | "unknown"
+            ));
+        }
+        Interruption::StaleVersion => {
+            let published = sqlx::query(
+                "UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' AND version=1",
+            )
+            .bind(s.tenant().to_string())
+            .bind(s.device().as_uuid().to_string())
+            .execute(&mut *blocker)
+            .await?;
+            assert_eq!(published.rows_affected(), 1);
+            blocker.commit().await?;
+            let fenced = attempt.await.fold(
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |e| Some(e.kind()),
+            );
+            assert_eq!(fenced, Some(MessagingErrorKind::OwnershipLost));
+            return assert_rolled_back(f, s, old, (2, Status::Published)).await;
+        }
+    }
+    blocker.rollback().await?;
+    assert_rolled_back(f, s, old, (1, Status::Queued)).await
+}
+
+async fn assert_rolled_back(
+    f: &Fixture,
+    s: Scope,
+    old: Coordinate,
+    last: (i64, Status),
+) -> anyhow::Result<()> {
     // A plain MVCC read can still see the old version before rollback. Wait for
     // the original authority lock and verify that its update did not commit.
+    let mut check = f.owner.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout='5s'")
+        .execute(&mut *check)
+        .await?;
     let coordinate: (i64, i64) = sqlx::query_as(
         "SELECT generation,authority_epoch FROM rss_device_command.authorities
          WHERE tenant_id=$1::uuid AND device_id=$2::uuid FOR UPDATE",
     )
     .bind(s.tenant().to_string())
     .bind(s.device().as_uuid().to_string())
-    .fetch_one(&f.owner)
-    .await?;
+    .fetch_one(&mut *check)
+    .await
+    .context("checking whether takeover released the authority lock within five seconds")?;
+    check.commit().await?;
     assert_eq!(coordinate, (old.generation(), old.epoch()));
-    for id in ["handoff-a", "handoff-b", "handoff-z"] {
+    for id in COMMANDS {
         let command = f
             .load(id, s)
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing command"))?;
-        assert_eq!((command.version(), command.status()), (1, Status::Queued));
+        let expected = if id == "handoff-z" {
+            last
+        } else {
+            (1, Status::Queued)
+        };
+        assert_eq!((command.version(), command.status()), expected, "{id}");
     }
     Ok(())
 }
@@ -113,11 +165,15 @@ pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
     let old = Coordinate::new(1, 1)?;
     let next = Coordinate::new(2, 2)?;
     f.initialize(s, old).await?;
-    for id in ["handoff-a", "handoff-b", "handoff-z"] {
+    for id in COMMANDS {
         f.queue(id, s, old).await?;
     }
-    for cancel in [true, false] {
-        interrupt_last_page(f, s, old, next, cancel).await?;
+    for interruption in [
+        Interruption::Cancel,
+        Interruption::Deadline,
+        Interruption::StaleVersion,
+    ] {
+        interrupt_last_page(f, s, old, next, interruption).await?;
     }
     isolated_handoff(f, s, old, next).await?;
     queue_race(f, s, next).await
@@ -166,14 +222,16 @@ async fn replay_after_unknown(
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     assert_eq!(status(advance(f, s, old, next).await?), "unknown");
     committed(advance(f, s, old, next).await?)?;
-    for id in ["handoff-a", "handoff-b", "handoff-z"] {
+    for id in COMMANDS {
         let command = f
             .load(id, s)
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing command"))?;
+        let expected_version = if id == "handoff-z" { 3 } else { 2 };
         assert_eq!(
             (command.version(), command.status()),
-            (2, Status::Superseded)
+            (expected_version, Status::Superseded),
+            "{id}"
         );
         assert_eq!(f.recover_exact(id, s).await?, Some(command));
         assert_eq!(f.count("outbox", &format!("dispatch.{id}")).await?, 1);
