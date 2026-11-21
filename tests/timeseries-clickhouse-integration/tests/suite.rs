@@ -754,6 +754,7 @@ async fn rejects_unsafe_admission_and_tls_identity() -> anyhow::Result<()> {
     for setting in [
         "max_execution_time=0 READONLY",
         "max_execution_time=1 MAX 2",
+        "PROFILE disallow_two_seconds",
         "max_rows_to_read=1 MAX 1",
     ] {
         f.ch.sql(&format!(

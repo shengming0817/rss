@@ -82,7 +82,8 @@ Set `Limits.query_threads` explicitly (use 1 for conservative operation). A publ
 aggregate acquires that many permits at once and runs its SELECTs with the corresponding
 `max_threads` and `max_final_threads`. Other calls and tenant binding use one permit.
 The thread setting must fit the owner capacity. Reader and maintenance profiles must accept their
-query settings and allow a positive execution timeout derived from each caller’s deadline.
+query settings and allow the full range of positive execution timeouts, including individual
+values, because each caller supplies its own deadline.
 Queueing, PG acquisition, HTTP and settlement use one absolute deadline. Scan, output and
 memory limits apply per query. The owner bounds admitted local calls; ClickHouse owns
 remote query execution.

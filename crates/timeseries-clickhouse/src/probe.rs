@@ -112,9 +112,15 @@ async fn check_limits(
     threads: NonZeroU32,
 ) -> Result<(), Error> {
     // A single successful timeout cannot prove that every caller deadline is admissible.
-    let unrestricted = client.query("SELECT toUInt8(readonly=0 AND (min IS NULL OR ifNull(toFloat64OrNull(min)<=0,false)) AND max IS NULL)
-        FROM system.settings WHERE name='max_execution_time'")
-        .fetch_one::<u8>().await.map_err(settings_error)?;
+    let unrestricted = client
+        .query(
+            "SELECT toUInt8(readonly=0 AND (min IS NULL OR ifNull(toFloat64OrNull(min)<=0,false))
+            AND max IS NULL AND empty(disallowed_values))
+            FROM system.settings WHERE name='max_execution_time'",
+        )
+        .fetch_one::<u8>()
+        .await
+        .map_err(settings_error)?;
     if unrestricted != 1 {
         return Err(Error::InvalidInput);
     }
