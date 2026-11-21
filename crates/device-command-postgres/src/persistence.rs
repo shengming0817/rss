@@ -151,18 +151,25 @@ pub(crate) async fn save(
     }
     Ok(())
 }
-pub(crate) async fn page(
+pub(crate) async fn active_rows(
     tx: &mut PgTransaction<'_>,
     s: Scope,
-    after: Option<&CommandId>,
-    limit: i64,
-) -> Result<Vec<Stored>, PgError> {
+    after: Option<&str>,
+    limit: BatchLimit,
+    sample_time: bool,
+) -> Result<Vec<PgRow>, PgError> {
     scope(tx, s)?;
     let t = s.tenant().to_string();
     let d = s.device().as_uuid().to_string();
-    let after = after.map(|id| id.as_str().to_owned());
-    let rows=tx.with_connection(move |c|Box::pin(async move {
-        sqlx::query("SELECT *,tenant_id::text AS tenant,device_id::text AS device FROM rss_device_command.commands WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND terminal_at IS NULL AND ($3::text IS NULL OR command_id COLLATE \"C\">$3 COLLATE \"C\") ORDER BY command_id COLLATE \"C\" LIMIT $4").bind(t).bind(d).bind(after).bind(limit).fetch_all(c).await
-    })).await?;
-    rows.into_iter().map(decode).collect()
+    let after = after.map(str::to_owned);
+    tx.with_connection(move |c| Box::pin(async move {
+        sqlx::query(r#"SELECT *,tenant_id::text AS tenant,device_id::text AS device,
+                    CASE WHEN $5 THEN floor(extract(epoch FROM clock_timestamp())*1000000)::bigint END AS command_time
+                FROM rss_device_command.commands
+                WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND terminal_at IS NULL
+                  AND ($3::text IS NULL OR command_id COLLATE "C" > $3 COLLATE "C")
+                ORDER BY command_id COLLATE "C" LIMIT $4"#)
+            .bind(t).bind(d).bind(after).bind(i64::from(limit.get())).bind(sample_time)
+            .fetch_all(c).await
+    })).await
 }

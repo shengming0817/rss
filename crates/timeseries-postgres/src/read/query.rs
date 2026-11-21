@@ -1,6 +1,7 @@
 //! Bound selectors and keysets for raw reads in the page's tenant snapshot.
 use super::Position;
-use rss_timeseries::{Error, Query, QueryMode, Selection};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use rss_timeseries::{Availability, Error, Query, QueryMode, Selection};
 use sqlx::{Postgres, QueryBuilder};
 
 const GROUP: &str = "series_digest,source,generation";
@@ -62,12 +63,48 @@ fn continuation(sql: &mut QueryBuilder<Postgres>, mode: QueryMode, p: &Position)
     sql.push(")");
 }
 
+// The scope and time window have already been applied by availability() in this
+// page's snapshot. Bind all fences once, independently of the PG parameter limit.
+fn excluded(availability: &Availability) -> Result<String, Error> {
+    let mut ranges = Vec::with_capacity(availability.excluded.len());
+    for range in &availability.excluded {
+        let mut row = match &range.selection {
+            Selection::Exact { stream, series } => serde_json::json!({
+                "series": STANDARD.encode(series.digest()?.as_bytes()),
+                "source": stream.source().as_str(), "generation": stream.generation().as_str(),
+            }),
+            Selection::Resource {
+                subject,
+                resource,
+                keys,
+                ..
+            } => serde_json::json!({
+                "subject": subject.as_str(), "resource": resource.as_str(), "keys": keys,
+            }),
+        };
+        row["lo"] = range.window.start().micros().into();
+        row["hi"] = range.window.end().micros().into();
+        ranges.push(row);
+    }
+    crate::lifecycle::json(&ranges)
+}
+
 pub(super) fn samples(
     q: &Query,
+    availability: &Availability,
     after: Option<&Position>,
 ) -> Result<QueryBuilder<Postgres>, Error> {
     let exact = matches!(q.selection(), Selection::Exact { .. });
-    let mut sql = QueryBuilder::new("WITH selected AS (SELECT ");
+    let mut sql = QueryBuilder::new("WITH ");
+    if !availability.excluded.is_empty() {
+        sql.push("excluded AS MATERIALIZED (
+              SELECT lo,hi,decode(series,'base64') AS series_digest,source,generation,subject,resource,keys
+              FROM jsonb_to_recordset(")
+            .push_bind(excluded(availability)?)
+            .push("::text::jsonb) AS f(lo bigint,hi bigint,series text,source text,generation text,
+                                      subject text,resource text,keys text[])), ");
+    }
+    sql.push("selected AS (SELECT ");
     if q.mode() == QueryMode::Latest && !exact {
         sql.push("DISTINCT ON (").push(GROUP).push(") ");
     }
@@ -83,7 +120,15 @@ pub(super) fn samples(
     if let Some(position) = after {
         continuation(&mut sql, q.mode(), position);
     }
-    sql.push(" AND rss_timeseries.visible(convert_from(s.raw,'UTF8')::jsonb,s.observed_at)");
+    if !availability.excluded.is_empty() {
+        sql.push(
+            " AND NOT EXISTS (SELECT FROM excluded f
+            WHERE s.observed_at >= f.lo AND s.observed_at < f.hi AND (
+                (s.series_digest,s.source,s.generation) = (f.series_digest,f.source,f.generation)
+                OR (s.subject=f.subject AND s.resource=f.resource
+                    AND (cardinality(f.keys)=0 OR s.key=ANY(f.keys)))))",
+        );
+    }
     sql.push(" ORDER BY ");
     let points = i64::from(q.budget().max_points.get());
     let limit = match q.mode() {

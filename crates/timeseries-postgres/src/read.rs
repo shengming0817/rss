@@ -52,7 +52,7 @@ impl Read {
                 .ok_or(Error::NumericRange)?,
         };
         let after = token.map(|t| t.last);
-        let mut sql = query::samples(q, after.as_ref())?;
+        let mut sql = query::samples(q, &availability, after.as_ref())?;
         let mut stream = sql.build().fetch(c);
         let mut rows = Vec::new();
         let mut last: Option<Position> = None;
