@@ -93,30 +93,22 @@ async fn lookup(c: &mut PgConnection, q: &ReceiptQuery) -> Result<Option<PgRow>,
         .bind(q.stream.scope().tenant().to_string()).bind(q.stream.scope().namespace().as_str()).bind(q.stream.source().as_str()).bind(q.stream.generation().as_str()).bind(q.batch_id.as_str()).fetch_optional(c).await.map_err(sql_error)
 }
 impl<C: Clock> Operation<'_, C> {
-    async fn prepare(
-        &self,
-        b: &Batch,
-        deadline: Deadline,
-    ) -> Result<Outcome<Admission>, Error> {
+    async fn prepare(&self, b: &Batch, deadline: Deadline) -> Result<Outcome<Admission>, Error> {
         let scope = b.stream().scope();
         let mut tx = self.begin(scope, true, deadline).await?;
         let result = self.prepare_in(tx.connection(), b).await;
         tx.finish(result, true).await
     }
-    async fn prepare_in(
-        &self,
-        c: &mut PgConnection,
-        b: &Batch,
-    ) -> Result<Admission, Error> {
+    async fn prepare_in(&self, c: &mut PgConnection, b: &Batch) -> Result<Admission, Error> {
         let q = identity(b)?;
         if let Some(r) = lookup(c, &q).await? {
             let receipt = receipt(&r, &q)?;
-            return match r.try_get::<&str,_>("phase").map_err(sql_error)? {
+            return match r.try_get::<&str, _>("phase").map_err(sql_error)? {
                 "expired" => Err(Error::HistoryExpired),
                 "published" => Ok(Admission::Published(receipt)),
                 "verified" => Ok(Admission::Verified),
                 "prepared" => Ok(Admission::Prepared(Prepared {
-                    rows: decode(&r.try_get::<Vec<u8>,_>("projection").map_err(sql_error)?)?,
+                    rows: decode(&r.try_get::<Vec<u8>, _>("projection").map_err(sql_error)?)?,
                     revision: r.try_get("revision").map_err(sql_error)?,
                     receipt,
                 })),
@@ -125,15 +117,22 @@ impl<C: Clock> Operation<'_, C> {
         }
         let s = b.stream();
         let scope = s.scope();
-        let revision = sqlx::query_scalar::<_,i64>("UPDATE rss_ts_ch.namespaces n SET allocated=allocated+1
+        let revision = sqlx::query_scalar::<_, i64>(
+            "UPDATE rss_ts_ch.namespaces n SET allocated=allocated+1
             FROM rss_ts_ch.installation i WHERE n.tenant_id=$1::text::uuid AND n.namespace=$2
               AND n.allocated-n.published<i.max_pending_batches AND NOT EXISTS (
                 SELECT FROM rss_ts_ch.batches WHERE tenant_id=n.tenant_id AND namespace=n.namespace
                   AND source=$3 AND generation=$4 AND phase IN ('prepared','verified'))
-            RETURNING n.allocated")
-            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str())
-            .bind(s.generation().as_str()).fetch_optional(&mut *c).await.map_err(sql_error)?
-            .ok_or(Error::Unavailable)?;
+            RETURNING n.allocated",
+        )
+        .bind(scope.tenant().to_string())
+        .bind(scope.namespace().as_str())
+        .bind(s.source().as_str())
+        .bind(s.generation().as_str())
+        .fetch_optional(&mut *c)
+        .await
+        .map_err(sql_error)?
+        .ok_or(Error::Unavailable)?;
         sqlx::query("INSERT INTO rss_ts_ch.streams(tenant_id,namespace,source,generation) VALUES($1::text::uuid,$2,$3,$4) ON CONFLICT DO NOTHING")
             .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).execute(&mut *c).await.map_err(sql_error)?;
         let closed:bool=sqlx::query_scalar("SELECT closed FROM rss_ts_ch.streams WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4")
@@ -143,7 +142,15 @@ impl<C: Clock> Operation<'_, C> {
         }
         let fences = control::fences(c, scope, self.limits.max_points.get()).await?;
         let received = now(c).await?;
-        let rows = admission::admit(c, b, &fences, received, revision, self.limits.max_points.get()).await?;
+        let rows = admission::admit(
+            c,
+            b,
+            &fences,
+            received,
+            revision,
+            self.limits.max_points.get(),
+        )
+        .await?;
         let replay_until = received
             .checked_add(
                 i64::try_from(self.limits.replay_micros.get()).map_err(|_| Error::NumericRange)?,
@@ -187,15 +194,20 @@ impl<C: Clock> Operation<'_, C> {
     }
     async fn advance(&self, b: &Batch, deadline: Deadline) -> Result<Outcome<Receipt>, Error> {
         let p = match self.prepare(b, deadline).await? {
-            Outcome::Accepted(Admission::Published(r)) | Outcome::Replay(Admission::Published(r)) => return Ok(Outcome::Replay(r)),
-            Outcome::Accepted(Admission::Verified) | Outcome::Replay(Admission::Verified) => return Ok(Outcome::Unknown),
-            Outcome::Accepted(Admission::Prepared(p)) | Outcome::Replay(Admission::Prepared(p)) => p,
+            Outcome::Accepted(Admission::Published(r))
+            | Outcome::Replay(Admission::Published(r)) => return Ok(Outcome::Replay(r)),
+            Outcome::Accepted(Admission::Verified) | Outcome::Replay(Admission::Verified) => {
+                return Ok(Outcome::Unknown);
+            }
+            Outcome::Accepted(Admission::Prepared(p)) | Outcome::Replay(Admission::Prepared(p)) => {
+                p
+            }
             Outcome::Unknown => return Ok(Outcome::Unknown),
         };
         if self.fault(1) {
             return Ok(Outcome::Unknown);
         }
-        let projected: Result<Outcome<Receipt>,Error> = async {
+        let projected: Result<Outcome<Receipt>, Error> = async {
             let a = match self.raw_attempt(b.stream().scope(), &p, deadline).await? {
                 Outcome::Accepted(a) | Outcome::Replay(a) => a,
                 Outcome::Unknown => return Ok(Outcome::Unknown),
@@ -241,7 +253,7 @@ impl<C: Clock> ChStore<C> {
                         None => ProjectionProgress::NotVisible,
                         Some(r) => {
                             receipt(&r, q)?;
-                            match r.try_get::<&str,_>("phase").map_err(sql_error)? {
+                            match r.try_get::<&str, _>("phase").map_err(sql_error)? {
                                 "expired" => ProjectionProgress::Expired,
                                 "published" => ProjectionProgress::Published,
                                 "verified" => ProjectionProgress::Verified,

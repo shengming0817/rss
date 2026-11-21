@@ -185,7 +185,10 @@ impl<C> Shared<C> {
             Ok(())
         }
     }
-    async fn enter(&self, weight: NonZeroU32) -> Result<(SemaphorePermit<'_>, RwLockReadGuard<'_, Resources>), Error> {
+    async fn enter(
+        &self,
+        weight: NonZeroU32,
+    ) -> Result<(SemaphorePermit<'_>, RwLockReadGuard<'_, Resources>), Error> {
         self.open()?;
         let capacity = self
             .capacity
@@ -206,14 +209,25 @@ impl<C: Clock> Shared<C> {
         scope: &Scope,
         deadline: Deadline,
     ) -> Result<Operation<'a, C>, Error> {
-        self.admit_operation(store, scope, NonZeroU32::MIN, deadline).await
+        self.admit_operation(store, scope, NonZeroU32::MIN, deadline)
+            .await
     }
-    pub(crate) async fn read_operation<'a>(&'a self, store: &'a ChStore<C>, scope: &Scope, deadline: Deadline)
-        -> Result<Operation<'a,C>,Error> {
-        self.admit_operation(store,scope,self.limits.query_threads,deadline).await
+    pub(crate) async fn read_operation<'a>(
+        &'a self,
+        store: &'a ChStore<C>,
+        scope: &Scope,
+        deadline: Deadline,
+    ) -> Result<Operation<'a, C>, Error> {
+        self.admit_operation(store, scope, self.limits.query_threads, deadline)
+            .await
     }
-    async fn admit_operation<'a>(&'a self, store: &'a ChStore<C>, scope: &Scope, threads:NonZeroU32, deadline: Deadline)
-        -> Result<Operation<'a,C>,Error> {
+    async fn admit_operation<'a>(
+        &'a self,
+        store: &'a ChStore<C>,
+        scope: &Scope,
+        threads: NonZeroU32,
+        deadline: Deadline,
+    ) -> Result<Operation<'a, C>, Error> {
         store.admit(scope)?;
         bounded(self.clock.as_ref(), deadline, async {
             let (capacity, resources) = self.enter(threads).await?;

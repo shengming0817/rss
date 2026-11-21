@@ -400,10 +400,30 @@ async fn identity_conflict_visibility_and_restart_recovery() -> anyhow::Result<(
     assert_eq!(confirmed(f.write(&cross).await?)?.replayed_samples(), 1);
     let other = batch(
         "other",
-        vec![sample(&d, "one", 10, 3)?, sample(&d, "new", 12, 5)?],
+        vec![sample(&d, "new", 12, 5)?, sample(&d, "one", 10, 3)?],
     )?;
     assert!(f.write(&other).await.is_err());
     assert_eq!(f.read(&d).await?.rows.len(), 2);
+    let missing = Definition::new(DefinitionSpec {
+        key: id("missing")?,
+        ..d.spec().clone()
+    })?;
+    let rejected = batch(
+        "missing",
+        vec![
+            sample(&d, "new", 12, 5)?,
+            sample(&missing, "absent", 15, 1)?,
+        ],
+    )?;
+    assert!(
+        matches!(f.write(&rejected).await,Err(e) if e.downcast_ref::<Error>()==Some(&Error::InvalidInput))
+    );
+    let mixed = batch(
+        "mixed",
+        vec![sample(&d, "one", 10, u64::MAX)?, sample(&d, "new", 12, 5)?],
+    )?;
+    let receipt = confirmed(f.write(&mixed).await?)?;
+    assert_eq!((receipt.new_samples(), receipt.replayed_samples()), (1, 1));
     expanded_dimensions(&f).await?;
     f.ch.restart().await?;
     assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
@@ -756,12 +776,14 @@ async fn revoked_guard_rejects_late_insert_after_prune() -> anyhow::Result<()> {
     let d = definition(TENANT)?;
     f.register(&d).await?;
     let b = batch("b", vec![sample(&d, "one", 10, 2)?])?;
-    confirmed(f.write(&b).await?)?;
+    f.store.inject_next_fault(Fault::AfterInsert);
+    assert!(matches!(f.write(&b).await?, Outcome::Unknown));
     let old: (String,String,String,i64)=sqlx::query_as("SELECT id::text,query_id::text,digest,revision FROM rss_ts_ch.attempts ORDER BY id LIMIT 1").fetch_one(&f.admin).await?;
     // Persist exactly what an old network request would send, before physical cleanup.
     let captured =
         f.ch.sql("SELECT * FROM rss_ts_ch.raw FORMAT JSONEachRow")
             .await?;
+    confirmed(f.write(&b).await?)?;
     let spec = Selection::Exact {
         stream: b.stream().clone(),
         series: b.samples()[0].input().series.clone(),

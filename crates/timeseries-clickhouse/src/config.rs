@@ -130,7 +130,11 @@ pub struct Limits {
     pub cursor_micros: NonZeroU64,
 }
 
-pub(crate) fn query_threads(query: clickhouse::query::Query, threads: NonZeroU32) -> clickhouse::query::Query {
-    query.with_setting("max_threads", threads.to_string())
-         .with_setting("max_final_threads", threads.to_string())
+pub(crate) fn query_threads(
+    query: clickhouse::query::Query,
+    threads: NonZeroU32,
+) -> clickhouse::query::Query {
+    query
+        .with_setting("max_threads", threads.to_string())
+        .with_setting("max_final_threads", threads.to_string())
 }
