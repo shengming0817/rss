@@ -27,10 +27,10 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    stale_stream(f, &p).await?;
-    inbox_contention(f, &p).await?;
-    windows(f, &p).await?;
-    duplicate_crossing_deadline(f, &p).await
+    Box::pin(stale_stream(f, &p)).await?;
+    Box::pin(inbox_contention(f, &p)).await?;
+    Box::pin(windows(f, &p)).await?;
+    Box::pin(duplicate_crossing_deadline(f, &p)).await
 }
 
 async fn stale_stream(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {

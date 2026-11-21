@@ -621,7 +621,9 @@ impl CheckedLeases {
         cutoff: Deadline,
     ) -> Result<Deadline, PgError> {
         let now = timer.now();
-        let elapsed = now.duration_since(self.observed);
+        let elapsed = now
+            .checked_duration_since(self.observed)
+            .ok_or_else(PgError::invariant)?;
         let lease = self.remaining.saturating_sub(elapsed);
         let delivery = self.delivery.saturating_sub(elapsed);
         if !policy.fits(lease) || delivery.is_zero() {
@@ -638,17 +640,16 @@ impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
         let timer = &p.runtime.timer;
         let mut expected = within(timer, cutoff, |_| self.source.lease_us.lock()).await?;
         let previous = *expected;
-        let attempt = p
-            .runtime
-            .local_tx_with_context(
-                self.source.binding,
-                remaining(p, cutoff),
-                self,
-                move |effect, tx| {
-                    Box::pin(async move { effect.check_locked(tx, previous, cutoff).await })
-                },
-            )
-            .await;
+        // The heartbeat runs nested inside the effect transaction on the same task.
+        let attempt = Box::pin(p.runtime.local_tx_with_context(
+            self.source.binding,
+            remaining(p, cutoff),
+            self,
+            move |effect, tx| {
+                Box::pin(async move { effect.check_locked(tx, previous, cutoff).await })
+            },
+        ))
+        .await;
         let checked = crate::transaction::settled(attempt)?;
         *expected = checked.expected;
         checked.next_check(timer, p.renewal, cutoff)
