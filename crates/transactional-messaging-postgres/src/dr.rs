@@ -112,9 +112,13 @@ impl Store for PgDrStore {
         if let Err(e) = self.validate(plan) {
             return LocalTxAttempt::not_started(e);
         }
+        let cutoff = match self.runtime.cutoff(deadline) {
+            Ok(value) => value,
+            Err(e) => return LocalTxAttempt::not_started(error(e)),
+        };
         let attempt = self
             .runtime
-            .transaction_with_context(ExecutionBinding::new(plan.storage(), plan.tenant(), plan.expected()), deadline, plan, false, #[cfg(feature = "integration")] None, |plan, tx| {
+            .transaction_until(ExecutionBinding::new(plan.storage(), plan.tenant(), plan.expected()), cutoff, plan, false, #[cfg(feature = "integration")] None, |plan, tx| {
                 Box::pin(async move {
                     let (direction, evidence) = match plan.action() {
                         PlanAction::Recover {direction, evidence,..} => (
@@ -167,9 +171,9 @@ impl Store for PgDrStore {
         self.validate(plan)?;
         map(self
             .runtime
-            .transaction_with_context(
+            .transaction_until(
                 ExecutionBinding::new(plan.storage(), plan.tenant(), plan.expected()),
-                deadline,
+                self.runtime.cutoff(deadline).map_err(error)?,
                 plan,
                 false,
                 #[cfg(feature = "integration")]

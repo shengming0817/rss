@@ -515,9 +515,13 @@ impl PgRuntime {
             ) -> BoxFuture<'a, Result<T, PgError>>
             + Send,
     {
-        self.transaction_with_context(
+        let cutoff = match self.cutoff(deadline) {
+            Ok(value) => value,
+            Err(error) => return LocalTxAttempt::not_started(error),
+        };
+        self.transaction_until(
             binding,
-            deadline,
+            cutoff,
             context,
             true,
             #[cfg(feature = "integration")]
@@ -527,36 +531,8 @@ impl PgRuntime {
         .await
     }
 
-    pub(crate) async fn transaction_with_context<T: Send, C: Send, F>(
-        &self,
-        binding: ExecutionBinding,
-        deadline: OperationDeadline,
-        context: C,
-        lock: bool,
-        #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
-        operation: F,
-    ) -> LocalTxAttempt<T, PgError>
-    where
-        F: for<'a> FnOnce(
-                &'a mut C,
-                &'a mut PgTransaction<'_>,
-            ) -> BoxFuture<'a, Result<T, PgError>>
-            + Send,
-    {
-        let cutoff = match Deadline::from_timeout(&self.timer, deadline.timeout()) {
-            Ok(value) => value,
-            Err(_) => return LocalTxAttempt::not_started(PgError::invariant()),
-        };
-        self.transaction_until(
-            binding,
-            cutoff,
-            context,
-            lock,
-            #[cfg(feature = "integration")]
-            injection,
-            operation,
-        )
-        .await
+    pub(crate) fn cutoff(&self, deadline: OperationDeadline) -> Result<Deadline, PgError> {
+        Deadline::from_timeout(&self.timer, deadline.timeout()).map_err(|_| PgError::invariant())
     }
 
     pub(crate) async fn transaction_until<T: Send, C: Send, F>(

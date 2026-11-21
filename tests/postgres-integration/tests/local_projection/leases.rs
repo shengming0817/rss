@@ -269,11 +269,7 @@ async fn expired_before_poll(
             Duration::from_secs(5),
         )
         .await?;
-    let live: bool = sqlx::query_scalar("SELECT automatic_retry_deadline>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE status='publishing' AND message_id=$1").bind(id).fetch_one(&f.owner).await?;
-    assert!(live, "claim must return with a positive delivery window");
-    sqlx::query("SELECT pg_sleep(greatest(0,extract(epoch FROM automatic_retry_deadline-clock_timestamp()))::double precision) FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).execute(&f.owner).await?;
-    let crossed: bool = sqlx::query_scalar("SELECT automatic_retry_deadline<=clock_timestamp() AND lease_until>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).fetch_one(&f.owner).await?;
-    assert!(crossed);
+    wait_for_delivery_expiry(f, id).await?;
     assert!(matches!(
         only(stream.collect().await)?,
         PgProjectionOutcome::DeliveryExpired
@@ -293,5 +289,14 @@ async fn expired_before_poll(
     .bind(id)
     .execute(&f.owner)
     .await?;
+    Ok(())
+}
+
+async fn wait_for_delivery_expiry(f: &Fixture, id: &str) -> anyhow::Result<()> {
+    let live: bool = sqlx::query_scalar("SELECT automatic_retry_deadline>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE status='publishing' AND message_id=$1").bind(id).fetch_one(&f.owner).await?;
+    assert!(live, "claim must return with a positive delivery window");
+    sqlx::query("SELECT pg_sleep(greatest(0,extract(epoch FROM automatic_retry_deadline-clock_timestamp()))::double precision) FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).execute(&f.owner).await?;
+    let crossed: bool = sqlx::query_scalar("SELECT automatic_retry_deadline<=clock_timestamp() AND lease_until>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).fetch_one(&f.owner).await?;
+    assert!(crossed);
     Ok(())
 }
