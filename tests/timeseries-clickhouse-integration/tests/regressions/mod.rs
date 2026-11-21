@@ -201,6 +201,52 @@ async fn invalidation_budget_is_scoped_and_checked_before_prepare() -> anyhow::R
         .fetch_one(&f.admin)
         .await?;
     assert_eq!(dirty, 4);
+    // Two distinct series each fan out to two buckets. Their union exceeds
+    // the per-series budget while each input remains admissible.
+    let mut inputs = Vec::new();
+    for key in ["pressure", "humidity"] {
+        let definition = Definition::new(DefinitionSpec {
+            key: id(key)?,
+            ..d.spec().clone()
+        })?;
+        f.register(&definition).await?;
+        let point = sample(&definition, key, 1, 1)?;
+        let spec = SummarySpec::new(
+            point.input().stream.clone(),
+            point.input().series.clone(),
+            NonZeroU64::new(10).ok_or(Error::Invariant)?,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )?;
+        f.maintain(
+            key,
+            MaintenanceAction::Recompute {
+                spec,
+                window: Interval::new(Timestamp::new(0)?, Timestamp::new(20)?)?,
+            },
+        )
+        .await?;
+        inputs.push(point);
+    }
+    let mut caps = limits()?;
+    caps.max_points = NonZeroU32::new(2).ok_or(Error::Invariant)?;
+    f.store = Fixture::connect_options(
+        &f.ch,
+        f.pool.clone(),
+        TENANT,
+        "ch_reader",
+        "ch_writer",
+        caps,
+    )
+    .await?;
+    assert_eq!(
+        confirmed(f.write(&batch("two-series", inputs)?).await?)?.new_samples(),
+        2
+    );
+    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.summaries WHERE dirty")
+        .fetch_one(&f.admin)
+        .await?;
+    assert_eq!(dirty, 8);
     Ok(())
 }
 
@@ -340,5 +386,41 @@ async fn independent_streams_publish_one_contiguous_prefix() -> anyhow::Result<(
     assert_eq!(old.rows[0].sample.input().id, id("second")?);
     assert!(old.next.is_none());
     assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn successor_verifies_while_the_heads_insert_response_is_in_flight() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-overlap").await?;
+    sqlx::query("UPDATE rss_ts_ch.installation SET max_pending_batches=2")
+        .execute(&f.admin)
+        .await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let writer = proxy.store(f.pool.clone()).await?;
+    let auth = authority(TENANT)?;
+    let head = Authorized::<Batch>::verify(&auth, stream_batch(&d, "a", "head", 10)?)?;
+    let tail = stream_batch(&d, "b", "tail", 20)?;
+    let receipt = Authorized::<ReceiptQuery>::verify(&auth, receipt_query(&tail)?)?;
+    proxy.arm(4);
+    let writing = writer.write(&head, deadline()?);
+    tokio::pin!(writing);
+    tokio::select! {
+        result=&mut writing => anyhow::bail!("head finished before the response gate: {}",result.is_ok()),
+        ready=proxy.wait_held()=>ready?,
+    }
+    assert!(matches!(f.write(&tail).await?, Outcome::Unknown));
+    assert_eq!(
+        f.store.progress(&receipt, deadline()?).await?,
+        rss_timeseries_clickhouse::ProjectionProgress::Verified
+    );
+    proxy.release();
+    confirmed(writing.await?)?;
+    assert!(matches!(
+        f.store.receipt(&receipt, deadline()?).await?,
+        Lookup::Found(_)
+    ));
+    assert_eq!(f.read(&d).await?.rows.len(), 2);
     Ok(())
 }
