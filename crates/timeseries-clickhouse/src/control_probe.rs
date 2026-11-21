@@ -3,7 +3,7 @@ use crate::transaction::sql_error;
 use rss_timeseries::Error;
 use sqlx::PgPool;
 // PostgreSQL 17 canonical columns/constraints/indexes/RLS/view contract.
-const CATALOG: &str = "6fd5e88af7292651c076b7e9d6499fed";
+const CATALOG: &str = "b118b396bc410882e3be468edf1f188c";
 pub(crate) async fn validate(pool: &PgPool) -> Result<(), Error> {
     let catalog: Option<String> = sqlx::query_scalar(include_str!("catalog.sql"))
         .fetch_one(pool)

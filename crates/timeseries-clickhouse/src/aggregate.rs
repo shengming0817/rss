@@ -189,13 +189,14 @@ impl<C: Clock> Operation<'_, C> {
     async fn cached(
         &self,
         c: &mut PgConnection,
+        published: i64,
         spec: &SummarySpec,
         window: Interval,
         deadline: Deadline,
     ) -> Result<Option<Summary>, Error> {
         let scope = spec.stream().scope();
-        let refs=sqlx::query("SELECT object_id::text,lo,hi FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5 AND NOT dirty ORDER BY lo DESC,hi DESC LIMIT $6")
-            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(spec.semantics()?.as_bytes().as_slice()).bind(window.start().micros()).bind(window.end().micros()).bind(i64::from(self.limits.max_points.get())+1).fetch_all(c).await.map_err(sql_error)?;
+        let refs=sqlx::query("SELECT object_id::text,lo,hi FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5 AND (dirty_from IS NULL OR dirty_from>$7) ORDER BY lo DESC,hi DESC LIMIT $6")
+            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(spec.semantics()?.as_bytes().as_slice()).bind(window.start().micros()).bind(window.end().micros()).bind(i64::from(self.limits.max_points.get())+1).bind(published).fetch_all(c).await.map_err(sql_error)?;
         if refs.len() > self.limits.max_points.get() as usize {
             return Err(Error::BudgetExceeded);
         }
@@ -296,18 +297,19 @@ pub(crate) async fn read<C: Clock>(
         let mut size = 0usize;
         let mut refreshed = None;
         let mut continuous = true;
+        let published = tx.published;
         while at < q.query().window().end() {
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
             let cached = store
-                .cached(tx.connection(), q.spec(), window, deadline)
+                .cached(tx.connection(), published, q.spec(), window, deadline)
                 .await?;
             let is_cached = cached.is_some();
             let value = match cached {
                 Some(v) => v,
                 None => {
                     store
-                        .raw_summary(q.spec(), window, tx.published, &fences, deadline)
+                        .raw_summary(q.spec(), window, published, &fences, deadline)
                         .await?
                 }
             };

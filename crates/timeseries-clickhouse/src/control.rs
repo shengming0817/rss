@@ -18,7 +18,7 @@ pub(crate) async fn invalidate(
     for row in rows {
         let spec: SummarySpec = decode(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)?;
         if overlaps(selection, &spec.selection()) {
-            sqlx::query("UPDATE rss_ts_ch.summaries SET dirty=true WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=$4")
+            sqlx::query("UPDATE rss_ts_ch.summaries SET dirty_from=0 WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=$4")
                 .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(row.try_get::<Vec<u8>,_>("spec_digest").map_err(sql_error)?).bind(row.try_get::<i64,_>("lo").map_err(sql_error)?).execute(&mut *c).await.map_err(sql_error)?;
         }
     }
@@ -33,7 +33,7 @@ async fn invalidation_targets(
     max: u32,
 ) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
     let selection = String::from_utf8(bytes(selection)?).map_err(|_| Error::Invariant)?;
-    let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND NOT dirty AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
+    let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND dirty_from IS NULL AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
         .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(at).bind(i64::from(max)+1).bind(selection).fetch_all(c).await.map_err(sql_error)?;
     if rows.len() > max as usize {
         return Err(Error::BudgetExceeded);

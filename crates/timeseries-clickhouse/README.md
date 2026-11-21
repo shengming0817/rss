@@ -29,7 +29,7 @@ ref: ClickHouse/clickhouse-rs src/lib.rs@v0.15.3
 
 The external PG migrator adopts a dedicated NOLOGIN, NOSUPERUSER, NOBYPASSRLS schema
 owner and executes `CONTROL_SQL`. Schema version 2 is fresh-install only. During installation the owner sets
-`installation.max_pending_batches` to a positive per-namespace publication window (default 1).
+`installation.max_pending_batches` to a per-namespace publication window from 1 to 16 (default 1).
 All runtime owners consult the same installation row when allocating a revision. Runtime must not be a member of that owner or have
 schema CREATE, installation writes, superuser, BYPASSRLS, CREATEROLE or replication.
 Grant schema USAGE, installation SELECT and SELECT/INSERT/UPDATE/DELETE on the ten
@@ -81,7 +81,8 @@ Reader configurations share the transport, never another tenant's authentication
 Set `Limits.query_threads` explicitly (use 1 for conservative operation). A public query or
 aggregate acquires that many permits at once and runs its SELECTs with the corresponding
 `max_threads` and `max_final_threads`. Other calls and tenant binding use one permit.
-The thread setting must fit the owner capacity and be accepted by the actual reader role.
+The thread setting must fit the owner capacity. Reader and maintenance profiles must accept their
+query settings and allow a positive execution timeout derived from each caller’s deadline.
 Queueing, PG acquisition, HTTP and settlement use one absolute deadline. Scan, output and
 memory limits apply per query. The owner bounds admitted local calls; ClickHouse owns
 remote query execution.
@@ -109,8 +110,9 @@ A full window or busy stream returns `Unavailable` for a new batch. Existing ide
 remain recoverable. Independent streams may project out of order. `progress` reports
 `Verified` when ClickHouse verification finished but an earlier revision still blocks
 publication. Such writes return `Unknown` and cannot yet produce a successful receipt.
-PG advances only a contiguous verified prefix, makes affected summaries dirty, and
-releases recovery material in the same transaction. A stalled head needs explicit
+Verification releases each batch’s recovery payload. PG publishes up to 16 consecutive verified
+batches atomically. Affected summaries carry the first revision that invalidates them, so the
+publication boundary also switches summary visibility without rewriting summary rows. A stalled head needs explicit
 recovery. `recover(scope, authority, deadline)` selects the oldest pending revision and
 reauthorizes its original content; retrying the original batch uses the same protocol.
 Each raw attempt owns one revision and query ID. Replacement and publication revoke

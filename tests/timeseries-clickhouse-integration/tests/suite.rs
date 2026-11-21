@@ -111,6 +111,43 @@ fn batch(name: &str, samples: Vec<Sample>) -> anyhow::Result<Batch> {
         .clone();
     Ok(Batch::new(stream, id(name)?, samples)?)
 }
+fn stream_batch(d: &Definition, source: &str, name: &str, time: i64) -> anyhow::Result<Batch> {
+    let mut input = sample(d, name, time, 1)?.input().clone();
+    input.stream = Stream::new(d.spec().scope.clone(), id(source)?, id("generation")?);
+    batch(name, vec![Sample::new(input)?])
+}
+
+async fn seed_count_query(f: &Fixture, b: &Batch) -> anyhow::Result<Authorized<AggregateQuery>> {
+    let spec = SummarySpec::new(
+        b.stream().clone(),
+        b.samples()[0].input().series.clone(),
+        NonZeroU64::new(100).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let window = Interval::new(Timestamp::new(0)?, Timestamp::new(100)?)?;
+    f.maintain(
+        "seed-summary",
+        MaintenanceAction::Recompute {
+            spec: spec.clone(),
+            window,
+        },
+    )
+    .await?;
+    Ok(Authorized::<AggregateQuery>::verify(
+        &authority(TENANT)?,
+        AggregateQuery::new(
+            spec,
+            window,
+            QueryBudget {
+                max_points: NonZeroU32::new(10).ok_or(Error::Invariant)?,
+                max_series: NonZeroU32::MIN,
+            },
+            AggregateOp::Count,
+        )?,
+    )?)
+}
+
 fn query(d: &Definition, mode: QueryMode, points: u32) -> anyhow::Result<Query> {
     Ok(Query::new(
         Selection::Resource {
@@ -714,6 +751,31 @@ async fn rejects_unsafe_admission_and_tls_identity() -> anyhow::Result<()> {
             .is_err()
     );
     f.ch.sql("DROP SETTINGS PROFILE incompatible_drain").await?;
+    for setting in [
+        "max_execution_time=0 READONLY",
+        "max_execution_time=1 MAX 2",
+        "max_rows_to_read=1 MAX 1",
+    ] {
+        f.ch.sql(&format!(
+            "CREATE SETTINGS PROFILE drain_budget SETTINGS {setting} TO ch_maint"
+        ))
+        .await?;
+        let result = Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader").await;
+        assert!(
+            matches!(result, Err(e) if e.downcast_ref::<Error>()==Some(&Error::InvalidInput)),
+            "{setting}"
+        );
+        f.ch.sql("DROP SETTINGS PROFILE drain_budget").await?;
+    }
+    sqlx::raw_sql("REVOKE SELECT ON rss_ts_ch.installation FROM ch_runtime; GRANT SELECT(singleton,id,version) ON rss_ts_ch.installation TO ch_runtime")
+        .execute(&f.admin).await?;
+    let restricted = Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader").await;
+    assert!(
+        matches!(restricted, Err(e) if e.downcast_ref::<Error>() == Some(&Error::Unauthorized))
+    );
+    sqlx::query("GRANT SELECT ON rss_ts_ch.installation TO ch_runtime")
+        .execute(&f.admin)
+        .await?;
     f.ch.sql("GRANT INSERT ON rss_ts_ch.raw TO ch_reader")
         .await?;
     assert!(
@@ -990,6 +1052,13 @@ mod crash {
         let f = Fixture::new("ch-crash").await?;
         let d = crash_definition()?;
         f.register(&d).await?;
+        sqlx::query("UPDATE rss_ts_ch.installation SET max_pending_batches=2")
+            .execute(&f.admin)
+            .await?;
+        let successor = stream_batch(&d, "successor", "next", 40)?;
+        let q =
+            Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(&successor)?)?;
+        let aq = seed_count_query(&f, &successor).await?;
         let proxy = transport::Proxy::new(&f.ch).await?;
         proxy.arm(4);
         let p = f.pg.params();
@@ -1004,13 +1073,34 @@ mod crash {
         let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("stdin"))?;
         stdin.write_all(&serde_json::to_vec(&input)?).await?;
         drop(stdin);
-        let ready = proxy.wait_held().await;
+        proxy.wait_held().await?;
+        assert!(matches!(f.write(&successor).await?, Outcome::Unknown));
+        assert_eq!(
+            f.store.progress(&q, deadline()?).await?,
+            rss_timeseries_clickhouse::ProjectionProgress::Verified
+        );
+        let (received_at, replay_until): (i64, i64) = sqlx::query_as(
+            "SELECT received_at,replay_until FROM rss_ts_ch.batches WHERE phase='verified'",
+        )
+        .fetch_one(&f.admin)
+        .await?;
         child.kill().await?;
         child.wait().await?;
-        ready?;
         proxy.release();
         assert!(f.read(&d).await?.rows.is_empty());
         let reopened = Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader").await?;
+        assert_eq!(
+            reopened.progress(&q, deadline()?).await?,
+            rss_timeseries_clickhouse::ProjectionProgress::Verified
+        );
+        assert!(matches!(
+            reopened.receipt(&q, deadline()?).await?,
+            Lookup::NotVisible
+        ));
+        assert!(matches!(
+            reopened.aggregate(&aq, None, deadline()?).await?.buckets[0].value,
+            AggregateValue::Missing
+        ));
         let result = confirmed(
             reopened
                 .recover(&d.spec().scope, &authority(TENANT)?, deadline()?)
@@ -1022,7 +1112,28 @@ mod crash {
                 .new_samples(),
             24
         );
-        assert_eq!(f.read(&d).await?.rows.len(), 24);
+        let Lookup::Found(receipt) = reopened.receipt(&q, deadline()?).await? else {
+            anyhow::bail!("successor receipt missing");
+        };
+        let Outcome::Replay(replay) = f.write(&successor).await? else {
+            anyhow::bail!("expected successor replay");
+        };
+        for original in [receipt, replay] {
+            assert_eq!(original.identity().digest, q.request().digest);
+            assert_eq!(original.identity().stream, q.request().stream);
+            assert_eq!(original.identity().batch_id, q.request().batch_id);
+            assert_eq!(original.received_at().micros(), received_at);
+            assert_eq!(original.replay_until().micros(), replay_until);
+            assert_eq!(
+                (original.new_samples(), original.replayed_samples()),
+                (1, 0)
+            );
+        }
+        assert!(matches!(
+            reopened.aggregate(&aq, None, deadline()?).await?.buckets[0].value,
+            AggregateValue::Count(1)
+        ));
+        assert_eq!(f.read(&d).await?.rows.len(), 25);
         Ok(())
     }
     #[tokio::test]

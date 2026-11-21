@@ -130,11 +130,24 @@ pub struct Limits {
     pub cursor_micros: NonZeroU64,
 }
 
-pub(crate) fn query_threads(
-    query: clickhouse::query::Query,
-    threads: NonZeroU32,
-) -> clickhouse::query::Query {
-    query
-        .with_setting("max_threads", threads.to_string())
-        .with_setting("max_final_threads", threads.to_string())
+impl Limits {
+    pub(crate) fn query(
+        &self,
+        query: clickhouse::query::Query,
+        threads: NonZeroU32,
+        remaining: std::time::Duration,
+    ) -> clickhouse::query::Query {
+        query
+            .with_setting("max_threads", threads.to_string())
+            .with_setting("max_final_threads", threads.to_string())
+            .with_setting("max_execution_time", remaining.as_secs_f64().to_string())
+            .with_setting("max_rows_to_read", self.max_scan_rows.to_string())
+            .with_setting("max_bytes_to_read", self.max_scan_bytes.to_string())
+            .with_setting("max_memory_usage", self.max_memory_bytes.to_string())
+            .with_setting("max_result_bytes", self.max_bytes.to_string())
+            .with_setting("read_overflow_mode", "throw")
+            .with_setting("result_overflow_mode", "throw")
+            .with_setting("timeout_overflow_mode", "throw")
+            .with_setting("use_query_cache", "0")
+    }
 }

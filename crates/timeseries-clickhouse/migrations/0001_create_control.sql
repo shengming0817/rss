@@ -4,7 +4,7 @@ CREATE SCHEMA rss_ts_ch;
 CREATE TABLE rss_ts_ch.installation (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 2 CHECK(version=2),
- max_pending_batches integer NOT NULL DEFAULT 1 CHECK(max_pending_batches>0)
+ max_pending_batches integer NOT NULL DEFAULT 1 CHECK(max_pending_batches BETWEEN 1 AND 16)
 );
 INSERT INTO rss_ts_ch.installation DEFAULT VALUES;
 CREATE TABLE rss_ts_ch.namespaces (
@@ -40,8 +40,7 @@ CREATE TABLE rss_ts_ch.batches (
  CHECK(phase='prepared' OR attempt IS NULL),
  CHECK(new_samples+replayed_samples BETWEEN 1 AND 4096),
  CHECK((phase='prepared' AND payload IS NOT NULL AND projection IS NOT NULL)
-    OR (phase='verified' AND payload IS NOT NULL AND projection IS NULL)
-    OR (phase IN ('published','expired') AND payload IS NULL AND projection IS NULL)),
+    OR (phase<>'prepared' AND payload IS NULL AND projection IS NULL)),
  UNIQUE(tenant_id,namespace,revision),
  PRIMARY KEY(tenant_id,namespace,source,generation,batch_id),
  FOREIGN KEY(tenant_id,namespace,source,generation) REFERENCES rss_ts_ch.streams
@@ -86,13 +85,11 @@ CREATE TABLE rss_ts_ch.summaries (
  source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
  series text COLLATE "C" NOT NULL CHECK(length(series)=64),
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
- object_id uuid NOT NULL, dirty boolean NOT NULL DEFAULT false,
- invalidate_revision bigint CHECK(invalidate_revision IS NULL OR (invalidate_revision>0 AND NOT dirty)),
+ object_id uuid NOT NULL, dirty_from bigint CHECK(dirty_from>=0),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );
-CREATE INDEX clean_series_summaries ON rss_ts_ch.summaries(tenant_id,namespace,source,generation,series,hi) WHERE NOT dirty;
-CREATE INDEX reserved_summaries ON rss_ts_ch.summaries(tenant_id,namespace,invalidate_revision) WHERE invalidate_revision IS NOT NULL;
+CREATE INDEX clean_series_summaries ON rss_ts_ch.summaries(tenant_id,namespace,source,generation,series,hi) WHERE dirty_from IS NULL;
 CREATE TABLE rss_ts_ch.ranges (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, spec_digest bytea NOT NULL,
  spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),

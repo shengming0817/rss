@@ -163,7 +163,7 @@ async fn invalidation_budget_is_scoped_and_checked_before_prepare() -> anyhow::R
     input.series = Series::new(d.clone(), id("other")?, id("resource")?, Default::default())?;
     let unrelated = batch("unrelated", vec![Sample::new(input)?])?;
     confirmed(f.write(&unrelated).await?)?;
-    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.summaries WHERE dirty")
+    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.summaries JOIN rss_ts_ch.namespaces USING(tenant_id,namespace) WHERE dirty_from<=published")
         .fetch_one(&f.admin)
         .await?;
     assert_eq!(dirty, 0);
@@ -197,7 +197,7 @@ async fn invalidation_budget_is_scoped_and_checked_before_prepare() -> anyhow::R
     ));
     f.store = Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader").await?;
     confirmed(f.write(&related).await?)?;
-    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.summaries WHERE dirty")
+    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.summaries JOIN rss_ts_ch.namespaces USING(tenant_id,namespace) WHERE dirty_from<=published")
         .fetch_one(&f.admin)
         .await?;
     assert_eq!(dirty, 4);
@@ -243,17 +243,48 @@ async fn invalidation_budget_is_scoped_and_checked_before_prepare() -> anyhow::R
         confirmed(f.write(&batch("two-series", inputs)?).await?)?.new_samples(),
         2
     );
-    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.summaries WHERE dirty")
+    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.summaries JOIN rss_ts_ch.namespaces USING(tenant_id,namespace) WHERE dirty_from<=published")
         .fetch_one(&f.admin)
         .await?;
     assert_eq!(dirty, 8);
     Ok(())
 }
 
-fn stream_batch(d: &Definition, source: &str, name: &str, time: i64) -> anyhow::Result<Batch> {
-    let mut input = sample(d, name, time, 1)?.input().clone();
-    input.stream = Stream::new(d.spec().scope.clone(), id(source)?, id("generation")?);
-    batch(name, vec![Sample::new(input)?])
+#[tokio::test]
+async fn publication_settles_the_installation_window_at_its_upper_bound() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-window-limit").await?;
+    let invalid = sqlx::query("UPDATE rss_ts_ch.installation SET max_pending_batches=17")
+        .execute(&f.admin)
+        .await;
+    assert!(matches!(invalid, Err(sqlx::Error::Database(e)) if e.code().as_deref()==Some("23514")));
+    sqlx::query("UPDATE rss_ts_ch.installation SET max_pending_batches=16")
+        .execute(&f.admin)
+        .await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let head = stream_batch(&d, "head", "head", 1)?;
+    f.store.inject_next_fault(Fault::AfterPrepare);
+    assert!(matches!(f.write(&head).await?, Outcome::Unknown));
+    for n in 2..=16 {
+        let name = format!("stream{n}");
+        assert!(matches!(
+            f.write(&stream_batch(&d, &name, &name, n)?).await?,
+            Outcome::Unknown
+        ));
+    }
+    let blocked = f.write(&stream_batch(&d, "full", "full", 17)?).await;
+    assert!(matches!(blocked, Err(e) if e.downcast_ref::<Error>()==Some(&Error::Unavailable)));
+    let released: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.batches WHERE phase='verified' AND payload IS NULL AND projection IS NULL").fetch_one(&f.admin).await?;
+    assert_eq!(released, 15);
+    confirmed(f.write(&head).await?)?;
+    let published: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.batches WHERE phase='published'")
+            .fetch_one(&f.admin)
+            .await?;
+    assert_eq!(published, 16);
+    let last = stream_batch(&d, "stream16", "stream16", 16)?;
+    assert!(matches!(f.write(&last).await?, Outcome::Replay(_)));
+    Ok(())
 }
 
 #[tokio::test]
@@ -279,34 +310,7 @@ async fn independent_streams_publish_one_contiguous_prefix() -> anyhow::Result<(
         .ok_or(Error::Invariant)?;
     let a = stream_batch(&d, "left", "a", 30)?;
     let b = stream_batch(&d, "right", "b", 40)?;
-    let spec = SummarySpec::new(
-        b.stream().clone(),
-        b.samples()[0].input().series.clone(),
-        NonZeroU64::new(100).ok_or(Error::Invariant)?,
-        CoveragePolicy::ObservedOnly,
-        None,
-    )?;
-    let window = Interval::new(Timestamp::new(0)?, Timestamp::new(100)?)?;
-    f.maintain(
-        "seed-summary",
-        MaintenanceAction::Recompute {
-            spec: spec.clone(),
-            window,
-        },
-    )
-    .await?;
-    let aq = Authorized::<AggregateQuery>::verify(
-        &public,
-        AggregateQuery::new(
-            spec,
-            window,
-            QueryBudget {
-                max_points: NonZeroU32::new(10).ok_or(Error::Invariant)?,
-                max_series: NonZeroU32::MIN,
-            },
-            AggregateOp::Count,
-        )?,
-    )?;
+    let aq = seed_count_query(&f, &b).await?;
     f.store.inject_next_fault(Fault::AfterInsert);
     assert!(matches!(f.write(&a).await?, Outcome::Unknown));
     assert!(

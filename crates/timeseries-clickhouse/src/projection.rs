@@ -114,20 +114,10 @@ impl<C: Clock> Operation<'_, C> {
     ) -> Result<clickhouse::query::Query, Error> {
         let remaining = deadline
             .remaining(self.clock.now())
-            .ok_or(Error::Deadline)?
-            .as_secs_f64();
-        Ok(
-            crate::config::query_threads(client.query(sql), self.threads)
-                .with_setting("max_execution_time", remaining.to_string())
-                .with_setting("max_rows_to_read", self.limits.max_scan_rows.to_string())
-                .with_setting("max_bytes_to_read", self.limits.max_scan_bytes.to_string())
-                .with_setting("max_memory_usage", self.limits.max_memory_bytes.to_string())
-                .with_setting("max_result_bytes", self.limits.max_bytes.to_string())
-                .with_setting("read_overflow_mode", "throw")
-                .with_setting("result_overflow_mode", "throw")
-                .with_setting("timeout_overflow_mode", "throw")
-                .with_setting("use_query_cache", "0"),
-        )
+            .ok_or(Error::Deadline)?;
+        Ok(self
+            .limits
+            .query(client.query(sql), self.threads, remaining))
     }
     pub(crate) async fn insert<T: Serialize>(
         &self,

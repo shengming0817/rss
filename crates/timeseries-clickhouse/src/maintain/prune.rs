@@ -79,7 +79,7 @@ async fn safe_limit<C: Clock>(
                 .end()
                 .micros(),
         );
-        let complete:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM generate_series($4::bigint,$5::bigint-1,$6::bigint) x WHERE NOT EXISTS(SELECT FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=x AND NOT dirty))")
+        let complete:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM generate_series($4::bigint,$5::bigint-1,$6::bigint) x WHERE NOT EXISTS(SELECT FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=x AND dirty_from IS NULL))")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(lo).bind(hi).bind(spec.resolution_micros().get() as i64).fetch_one(&mut *c).await.map_err(sql_error)?;
         if !complete {
             return Ok(Err(MaintenanceBlock::DirtySummary));

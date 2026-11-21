@@ -125,7 +125,7 @@ impl<C: Clock> Operation<'_, C> {
         let prior = tx.published;
         let result = async {
             remove(tx.connection(), &attempt.id).await?;
-            let count = sqlx::query("UPDATE rss_ts_ch.batches SET phase='verified', projection=NULL, attempt=NULL
+            let count = sqlx::query("UPDATE rss_ts_ch.batches SET phase='verified', payload=NULL, projection=NULL, attempt=NULL
                 WHERE tenant_id=$1::text::uuid AND namespace=$2 AND revision=$3 AND attempt=$4::text::uuid AND phase='prepared'")
                 .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(p.revision)
                 .bind(&attempt.id).execute(tx.connection()).await.map_err(sql_error)?.rows_affected();
@@ -146,23 +146,13 @@ async fn promote(c: &mut PgConnection, scope: &Scope, prior: i64) -> Result<(), 
         n.allocated) FROM rss_ts_ch.namespaces n WHERE n.tenant_id=$1::text::uuid AND n.namespace=$2")
         .bind(&tenant).bind(ns).fetch_one(&mut *c).await.map_err(sql_error)?;
     let (count,changed):(i64,bool)=sqlx::query_as("WITH published AS (
-        UPDATE rss_ts_ch.batches SET phase='published',payload=NULL WHERE tenant_id=$1::text::uuid AND namespace=$2
+        UPDATE rss_ts_ch.batches SET phase='published' WHERE tenant_id=$1::text::uuid AND namespace=$2
           AND revision>$3 AND revision<=$4 AND phase='verified' RETURNING new_samples)
         SELECT count(*),coalesce(bool_or(new_samples>0),false) FROM published")
         .bind(&tenant).bind(ns).bind(prior).bind(boundary).fetch_one(&mut *c).await.map_err(sql_error)?;
     if count == 0 || count != boundary - prior {
         return Err(Error::Invariant);
     }
-    sqlx::query(
-        "UPDATE rss_ts_ch.summaries SET dirty=true,invalidate_revision=NULL
-        WHERE tenant_id=$1::text::uuid AND namespace=$2 AND invalidate_revision<=$3",
-    )
-    .bind(&tenant)
-    .bind(ns)
-    .bind(boundary)
-    .execute(&mut *c)
-    .await
-    .map_err(sql_error)?;
     sqlx::query(
         "UPDATE rss_ts_ch.namespaces SET published=$3,revision=revision+$4
         WHERE tenant_id=$1::text::uuid AND namespace=$2",

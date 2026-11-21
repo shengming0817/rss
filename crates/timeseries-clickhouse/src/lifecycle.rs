@@ -95,7 +95,7 @@ impl<C: Clock> ChOwner<C> {
             return Err(Error::InvalidInput);
         }
         let ch = config.connect();
-        let instance = bounded(&clock, deadline, probe::installation(&pool, &ch)).await?;
+        let instance = bounded(&clock, deadline, probe::installation(&pool, &ch, &limits)).await?;
         Ok(Self {
             inner: Arc::new(Shared {
                 clock: Arc::new(clock),
@@ -130,7 +130,7 @@ impl<C: Clock> ChOwner<C> {
                 &reader.user,
                 tenant,
                 &self.inner.instance,
-                self.inner.limits.query_threads,
+                &self.inner.limits,
             )
             .await?;
             self.inner.open()?;
