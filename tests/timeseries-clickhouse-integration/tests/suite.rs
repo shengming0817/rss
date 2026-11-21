@@ -704,6 +704,16 @@ async fn rejects_unsafe_admission_and_tls_identity() -> anyhow::Result<()> {
         caps,
     )
     .await?;
+    f.ch.sql(
+        "CREATE SETTINGS PROFILE incompatible_drain SETTINGS max_final_threads=2 MIN 2 TO ch_maint",
+    )
+    .await?;
+    assert!(
+        Fixture::connect(&f.ch, f.pool.clone(), TENANT, "ch_reader")
+            .await
+            .is_err()
+    );
+    f.ch.sql("DROP SETTINGS PROFILE incompatible_drain").await?;
     f.ch.sql("GRANT INSERT ON rss_ts_ch.raw TO ch_reader")
         .await?;
     assert!(

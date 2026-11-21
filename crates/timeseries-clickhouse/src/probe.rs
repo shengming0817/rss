@@ -44,6 +44,7 @@ pub(crate) async fn installation(pool: &PgPool, ch: &Connections) -> Result<Stri
     service_grants(ch)
         .await
         .map_err(|e| diagnose("service-grants", e))?;
+    check_threads(&ch.maintenance, std::num::NonZeroU32::MIN).await?;
     let guard = ch
         .writer
         .query("SELECT installation,primary_server,tls,guard_user FROM rss_ts_ch.guard_identity")
