@@ -72,7 +72,9 @@ pub struct PgOutboxClaim {
     dr_operation: Option<String>,
     pub(crate) binding: ExecutionBinding,
     token: String,
-    lease_us: Mutex<i64>,
+    pub(crate) lease_us: Mutex<i64>,
+    #[cfg(feature = "recovery")]
+    pub(crate) initial_window: Deadline,
 }
 #[derive(Clone)]
 #[cfg(feature = "recovery")]
@@ -80,7 +82,36 @@ pub(crate) struct LocalSourceIdentity {
     pub(crate) seq: i64,
     pub(crate) dr_operation: Option<String>,
 }
+pub(crate) struct SourceWindow {
+    pub(crate) lease_us: i64,
+    pub(crate) remaining: Duration,
+    pub(crate) delivery: Duration,
+}
 impl PgOutboxClaim {
+    pub(crate) async fn lease_in(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        previous: i64,
+        extend_ms: i64,
+    ) -> Result<SourceWindow, PgError> {
+        if *tx.binding() != self.binding {
+            return Err(PgError::lost());
+        }
+        let row = sqlx::query("SELECT * FROM rss_transactional_messaging.outbox_lease($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)")
+            .bind(self.binding.tenant().to_string())
+            .bind(self.seq)
+            .bind(&self.token)
+            .bind(previous)
+            .bind(extend_ms)
+            .bind(&self.dr_operation)
+            .fetch_optional(&mut *tx.connection).await?.ok_or_else(PgError::lost)?;
+        Ok(SourceWindow {
+            lease_us: row.try_get("lease_us")?,
+            remaining: Duration::from_micros(row.try_get::<i64, _>("remaining_us")?.unsigned_abs()),
+            delivery: Duration::from_micros(row.try_get::<i64, _>("delivery_us")?.unsigned_abs()),
+        })
+    }
+
     #[cfg(feature = "recovery")]
     pub(crate) fn local_identity(&self) -> LocalSourceIdentity {
         LocalSourceIdentity {
@@ -116,7 +147,7 @@ impl OutboxWakeup {
 /// PostgreSQL outbox, generic over the selected publisher's receipt evidence.
 pub struct PgOutboxStore<R> {
     writer: PgOutboxWriter,
-    lease_ms: i64,
+    pub(crate) lease_ms: i64,
     budget: DeliveryBudget,
     receipt: PhantomData<fn() -> R>,
 }
@@ -235,55 +266,34 @@ impl<R> PgOutboxStore<R> {
         if !self.valid_claim(claim) {
             return Ok(OutboxLeaseStatus::Lost);
         }
-        let tenant = claim.message.envelope().metadata().tenant_id();
-        let dr = claim.dr_operation.clone();
-        let mut lease = within(&self.writer.runtime.timer, cutoff, |_| {
-            claim.lease_us.lock()
-        })
-        .await?;
-        let previous = *lease;
-        let seq = claim.seq;
-        let token = claim.token.clone();
-        let result = self
-            .writer.runtime
-            .relay(claim.binding, cutoff, move |connection| {
-                Box::pin(async move {
-                    Ok(sqlx::query(
-                        "SELECT * FROM rss_transactional_messaging.outbox_lease($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
-                    )
-                    .bind(tenant.to_string())
-                    .bind(seq)
-                    .bind(token)
-                    .bind(previous)
-                    .bind(extend_ms)
-                    .bind(dr)
-                    .fetch_optional(connection)
-                    .await?)
-                })
-            })
-            .await
-            .or_else(|error| {
-                if error.kind() == MessagingErrorKind::OwnershipLost { Ok(None) } else { Err(error) }
-            })
-            .map_err(PgError::port)?;
-        match result {
-            None => Ok(OutboxLeaseStatus::Lost),
-            Some(row) => {
-                let current: i64 = row
-                    .try_get("lease_us")
-                    .map_err(|e| PgError::from(e).port())?;
-                let remaining: i64 = row
-                    .try_get("remaining_us")
-                    .map_err(|e| PgError::from(e).port())?;
-                let delivery: i64 = row
-                    .try_get("delivery_us")
-                    .map_err(|e| PgError::from(e).port())?;
-                *lease = current;
+        let runtime = &self.writer.runtime;
+        let mut expected = within(&runtime.timer, cutoff, |_| claim.lease_us.lock()).await?;
+        let previous = *expected;
+        let attempt = runtime
+            .transaction_until(
+                claim.binding,
+                cutoff,
+                claim,
+                true,
+                #[cfg(feature = "integration")]
+                None,
+                move |claim, tx| {
+                    Box::pin(async move { claim.lease_in(tx, previous, extend_ms).await })
+                },
+            )
+            .await;
+        match crate::transaction::settled(attempt) {
+            Ok(window) => {
+                *expected = window.lease_us;
                 Ok(OutboxLeaseStatus::Held {
-                    remaining: Duration::from_micros(remaining.unsigned_abs()),
-                    delivery_remaining: Some(Duration::from_micros(delivery.unsigned_abs())),
+                    remaining: window.remaining,
+                    delivery_remaining: Some(window.delivery),
                 })
             }
+            Err(error) if error.kind() == MessagingErrorKind::OwnershipLost => {
+                Ok(OutboxLeaseStatus::Lost)
+            }
+            Err(error) => Err(error.port()),
         }
     }
 }
@@ -353,8 +363,10 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         let ttl = self.lease_ms;
         let tenant = binding.tenant();
         let domain = self.writer.domain.as_str().to_owned();
+        #[cfg(feature = "recovery")]
+        let started = self.writer.runtime.timer.now();
         let batch = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
-                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
+                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
                     .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
                 rows.into_iter().map(|row| {
                     let message = PendingMessage::new(Envelope::decode(&row.try_get::<String,_>("envelope")?)?);
@@ -368,7 +380,14 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
                         || row.try_get::<Option<String>,_>("partition_key")?.as_deref() != message.partition().map(|p| p.key().as_str()) {
                         return Err(PgError::invariant());
                     }
-                    Ok(PgOutboxClaim { message, binding, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
+                    Ok(PgOutboxClaim {
+                        #[cfg(feature = "recovery")]
+                        initial_window: {
+                            let window = row.try_get::<i64,_>("remaining_us")?.min(row.try_get("delivery_us")?);
+                            let micros = u64::try_from(window).map_err(|_| PgError::invariant())?;
+                            Deadline::at(started.checked_add(Duration::from_micros(micros)).ok_or_else(PgError::invariant)?)
+                        },
+                        message, binding, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
                 }).collect::<Result<Vec<_>, PgError>>()
         })).await.map_err(PgError::port)?;
         OutboxClaimBatch::try_from_provider(batch, limit)

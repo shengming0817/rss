@@ -15,6 +15,7 @@ from package_proof import (
 SCENARIOS = {
     "core": ["recovery-core"],
     "postgres": ["recovery-pg"],
+    "local-projection": ["recovery-pg"],
     "s3": ["recovery-s3"],
     "combined": ["recovery-archive"],
     "managed": ["recovery-managed"],
@@ -31,18 +32,24 @@ def main():
     )
     for name, (features, deps) in selected.items():
         directory = root / name
+        if name == "local-projection":
+            # The packaged integration feature models a lost COMMIT acknowledgement.
+            deps["rss-transactional-messaging-postgres"]["features"].append("integration")
+            deps["futures"] = {"version": "0.3", "default-features": False}
         consumer(directory, features, deps, allowed)
         forbidden = {"testkit", "testcontainers"}
         if name in {"core", "s3"}:
             forbidden |= {"sqlx", "rss-transactional-messaging-postgres"}
-        if name in {"core", "postgres"}:
+        if name in {"core", "postgres", "local-projection"}:
             forbidden.add("aws-sdk-s3")
         if name != "managed":
             forbidden.add("rss-runtime")
         # Independent scenario contract: a missing forwarding edge must fail.
         required = {"rss-transactional-messaging-recovery": set()}
-        if name in {"postgres", "combined", "managed"}:
+        if name in {"postgres", "combined", "managed", "local-projection"}:
             required["rss-transactional-messaging-postgres"] = {"default", "recovery"}
+        if name == "local-projection":
+            required["rss-transactional-messaging-postgres"].update({"integration", "test-support"})
         if name in {"s3", "combined", "managed"}:
             required["rss-transactional-messaging-recovery-s3"] = set()
         if name == "managed":
@@ -57,6 +64,8 @@ def main():
             required_dependencies=deps,
         )
         probe = "recovery-core.rs" if name == "core" else "recovery-api.rs"
+        if name == "local-projection":
+            probe = "local-projection.rs"
         shutil.copyfile(
             ROOT / "crates/examples/probes" / probe, directory / "src/main.rs"
         )
@@ -64,6 +73,11 @@ def main():
             ["run" if name == "core" else "check", "--locked", "--bin", "rss-examples"],
             directory,
         )
+        if name == "local-projection":
+            cargo(["build", "--locked", "--bin", "rss-examples"], directory)
+            provider_consumer(directory, "postgres-integration", "local_projection",
+                              "local_projection_atomicity_scope_and_recovery",
+                              {"RSS_LOCAL_PROJECTION_EXAMPLE": "rss-examples"})
         if name == "postgres":
             cargo(
                 ["build", "--locked", "--bin", "recovery", "--bin", "recovery-install"],

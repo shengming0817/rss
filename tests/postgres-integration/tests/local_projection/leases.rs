@@ -1,0 +1,302 @@
+//! Boundaries between claim ACK, stream polling, dual lease checks and terminal settlement.
+use super::*;
+use futures::StreamExt;
+use rss_transactional_messaging::{
+    error::MessagingErrorKind,
+    inbox::{ConsumerIdentity, IdempotencyDisposition, InboxStore},
+};
+
+async fn project(p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<PgProjectionOutcome> {
+    Ok(only(
+        collect_batch(p.project_batch(
+            execution(tenant(), 1),
+            &Validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        ))
+        .await?,
+    )?)
+}
+
+pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
+    let p = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: false,
+        })
+        .await?;
+    Box::pin(stale_generation(f, &p)).await?;
+    Box::pin(takeover(f, &p)).await?;
+    Box::pin(inbox_contention(f, &p)).await?;
+    Box::pin(windows(f, &p)).await?;
+    Box::pin(delivery_expired(f, &p)).await?;
+    Box::pin(expired_before_poll(f, &p)).await?;
+    Box::pin(duplicate_crossing_deadline(f, &p)).await
+}
+
+async fn stale_generation(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
+    let binding = execution(tenant(), 1);
+    for (id, change, restore) in [
+        (
+            "lease-epoch",
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=current_setting('rss.tenant_id')::uuid",
+            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=1 WHERE tenant_id=current_setting('rss.tenant_id')::uuid",
+        ),
+        (
+            "lease-lineage",
+            "UPDATE rss_transactional_messaging.storage_lineage SET lineage=decode(repeat('03',16),'hex')",
+            "UPDATE rss_transactional_messaging.storage_lineage SET lineage=decode(repeat('02',16),'hex')",
+        ),
+    ] {
+        f.append(id, "orders").await?;
+        let stream = p
+            .project_batch(
+                binding,
+                &Validator,
+                NonZeroUsize::MIN,
+                deadline(),
+                Duration::from_secs(5),
+            )
+            .await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(change))
+            .execute(&f.owner)
+            .await?;
+        assert!(
+            matches!(only(stream.collect().await), Err(error) if error.kind()==MessagingErrorKind::OwnershipLost)
+        );
+        assert_eq!(f.state(id).await?, (0, 0, None, "publishing".into()));
+        sqlx::raw_sql(sqlx::AssertSqlSafe(restore))
+            .execute(&f.owner)
+            .await?;
+        sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp() WHERE message_id=$1").bind(id).execute(&f.owner).await?;
+        committed_projection(project(p).await?)?;
+    }
+    Ok(())
+}
+
+async fn takeover(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
+    let binding = execution(tenant(), 1);
+    f.append("lease-takeover", "orders").await?;
+    let stale = p
+        .project_batch(
+            binding,
+            &Validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp() WHERE message_id='lease-takeover'").execute(&f.owner).await?;
+    let fresh = p
+        .project_batch(
+            binding,
+            &Validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    assert_eq!(
+        attempt_status(only(stale.collect().await)?)?,
+        Status::InfrastructureTransient
+    );
+    assert_eq!(
+        f.state("lease-takeover").await?,
+        (0, 0, None, "publishing".into())
+    );
+    committed_projection(only(fresh.collect().await)?)?;
+    Ok(())
+}
+
+async fn inbox_contention(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
+    let id = "lease-contended";
+    f.append(id, "orders").await?;
+    let message = message(id, "orders")?;
+    let identity = ConsumerIdentity::new(
+        tenant(),
+        group()?,
+        message.id().clone(),
+        message.metadata().contract().clone(),
+    );
+    let other = PgInboxStore::new(
+        f.worker.clone(),
+        LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
+    )?;
+    let IdempotencyDisposition::Acquired(held) = other
+        .claim(execution(tenant(), 1), &identity, deadline())
+        .await?
+    else {
+        anyhow::bail!("external consumer did not acquire Inbox")
+    };
+    assert!(matches!(project(p).await?, PgProjectionOutcome::InProgress));
+    assert_eq!(f.state(id).await?, (0, 0, None, "pending".into()));
+    other.release(held, deadline()).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp() WHERE message_id=$1").bind(id).execute(&f.owner).await?;
+    committed_projection(project(p).await?)?;
+    Ok(())
+}
+
+async fn windows(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
+    // The marker participates in the renewing transaction, so partial commits are visible.
+    sqlx::raw_sql("CREATE TABLE public.lease_changes(id text, relation text);
+        GRANT INSERT ON public.lease_changes TO projection_worker,rss_tmsg_relay;
+        CREATE FUNCTION public.capture_lease() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
+        IF NEW.message_id='lease-short' AND TG_TABLE_NAME='inbox' THEN
+          IF TG_OP='INSERT' THEN NEW.lease_until:=clock_timestamp()+interval '450 milliseconds';
+          ELSIF OLD.lease_until IS DISTINCT FROM NEW.lease_until THEN RETURN NULL; END IF;
+        END IF;
+        IF TG_OP='UPDATE' AND OLD.lease_until IS NOT NULL AND NEW.lease_until IS NOT NULL AND OLD.lease_until<>NEW.lease_until THEN
+          INSERT INTO public.lease_changes VALUES(NEW.message_id,TG_TABLE_NAME);
+        END IF;
+        RETURN NEW; END $f$;
+        CREATE TRIGGER sample_inbox BEFORE INSERT OR UPDATE ON rss_transactional_messaging.inbox FOR EACH ROW EXECUTE FUNCTION public.capture_lease();
+        CREATE TRIGGER sample_source BEFORE UPDATE ON rss_transactional_messaging.outbox FOR EACH ROW EXECUTE FUNCTION public.capture_lease();")
+        .execute(&f.owner).await?;
+    f.append("lease-full", "orders").await?;
+    committed_projection(project(p).await?)?;
+    f.append("lease-short", "orders").await?;
+    assert_eq!(
+        attempt_status(project(p).await?)?,
+        Status::InfrastructureTransient
+    );
+    assert_eq!(
+        f.state("lease-short").await?,
+        (0, 0, None, "pending".into())
+    );
+    let writes: i64 = sqlx::query_scalar("SELECT count(*) FROM public.lease_changes")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(
+        writes, 0,
+        "full leases were rewritten or half of a failed renewal committed"
+    );
+    sqlx::raw_sql("DROP TRIGGER sample_inbox ON rss_transactional_messaging.inbox; DROP TRIGGER sample_source ON rss_transactional_messaging.outbox; UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp() WHERE message_id='lease-short'").execute(&f.owner).await?;
+    committed_projection(project(p).await?)?;
+    Ok(())
+}
+
+async fn delivery_expired(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
+    f.append("lease-delivery-expired", "orders").await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp() WHERE message_id='lease-delivery-expired'").execute(&f.owner).await?;
+    assert!(matches!(
+        project(p).await?,
+        PgProjectionOutcome::DeliveryExpired
+    ));
+    assert_eq!(
+        f.state("lease-delivery-expired").await?,
+        (0, 0, None, "dead_letter".into())
+    );
+    // The later dead-letter discovery scenario starts with a clean domain.
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='resolved' WHERE message_id='lease-delivery-expired'").execute(&f.owner).await?;
+    Ok(())
+}
+
+async fn duplicate_crossing_deadline(
+    f: &Fixture,
+    p: &PgLocalProjection<Effect, Key>,
+) -> anyhow::Result<()> {
+    struct Entered(Notify);
+    impl IngressValidator<Vec<u8>> for Entered {
+        fn validate(
+            &self,
+            input: IngressChallenge<'_, Vec<u8>>,
+        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+            self.0.notify_one();
+            Validator.validate(input)
+        }
+    }
+    // A redriven source meets the matching success receipt after admission.
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='pending' WHERE message_id='lease-full'").execute(&f.owner).await?;
+    let mut blocker = f.owner.begin().await?;
+    sqlx::query(
+        "SELECT 1 FROM rss_transactional_messaging.inbox WHERE message_id='lease-full' FOR UPDATE",
+    )
+    .execute(&mut *blocker)
+    .await?;
+    let validator = Entered(Notify::new());
+    let stream = p
+        .project_batch(
+            execution(tenant(), 1),
+            &validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    let release = async {
+        validator.0.notified().await;
+        // Model the window crossing while the worker waits for the receipt lock.
+        sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp() WHERE message_id='lease-full'").execute(&mut *blocker).await?;
+        blocker.commit().await
+    };
+    let (items, released) = tokio::join!(stream.collect(), release);
+    released?;
+    committed_projection(only(items)?)?;
+    assert_eq!(
+        f.state("lease-full").await?,
+        (1, 1, Some("succeeded".into()), "published".into())
+    );
+    Ok(())
+}
+
+async fn expired_before_poll(
+    f: &Fixture,
+    p: &PgLocalProjection<Effect, Key>,
+) -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct ValidatorSpy(AtomicBool);
+    impl IngressValidator<Vec<u8>> for ValidatorSpy {
+        fn validate(
+            &self,
+            input: IngressChallenge<'_, Vec<u8>>,
+        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+            self.0.store(true, Ordering::Relaxed);
+            Validator.validate(input)
+        }
+    }
+    let id = "lease-late-poll";
+    f.append(id, "orders").await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+interval '750 milliseconds' WHERE message_id=$1").bind(id).execute(&f.owner).await?;
+    let validator = ValidatorSpy(AtomicBool::new(false));
+    let stream = p
+        .project_batch(
+            execution(tenant(), 1),
+            &validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    wait_for_delivery_expiry(f, id).await?;
+    assert!(matches!(
+        only(stream.collect().await)?,
+        PgProjectionOutcome::DeliveryExpired
+    ));
+    assert!(!validator.0.load(Ordering::Relaxed));
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_transactional_messaging.inbox WHERE message_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(rows, 0);
+    assert_eq!(f.state(id).await?, (0, 0, None, "dead_letter".into()));
+    sqlx::query(
+        "UPDATE rss_transactional_messaging.outbox SET status='resolved' WHERE message_id=$1",
+    )
+    .bind(id)
+    .execute(&f.owner)
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_delivery_expiry(f: &Fixture, id: &str) -> anyhow::Result<()> {
+    let live: bool = sqlx::query_scalar("SELECT automatic_retry_deadline>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE status='publishing' AND message_id=$1").bind(id).fetch_one(&f.owner).await?;
+    assert!(live, "claim must return with a positive delivery window");
+    sqlx::query("SELECT pg_sleep(greatest(0,extract(epoch FROM automatic_retry_deadline-clock_timestamp()))::double precision) FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).execute(&f.owner).await?;
+    let crossed: bool = sqlx::query_scalar("SELECT automatic_retry_deadline<=clock_timestamp() AND lease_until>clock_timestamp() FROM rss_transactional_messaging.outbox WHERE message_id=$1").bind(id).fetch_one(&f.owner).await?;
+    assert!(crossed);
+    Ok(())
+}

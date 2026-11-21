@@ -8,7 +8,7 @@ use crate::{
 use futures::{Stream, stream::FuturesUnordered};
 use rss_data_protection::Aead;
 use rss_request_context::TenantId;
-use rss_request_context::{Deadline, ExecutionTimer};
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::message::MessageId;
 use rss_transactional_messaging::{
     error::MessagingError,
@@ -23,7 +23,11 @@ use rss_transactional_messaging::{
     },
 };
 use sqlx::Row;
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// A local terminal result, minted only from acknowledged commit or matching durable facts.
 pub struct PgProjectionReceipt {
@@ -269,18 +273,10 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     ) -> Result<PgProjectionOutcome, PgError> {
         let cutoff = Deadline::from_timeout(&self.runtime.timer, budget)
             .map_err(|_| PgError::invariant())?;
-        if matches!(self.outbox.lease_status(&source, remaining(self, cutoff)).await.map_err(pg)?,
-            OutboxLeaseStatus::Held { delivery_remaining: Some(time), .. } if time.is_zero())
+        if source.initial_window.is_expired(self.runtime.timer.now())
+            && self.delivery_expired(&source, cutoff).await?
         {
-            self.outbox
-                .settle(
-                    source,
-                    OutboxSettlement::DeadLetter,
-                    remaining(self, cutoff),
-                )
-                .await
-                .map_err(pg)?;
-            return Ok(PgProjectionOutcome::DeliveryExpired);
+            return self.expire(source, cutoff).await;
         }
         let message = PgOutboxStore::<()>::message(&source).envelope();
         let subscription = SubscriptionIdentity::new(
@@ -318,6 +314,8 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             )
             .await
             .map_err(pg)?;
+        // Ingress ran within the admitted window. The source CAS still fences settlement;
+        // a wait for Inbox must not overturn a matching durable terminal receipt.
         let claim = match acquired {
             IdempotencyDisposition::Acquired(claim) => claim,
             IdempotencyDisposition::InProgress => {
@@ -371,6 +369,42 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         )))
     }
 
+    async fn delivery_expired(
+        &self,
+        source: &PgOutboxClaim,
+        cutoff: Deadline,
+    ) -> Result<bool, PgError> {
+        match self
+            .outbox
+            .lease_status(source, remaining(self, cutoff))
+            .await
+            .map_err(pg)?
+        {
+            OutboxLeaseStatus::Held {
+                delivery_remaining: Some(window),
+                ..
+            } => Ok(window.is_zero()),
+            OutboxLeaseStatus::Lost => Err(PgError::lost()),
+            _ => Err(PgError::invariant()),
+        }
+    }
+
+    async fn expire(
+        &self,
+        source: PgOutboxClaim,
+        cutoff: Deadline,
+    ) -> Result<PgProjectionOutcome, PgError> {
+        self.outbox
+            .settle(
+                source,
+                OutboxSettlement::DeadLetter,
+                remaining(self, cutoff),
+            )
+            .await
+            .map_err(pg)?;
+        Ok(PgProjectionOutcome::DeliveryExpired)
+    }
+
     async fn release_after_rollback(
         &self,
         status: rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus,
@@ -411,7 +445,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let fingerprint = intent.fingerprint();
         #[cfg(feature = "integration")]
         let injection = self.take_projection_fault()?;
-        let attempt = self.runtime.transaction_with_context(source.binding, remaining(self, cutoff),
+        let attempt = self.runtime.transaction_until(source.binding, cutoff,
             (self, source, identity, fingerprint), true, #[cfg(feature = "integration")] injection, |(owner, source, identity, fingerprint), tx| Box::pin(async move {
                 let row = sqlx::query("SELECT contract,fingerprint,disposition FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
                     .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str())
@@ -527,22 +561,19 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgConsumerEffect<Vec<u
     ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
         let cutoff = Deadline::from_timeout(&self.projection.runtime.timer, deadline.timeout())
             .map_err(PgConsumerEffectFailure::infrastructure)?;
-        self.renew(cutoff)
+        let mut wake = self
+            .check_leases(cutoff)
             .await
             .map_err(PgConsumerEffectFailure::infrastructure)?;
         let stop = tokio::sync::Notify::new();
         let renew = async {
             loop {
-                let wake = cutoff.capped(
-                    &self.projection.runtime.timer,
-                    self.projection.renewal.interval(),
-                );
                 tokio::select! {
                     biased;
                     () = stop.notified() => return Ok::<(), PgError>(()),
                     () = self.projection.runtime.timer.sleep_until(wake) => {},
                 }
-                self.renew(cutoff).await?;
+                wake = self.check_leases(cutoff).await?;
             }
         };
         tokio::pin!(renew);
@@ -562,27 +593,193 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgConsumerEffect<Vec<u
         }
     }
 }
-impl<H, K> RenewedEffect<'_, H, K> {
-    async fn renew(&self, cutoff: Deadline) -> Result<(), PgError> {
-        let timer = &self.projection.runtime.timer;
-        let source = within(timer, cutoff, |budget| {
-            self.projection.outbox.extend(self.source, budget)
-        })
-        .await?
-        .map_err(pg)?;
-        if !matches!(source, OutboxLeaseStatus::Held { remaining, delivery_remaining } if self.projection.renewal.fits(remaining) && delivery_remaining.is_none_or(|time| !time.is_zero()))
-        {
+/// Both durations use the same conservative origin, taken before the first DB sample.
+struct CheckedLeases {
+    expected: i64,
+    observed: Instant,
+    remaining: Duration,
+    delivery: Duration,
+}
+impl CheckedLeases {
+    fn from_source(
+        source: crate::outbox::SourceWindow,
+        inbox: Duration,
+        observed: Instant,
+    ) -> Self {
+        Self {
+            expected: source.lease_us,
+            observed,
+            remaining: source.remaining.min(inbox),
+            delivery: source.delivery,
+        }
+    }
+
+    fn next_check(
+        &self,
+        now: Instant,
+        policy: LeaseRenewalPolicy,
+        cutoff: Deadline,
+    ) -> Result<Option<Deadline>, PgError> {
+        let elapsed = now
+            .checked_duration_since(self.observed)
+            .ok_or_else(PgError::invariant)?;
+        let lease = self.remaining.saturating_sub(elapsed);
+        let delivery = self.delivery.saturating_sub(elapsed);
+        if lease.is_zero() || delivery.is_zero() {
             return Err(PgError::lost());
         }
-        let inbox = within(timer, cutoff, |budget| {
-            self.projection.inbox.extend(self.inbox, budget)
-        })
-        .await?
-        .map_err(pg)?;
-        if !matches!(inbox, LeaseStatus::Held { remaining } if self.projection.renewal.fits(remaining))
-        {
+        if !policy.fits(lease) {
+            return Ok(None);
+        }
+        // Leave a full renewal interval for acquiring the connection and both locks.
+        let interval = policy.interval();
+        let wait = interval.min(lease - interval).min(delivery);
+        Ok(Some(cutoff.shortened_to(
+            now.checked_add(wait).ok_or_else(PgError::invariant)?,
+        )))
+    }
+}
+
+impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
+    async fn check_leases(&self, cutoff: Deadline) -> Result<Deadline, PgError> {
+        let p = self.projection;
+        let timer = &p.runtime.timer;
+        let mut expected = within(timer, cutoff, |_| self.source.lease_us.lock()).await?;
+        // A delayed ACK may consume the headroom of an otherwise valid observation.
+        // Recheck and renew once under the original cutoff before entering the effect.
+        for force_renewal in [false, true] {
+            let previous = *expected;
+            let attempt = Box::pin(p.runtime.transaction_until(
+                self.source.binding,
+                cutoff,
+                self,
+                true,
+                #[cfg(feature = "integration")]
+                None,
+                move |effect, tx| {
+                    Box::pin(async move {
+                        effect
+                            .check_locked(tx, previous, cutoff, force_renewal)
+                            .await
+                    })
+                },
+            ))
+            .await;
+            let checked = crate::transaction::settled(attempt)?;
+            *expected = checked.expected;
+            if let Some(wake) = checked.next_check(timer.now(), p.renewal, cutoff)? {
+                return Ok(wake);
+            }
+        }
+        Err(insufficient_headroom())
+    }
+
+    async fn check_locked(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        previous: i64,
+        cutoff: Deadline,
+        force_renewal: bool,
+    ) -> Result<CheckedLeases, PgError> {
+        let p = self.projection;
+        let timer = &p.runtime.timer;
+        let claim = self.inbox;
+        if claim.binding != *tx.binding() || !claim.matches(&p.runtime) {
             return Err(PgError::lost());
         }
+        // Same order as terminal settlement. Sample expiry only after waiting for both locks.
+        crate::inbox::lock_identity(tx, &claim.identity).await?;
+        let observed = timer.now();
+        let source = self.source.lease_in(tx, previous, 0).await?;
+        let inbox = sqlx::query_scalar::<_, i64>(
+            "SELECT (extract(epoch FROM lease_until-clock_timestamp())*1000000)::bigint
+             FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2
+             AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL",
+        )
+        .bind(claim.identity.tenant_id().to_string())
+        .bind(claim.identity.message_id().as_str())
+        .bind(claim.identity.group().as_str())
+        .bind(&claim.token)
+        .fetch_optional(&mut *tx.connection)
+        .await?
+        .ok_or_else(PgError::lost)?;
+        if inbox <= 0 || source.delivery.is_zero() {
+            return Err(PgError::lost());
+        }
+        let checked = CheckedLeases::from_source(
+            source,
+            Duration::from_micros(inbox.unsigned_abs()),
+            observed,
+        );
+        if !force_renewal
+            && matches!(
+                checked.next_check(timer.now(), p.renewal, cutoff),
+                Ok(Some(_))
+            )
+        {
+            return Ok(checked);
+        }
+
+        let observed = timer.now();
+        let source = self
+            .source
+            .lease_in(tx, previous, p.outbox.lease_ms)
+            .await?;
+        let LeaseStatus::Held { remaining } =
+            crate::inbox::extend_locked(tx, &claim.identity, &claim.token, p.inbox.lease_ms)
+                .await?
+        else {
+            return Err(PgError::lost());
+        };
+        let checked = CheckedLeases::from_source(source, remaining, observed);
+        checked
+            .next_check(timer.now(), p.renewal, cutoff)?
+            .ok_or_else(insufficient_headroom)?;
+        Ok(checked)
+    }
+}
+
+fn insufficient_headroom() -> PgError {
+    PgError::classified(
+        rss_transactional_messaging::error::MessagingErrorKind::Transient,
+        std::io::Error::other("insufficient acknowledged lease headroom"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acknowledged_window_distinguishes_renewal_from_expiry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "One arbitrary origin for synthetic ACK and expiry instants."
+        )]
+        let observed = Instant::now();
+        let policy = LeaseRenewalPolicy::from_ttl(Duration::from_millis(999))?;
+        let cutoff = Deadline::at(observed + Duration::from_secs(2));
+        let window = CheckedLeases {
+            expected: 1,
+            observed,
+            remaining: Duration::from_millis(370),
+            delivery: Duration::from_secs(1),
+        };
+        assert_eq!(
+            window
+                .next_check(observed, policy, cutoff)?
+                .map(Deadline::instant),
+            Some(observed + Duration::from_millis(37))
+        );
+        assert!(
+            window
+                .next_check(observed + Duration::from_millis(40), policy, cutoff)?
+                .is_none()
+        );
+        assert!(
+            matches!(window.next_check(observed + Duration::from_millis(370),policy,cutoff),Err(e) if e.kind()==rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost)
+        );
         Ok(())
     }
 }

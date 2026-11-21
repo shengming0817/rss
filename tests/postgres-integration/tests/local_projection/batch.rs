@@ -87,8 +87,7 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     Box::pin(concurrent_heads(f)).await?;
     Box::pin(independent_deadline(f)).await?;
     Box::pin(mixed_unknown(f)).await?;
-    Box::pin(above_old_limit(f)).await?;
-    Box::pin(history_and_policy(f)).await
+    Box::pin(above_old_limit(f)).await
 }
 #[allow(
     clippy::cognitive_complexity,
@@ -256,7 +255,7 @@ async fn above_old_limit(f: &Fixture) -> anyhow::Result<()> {
     clippy::cognitive_complexity,
     reason = "Keep the provider scenario and its ordered durable assertions together."
 )]
-async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
+pub(super) async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
     append(
         f,
         (0..1500)
