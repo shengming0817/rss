@@ -285,7 +285,7 @@ async fn scenario(
     let settled = committed(
         runtime
             .local_tx(binding, budget()?, move |tx| {
-                Box::pin(async move { selected.recover_exact(tx, s, &handoff).await })
+                Box::pin(async move { selected.load(tx, s, &handoff).await })
             })
             .await,
     )?;

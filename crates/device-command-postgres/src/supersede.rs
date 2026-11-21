@@ -46,6 +46,7 @@ async fn save_page(
     let count = rows.len();
     let mut ids = Vec::with_capacity(count);
     let mut versions = Vec::with_capacity(count);
+    let mut statuses = Vec::with_capacity(count);
     let mut published = Vec::with_capacity(count);
     let mut received = Vec::with_capacity(count);
     let mut terminal = Vec::with_capacity(count);
@@ -66,6 +67,7 @@ async fn save_page(
         }
         let record = command.record();
         ids.push(record.spec.id().as_str().to_owned());
+        statuses.push(record.status.as_str());
         published.push(record.published_at);
         received.push(record.received_at);
         terminal.push(record.terminal_at);
@@ -79,14 +81,15 @@ async fn save_page(
             Box::pin(async move {
                 sqlx::query_scalar(
                     "SELECT count(*) FILTER (WHERE rss_device_command.save(
-                    $1::uuid,$2::uuid,id,version,'superseded',published,received,terminal))
-                FROM unnest($3::text[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[])
-                     AS batch(id,version,published,received,terminal)",
+                    $1::uuid,$2::uuid,id,version,status,published,received,terminal))
+                FROM unnest($3::text[], $4::bigint[], $5::text[], $6::bigint[], $7::bigint[], $8::bigint[])
+                     AS batch(id,version,status,published,received,terminal)",
                 )
                 .bind(scope.tenant().to_string())
                 .bind(scope.device().as_uuid().to_string())
                 .bind(ids)
                 .bind(versions)
+                .bind(statuses)
                 .bind(published)
                 .bind(received)
                 .bind(terminal)

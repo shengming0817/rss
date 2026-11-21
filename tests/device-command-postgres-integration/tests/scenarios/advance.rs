@@ -35,27 +35,22 @@ async fn interrupt_last_page(
     .bind(s.device().as_uuid().to_string())
     .fetch_one(&mut *blocker)
     .await?;
-    let runtime = f.runtime.clone();
-    let store = f.store.clone();
     let deadline = if cancel {
         budget()?
     } else {
         OperationDeadline::from_remaining(Duration::from_secs(3))
     };
-    let attempt = tokio::spawn(async move {
-        compose::takeover(
-            &runtime,
-            crate::execution(s.tenant(), 1),
-            store,
-            s,
-            old,
-            next,
-            deadline,
-        )
-        .await
-    });
+    let mut attempt = Box::pin(compose::takeover(
+        &f.runtime,
+        crate::execution(s.tenant(), 1),
+        f.store.clone(),
+        s,
+        old,
+        next,
+        deadline,
+    ));
     // pg_blocking_pids ties this observation to this fixture's final-row lock.
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let blocked = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT FROM pg_stat_activity
@@ -69,18 +64,33 @@ async fn interrupt_last_page(
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    })
-    .await??;
+    });
+    tokio::select! {
+        observed = blocked => observed??,
+        result = &mut attempt => anyhow::bail!("advance settled before the final-row lock: {}", status(result)),
+    }
     if cancel {
-        attempt.abort();
-        anyhow::ensure!(attempt.await.is_err_and(|error| error.is_cancelled()));
+        drop(attempt);
     } else {
-        let result = attempt.await?;
-        // The cutoff can expire before the runtime confirms rollback.
-        assert!(matches!(status(result), "rolled-back" | "rollback-failed"));
+        let result = attempt.await;
+        // The outer cutoff may quarantine a transaction before settlement is confirmed.
+        assert!(matches!(
+            status(result),
+            "rolled-back" | "rollback-failed" | "unknown"
+        ));
     }
     blocker.rollback().await?;
-    // Locking the authority for a fresh read waits for the interrupted transaction to settle.
+    // A plain MVCC read can still see the old version before rollback. Wait for
+    // the original authority lock and verify that its update did not commit.
+    let coordinate: (i64, i64) = sqlx::query_as(
+        "SELECT generation,authority_epoch FROM rss_device_command.authorities
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid FOR UPDATE",
+    )
+    .bind(s.tenant().to_string())
+    .bind(s.device().as_uuid().to_string())
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(coordinate, (old.generation(), old.epoch()));
     for id in ["handoff-a", "handoff-b", "handoff-z"] {
         let command = f
             .load(id, s)
@@ -124,13 +134,14 @@ pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
     committed(advance(f, s, old, next).await?)?;
     for id in ["handoff-a", "handoff-b", "handoff-z"] {
         let command = f
-            .recover_exact(id, s)
+            .load(id, s)
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing command"))?;
         assert_eq!(
             (command.version(), command.status()),
             (2, Status::Superseded)
         );
+        assert_eq!(f.recover_exact(id, s).await?, Some(command));
         assert_eq!(f.count("outbox", &format!("dispatch.{id}")).await?, 1);
     }
     for (scope, name) in [
