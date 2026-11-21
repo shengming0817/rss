@@ -139,7 +139,6 @@ identity sets. Late network requests must reread the revoked permit inside their
 INSERT pipeline, so cannot resurrect cleaned rows. Incomplete steps retain durable
 progress. Completion concerns active stored data, not backup/media erasure.
 
-`PendingWrite` means recover the already prepared batch before attempting maintenance.
 Unknown effects never become a confirmed rejection. The caller's one absolute Deadline
 covers pool acquisition, locks, transport and settlement. Unsettled PG connections are
 quarantined. The product owns process/task termination and recovery scheduling.

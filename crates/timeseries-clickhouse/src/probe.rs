@@ -23,12 +23,15 @@ pub(crate) async fn installation(pool: &PgPool, ch: &Connections) -> Result<Stri
     if !safe {
         return Err(Error::Unauthorized);
     }
-    let instance: String = sqlx::query_scalar(
-        "SELECT id::text FROM rss_ts_ch.installation WHERE singleton AND version=2",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(sql_error)?;
+    let (instance, version): (String, i32) =
+        sqlx::query_as("SELECT id::text,version FROM rss_ts_ch.installation WHERE singleton")
+            .fetch_optional(pool)
+            .await
+            .map_err(sql_error)?
+            .ok_or(Error::Invariant)?;
+    if version != 2 {
+        return Err(Error::Unsupported);
+    }
     for (client, user) in [(&ch.writer, &ch.users[0]), (&ch.maintenance, &ch.users[1])] {
         identity(client, user, &instance).await?;
     }
