@@ -144,6 +144,11 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
     }
     f.publish().await?;
     let _page = f.recover(s).await?;
+    let received = f
+        .report("late-supersede", s, c, DeviceEvent::Received)
+        .await?
+        .command;
+    assert_eq!(received.status(), Status::Received);
     clock.advance_to(expires)?;
     let store = f.store.clone();
     let id = CommandId::parse("late-cancel")?;
@@ -171,10 +176,21 @@ pub(crate) async fn late_controls(f: &Fixture) -> anyhow::Result<()> {
             })
             .await,
     )?;
+    let superseded = f
+        .load("late-supersede", s)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing superseded command"))?;
+    assert_eq!(superseded.status(), Status::Superseded);
+    assert_eq!(superseded.version(), received.version() + 1);
     assert_eq!(
-        f.load("late-supersede", s).await?.map(|c| c.status()),
-        Some(Status::Superseded)
+        superseded.record().received_at,
+        received.record().received_at
     );
+    assert_eq!(
+        superseded.record().published_at,
+        received.record().published_at
+    );
+    assert_eq!(superseded.record().terminal_at, Some(expires));
     f.runtime.close().await;
     Ok(())
 }

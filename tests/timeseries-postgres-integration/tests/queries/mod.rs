@@ -1,3 +1,4 @@
+mod fences;
 use super::*;
 #[tokio::test]
 async fn history_latest_live_pages_and_budgets() -> anyhow::Result<()> {

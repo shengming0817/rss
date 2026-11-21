@@ -258,6 +258,41 @@ async fn scenario(
         applied.command.status() == Status::Applied,
         "device report did not reach applied"
     );
+    let pending = spec("handoff", s, coordinate)?;
+    let dispatch = message("handoff", s.tenant())?;
+    let selected = store.clone();
+    committed(
+        runtime
+            .local_tx(binding, budget()?, move |tx| {
+                Box::pin(async move { selected.queue(tx, pending, dispatch).await })
+            })
+            .await,
+    )?;
+    committed(
+        compose::takeover(
+            runtime,
+            binding,
+            store.clone(),
+            s,
+            coordinate,
+            Coordinate::new(2, 4)?,
+            budget()?,
+        )
+        .await,
+    )?;
+    let selected = store.clone();
+    let handoff = CommandId::parse("handoff")?;
+    let settled = committed(
+        runtime
+            .local_tx(binding, budget()?, move |tx| {
+                Box::pin(async move { selected.recover_exact(tx, s, &handoff).await })
+            })
+            .await,
+    )?;
+    anyhow::ensure!(
+        settled.is_some_and(|c| c.status() == Status::Superseded),
+        "handoff not persisted"
+    );
     anyhow::ensure!(
         load(runtime, binding, store, s).await? == applied.command,
         "applied command not persisted"
