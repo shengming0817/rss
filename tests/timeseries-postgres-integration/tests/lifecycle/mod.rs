@@ -818,3 +818,49 @@ async fn repeated_prunes_compact_frontiers_and_unrelated_deletes_do_not_exhaust_
     assert_eq!(count, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn history_page_uses_one_snapshot_across_fence_and_raw_reads() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-page-snapshot").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    confirmed(
+        f.write(&batch("seed", vec![sample(&d, "seed", 5, 1)?])?)
+            .await?,
+    )?;
+    let mut barrier = f.admin.begin().await?;
+    sqlx::query("LOCK TABLE rss_timeseries.samples IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *barrier)
+        .await?;
+    let interleave = async {
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock' AND query LIKE '%FROM rss_timeseries.samples%')").fetch_one(&f.admin).await?;
+                if blocked {return anyhow::Ok(());}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await??;
+        complete(
+            &f.store,
+            plan(
+                "hide",
+                MaintenanceAction::Delete {
+                    selection: spec(&d, 10)?.selection(),
+                    window: window(0, 10)?,
+                    restore_until: Timestamp::new(now(&f).await? + 60_000_000)?,
+                },
+                1,
+            )?,
+        )
+        .await?;
+        barrier.commit().await?;
+        anyhow::Ok(())
+    };
+    let (page, ()) = tokio::try_join!(raw_page(&f, &d), interleave)?;
+    assert_eq!(page.rows.len(), 1);
+    assert!(page.availability.excluded.is_empty());
+    let next = raw_page(&f, &d).await?;
+    assert!(next.rows.is_empty());
+    assert_eq!(next.availability.excluded.len(), 1);
+    Ok(())
+}

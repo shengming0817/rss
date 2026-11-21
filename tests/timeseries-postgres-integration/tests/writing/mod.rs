@@ -1,3 +1,4 @@
+mod measure;
 use super::*;
 #[tokio::test]
 async fn atomic_replay_conflict_retirement_and_recovery() -> anyhow::Result<()> {
@@ -231,5 +232,63 @@ pub(super) async fn expanded_dimensions(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(page.rows.len(), 1);
     assert_eq!(page.rows[0].sample, sample);
     assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
+    Ok(())
+}
+
+async fn stage_batch(c: &mut sqlx::PgConnection, batch: &Batch) -> anyhow::Result<()> {
+    let s = batch.stream();
+    let item = &batch.samples()[0];
+    let series = &item.input().series;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(s.scope().tenant().to_string())
+        .execute(&mut *c)
+        .await?;
+    sqlx::query(
+        "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+    )
+    .bind(s.scope().tenant().to_string())
+    .bind(s.scope().namespace().as_str())
+    .bind(s.source().as_str())
+    .bind(s.generation().as_str())
+    .bind(batch.id().as_str())
+    .bind(batch.digest()?.as_bytes().as_slice())
+    .bind(vec![serde_json::to_vec(item)?])
+    .bind(vec![item.digest()?.as_bytes().to_vec()])
+    .bind(vec![series.digest()?.as_bytes().to_vec()])
+    .bind(vec![series.definition().digest()?.as_bytes().to_vec()])
+    .bind(60_000_000i64)
+    .fetch_one(c)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn independent_first_streams_commit_while_another_batch_is_staged() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-independent").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    for (name, commit) in [("commit", true), ("rollback", false)] {
+        let mut input = sample(&d, name, 20, 1)?.input().clone();
+        input.stream = Stream::new(d.spec().scope.clone(), id(name)?, id("generation")?);
+        let held = batch(name, vec![Sample::new(input)?])?;
+        let mut staged = f.pool.begin().await?;
+        stage_batch(&mut staged, &held).await?;
+        let other = batch(name, vec![sample(&d, name, 21, 2)?])?;
+        assert!(matches!(f.write(&other).await?, Outcome::Accepted(_)));
+        let auth = authority(TENANT)?;
+        let lookup = Authorized::<ReceiptQuery>::verify(&auth, receipt_query(&held)?)?;
+        assert!(matches!(
+            f.store.receipt(&lookup, deadline()?).await?,
+            Lookup::NotVisible
+        ));
+        if commit {
+            staged.commit().await?;
+            assert!(matches!(f.write(&held).await?, Outcome::Replay(_)));
+        } else {
+            staged.rollback().await?;
+            assert!(matches!(f.write(&held).await?, Outcome::Accepted(_)));
+        }
+    }
+    assert_eq!(f.count().await?, 4);
     Ok(())
 }

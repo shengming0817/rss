@@ -227,3 +227,49 @@ async fn injected_deadline_is_checked_before_commit() -> anyhow::Result<()> {
     assert_eq!(count, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn cancelled_writer_and_exhausted_pool_recover_by_original_identity() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-cancel").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch("cancel", vec![sample(&d, "cancel", 1, 1)?])?;
+    let request = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+    let mut occupied = Vec::new();
+    for _ in 0..f.pool.options().get_max_connections() {
+        occupied.push(f.pool.acquire().await?);
+    }
+    assert_eq!(
+        f.store
+            .write(
+                &request,
+                Deadline::from_timeout(&Timer, Duration::from_millis(50))?
+            )
+            .await
+            .err(),
+        Some(Error::Deadline)
+    );
+    drop(occupied);
+    let mut owner = f.admin.begin().await?;
+    sqlx::query("SELECT 1 FROM rss_timeseries.namespaces FOR UPDATE")
+        .execute(&mut *owner)
+        .await?;
+    let waiting = async {
+        loop {
+            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock' AND query LIKE '%admit_batch%')").fetch_one(&f.admin).await?;
+            if blocked {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        result=f.store.write(&request,deadline()?) => anyhow::bail!("unexpected early write {result:?}"),
+        observed=tokio::time::timeout(Duration::from_secs(5),waiting) => observed??,
+    }
+    owner.rollback().await?;
+    let received = confirmed(f.write(&b).await?)?;
+    assert_eq!(received.new_samples(), 1);
+    assert_eq!(f.count().await?, 1);
+    Ok(())
+}
