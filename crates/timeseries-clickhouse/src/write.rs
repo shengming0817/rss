@@ -301,8 +301,10 @@ impl<C: Clock> ChStore<C> {
         let operation = owner.operation(self, scope, deadline).await?;
         operation.mutation(deadline,async {
             let mut tx=operation.begin(scope,false,deadline).await?;
-            let raw=sqlx::query_scalar::<_,Vec<u8>>("SELECT payload FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND phase IN ('prepared','verified') ORDER BY revision LIMIT 1")
-                .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).fetch_optional(tx.connection()).await.map_err(sql_error);
+            // At the largest published revision there can be no pending successor.
+            let head = tx.published.checked_add(1);
+            let raw=sqlx::query_scalar::<_,Vec<u8>>("SELECT payload FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND revision=$3 AND phase='prepared'")
+                .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(head).fetch_optional(tx.connection()).await.map_err(sql_error);
             let Some(raw)=tx.read(raw).await? else {return Ok(Outcome::Accepted(None));};
             let b=Authorized::<Batch>::verify(authority,Batch::decode(&raw)?)?;
             Ok(match operation.advance(b.request(),deadline).await? {Outcome::Accepted(r)=>Outcome::Accepted(Some(r)),Outcome::Replay(r)=>Outcome::Replay(Some(r)),Outcome::Unknown=>Outcome::Unknown})

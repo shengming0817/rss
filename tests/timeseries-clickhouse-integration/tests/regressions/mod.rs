@@ -338,7 +338,7 @@ async fn independent_streams_publish_one_contiguous_prefix() -> anyhow::Result<(
     );
     assert!(matches!(
         f.store.aggregate(&aq, None, deadline()?).await?.buckets[0].value,
-        AggregateValue::Count(0)
+        AggregateValue::Missing
     ));
     assert!(matches!(
         f.maintain(

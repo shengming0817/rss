@@ -142,7 +142,7 @@ async fn promote(c: &mut PgConnection, scope: &Scope, prior: i64) -> Result<(), 
     let tenant = scope.tenant().to_string();
     let ns = scope.namespace().as_str();
     let boundary:i64=sqlx::query_scalar("SELECT coalesce(
-        (SELECT min(revision)-1 FROM rss_ts_ch.batches WHERE tenant_id=n.tenant_id AND namespace=n.namespace AND phase='prepared'),
+        (SELECT min(revision)-1 FROM rss_ts_ch.batches WHERE tenant_id=n.tenant_id AND namespace=n.namespace AND revision>n.published AND phase='prepared'),
         n.allocated) FROM rss_ts_ch.namespaces n WHERE n.tenant_id=$1::text::uuid AND n.namespace=$2")
         .bind(&tenant).bind(ns).fetch_one(&mut *c).await.map_err(sql_error)?;
     let (count,changed):(i64,bool)=sqlx::query_as("WITH published AS (
