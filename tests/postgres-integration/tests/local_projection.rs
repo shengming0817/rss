@@ -379,6 +379,10 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Drive the ordered, independently boxed real-provider scenarios from one fixture."
+)]
 async fn source_scenarios(f: &Fixture, scale_only: bool) -> anyhow::Result<()> {
     for id in ["existing-pending", "existing-published"] {
         let message = message(id, "orders")?;

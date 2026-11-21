@@ -27,13 +27,15 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
-    Box::pin(stale_stream(f, &p)).await?;
+    Box::pin(stale_generation(f, &p)).await?;
+    Box::pin(takeover(f, &p)).await?;
     Box::pin(inbox_contention(f, &p)).await?;
     Box::pin(windows(f, &p)).await?;
+    Box::pin(delivery_expired(f, &p)).await?;
     Box::pin(duplicate_crossing_deadline(f, &p)).await
 }
 
-async fn stale_stream(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
+async fn stale_generation(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
     let binding = execution(tenant(), 1);
     for (id, change, restore) in [
         (
@@ -70,6 +72,11 @@ async fn stale_stream(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow
         sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp() WHERE message_id=$1").bind(id).execute(&f.owner).await?;
         committed_projection(project(p).await?)?;
     }
+    Ok(())
+}
+
+async fn takeover(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
+    let binding = execution(tenant(), 1);
     f.append("lease-takeover", "orders").await?;
     let stale = p
         .project_batch(
@@ -166,6 +173,10 @@ async fn windows(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Res
     );
     sqlx::raw_sql("DROP TRIGGER sample_inbox ON rss_transactional_messaging.inbox; DROP TRIGGER sample_source ON rss_transactional_messaging.outbox; UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp() WHERE message_id='lease-short'").execute(&f.owner).await?;
     committed_projection(project(p).await?)?;
+    Ok(())
+}
+
+async fn delivery_expired(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
     f.append("lease-delivery-expired", "orders").await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp() WHERE message_id='lease-delivery-expired'").execute(&f.owner).await?;
     assert!(matches!(
