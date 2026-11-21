@@ -289,12 +289,12 @@ async fn expire(
     limit: u32,
     time: i64,
 ) -> Result<Step, Error> {
-    let count=sqlx::query("UPDATE rss_ts_ch.batches SET expired=true WHERE ctid IN (SELECT ctid FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND published AND NOT expired AND received_at<$5 AND replay_until<=$6 ORDER BY received_at LIMIT $7)")
+    let count=sqlx::query("UPDATE rss_ts_ch.batches SET phase='expired' WHERE ctid IN (SELECT ctid FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND phase='published' AND received_at<$5 AND replay_until<=$6 ORDER BY received_at LIMIT $7)")
         .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(before.micros()).bind(time).bind(i64::from(limit)).execute(&mut *c).await.map_err(sql_error)?.rows_affected();
     if count == u64::from(limit) {
         return Ok(Step::More(limit));
     }
-    let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND NOT expired AND received_at<$5)")
+    let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND phase<>'expired' AND received_at<$5)")
         .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(before.micros()).fetch_one(c).await.map_err(sql_error)?;
     Ok(if blocked {
         Step::Blocked(MaintenanceBlock::ReplayGuarantee)

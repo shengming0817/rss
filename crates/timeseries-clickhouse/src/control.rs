@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
 
 pub(crate) async fn pending(c: &mut PgConnection, s: &Scope) -> Result<bool, Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND NOT published)")
+    sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND phase IN ('prepared','verified'))")
         .bind(s.tenant().to_string()).bind(s.namespace().as_str()).fetch_one(c).await.map_err(sql_error)
 }
 pub(crate) async fn invalidate(
@@ -24,9 +24,8 @@ pub(crate) async fn invalidate(
     }
     bump(c, s).await
 }
-/// Filter the durable spec before applying the result budget. Both prepare and
-/// publish use this owner; a pending batch excludes maintenance publications.
-pub(crate) async fn invalidation_targets(
+/// Filter the durable specs before applying the maintenance result budget.
+async fn invalidation_targets(
     c: &mut PgConnection,
     s: &Scope,
     selection: &Selection,

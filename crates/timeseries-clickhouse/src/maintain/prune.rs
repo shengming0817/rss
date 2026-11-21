@@ -370,7 +370,7 @@ pub(super) async fn reclaim<C: Clock>(
             return Ok(Step::Blocked(MaintenanceBlock::RetainedData));
         }
     }
-    let live:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND (NOT expired OR replay_until>$5))")
+    let live:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND (phase<>'expired' OR replay_until>$5))")
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(time).fetch_one(&mut *c).await.map_err(sql_error)?;
     if live {
         return Ok(Step::Blocked(MaintenanceBlock::ReplayGuarantee));

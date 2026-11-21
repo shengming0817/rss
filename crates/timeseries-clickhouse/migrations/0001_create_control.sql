@@ -3,11 +3,13 @@
 CREATE SCHEMA rss_ts_ch;
 CREATE TABLE rss_ts_ch.installation (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 1 CHECK(version=1)
+ id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 2 CHECK(version=2),
+ max_pending_batches integer NOT NULL DEFAULT 1 CHECK(max_pending_batches>0)
 );
 INSERT INTO rss_ts_ch.installation DEFAULT VALUES;
 CREATE TABLE rss_ts_ch.namespaces (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
+ allocated bigint NOT NULL DEFAULT 0 CHECK(allocated>=published),
  published bigint NOT NULL DEFAULT 0 CHECK(published>=0),
  revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
  PRIMARY KEY(tenant_id,namespace)
@@ -33,13 +35,19 @@ CREATE TABLE rss_ts_ch.batches (
  digest bytea NOT NULL CHECK(octet_length(digest)=32), revision bigint NOT NULL CHECK(revision>0),
  received_at bigint NOT NULL CHECK(received_at>=0), replay_until bigint NOT NULL CHECK(replay_until>received_at),
  new_samples integer NOT NULL CHECK(new_samples>=0), replayed_samples integer NOT NULL CHECK(replayed_samples>=0),
- payload bytea, projection bytea, attempt uuid, published boolean NOT NULL DEFAULT false, expired boolean NOT NULL DEFAULT false,
+ payload bytea, projection bytea, attempt uuid,
+ phase text NOT NULL DEFAULT 'prepared' CHECK(phase IN ('prepared','verified','published','expired')),
+ CHECK(phase='prepared' OR attempt IS NULL),
  CHECK(new_samples+replayed_samples BETWEEN 1 AND 4096),
- CHECK((published AND payload IS NULL AND projection IS NULL) OR (NOT published AND payload IS NOT NULL AND projection IS NOT NULL)),
+ CHECK((phase='prepared' AND payload IS NOT NULL AND projection IS NOT NULL)
+    OR (phase='verified' AND payload IS NOT NULL AND projection IS NULL)
+    OR (phase IN ('published','expired') AND payload IS NULL AND projection IS NULL)),
+ UNIQUE(tenant_id,namespace,revision),
  PRIMARY KEY(tenant_id,namespace,source,generation,batch_id),
  FOREIGN KEY(tenant_id,namespace,source,generation) REFERENCES rss_ts_ch.streams
 );
-CREATE UNIQUE INDEX one_pending_batch ON rss_ts_ch.batches(tenant_id,namespace) WHERE NOT published;
+CREATE UNIQUE INDEX one_pending_stream ON rss_ts_ch.batches(tenant_id,namespace,source,generation)
+ WHERE phase IN ('prepared','verified');
 CREATE TABLE rss_ts_ch.identities (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
  source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL, sample_id text COLLATE "C" NOT NULL,
@@ -56,6 +64,7 @@ CREATE TABLE rss_ts_ch.attempts (
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces,
  CHECK(NOT allowed OR NOT drained)
 );
+CREATE UNIQUE INDEX raw_batch_attempt ON rss_ts_ch.attempts(tenant_id,namespace,revision) WHERE target='raw';
 CREATE TABLE rss_ts_ch.fences (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
  kind text NOT NULL CHECK(kind IN ('cutoff','delete','pruned')),
@@ -76,7 +85,7 @@ CREATE TABLE rss_ts_ch.summaries (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, spec_digest bytea NOT NULL,
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
  object_id uuid NOT NULL, dirty boolean NOT NULL DEFAULT false,
- invalidate_revision bigint CHECK(invalidate_revision>0 AND NOT dirty),
+ invalidate_revision bigint CHECK(invalidate_revision IS NULL OR (invalidate_revision>0 AND NOT dirty)),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );

@@ -170,7 +170,7 @@ async fn invalidation_budget_is_scoped_and_checked_before_prepare() -> anyhow::R
     let related = batch("related", vec![sample(&d, "related", 2, 4)?])?;
     assert!(f.write(&related).await.is_err());
     let pending: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.batches WHERE NOT published")
+        sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.batches WHERE phase IN ('prepared','verified')")
             .fetch_one(&f.admin)
             .await?;
     assert_eq!(pending, 0);

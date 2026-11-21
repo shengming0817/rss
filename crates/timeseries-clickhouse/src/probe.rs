@@ -24,7 +24,7 @@ pub(crate) async fn installation(pool: &PgPool, ch: &Connections) -> Result<Stri
         return Err(Error::Unauthorized);
     }
     let instance: String = sqlx::query_scalar(
-        "SELECT id::text FROM rss_ts_ch.installation WHERE singleton AND version=1",
+        "SELECT id::text FROM rss_ts_ch.installation WHERE singleton AND version=2",
     )
     .fetch_one(pool)
     .await
