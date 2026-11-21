@@ -65,6 +65,27 @@ struct Prepared {
     revision: i64,
     receipt: Receipt,
 }
+impl Prepared {
+    fn validate(&self, batch: &Batch) -> Result<(), Error> {
+        if self.rows.len() != self.receipt.new_samples() as usize {
+            return Err(Error::Invariant);
+        }
+        // Projection is the ordered subset admitted as new in the original batch.
+        let mut samples = batch.samples().iter();
+        for row in &self.rows {
+            let original = samples
+                .find(|s| s.input().id.as_str() == row.sample_id)
+                .ok_or(Error::Invariant)?;
+            if row.revision != self.revision
+                || row.received_at != self.receipt.received_at().micros()
+                || &row.sample()? != original
+            {
+                return Err(Error::Invariant);
+            }
+        }
+        Ok(())
+    }
+}
 fn receipt(r: &PgRow, q: &ReceiptQuery) -> Result<Receipt, Error> {
     if r.try_get::<Vec<u8>, _>("digest").map_err(sql_error)? != q.digest.as_bytes() {
         return Err(Error::Conflict);
@@ -208,6 +229,7 @@ impl<C: Clock> Operation<'_, C> {
             return Ok(Outcome::Unknown);
         }
         let projected: Result<Outcome<Receipt>, Error> = async {
+            p.validate(b)?;
             let a = match self.raw_attempt(b.stream().scope(), &p, deadline).await? {
                 Outcome::Accepted(a) | Outcome::Replay(a) => a,
                 Outcome::Unknown => return Ok(Outcome::Unknown),

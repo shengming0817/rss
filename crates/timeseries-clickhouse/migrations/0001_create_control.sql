@@ -83,12 +83,16 @@ CREATE TABLE rss_ts_ch.plans (
 -- Only references/checkpoints are in PG; summary values live exclusively in ClickHouse.
 CREATE TABLE rss_ts_ch.summaries (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, spec_digest bytea NOT NULL,
+ source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
+ series text COLLATE "C" NOT NULL CHECK(length(series)=64),
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
  object_id uuid NOT NULL, dirty boolean NOT NULL DEFAULT false,
  invalidate_revision bigint CHECK(invalidate_revision IS NULL OR (invalidate_revision>0 AND NOT dirty)),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );
+CREATE INDEX clean_series_summaries ON rss_ts_ch.summaries(tenant_id,namespace,source,generation,series,hi) WHERE NOT dirty;
+CREATE INDEX reserved_summaries ON rss_ts_ch.summaries(tenant_id,namespace,invalidate_revision) WHERE invalidate_revision IS NOT NULL;
 CREATE TABLE rss_ts_ch.ranges (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, spec_digest bytea NOT NULL,
  spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),

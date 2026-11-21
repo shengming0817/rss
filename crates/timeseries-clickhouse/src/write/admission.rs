@@ -2,15 +2,8 @@
 //! ref: transact-rs/sqlx FAQ.md@v0.9.0 (PostgreSQL typed UNNEST).
 use crate::{control::Fence, definition, projection::Raw, transaction::sql_error};
 use rss_timeseries::*;
-use serde::Serialize;
 use sqlx::PgConnection;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-#[derive(Serialize)]
-struct Frontier<'a> {
-    series: &'a Series,
-    at: i64,
-}
 
 pub(super) async fn admit(
     c: &mut PgConnection,
@@ -70,11 +63,10 @@ pub(super) async fn admit(
             return Err(Error::Retired);
         }
         let row = Raw::new(sample, received, revision)?;
-        let frontier = frontiers.entry(row.series.clone()).or_insert(Frontier {
-            series: &input.series,
-            at: row.observed_at,
-        });
-        frontier.at = frontier.at.min(row.observed_at);
+        let earliest = frontiers
+            .entry(row.series.clone())
+            .or_insert(row.observed_at);
+        *earliest = (*earliest).min(row.observed_at);
         new_ids.push(input.id.as_str());
         digests.push(digest.as_bytes().to_vec());
         rows.push(row);
@@ -82,12 +74,14 @@ pub(super) async fn admit(
     if rows.is_empty() {
         return Ok(rows);
     } // reason: replay owns no new identities or summaries.
-    let frontiers: Vec<_> = frontiers.into_values().collect();
+    let (series, earliest): (Vec<_>, Vec<_>) = frontiers.into_iter().unzip();
     let valid: bool = sqlx::query_scalar(include_str!("reserve_summaries.sql"))
         .bind(scope.tenant().to_string())
         .bind(scope.namespace().as_str())
-        .bind(serde_json::to_string(stream).map_err(|_| Error::Invariant)?)
-        .bind(serde_json::to_string(&frontiers).map_err(|_| Error::Invariant)?)
+        .bind(stream.source().as_str())
+        .bind(stream.generation().as_str())
+        .bind(series)
+        .bind(earliest)
         .bind(i64::from(max))
         .bind(revision)
         .fetch_one(&mut *c)
