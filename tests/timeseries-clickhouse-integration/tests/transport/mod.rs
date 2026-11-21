@@ -30,6 +30,7 @@ struct State {
     release: tokio::sync::Semaphore,
     connections: AtomicUsize,
     requests: Mutex<Vec<(usize, String)>>,
+    raw_threads: Mutex<Vec<(u32, u32)>>,
 }
 pub(super) struct Proxy {
     pub endpoint: String,
@@ -81,6 +82,7 @@ impl Proxy {
             release: tokio::sync::Semaphore::new(0),
             connections: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
+            raw_threads: Mutex::new(Vec::new()),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let endpoint = format!("https://localhost:{}", listener.local_addr()?.port());
@@ -153,6 +155,9 @@ impl Proxy {
     pub fn release(&self) {
         self.state.release.add_permits(1);
     }
+    pub async fn raw_read_threads(&self) -> Vec<(u32, u32)> {
+        self.state.raw_threads.lock().await.clone()
+    }
     pub async fn requests(&self) -> Vec<(usize, String)> {
         self.state.requests.lock().await.clone()
     }
@@ -207,6 +212,23 @@ async fn serve(
         .find(|(key, _)| key == "query")
         .map(|(_, v)| v.into_owned())
         .unwrap_or_default();
+    if sql.contains("FROM rss_ts_ch.raw FINAL")
+        || String::from_utf8_lossy(&data).contains("FROM rss_ts_ch.raw FINAL")
+    {
+        let settings: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()).collect();
+        if let Some(threads) = settings.get("max_threads").and_then(|s| s.parse().ok())
+            && let Some(final_threads) = settings
+                .get("max_final_threads")
+                .and_then(|s| s.parse().ok())
+        {
+            state
+                .raw_threads
+                .lock()
+                .await
+                .push((threads, final_threads));
+        }
+    }
     let is_insert = ["raw", "summaries"].iter().any(|table| {
         let prefix = format!("INSERT INTO rss_ts_ch.{table}");
         sql.starts_with(&prefix) || data.starts_with(prefix.as_bytes())

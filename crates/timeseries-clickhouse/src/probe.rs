@@ -1,10 +1,18 @@
-use crate::{config::Connections, transaction::sql_error};
+use crate::{
+    config::{Connections, Limits},
+    transaction::sql_error,
+};
 use rss_request_context::TenantId;
 use rss_timeseries::Error;
 use sqlx::{PgPool, postgres::PgSslMode};
 use std::collections::BTreeSet;
+use std::{num::NonZeroU32, time::Duration};
 
-pub(crate) async fn installation(pool: &PgPool, ch: &Connections) -> Result<String, Error> {
+pub(crate) async fn installation(
+    pool: &PgPool,
+    ch: &Connections,
+    limits: &Limits,
+) -> Result<String, Error> {
     if !matches!(pool.connect_options().get_ssl_mode(), PgSslMode::VerifyFull) {
         return Err(Error::Unauthorized);
     }
@@ -23,8 +31,18 @@ pub(crate) async fn installation(pool: &PgPool, ch: &Connections) -> Result<Stri
     if !safe {
         return Err(Error::Unauthorized);
     }
-    let instance: String = sqlx::query_scalar(
-        "SELECT id::text FROM rss_ts_ch.installation WHERE singleton AND version=1",
+    let (instance, version): (String, i32) =
+        sqlx::query_as("SELECT id::text,version FROM rss_ts_ch.installation WHERE singleton")
+            .fetch_optional(pool)
+            .await
+            .map_err(sql_error)?
+            .ok_or(Error::Invariant)?;
+    if version != 2 {
+        return Err(Error::Unsupported);
+    }
+    // Read the v2-only allocation input with the runtime login after checking the version.
+    sqlx::query_scalar::<_, i32>(
+        "SELECT max_pending_batches FROM rss_ts_ch.installation WHERE singleton",
     )
     .fetch_one(pool)
     .await
@@ -41,6 +59,7 @@ pub(crate) async fn installation(pool: &PgPool, ch: &Connections) -> Result<Stri
     service_grants(ch)
         .await
         .map_err(|e| diagnose("service-grants", e))?;
+    check_limits(&ch.maintenance, limits, NonZeroU32::MIN).await?;
     let guard = ch
         .writer
         .query("SELECT installation,primary_server,tls,guard_user FROM rss_ts_ch.guard_identity")
@@ -78,11 +97,63 @@ pub(crate) async fn tenant(
     user: &str,
     tenant: TenantId,
     instance: &str,
+    limits: &Limits,
 ) -> Result<(), Error> {
     identity(client, user, instance).await?;
+    check_limits(client, limits, limits.query_threads).await?;
     reader(ch, user, tenant)
         .await
         .map_err(|e| diagnose("tenant-reader", e))
+}
+
+async fn check_limits(
+    client: &clickhouse::Client,
+    limits: &Limits,
+    threads: NonZeroU32,
+) -> Result<(), Error> {
+    // A single successful timeout cannot prove that every caller deadline is admissible.
+    let unrestricted = client
+        .query(
+            "SELECT toUInt8(readonly=0 AND (min IS NULL OR ifNull(toFloat64OrNull(min)<=0,false))
+            AND max IS NULL AND empty(disallowed_values))
+            FROM system.settings WHERE name='max_execution_time'",
+        )
+        .fetch_one::<u8>()
+        .await
+        .map_err(settings_error)?;
+    if unrestricted != 1 {
+        return Err(Error::InvalidInput);
+    }
+    let sql =
+        "SELECT toUInt64(getSetting('max_threads')),toUInt64(getSetting('max_final_threads'))";
+    for width in
+        std::iter::once(NonZeroU32::MIN).chain((threads != NonZeroU32::MIN).then_some(threads))
+    {
+        let observed = limits
+            .query(client.query(sql), width, Duration::from_secs(1))
+            .fetch_one::<(u64, u64)>()
+            .await
+            .map_err(settings_error)?;
+        let expected = u64::from(width.get());
+        if observed != (expected, expected) {
+            return Err(Error::InvalidInput);
+        }
+    }
+    Ok(())
+}
+fn settings_error(error: clickhouse::error::Error) -> Error {
+    if let clickhouse::error::Error::BadResponse(message) = &error {
+        match message
+            .strip_prefix("Code: ")
+            .and_then(|s| s.split_once('.'))
+            .map(|(code, _)| code)
+        {
+            Some("452" | "164") => return Error::InvalidInput,
+            Some("497") => return Error::Unauthorized,
+            _ => {}
+        }
+    }
+    crate::projection::provider_error("query-settings", error)
 }
 fn compact(s: &str) -> String {
     s.chars().filter(|c| !c.is_ascii_whitespace()).collect()

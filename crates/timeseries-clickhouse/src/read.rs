@@ -174,7 +174,7 @@ impl<C: Clock> Reader for ChStore<C> {
     ) -> Result<Page, Error> {
         let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
         let operation = owner
-            .operation(self, q.request().selection().scope(), deadline)
+            .read_operation(self, q.request().selection().scope(), deadline)
             .await?;
         operation
             .bounded(deadline, operation.history(q.request(), after, deadline))
@@ -188,7 +188,7 @@ impl<C: Clock> Reader for ChStore<C> {
     ) -> Result<AggregatePage, Error> {
         let owner = self.owner.upgrade().ok_or(Error::Unavailable)?;
         let operation = owner
-            .operation(self, q.request().spec().stream().scope(), deadline)
+            .read_operation(self, q.request().spec().stream().scope(), deadline)
             .await?;
         operation
             .bounded(

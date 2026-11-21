@@ -5,7 +5,7 @@ use crate::{
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::{PgConnection, Row, postgres::PgRow};
-fn record(r: PgRow) -> Result<DefinitionRecord, Error> {
+pub(crate) fn record(r: PgRow) -> Result<DefinitionRecord, Error> {
     let d: Definition = decode(&r.try_get::<Vec<u8>, _>("raw").map_err(sql_error)?)?;
     if d.digest()?.as_bytes().as_slice() != r.try_get::<Vec<u8>, _>("digest").map_err(sql_error)? {
         return Err(Error::Invariant);

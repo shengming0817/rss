@@ -5,7 +5,7 @@ use rss_timeseries::{Atomicity, Error, Guarantees, Scope};
 use sqlx::PgPool;
 use std::{
     future::Future,
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -57,6 +57,7 @@ pub(crate) struct Operation<'a, C> {
     pub(crate) reader: clickhouse::Client,
     pub(crate) material: RwLockReadGuard<'a, Material>,
     pub(crate) resources: RwLockReadGuard<'a, Resources>,
+    pub(crate) threads: NonZeroU32,
     _capacity: SemaphorePermit<'a>,
     pub(crate) clock: &'a C,
     pub(crate) limits: &'a Limits,
@@ -88,16 +89,17 @@ impl<C: Clock> ChOwner<C> {
     ) -> Result<Self, Error> {
         if limits.replay_micros.get() > i64::MAX as u64
             || limits.cursor_micros.get() > i64::MAX as u64
-            || limits.max_concurrent_operations.get() as usize > Semaphore::MAX_PERMITS
+            || limits.query_threads > limits.operation_permits
+            || limits.operation_permits.get() as usize > Semaphore::MAX_PERMITS
         {
             return Err(Error::InvalidInput);
         }
         let ch = config.connect();
-        let instance = bounded(&clock, deadline, probe::installation(&pool, &ch)).await?;
+        let instance = bounded(&clock, deadline, probe::installation(&pool, &ch, &limits)).await?;
         Ok(Self {
             inner: Arc::new(Shared {
                 clock: Arc::new(clock),
-                capacity: Semaphore::new(limits.max_concurrent_operations.get() as usize),
+                capacity: Semaphore::new(limits.operation_permits.get() as usize),
                 limits,
                 instance,
                 closed: AtomicBool::new(false),
@@ -117,7 +119,7 @@ impl<C: Clock> ChOwner<C> {
         deadline: Deadline,
     ) -> Result<ChStore<C>, Error> {
         bounded(self.inner.clock.as_ref(), deadline, async {
-            let (_capacity, resources) = self.inner.enter().await?;
+            let (_capacity, resources) = self.inner.enter(NonZeroU32::MIN).await?;
             if resources.ch.users.contains(&reader.user) {
                 return Err(Error::Unauthorized);
             }
@@ -128,6 +130,7 @@ impl<C: Clock> ChOwner<C> {
                 &reader.user,
                 tenant,
                 &self.inner.instance,
+                &self.inner.limits,
             )
             .await?;
             self.inner.open()?;
@@ -182,11 +185,14 @@ impl<C> Shared<C> {
             Ok(())
         }
     }
-    async fn enter(&self) -> Result<(SemaphorePermit<'_>, RwLockReadGuard<'_, Resources>), Error> {
+    async fn enter(
+        &self,
+        weight: NonZeroU32,
+    ) -> Result<(SemaphorePermit<'_>, RwLockReadGuard<'_, Resources>), Error> {
         self.open()?;
         let capacity = self
             .capacity
-            .acquire()
+            .acquire_many(weight.get())
             .await
             .map_err(|_| Error::Unavailable)?;
         let resources = self.resources.read().await;
@@ -203,9 +209,28 @@ impl<C: Clock> Shared<C> {
         scope: &Scope,
         deadline: Deadline,
     ) -> Result<Operation<'a, C>, Error> {
+        self.admit_operation(store, scope, NonZeroU32::MIN, deadline)
+            .await
+    }
+    pub(crate) async fn read_operation<'a>(
+        &'a self,
+        store: &'a ChStore<C>,
+        scope: &Scope,
+        deadline: Deadline,
+    ) -> Result<Operation<'a, C>, Error> {
+        self.admit_operation(store, scope, self.limits.query_threads, deadline)
+            .await
+    }
+    async fn admit_operation<'a>(
+        &'a self,
+        store: &'a ChStore<C>,
+        scope: &Scope,
+        threads: NonZeroU32,
+        deadline: Deadline,
+    ) -> Result<Operation<'a, C>, Error> {
         store.admit(scope)?;
         bounded(self.clock.as_ref(), deadline, async {
-            let (capacity, resources) = self.enter().await?;
+            let (capacity, resources) = self.enter(threads).await?;
             let material = store.material.read().await;
             self.open()?;
             store.admit(scope)?;
@@ -215,6 +240,7 @@ impl<C: Clock> Shared<C> {
                 reader: resources.ch.reader(&material.reader),
                 material,
                 resources,
+                threads,
                 _capacity: capacity,
                 clock: self.clock.as_ref(),
                 limits: &self.limits,

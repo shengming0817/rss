@@ -28,7 +28,9 @@ ref: ClickHouse/clickhouse-rs src/lib.rs@v0.15.3
 ## Installation and authority
 
 The external PG migrator adopts a dedicated NOLOGIN, NOSUPERUSER, NOBYPASSRLS schema
-owner and executes `CONTROL_SQL`. Runtime must not be a member of that owner or have
+owner and executes `CONTROL_SQL`. Schema version 2 is fresh-install only. During installation the owner sets
+`installation.max_pending_batches` to a per-namespace publication window from 1 to 16 (default 1).
+All runtime owners consult the same installation row when allocating a revision. Runtime must not be a member of that owner or have
 schema CREATE, installation writes, superuser, BYPASSRLS, CREATEROLE or replication.
 Grant schema USAGE, installation SELECT and SELECT/INSERT/UPDATE/DELETE on the ten
 control tables. All tenant tables FORCE RLS. These are trusted host credentials, not
@@ -75,9 +77,16 @@ validate each reader's real identity, exact SELECT grants, absent inherited role
 exact tenant policies before returning a `ChStore`. The store implements the core
 ports and `recover`/`progress`, but has no pool constructor or resource-close method.
 Reader configurations share the transport, never another tenant's authentication.
-`max_concurrent_operations` limits complete calls and tenant admission across this owner;
-all queueing, PG acquisition, HTTP work and settlement use the original absolute deadline.
-Per-call scan/output/memory limits remain explicit and do not become process-wide quotas.
+`Limits.operation_permits` is the total admission capacity shared across tenants.
+Set `Limits.query_threads` explicitly (use 1 for conservative operation). A public query or
+aggregate acquires that many permits at once and runs its SELECTs with the corresponding
+`max_threads` and `max_final_threads`. Other calls and tenant binding use one permit.
+The thread setting must fit the owner capacity. Reader and maintenance profiles must accept their
+query settings and allow the full range of positive execution timeouts, including individual
+values, because each caller supplies its own deadline.
+Queueing, PG acquisition, HTTP and settlement use one absolute deadline. Scan, output and
+memory limits apply per query. The owner bounds admitted local calls; ClickHouse owns
+remote query execution.
 
 Materials are immutable. Products admit a new version, switch their references, then
 `retire(deadline)` the old capability. Retirement permanently refuses new calls and
@@ -97,11 +106,19 @@ remote query termination or rollback. Uncertain external effects still require r
 
 ## Recovery, reads and maintenance
 
-Each namespace admits at most one unpublished batch. Reauthorization and an explicit
-`recover` call advance the same state machine used by `write`; there is no worker,
-automatic new-ID retry, queue service or lease controller. `progress` distinguishes
-Prepared from Published without redefining immutable receipts. Producer identity,
-order and content remain fixed; transport attempts have distinct identities.
+Each stream admits one pending batch inside the installation's per-namespace window.
+A full window or busy stream returns `Unavailable` for a new batch. Existing identities
+remain recoverable. Independent streams may project out of order. `progress` reports
+`Verified` when ClickHouse verification finished but an earlier revision still blocks
+publication. Such writes return `Unknown` and cannot yet produce a successful receipt.
+Verification releases each batch’s recovery payload. PG publishes up to 16 consecutive verified
+batches atomically. Affected summaries carry the first revision that invalidates them, so the
+publication boundary also switches summary visibility without rewriting summary rows. A stalled head needs explicit
+recovery. `recover(scope, authority, deadline)` selects the oldest pending revision and
+reauthorizes its original content; retrying the original batch uses the same protocol.
+Each raw attempt owns one revision and query ID. Replacement and publication revoke
+and drain that attempt before clearing it. Maintenance reports `PendingWrite` until
+the namespace has no unpublished batches.
 
 Raw values retain typed canonical JSON, exact integer timestamps/sequences, original
 receipt time and digest. Integers never round-trip through float. History and latest
@@ -125,7 +142,6 @@ identity sets. Late network requests must reread the revoked permit inside their
 INSERT pipeline, so cannot resurrect cleaned rows. Incomplete steps retain durable
 progress. Completion concerns active stored data, not backup/media erasure.
 
-`PendingWrite` means recover the already prepared batch before attempting maintenance.
 Unknown effects never become a confirmed rejection. The caller's one absolute Deadline
 covers pool acquisition, locks, transport and settlement. Unsettled PG connections are
 quarantined. The product owns process/task termination and recovery scheduling.

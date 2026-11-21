@@ -79,7 +79,7 @@ async fn safe_limit<C: Clock>(
                 .end()
                 .micros(),
         );
-        let complete:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM generate_series($4::bigint,$5::bigint-1,$6::bigint) x WHERE NOT EXISTS(SELECT FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=x AND NOT dirty))")
+        let complete:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM generate_series($4::bigint,$5::bigint-1,$6::bigint) x WHERE NOT EXISTS(SELECT FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=x AND dirty_from IS NULL))")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(lo).bind(hi).bind(spec.resolution_micros().get() as i64).fetch_one(&mut *c).await.map_err(sql_error)?;
         if !complete {
             return Ok(Err(MaintenanceBlock::DirtySummary));
@@ -370,7 +370,7 @@ pub(super) async fn reclaim<C: Clock>(
             return Ok(Step::Blocked(MaintenanceBlock::RetainedData));
         }
     }
-    let live:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND (NOT expired OR replay_until>$5))")
+    let live:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND (phase<>'expired' OR replay_until>$5))")
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(time).fetch_one(&mut *c).await.map_err(sql_error)?;
     if live {
         return Ok(Step::Blocked(MaintenanceBlock::ReplayGuarantee));
