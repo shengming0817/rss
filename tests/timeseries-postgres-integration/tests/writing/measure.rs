@@ -113,6 +113,50 @@ async fn materialize(
     Ok(())
 }
 
+async fn write_lane(
+    fixture: Arc<Fixture>,
+    lane: Vec<Authorized<Batch>>,
+) -> anyhow::Result<Vec<u128>> {
+    let mut latency = Vec::with_capacity(lane.len());
+    for batch in lane {
+        let start = Timer.now();
+        let outcome = fixture
+            .store
+            .write(
+                &batch,
+                Deadline::from_timeout(&Timer, Duration::from_secs(90))?,
+            )
+            .await?;
+        anyhow::ensure!(matches!(outcome, Outcome::Accepted(_)));
+        latency.push((Timer.now() - start).as_micros());
+    }
+    Ok(latency)
+}
+
+async fn observe(
+    admin: &PgPool,
+    mut jobs: tokio::task::JoinSet<anyhow::Result<Vec<u128>>>,
+) -> anyhow::Result<(Vec<u128>, i64, usize)> {
+    let mut latency = Vec::new();
+    let mut waits = 0i64;
+    let mut polls = 0;
+    let mut interval = tokio::time::interval(Duration::from_millis(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    while !jobs.is_empty() {
+        tokio::select! {
+            Some(result) = jobs.join_next() => {
+                let timings = result??;
+                latency.extend(timings);
+            }
+            _=interval.tick()=>{
+                waits+=sqlx::query_scalar::<_,i64>("SELECT count(*) FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock'").fetch_one(admin).await?;
+                polls+=1;
+            }
+        }
+    }
+    Ok((latency, waits, polls))
+}
+
 async fn measure(f: Arc<Fixture>, tag: usize, load: Load) -> anyhow::Result<()> {
     let batches = inputs(&f, tag, &load).await?;
     if load.summaries {
@@ -131,38 +175,10 @@ async fn measure(f: Arc<Fixture>, tag: usize, load: Load) -> anyhow::Result<()> 
     let mut jobs = tokio::task::JoinSet::new();
     for lane in lanes {
         let fixture = f.clone();
-        jobs.spawn(async move {
-            let mut latency = Vec::new();
-            for batch in lane {
-                let t = Timer.now();
-                let outcome = fixture
-                    .store
-                    .write(
-                        &batch,
-                        Deadline::from_timeout(&Timer, Duration::from_secs(90))?,
-                    )
-                    .await?;
-                anyhow::ensure!(matches!(outcome, Outcome::Accepted(_)));
-                latency.push(t.elapsed().as_micros());
-            }
-            anyhow::Ok(latency)
-        });
+        jobs.spawn(write_lane(fixture, lane));
     }
-    let mut latency = Vec::new();
-    let mut waits = 0i64;
-    let mut polls = 0;
-    let mut interval = tokio::time::interval(Duration::from_millis(5));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    while !jobs.is_empty() {
-        tokio::select! {
-            result=jobs.join_next()=>latency.extend(result.ok_or_else(||anyhow::anyhow!("missing worker"))???),
-            _=interval.tick()=>{
-                waits+=sqlx::query_scalar::<_,i64>("SELECT count(*) FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock'").fetch_one(&f.admin).await?;
-                polls+=1;
-            }
-        }
-    }
-    let elapsed = start.elapsed();
+    let (mut latency, waits, polls) = observe(&f.admin, jobs).await?;
+    let elapsed = Timer.now() - start;
     let wal: i64 = sqlx::query_scalar(
         "SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),$1::pg_lsn)::bigint",
     )
