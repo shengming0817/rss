@@ -3,6 +3,8 @@
 mod batch;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
+#[path = "local_projection/leases.rs"]
+mod leases;
 #[path = "local_projection/scale.rs"]
 mod scale;
 #[path = "../../fixtures/message_recovery.rs"]
@@ -371,9 +373,25 @@ async fn run(scale_only: bool) -> anyhow::Result<()> {
     committed_projection(only(items)?)?;
     assert_eq!(f.state("existing-published").await?.3, "published");
     drop(projection);
-    if scale_only {
+    if let Ok(binary) = std::env::var("RSS_LOCAL_PROJECTION_EXAMPLE") {
+        for id in ["candidate-success", "candidate-unknown"] {
+            f.append(id, "orders").await?;
+        }
+        let input =
+            testkit::example_process::pg_input(&pg, "projection_worker", &tenant().to_string());
+        testkit::example_process::run_binary(&binary, &input, Duration::from_secs(60)).await?;
+        for id in ["candidate-success", "candidate-unknown"] {
+            assert_eq!(
+                f.state(id).await?,
+                (1, 0, Some("succeeded".into()), "published".into())
+            );
+        }
+        eprintln!("external-provider-consumer PASS {binary}");
+    } else if scale_only {
+        Box::pin(batch::history_and_policy(&f)).await?;
         Box::pin(scale::run(&f)).await?;
     } else {
+        Box::pin(leases::run(&f)).await?;
         Box::pin(batch::run(&f)).await?;
         Box::pin(success_and_duplicate(&f)).await?;
         Box::pin(mismatched_execution_preserves_valid_source(&f)).await?;
