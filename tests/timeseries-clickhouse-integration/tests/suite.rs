@@ -678,6 +678,32 @@ async fn pending_write_blocks_maintenance_and_closed_stream_cannot_reopen() -> a
 #[tokio::test]
 async fn rejects_unsafe_admission_and_tls_identity() -> anyhow::Result<()> {
     let f = Fixture::new("ch-probe").await?;
+    let mut caps = limits()?;
+    caps.query_threads = NonZeroU32::new(2).ok_or(Error::Invariant)?;
+    f.ch.sql("CREATE SETTINGS PROFILE public_reads_only SETTINGS max_threads=2 MIN 2 TO ch_reader")
+        .await?;
+    assert!(
+        Fixture::connect_options(
+            &f.ch,
+            f.pool.clone(),
+            TENANT,
+            "ch_reader",
+            "ch_writer",
+            caps.clone()
+        )
+        .await
+        .is_err()
+    );
+    f.ch.sql("DROP SETTINGS PROFILE public_reads_only").await?;
+    Fixture::connect_options(
+        &f.ch,
+        f.pool.clone(),
+        TENANT,
+        "ch_reader",
+        "ch_writer",
+        caps,
+    )
+    .await?;
     f.ch.sql("GRANT INSERT ON rss_ts_ch.raw TO ch_reader")
         .await?;
     assert!(

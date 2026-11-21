@@ -81,6 +81,19 @@ pub(crate) async fn tenant(
     threads: std::num::NonZeroU32,
 ) -> Result<(), Error> {
     identity(client, user, instance).await?;
+    check_threads(client, std::num::NonZeroU32::MIN).await?;
+    if threads != std::num::NonZeroU32::MIN {
+        check_threads(client, threads).await?;
+    }
+    reader(ch, user, tenant)
+        .await
+        .map_err(|e| diagnose("tenant-reader", e))
+}
+
+async fn check_threads(
+    client: &clickhouse::Client,
+    threads: std::num::NonZeroU32,
+) -> Result<(), Error> {
     let query = client.query(
         "SELECT toUInt64(getSetting('max_threads')),toUInt64(getSetting('max_final_threads'))",
     );
@@ -92,9 +105,7 @@ pub(crate) async fn tenant(
     if observed != (expected, expected) {
         return Err(Error::InvalidInput);
     }
-    reader(ch, user, tenant)
-        .await
-        .map_err(|e| diagnose("tenant-reader", e))
+    Ok(())
 }
 fn compact(s: &str) -> String {
     s.chars().filter(|c| !c.is_ascii_whitespace()).collect()
