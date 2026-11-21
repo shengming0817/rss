@@ -76,6 +76,7 @@ CREATE TABLE rss_ts_ch.summaries (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, spec_digest bytea NOT NULL,
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
  object_id uuid NOT NULL, dirty boolean NOT NULL DEFAULT false,
+ invalidate_revision bigint CHECK(invalidate_revision>0 AND NOT dirty),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );

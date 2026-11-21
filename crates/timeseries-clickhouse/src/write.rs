@@ -1,11 +1,13 @@
 use crate::{
-    ChStore, Operation, control, definition,
+    ChStore, Operation, control,
     projection::{self, Attempt, Raw},
     transaction::{bytes, decode, now, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::{PgConnection, Row, postgres::PgRow};
+mod admission;
+
 /// Provider progress is separate from the immutable successful admission receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionProgress {
@@ -129,24 +131,7 @@ impl<C: Clock> Operation<'_, C> {
         }
         let fences = control::fences(c, scope, self.limits.max_points.get()).await?;
         let received = now(c).await?;
-        let mut rows = Vec::new();
-        for sample in b.samples() {
-            if self.admit_sample(c, sample, &fences, received).await? {
-                let selection = Selection::Exact {
-                    stream: sample.input().stream.clone(),
-                    series: sample.input().series.clone(),
-                };
-                control::invalidation_targets(
-                    c,
-                    scope,
-                    &selection,
-                    sample.input().observed_at.micros(),
-                    self.limits.max_points.get(),
-                )
-                .await?;
-                rows.push(Raw::new(sample, received, revision)?);
-            }
-        }
+        let rows = admission::admit(c, b, &fences, received, revision, self.limits.max_points.get()).await?;
         let replay_until = received
             .checked_add(
                 i64::try_from(self.limits.replay_micros.get()).map_err(|_| Error::NumericRange)?,
@@ -168,49 +153,6 @@ impl<C: Clock> Operation<'_, C> {
                 replayed_samples,
             })?,
         }))
-    }
-    async fn admit_sample(
-        &self,
-        c: &mut PgConnection,
-        sample: &Sample,
-        fences: &[control::Fence],
-        received: i64,
-    ) -> Result<bool, Error> {
-        let i = sample.input();
-        let scope = i.stream.scope();
-        let digest = sample.digest()?;
-        let old:Option<Vec<u8>>=sqlx::query_scalar("SELECT digest FROM rss_ts_ch.identities WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND sample_id=$5")
-            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(i.stream.source().as_str()).bind(i.stream.generation().as_str()).bind(i.id.as_str()).fetch_optional(&mut *c).await.map_err(sql_error)?;
-        if let Some(old) = old {
-            return if old == digest.as_bytes() {
-                Ok(false)
-            } else {
-                Err(Error::Conflict)
-            };
-        }
-        if fences.iter().any(|f| f.matches(sample)) {
-            return Err(Error::HistoryExpired);
-        }
-        let spec = i.series.definition().spec();
-        let d = definition::exact(
-            c,
-            &DefinitionId {
-                scope: scope.clone(),
-                key: spec.key.clone(),
-                version: std::num::NonZeroU64::new(spec.version).ok_or(Error::Invariant)?,
-            },
-        )
-        .await?
-        .ok_or(Error::InvalidInput)?;
-        if d.definition != *i.series.definition() {
-            return Err(Error::Conflict);
-        }
-        if d.state == DefinitionState::Retired {
-            return Err(Error::Retired);
-        }
-        sqlx::query("INSERT INTO rss_ts_ch.identities(tenant_id,namespace,source,generation,sample_id,digest,received_at) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7)")
-            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(i.stream.source().as_str()).bind(i.stream.generation().as_str()).bind(i.id.as_str()).bind(digest.as_bytes().as_slice()).bind(received).execute(c).await.map_err(sql_error)?;
-        Ok(true)
     }
     async fn attempt(
         &self,
@@ -267,10 +209,10 @@ impl<C: Clock> Operation<'_, C> {
                 .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).execute(tx.connection()).await.map_err(sql_error)?;
             sqlx::query("UPDATE rss_ts_ch.namespaces SET published=$3 WHERE tenant_id=$1::text::uuid AND namespace=$2")
                 .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(p.revision).execute(tx.connection()).await.map_err(sql_error)?;
-            for row in &p.rows {
-                let sample=row.sample()?;
-                let selection=Selection::Exact {stream:sample.input().stream.clone(),series:sample.input().series.clone()};
-                control::invalidate(tx.connection(),scope,&selection,row.observed_at,self.limits.max_points.get()).await?;
+            if !p.rows.is_empty() {
+                sqlx::query("UPDATE rss_ts_ch.summaries SET dirty=true,invalidate_revision=NULL WHERE tenant_id=$1::text::uuid AND namespace=$2 AND invalidate_revision=$3")
+                    .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(p.revision).execute(tx.connection()).await.map_err(sql_error)?;
+                control::bump(tx.connection(), scope).await?;
             }
             Ok(p.receipt)
         }.await;
