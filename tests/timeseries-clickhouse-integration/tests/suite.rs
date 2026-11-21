@@ -31,7 +31,8 @@ fn id(s: &str) -> anyhow::Result<Id> {
 }
 fn limits() -> anyhow::Result<Limits> {
     Ok(Limits {
-        max_concurrent_operations: NonZeroU32::new(16).ok_or(Error::InvalidInput)?,
+        operation_permits: NonZeroU32::new(16).ok_or(Error::InvalidInput)?,
+        query_threads: NonZeroU32::MIN,
         max_points: NonZeroU32::new(100).ok_or_else(|| anyhow::anyhow!("positive"))?,
         max_series: NonZeroU32::new(20).ok_or_else(|| anyhow::anyhow!("positive"))?,
         max_bytes: NonZeroU32::new(1024 * 1024).ok_or_else(|| anyhow::anyhow!("positive"))?,

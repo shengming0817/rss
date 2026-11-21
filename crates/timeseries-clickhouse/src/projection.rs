@@ -116,8 +116,7 @@ impl<C: Clock> Operation<'_, C> {
             .remaining(self.clock.now())
             .ok_or(Error::Deadline)?
             .as_secs_f64();
-        Ok(client
-            .query(sql)
+        Ok(crate::config::query_threads(client.query(sql), self.threads)
             .with_setting("max_execution_time", remaining.to_string())
             .with_setting("max_rows_to_read", self.limits.max_scan_rows.to_string())
             .with_setting("max_bytes_to_read", self.limits.max_scan_bytes.to_string())
@@ -126,7 +125,6 @@ impl<C: Clock> Operation<'_, C> {
             .with_setting("read_overflow_mode", "throw")
             .with_setting("result_overflow_mode", "throw")
             .with_setting("timeout_overflow_mode", "throw")
-            .with_setting("max_threads", "1")
             .with_setting("use_query_cache", "0"))
     }
     pub(crate) async fn insert<T: Serialize>(

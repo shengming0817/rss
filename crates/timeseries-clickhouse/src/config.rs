@@ -116,8 +116,10 @@ fn authenticated(base: &clickhouse::Client, credentials: &Credentials) -> clickh
 /// Explicit host caps; there are no unlimited/default budgets.
 #[derive(Clone, Debug)]
 pub struct Limits {
-    /// Shared cap for complete calls and tenant admission on one owner.
-    pub max_concurrent_operations: NonZeroU32,
+    /// Weighted admission capacity shared by all tenants on one owner.
+    pub operation_permits: NonZeroU32,
+    /// Permits and maximum execution threads for each public read.
+    pub query_threads: NonZeroU32,
     pub max_points: NonZeroU32,
     pub max_series: NonZeroU32,
     pub max_bytes: NonZeroU32,
@@ -126,4 +128,9 @@ pub struct Limits {
     pub max_memory_bytes: NonZeroU64,
     pub replay_micros: NonZeroU64,
     pub cursor_micros: NonZeroU64,
+}
+
+pub(crate) fn query_threads(query: clickhouse::query::Query, threads: NonZeroU32) -> clickhouse::query::Query {
+    query.with_setting("max_threads", threads.to_string())
+         .with_setting("max_final_threads", threads.to_string())
 }

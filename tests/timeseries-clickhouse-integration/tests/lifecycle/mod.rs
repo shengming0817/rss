@@ -152,7 +152,7 @@ async fn shared_budget_and_retirement_drain_complete_write() -> anyhow::Result<(
     let mut f = Fixture::new("ch-retire").await?;
     let proxy = transport::Proxy::new(&f.ch).await?;
     let mut caps = limits()?;
-    caps.max_concurrent_operations = NonZeroU32::new(1).ok_or(Error::InvalidInput)?;
+    caps.operation_permits = NonZeroU32::new(1).ok_or(Error::InvalidInput)?;
     f.store = proxy.store_with_limits(f.pool.clone(), caps).await?;
     let other = bind(&f.store.owner, OTHER, "ch_other").await?;
     let a = definition(TENANT)?;
@@ -283,7 +283,7 @@ async fn cancelled_write_releases_capacity_and_recovers_original_identity() -> a
     let mut f = Fixture::new("ch-cancel-call").await?;
     let proxy = transport::Proxy::new(&f.ch).await?;
     let mut caps = limits()?;
-    caps.max_concurrent_operations = NonZeroU32::new(1).ok_or(Error::InvalidInput)?;
+    caps.operation_permits = NonZeroU32::new(1).ok_or(Error::InvalidInput)?;
     f.store = proxy.store_with_limits(f.pool.clone(), caps).await?;
     let other = bind(&f.store.owner, OTHER, "ch_other").await?;
     let a = definition(TENANT)?;

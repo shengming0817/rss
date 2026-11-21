@@ -78,8 +78,14 @@ pub(crate) async fn tenant(
     user: &str,
     tenant: TenantId,
     instance: &str,
+    threads: std::num::NonZeroU32,
 ) -> Result<(), Error> {
     identity(client, user, instance).await?;
+    let query = client.query("SELECT toUInt64(getSetting('max_threads')),toUInt64(getSetting('max_final_threads'))");
+    let observed = crate::config::query_threads(query, threads).fetch_one::<(u64,u64)>().await
+        .map_err(|e| crate::projection::provider_error("reader-thread-settings",e))?;
+    let expected = u64::from(threads.get());
+    if observed != (expected,expected) { return Err(Error::InvalidInput); }
     reader(ch, user, tenant)
         .await
         .map_err(|e| diagnose("tenant-reader", e))
