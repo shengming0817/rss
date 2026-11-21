@@ -80,6 +80,10 @@ async fn interrupt_last_page(
         ));
     }
     blocker.rollback().await?;
+    assert_rolled_back(f, s, old).await
+}
+
+async fn assert_rolled_back(f: &Fixture, s: Scope, old: Coordinate) -> anyhow::Result<()> {
     // A plain MVCC read can still see the old version before rollback. Wait for
     // the original authority lock and verify that its update did not commit.
     let coordinate: (i64, i64) = sqlx::query_as(
@@ -115,6 +119,16 @@ pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
     for cancel in [true, false] {
         interrupt_last_page(f, s, old, next, cancel).await?;
     }
+    isolated_handoff(f, s, old, next).await?;
+    queue_race(f, s, next).await
+}
+
+async fn isolated_handoff(
+    f: &Fixture,
+    s: Scope,
+    old: Coordinate,
+    next: Coordinate,
+) -> anyhow::Result<()> {
     let other_device = Scope::new(
         s.tenant(),
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440067")?,
@@ -127,6 +141,26 @@ pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
         f.initialize(scope, old).await?;
         f.queue(name, scope, old).await?;
     }
+    replay_after_unknown(f, s, old, next).await?;
+    for (scope, name) in [
+        (other_device, "other-device-pending"),
+        (other_tenant, "other-tenant-pending"),
+    ] {
+        assert_eq!(
+            f.load(name, scope).await?.map(|c| c.status()),
+            Some(Status::Queued)
+        );
+    }
+    assert!(f.queue("handoff-stale", s, old).await.is_err());
+    Ok(())
+}
+
+async fn replay_after_unknown(
+    f: &Fixture,
+    s: Scope,
+    old: Coordinate,
+    next: Coordinate,
+) -> anyhow::Result<()> {
     // An exact retry after ACK loss must not supersede any command a second time.
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
@@ -144,16 +178,10 @@ pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
         assert_eq!(f.recover_exact(id, s).await?, Some(command));
         assert_eq!(f.count("outbox", &format!("dispatch.{id}")).await?, 1);
     }
-    for (scope, name) in [
-        (other_device, "other-device-pending"),
-        (other_tenant, "other-tenant-pending"),
-    ] {
-        assert_eq!(
-            f.load(name, scope).await?.map(|c| c.status()),
-            Some(Status::Queued)
-        );
-    }
-    assert!(f.queue("handoff-stale", s, old).await.is_err());
+    Ok(())
+}
+
+async fn queue_race(f: &Fixture, s: Scope, next: Coordinate) -> anyhow::Result<()> {
     // Queue/advance race under the same authority lock: stale queue either commits first
     // and is superseded, or loses the coordinate and leaves no dispatch.
     let newer = Coordinate::new(2, 3)?;
