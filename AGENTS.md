@@ -4,6 +4,10 @@ See [CLAUDE.md](./CLAUDE.md)
 项目能力边界读取 [docs/rules/project-scope.md](./docs/rules/project-scope.md)；其它稳定规则直接从
 `docs/rules/*.md` 发现。
 
+## 旧部署、旧数据与墓碑清理
+
+RSS 系列项目现阶段均不支持旧部署和旧数据迁移，移除旧实现时不做墓碑收尾，发现此类遗留项须在当前改动中一并清理。
+
 ## 本地仓库与参考目录
 
 | 仓库 / 目录 | 本地绝对路径 | 用途 |
