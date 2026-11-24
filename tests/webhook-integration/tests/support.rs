@@ -224,32 +224,37 @@ impl Server {
                 .send(record)
                 .await
                 .map_err(|_| anyhow::anyhow!("fixture record channel closed"))?;
-            match mode {
-                Mode::ReleaseHeaders(release) => {
-                    release.notified().await;
-                    stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await?;
-                    stream.flush().await?;
-                }
-                Mode::KeepAlive(bytes) => {
-                    stream.write_all(&bytes).await?;
-                    stream.flush().await?;
-                }
-                Mode::Reply(bytes) => {
-                    stream.write_all(&bytes).await?;
-                    stream.flush().await?;
-                    return Ok(());
-                }
-                Mode::StallHeaders => {
-                    anyhow::ensure!(
-                        !read_peer(&mut stream, &mut first).await?,
-                        "unexpected pipelined request"
-                    );
-                    self.closed.fetch_add(1, Ordering::SeqCst);
-                    return Ok(());
-                }
-                Mode::DropResponse | Mode::StallTls => return Ok(()),
+            if !self.reply(&mut stream, mode).await? {
+                return Ok(());
             }
         }
+    }
+
+    async fn reply(
+        &self,
+        stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        mode: Mode,
+    ) -> anyhow::Result<bool> {
+        let (bytes, keep_alive) = match mode {
+            Mode::ReleaseHeaders(release) => {
+                release.notified().await;
+                (b"HTTP/1.1 204 No Content\r\n\r\n".to_vec(), true)
+            }
+            Mode::KeepAlive(bytes) => (bytes, true),
+            Mode::Reply(bytes) => (bytes, false),
+            Mode::StallHeaders => {
+                anyhow::ensure!(
+                    !read_peer(stream, &mut [0]).await?,
+                    "unexpected pipelined request"
+                );
+                self.closed.fetch_add(1, Ordering::SeqCst);
+                return Ok(false);
+            }
+            Mode::DropResponse | Mode::StallTls => return Ok(false),
+        };
+        stream.write_all(&bytes).await?;
+        stream.flush().await?;
+        Ok(keep_alive)
     }
 }
 async fn read_peer(
