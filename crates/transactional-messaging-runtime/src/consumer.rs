@@ -33,8 +33,6 @@ pub enum ProcessingDisposition {
     CapacityBusy,
     /// Another live claim owns this message.
     InProgress,
-    /// Another message owns this partition; this delivery was requeued without a claim.
-    PartitionBlocked,
     /// A matching durable terminal receipt bypassed the handler.
     Duplicate(TerminalDisposition),
     /// The consumer transaction committed a terminal result.
@@ -94,12 +92,6 @@ impl<'a, V, R, E> ConsumerExecution<'a, V, R, E> {
     #[must_use]
     pub const fn policy(&self) -> ConsumerExecutionPolicy {
         self.policy
-    }
-
-    fn contention_interval(&self) -> Duration {
-        let budget = self.policy.budget();
-        ((budget.total() - budget.settlement_reserve()) / 4)
-            .clamp(Duration::from_millis(1), Duration::from_millis(250))
     }
 
     fn deadlines(&self) -> Result<ExecutionDeadlines, MessagingError>
@@ -254,21 +246,6 @@ where
                 ProcessingDisposition::InProgress
             })
         }
-        Ok(IdempotencyDisposition::Conflict(rejection)) => {
-            let reason = rejection.reason();
-            execution
-                .emitter
-                .emit(TransactionalMessagingObservation::ConsumerIngressRejected { reason });
-            settle_observed(
-                settlement,
-                rejection.into_decision(),
-                deadlines.settlement(),
-                execution.timer,
-                execution.emitter,
-            )
-            .await?;
-            Ok(ProcessingDisposition::Rejected(reason))
-        }
         Err(error) => {
             emit_runtime_failure(
                 execution.emitter,
@@ -344,11 +321,13 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let interval = execution.contention_interval();
+    let budget = execution.policy.budget();
+    let interval = ((budget.total() - budget.settlement_reserve()) / 4)
+        .clamp(Duration::from_millis(1), Duration::from_millis(250));
     let mut capacity_wait = None;
     let result = loop {
         let claim = within(execution.timer, cutoff, |deadline| {
-            inbox.claim(binding, deadline)
+            inbox.claim(binding.execution(), binding.identity(), deadline)
         })
         .await
         .and_then(std::convert::identity);
@@ -705,29 +684,9 @@ where
             .await?;
             Ok(ProcessingDisposition::Committed(disposition))
         }
-        FoldedOutcome::NotStarted(class) | FoldedOutcome::RolledBack(class) => {
-            let cutoff = state.deadlines.operation();
-            let deadline = state.deadlines.settlement();
-            let settlement = release_or_abandon(inbox, execution, state).await?;
-            let disposition = if class == FailureClass::PartitionBlocked {
-                let wake = cutoff.capped(execution.timer, execution.contention_interval());
-                let _ = within(execution.timer, cutoff, |_| {
-                    execution.timer.sleep_until(wake)
-                })
-                .await;
-                ProcessingDisposition::PartitionBlocked
-            } else {
-                ProcessingDisposition::Deferred
-            };
-            settle_observed(
-                settlement,
-                SettlementDecision::requeue(),
-                deadline,
-                execution.timer,
-                execution.emitter,
-            )
-            .await?;
-            Ok(disposition)
+        FoldedOutcome::NotStarted(_class) | FoldedOutcome::RolledBack(_class) => {
+            release_or_abandon(inbox, execution, state).await?;
+            Ok(ProcessingDisposition::Deferred)
         }
         FoldedOutcome::RollbackFailed | FoldedOutcome::CommitUnknown => {
             abandon_observed(
@@ -759,7 +718,7 @@ async fn release_or_abandon<P, S, I, V, R, E>(
     inbox: &I,
     execution: &ConsumerExecution<'_, V, R, E>,
     state: AcquiredDelivery<P, S, I::Claim>,
-) -> Result<S, MessagingError>
+) -> Result<(), MessagingError>
 where
     S: DeliverySettlement,
     I: InboxStore,
@@ -773,7 +732,16 @@ where
     .await
     .and_then(std::convert::identity)
     {
-        Ok(()) => Ok(state.settlement),
+        Ok(()) => {
+            settle_observed(
+                state.settlement,
+                SettlementDecision::requeue(),
+                deadline,
+                execution.timer,
+                execution.emitter,
+            )
+            .await
+        }
         Err(error) => {
             execution
                 .emitter
@@ -1186,7 +1154,6 @@ fn can_continue(
             *recovery_attempt = NonZeroU32::MIN;
             !ordered || terminal == TerminalDisposition::Succeeded
         }
-        Ok(ProcessingDisposition::PartitionBlocked) => true,
         Ok(ProcessingDisposition::Rejected(_)) => {
             *recovery_attempt = NonZeroU32::MIN;
             true

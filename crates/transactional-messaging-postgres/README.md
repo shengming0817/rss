@@ -32,7 +32,7 @@ file. Pin the adapter version in the external migrator (`rss-transactional-messa
 "=0.1.0"`) so its SQL and runtime come from the same release. The constant does not execute DDL.
 
 The runtime login must not own the schema/tables, be superuser, have BYPASSRLS, or belong to the
-relay role. Grant it schema USAGE; policy SELECT; Inbox privileges as installed by `grant_consumer`; Outbox
+relay role. Grant it schema USAGE; policy SELECT; Inbox SELECT/INSERT/UPDATE/DELETE; Outbox
 SELECT; and EXECUTE on `check_execution`, the three relay functions, `next_outbox_wakeup(uuid,text)`, `prepare_outbox_partitions(jsonb)`
 and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or sequence privilege. Grant no schema
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
@@ -303,24 +303,20 @@ head continues blocking its successors.
 Enable `recovery` to consume `rss-transactional-messaging-recovery`. `PgConsumerTx::receipt_only`
 selects ordinary terminal receipts. `PgConsumerTx::with_recovery(effect, capture)` selects atomic
 protected dead letters; obtain `PgRecoveryCapture::new(runtime, protector, deadline)` first.
-Both use the same transaction implementation.
+Both use the same transaction implementation. The former `new` constructor is removed.
 
 Capture occurs only after verified ingress and rollback of a rejected business effect, in the same
 transaction as the terminal Inbox receipt. Protection/storage failure prevents terminal commit.
 Configure an `rss-data-protection::Aead` implementation with external key ownership; no default key
 or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
-Ordinary keyed consumers lock the tenant, group, domain and partition key on the PostgreSQL session before starting the business transaction. The SQLx pool holds the same PostgreSQL session through commit or rollback. Deploy keyed broker consumers with a direct connection or a session-pooling proxy. The handler inherits the configured transaction isolation level and runs only after checking for an unresolved rejection.
-A committed rejection stores its partition on the original Inbox receipt until authorized gap acceptance.
-A confirmed rollback releases the partition; another admitted message may execute before the original retry.
-Duplicate deliveries follow their original receipt. The operator can resolve receipt-only rejections without payload access.
-Local projections share the per-message Inbox lease and settle their source Outbox head in the effect transaction.
+An existing terminal Inbox receipt with no saved payload is not retroactively replayable.
 
 Create the opaque operator store with `PgRecoveryStore::connect(config, timer, storage, protector)` after
 provisioning its privileges. Each query, mutation and receipt read supplies its own explicit
 `ExecutionBinding`, alongside the authorized request. The store privately owns the same PG pool/transaction implementation;
 it has no runtime, pool, raw SQL, Deref or generic transaction accessor. Ordinary `PgRuntime::connect`
 continues to reject operator UPDATE rights. Provision the operator using the single
-[maintenance grant contract below](#recovery-and-archive-roles); ordinary consumer
+[maintenance grant contract below](#consumer-archive-schema-and-role-cutover-2302); ordinary consumer
 roles do not receive these privileges automatically. Every operation consumes library-bound
 product authorization. RLS remains forced; runtime/maintenance logins must not own tables, bypass
 RLS or inherit the relay role. Products provision roles and decide authorization.
@@ -347,7 +343,7 @@ an uncertain commit; absence is not proof of rollback. The library never blindly
 operation cutoff, and receipt readback uses the reserved settlement cutoff from the same clock
 observation. It performs one mutation and never resets the total budget.
 
-## Recovery and archive roles
+## Consumer archive schema and role cutover (#2302)
 
 Fresh installation uses the single `MIGRATION_SQL` artifact. Provision fixed LOGIN scopes where
 selected and complete the execution binding and grants below before admitting traffic.
@@ -355,9 +351,10 @@ Runtime admission checks the current installation, including the canonical scope
 candidate/claim definitions. Every archive function uses
 `search_path=pg_catalog,rss_transactional_messaging,pg_temp`, preventing temporary relation/type
 shadowing. The startup probe rejects unsafe paths, including drift of the internal helper.
-The recovery operator needs UPDATE(recovery_version) on `consumer_dead_letter`.
-The probe checks its effective privileges, including inherited grants.
-The complete additional maintenance grants are UPDATE(resolved_by) on Inbox, UPDATE(status,recovery_version,lease_token,lease_until,retry_after)
+Current recovery probes require nullable HOT capsule content and reject the previous broad UPDATE
+permission. External migrators must revoke UPDATE on `consumer_dead_letter` from the recovery
+operator (including inherited grants), then grant only UPDATE(recovery_version) on that table.
+The complete additional maintenance grants are UPDATE(status,recovery_version,lease_token,lease_until,retry_after)
 on `outbox` and SELECT/INSERT on `recovery_operations`, together with base read/execute permissions.
 Table-wide Outbox UPDATE, ordering-field UPDATE, INSERT and sequence privileges are rejected. No old-schema runtime mode exists.
 

@@ -16,8 +16,6 @@ use sqlx::{
 };
 use std::{sync::Arc, time::Duration};
 use support::*;
-#[path = "recovery/consumer_head.rs"]
-mod consumer_head;
 
 struct Allow;
 impl Authorizer for Allow {
@@ -95,23 +93,28 @@ impl PgConsumerEffect<Vec<u8>> for Reject {
 }
 async fn capture(
     runtime: Arc<PgRuntime>,
-    message: MessageEnvelope<Vec<u8>>,
+    id: &str,
     key: u8,
 ) -> anyhow::Result<TransactionalMessagingTransactionStatus> {
+    let message = message(id);
     let binding = binding(&message)?;
     let inbox = PgInboxStore::new(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
     let claim = inbox
-        .claim(&binding, deadline())
+        .claim(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            deadline(),
+        )
         .await
         .context("capture inbox claim")?;
     let IdempotencyDisposition::Acquired(claim) = claim else {
         anyhow::bail!("expected claim");
     };
     let capture = PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(key)), deadline()).await?;
-    if message.id().as_str() == "unknown-capture" {
+    if id == "unknown-capture" {
         runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     }
     Ok(PgConsumerTx::with_recovery(Reject, capture)
@@ -220,16 +223,11 @@ async fn run() -> anyhow::Result<()> {
         "capture does not grant mutation"
     );
     assert_eq!(
-        capture(runtime.clone(), message("rejected"), 1).await?,
+        capture(runtime.clone(), "rejected", 1).await?,
         TransactionalMessagingTransactionStatus::Committed
     );
     assert_eq!(
-        capture(
-            runtime.clone(),
-            message_in_partition("protected-failure", "protected-failure"),
-            0
-        )
-        .await?,
+        capture(runtime.clone(), "protected-failure", 0).await?,
         TransactionalMessagingTransactionStatus::InfrastructureTransient
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM public.effect")
@@ -248,27 +246,28 @@ async fn run() -> anyhow::Result<()> {
     .await?;
     assert_eq!(terminal, 1);
     assert_eq!(
-        capture(
-            runtime.clone(),
-            message_in_partition("unknown-capture", "unknown-capture"),
-            1
-        )
-        .await?,
+        capture(runtime.clone(), "unknown-capture", 1).await?,
         TransactionalMessagingTransactionStatus::CommitUnknown
     );
     let inbox = PgInboxStore::new(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let b = binding(&message_in_partition("unknown-capture", "unknown-capture"))?;
+    let b = binding(&message("unknown-capture"))?;
     assert!(
         matches!(
-            inbox.claim(&b, deadline()).await?,
+            inbox
+                .claim(
+                    crate::execution((b.identity()).tenant_id(), 1),
+                    b.identity(),
+                    deadline()
+                )
+                .await?,
             IdempotencyDisposition::Terminal(_)
         ),
         "committed rejection survives missing ACK"
     );
-    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE(resolved_by) ON rss_transactional_messaging.inbox TO recovery_operator; GRANT UPDATE(recovery_version) ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE(status,recovery_version,lease_token,lease_until,retry_after) ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
+    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE(recovery_version) ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE(status,recovery_version,lease_token,lease_until,retry_after) ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
     let operator_config = PgConfig::new(
         &params.host,
         params.port,
@@ -327,7 +326,6 @@ async fn run() -> anyhow::Result<()> {
         &owner,
     ))
     .await?;
-    Box::pin(consumer_head::run(&config, &store, &owner)).await?;
     store.close().await;
     assert!(store.is_closed());
     let clock = Timer::new();
@@ -365,7 +363,7 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 async fn base_grants(owner: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,DELETE,INSERT(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint),UPDATE(lease_token,lease_until,receive_count,disposition,domain,partition_key) ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
     Ok(())
 }
 #[allow(clippy::cognitive_complexity)] // reason: ordered real-database scenarios keep mutations adjacent to their durable assertions.
@@ -994,13 +992,19 @@ impl PgConsumerEffect<Vec<u8>> for Fence {
 #[allow(clippy::cognitive_complexity)] // reason: each failure is followed by assertions on all three durable effects.
 async fn capture_failures(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     for (id, fence) in [("insert-fails", false), ("lease-fenced", true)] {
-        let message = message_in_partition(id, id);
+        let message = message(id);
         let binding = binding(&message)?;
         let inbox = PgInboxStore::new(
             runtime.clone(),
             LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
         )?;
-        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             anyhow::bail!("claim")
         };
@@ -1308,7 +1312,14 @@ async fn replay_partition_race(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&verified, deadline()).await? else {
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((verified.identity()).tenant_id(), 1),
+            verified.identity(),
+            deadline(),
+        )
+        .await?
+    else {
         anyhow::bail!("replay source claim");
     };
     let capture = PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(1)), deadline()).await?;

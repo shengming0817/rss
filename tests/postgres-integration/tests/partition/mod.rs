@@ -535,7 +535,14 @@ async fn rejected_effect(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Res
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&verified, deadline()).await? else {
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((verified.identity()).tenant_id(), 1),
+            verified.identity(),
+            deadline(),
+        )
+        .await?
+    else {
         anyhow::bail!("fresh inbox");
     };
     let effect = RejectedAppend(PgOutboxWriter::new(

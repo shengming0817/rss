@@ -75,7 +75,14 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         let inbox = inbox.clone();
         contenders.spawn(async move {
             inbox
-                .claim(&binding(&message("concurrent-claim")), deadline())
+                .claim(
+                    crate::execution(
+                        (binding(&message("concurrent-claim")).identity()).tenant_id(),
+                        1,
+                    ),
+                    binding(&message("concurrent-claim")).identity(),
+                    deadline(),
+                )
                 .await
         });
     }
@@ -90,7 +97,13 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
     sqlx::query("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='concurrent-claim'").execute(owner).await?;
     let binding = binding(&message("concurrent-claim"));
     assert!(matches!(
-        inbox.claim(&binding, deadline()).await?,
+        inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline()
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
     assert_eq!(inbox.extend(&old, deadline()).await?, LeaseStatus::Lost);
@@ -131,7 +144,13 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
                 Duration::from_millis(500),
             )?,
         )?;
-        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("new claim")
         };
@@ -578,8 +597,13 @@ async fn tenant_isolation(
                 Duration::from_secs(60),
             )?,
         )?;
-        let IdempotencyDisposition::Acquired(claim) =
-            inbox.claim(&receipt_binding, deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((receipt_binding.identity()).tenant_id(), 1),
+                receipt_binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("tenant claim")
         };
@@ -705,7 +729,13 @@ async fn inbox_lock_expiry(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> any
             )?,
         )?;
         let binding = binding(&message(id));
-        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                deadline(),
+            )
+            .await?
         else {
             panic!("new claim")
         };

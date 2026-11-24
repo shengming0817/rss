@@ -117,8 +117,6 @@ pub enum IdempotencyDisposition<C> {
     Acquired(C),
     /// Another live attempt owns the record; do not execute the handler.
     InProgress,
-    /// Verified content differs from the durable identity. Reject only this delivery.
-    Conflict(crate::transaction::IngressRejection),
     /// A durable terminal result exists; validate it against verified ingress before settlement.
     Terminal(TerminalReceipt),
 }
@@ -158,10 +156,11 @@ pub trait InboxStore: Send + Sync {
     fn lease_policy(&self) -> crate::policy::LeaseRenewalPolicy;
 
     /// Acquire exclusive ownership, or return the existing live or terminal state for the full
-    /// identity. Report content conflicts without granting a lease or changing the original row.
+    /// identity.
     fn claim(
         &self,
-        verified: &crate::transaction::VerifiedConsumerBinding,
+        binding: crate::fence::ExecutionBinding,
+        identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<IdempotencyDisposition<Self::Claim>, MessagingError>> + Send;
 
@@ -182,7 +181,7 @@ pub trait InboxStore: Send + Sync {
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<LeaseStatus, MessagingError>> + Send;
 
-    /// End this message lease without removing any committed terminal receipt.
+    /// Release this claim without removing or downgrading a durable terminal result.
     fn release(
         &self,
         claim: Self::Claim,

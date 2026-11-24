@@ -24,11 +24,11 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
   WHERE a.attnum IS NULL OR NOT a.attnotnull OR format_type(a.atttypid,a.atttypmod)<>e.type)
  AND NOT EXISTS(SELECT FROM (VALUES
   ('outbox','outbox_consumer_scope','((domain = ( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain)) IS NOT FALSE)'),
-  ('inbox','inbox_consumer_scope','(rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group) AND ((domain = ( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain)) IS NOT FALSE))'),
+  ('inbox','inbox_consumer_scope','rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)'),
   ('consumer_dead_letter','dead_letter_consumer_scope','rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)')
  ) e(relation,name,predicate) LEFT JOIN pg_policy p ON p.polrelid=to_regclass('rss_transactional_messaging.'||e.relation) AND p.polname=e.name
  WHERE p.oid IS NULL OR p.polpermissive OR p.polcmd<>'*' OR p.polroles<>ARRAY[0]::oid[]
- OR pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM e.predicate OR pg_get_expr(COALESCE(p.polwithcheck,p.polqual),p.polrelid) IS DISTINCT FROM CASE WHEN e.name='inbox_consumer_scope' THEN '(rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group) AND ((domain IS NULL) OR (( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain) IS NULL)))' ELSE e.predicate END)
+ OR pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM e.predicate OR pg_get_expr(p.polwithcheck,p.polrelid) IS DISTINCT FROM e.predicate)
 
  AND NOT EXISTS(SELECT FROM (VALUES
   ('rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)',$5::text,false,'s','sql',NULL::text[]),

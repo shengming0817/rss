@@ -19,27 +19,16 @@ CREATE TABLE rss_transactional_messaging.inbox (
   lease_token uuid NOT NULL,
   lease_until timestamptz NOT NULL,
   receive_count bigint NOT NULL DEFAULT 1 CHECK (receive_count > 0),
-  fingerprint bytea NOT NULL CHECK (octet_length(fingerprint) = 32),
-  domain text COLLATE "C",
-  partition_key text COLLATE "C",
-  resolved_by uuid,
+  fingerprint bytea,
   disposition text,
   PRIMARY KEY (tenant_id, message_id, consumer_group),
   CONSTRAINT inbox_receipt_shape CHECK (
-    (disposition IS NULL OR disposition IN ('succeeded','rejected_permanent','rejected_invariant'))
-    AND ((domain IS NULL) = (partition_key IS NULL))
-    AND (partition_key IS NULL OR (disposition IS NOT NULL AND disposition IN ('rejected_permanent','rejected_invariant')))
-    AND (resolved_by IS NULL OR partition_key IS NOT NULL)
+    (fingerprint IS NULL AND disposition IS NULL) OR
+    (fingerprint IS NOT NULL AND octet_length(fingerprint) = 32
+      AND disposition IS NOT NULL AND disposition IN ('succeeded','rejected_permanent','rejected_invariant'))
   ),
  claim_epoch bigint NOT NULL DEFAULT 0, claim_lineage bytea
 );
-
--- Only ordinary ordered input participates. Projection already owns its source Outbox head.
-CREATE UNIQUE INDEX inbox_partition_head ON rss_transactional_messaging.inbox
- (tenant_id,consumer_group,domain,partition_key)
- WHERE partition_key IS NOT NULL AND resolved_by IS NULL;
-CREATE INDEX inbox_unresolved_list ON rss_transactional_messaging.inbox (tenant_id,message_id,consumer_group)
- WHERE partition_key IS NOT NULL AND resolved_by IS NULL;
 
 CREATE TABLE rss_transactional_messaging.outbox (
   seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -88,7 +77,7 @@ CREATE TABLE rss_transactional_messaging.recovery_operations (
  tenant_id uuid NOT NULL,
  operation_id uuid NOT NULL,
  request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
- target_kind text NOT NULL CHECK (target_kind IN ('consumer','outbox','consumer_head')),
+ target_kind text NOT NULL CHECK (target_kind IN ('consumer','outbox')),
  target_key text NOT NULL,
  outcome text NOT NULL CHECK (outcome IN ('replayed','redriven','resolved')),
  result_version bigint NOT NULL CHECK (result_version > 0),
@@ -100,15 +89,10 @@ CREATE TABLE rss_transactional_messaging.recovery_operations (
  CONSTRAINT operation_shape CHECK (
    (outcome = 'replayed' AND target_kind = 'consumer' AND replay_message_id IS NOT NULL AND resolution IS NULL AND evidence_message_id IS NULL)
    OR (outcome = 'redriven' AND target_kind = 'outbox' AND replay_message_id IS NULL AND resolution IS NULL AND evidence_message_id IS NULL)
-   OR (outcome = 'resolved' AND target_kind = 'consumer_head' AND replay_message_id IS NULL AND resolution IS NOT NULL AND resolution='accepted_gap' AND evidence_message_id IS NULL)
    OR (outcome = 'resolved' AND target_kind = 'outbox' AND replay_message_id IS NULL AND resolution IS NOT NULL AND
      ((resolution = 'accepted_gap' AND evidence_message_id IS NULL) OR (resolution = 'compensated' AND evidence_message_id IS NOT NULL)))),
  CONSTRAINT recovery_replay_identity UNIQUE (tenant_id,replay_message_id)
 );
-
-ALTER TABLE rss_transactional_messaging.inbox ADD CONSTRAINT inbox_resolution_receipt
- FOREIGN KEY (tenant_id,resolved_by) REFERENCES rss_transactional_messaging.recovery_operations(tenant_id,operation_id)
- DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE rss_transactional_messaging.archive_jobs (
  tenant_id uuid NOT NULL, operation_id uuid NOT NULL, dead_letter_id uuid NOT NULL,
@@ -975,14 +959,8 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_m
 DECLARE member dr_members;
 BEGIN
  PERFORM check_execution();
- IF TG_OP='UPDATE' AND OLD.disposition IS NOT NULL THEN
-  IF (NEW.disposition,NEW.domain,NEW.partition_key) IS DISTINCT FROM (OLD.disposition,OLD.domain,OLD.partition_key) THEN
-   RAISE EXCEPTION 'immutable Inbox receipt' USING ERRCODE='42501';
-  END IF;
-  RETURN NEW;
- END IF;
  FOR member IN SELECT m.* FROM dr_members m JOIN dr_plans p ON p.tenant_id=m.tenant_id AND p.operation_id=m.operation_id WHERE m.tenant_id=NEW.tenant_id AND m.message_id=NEW.message_id AND m.consumer_group=NEW.consumer_group AND p.epoch=current_setting('rss.execution_epoch')::bigint AND p.lineage=decode(current_setting('rss.storage_lineage'),'hex') FOR UPDATE OF m LOOP
-  IF member.contract<>NEW.contract OR member.fingerprint<>NEW.fingerprint THEN RAISE EXCEPTION 'consumer recovery evidence' USING ERRCODE='23505'; END IF;
+  IF member.contract<>NEW.contract OR (NEW.fingerprint IS NOT NULL AND member.fingerprint<>NEW.fingerprint) THEN RAISE EXCEPTION 'consumer recovery evidence' USING ERRCODE='23505'; END IF;
   IF NEW.disposition IS NOT NULL THEN UPDATE dr_members SET status='completed' WHERE tenant_id=member.tenant_id AND operation_id=member.operation_id AND ordinal=member.ordinal; END IF;
  END LOOP;
  RETURN NEW;
@@ -1020,13 +998,8 @@ CREATE POLICY outbox_partition_tenant ON rss_transactional_messaging.outbox_part
  WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid);
 
 CREATE POLICY inbox_consumer_scope ON rss_transactional_messaging.inbox AS RESTRICTIVE
- USING(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group) AND
-   ((domain=(SELECT rss_transactional_messaging.consumer_scope_domain())) IS NOT FALSE))
- WITH CHECK(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group) AND
-   (domain IS NULL OR (SELECT rss_transactional_messaging.consumer_scope_domain()) IS NULL));
-
-CREATE POLICY inbox_release ON rss_transactional_messaging.inbox AS RESTRICTIVE FOR DELETE
- USING (disposition IS NULL);
+ USING(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group))
+ WITH CHECK(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group));
 
 CREATE POLICY dead_letter_consumer_scope ON rss_transactional_messaging.consumer_dead_letter AS RESTRICTIVE
  USING(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group))

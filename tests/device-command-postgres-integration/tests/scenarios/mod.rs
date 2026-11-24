@@ -416,7 +416,14 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
         f.runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, budget()?).await? else {
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
+        .await?
+    else {
         anyhow::bail!("new claim missing")
     };
     let consumer = PgConsumerTx::receipt_only(
@@ -454,7 +461,14 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     inbox.release(claim, budget()?).await?;
     f.publish().await?;
     let _page = f.recover(s).await?;
-    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, budget()?).await? else {
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
+        .await?
+    else {
         anyhow::bail!("retry claim missing")
     };
     assert_eq!(
@@ -643,12 +657,22 @@ async fn verify_terminal(
 ) -> anyhow::Result<()> {
     use rss_transactional_messaging::inbox::{IdempotencyDisposition, InboxStore};
     let receipt = inbox
-        .read_terminal(binding.execution(), binding.identity(), budget()?)
+        .read_terminal(
+            crate::execution((binding.identity()).tenant_id(), 1),
+            binding.identity(),
+            budget()?,
+        )
         .await?
         .ok_or_else(|| anyhow::anyhow!("receipt missing"))?;
     assert!(binding.validate_terminal(receipt).is_ok());
     assert!(matches!(
-        inbox.claim(binding, budget()?).await?,
+        inbox
+            .claim(
+                crate::execution((binding.identity()).tenant_id(), 1),
+                binding.identity(),
+                budget()?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     Ok(())

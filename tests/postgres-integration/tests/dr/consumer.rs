@@ -1,5 +1,4 @@
 use super::*;
-use crate::support::message_in_partition;
 use rss_transactional_messaging::{inbox::*, message::*, transaction::*};
 struct Validator(ExecutionBinding);
 impl IngressValidator<Vec<u8>> for Validator {
@@ -33,7 +32,7 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         Ok(TerminalDisposition::Succeeded)
     }
 }
-pub(super) fn consumer_binding(
+fn consumer_binding(
     execution: ExecutionBinding,
     message: &MessageEnvelope<Vec<u8>>,
 ) -> anyhow::Result<VerifiedConsumerBinding> {
@@ -49,7 +48,7 @@ pub(super) fn consumer_binding(
 #[allow(clippy::cognitive_complexity)] // reason: sequential committed-effect, rollback and physical-lineage evidence checks.
 pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let clock = Timer::new();
-    let msg = message_in_partition("broker-member", "broker-member");
+    let msg = message("broker-member");
     let consumer = consumer_binding(binding(9)?, &msg)?;
     let plan = Plan::new(
         tenant(),
@@ -72,7 +71,10 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let claim = match inbox.claim(&consumer, deadline()).await? {
+    let claim = match inbox
+        .claim(consumer.execution(), consumer.identity(), deadline())
+        .await?
+    {
         IdempotencyDisposition::Acquired(c) => c,
         _ => anyhow::bail!("consumer claim"),
     };
@@ -90,15 +92,17 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         vec![MemberStatus::Completed]
     );
     assert!(matches!(
-        inbox.claim(&consumer, deadline()).await?,
+        inbox
+            .claim(consumer.execution(), consumer.identity(), deadline())
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM public.dr_effect")
         .fetch_one(owner)
         .await?;
     assert_eq!(count, 1);
-    // Same tenant/id/group but different trusted authored facts must prevent admission and progress.
-    let mismatch = message_in_partition("broker-mismatch", "broker-mismatch");
+    // Same tenant/id/group but different trusted authored facts must roll back effects and progress.
+    let mismatch = message("broker-mismatch");
     let identity = consumer_binding(binding(10)?, &mismatch)?;
     let clock = Timer::new();
     let request = authorize_dr(
@@ -121,22 +125,26 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
     let operator4 =
         PgDrStore::connect(operator.clone(), Timer::new(), (binding(9)?).storage()).await?;
     committed(operator4.apply(&request, deadline()).await)?;
+    let next = runtime.clone();
     let inbox = PgInboxStore::new(
-        runtime.clone(),
+        next.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    assert_eq!(
-        inbox
-            .claim(&identity, deadline())
-            .await
-            .err()
-            .map(|error| error.kind()),
-        Some(rss_transactional_messaging::error::MessagingErrorKind::Conflict)
-    );
+    let claim = match inbox
+        .claim(identity.execution(), identity.identity(), deadline())
+        .await?
+    {
+        IdempotencyDisposition::Acquired(c) => c,
+        _ => anyhow::bail!("mismatch claim"),
+    };
+    let result = PgConsumerTx::receipt_only(next.clone(), Effect)
+        .execute(&claim, &mismatch, identity.receipt_intent(), deadline())
+        .await;
+    assert_ne!(result.status(),rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM public.dr_effect")
         .fetch_one(owner)
         .await?;
-    assert_eq!(count, 1, "mismatched member never starts");
+    assert_eq!(count, 1, "mismatched member effect rolls back");
     assert_eq!(
         operator4
             .progress(&request, deadline())

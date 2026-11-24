@@ -1,7 +1,7 @@
 //! Real PostgreSQL drivers for the four canonical, provider-neutral conformance suites.
 mod consumer;
 mod outbox;
-use super::{Effect, Timer, Validator, binding, binding_for_group, deadline, message};
+use super::{Effect, Timer, Validator, binding, deadline, message};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     inbox::*,
@@ -88,7 +88,15 @@ impl Harness {
         &self,
         message: &MessageEnvelope<Vec<u8>>,
     ) -> Result<PgInboxClaim, MessagingError> {
-        match self.inbox().claim(&binding(message), deadline()).await? {
+        match self
+            .inbox()
+            .claim(
+                crate::execution((binding(message).identity()).tenant_id(), 1),
+                binding(message).identity(),
+                deadline(),
+            )
+            .await?
+        {
             IdempotencyDisposition::Acquired(claim) => Ok(claim),
             _ => Err(port(std::io::Error::other("expected fresh inbox claim"))),
         }
@@ -97,7 +105,15 @@ impl Harness {
         &self,
         message: &MessageEnvelope<Vec<u8>>,
     ) -> Result<TerminalReceipt, MessagingError> {
-        match self.inbox().claim(&binding(message), deadline()).await? {
+        match self
+            .inbox()
+            .claim(
+                crate::execution((binding(message).identity()).tenant_id(), 1),
+                binding(message).identity(),
+                deadline(),
+            )
+            .await?
+        {
             IdempotencyDisposition::Terminal(receipt) => Ok(receipt),
             _ => Err(port(std::io::Error::other("expected durable terminal"))),
         }
@@ -126,8 +142,14 @@ impl Harness {
     }
     async fn commit_effect(&self) -> Result<(), MessagingError> {
         let message = message(&self.id());
-        if let IdempotencyDisposition::Acquired(claim) =
-            self.inbox().claim(&binding(&message), deadline()).await?
+        if let IdempotencyDisposition::Acquired(claim) = self
+            .inbox()
+            .claim(
+                crate::execution((binding(&message).identity()).tenant_id(), 1),
+                binding(&message).identity(),
+                deadline(),
+            )
+            .await?
         {
             self.commit_claim(&claim, &message).await?;
         }
@@ -297,7 +319,11 @@ impl InboxDriver for Harness {
     }
     async fn first_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.inbox()
-            .claim(&binding(&message(&self.id())), deadline())
+            .claim(
+                crate::execution((binding(&message(&self.id())).identity()).tenant_id(), 1),
+                binding(&message(&self.id())).identity(),
+                deadline(),
+            )
             .await
     }
     async fn active_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
@@ -307,8 +333,19 @@ impl InboxDriver for Harness {
         &self,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let message = message(&self.id());
-        let verified = binding_for_group(&message, ConsumerGroup::parse("other").expect("group"));
-        self.inbox().claim(&verified, deadline()).await
+        let identity = ConsumerIdentity::new(
+            message.metadata().tenant_id(),
+            ConsumerGroup::parse("other").expect("group"),
+            message.id().clone(),
+            message.metadata().contract().clone(),
+        );
+        self.inbox()
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(),
+            )
+            .await
     }
     async fn terminal_duplicate(
         &self,
@@ -335,13 +372,25 @@ impl InboxDriver for Harness {
         &self,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let identity = binding(&message(&format!("{}-release", self.id())));
-        let IdempotencyDisposition::Acquired(claim) =
-            self.inbox().claim(&identity, deadline()).await?
+        let IdempotencyDisposition::Acquired(claim) = self
+            .inbox()
+            .claim(
+                crate::execution((identity.identity()).tenant_id(), 1),
+                identity.identity(),
+                deadline(),
+            )
+            .await?
         else {
             return Err(port(std::io::Error::other("new claim")));
         };
         self.inbox().release(claim, deadline()).await?;
-        self.inbox().claim(&identity, deadline()).await
+        self.inbox()
+            .claim(
+                crate::execution((identity.identity()).tenant_id(), 1),
+                identity.identity(),
+                deadline(),
+            )
+            .await
     }
     async fn stale_lease(&self) -> Result<LeaseStatus, MessagingError> {
         let old = self

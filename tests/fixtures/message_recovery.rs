@@ -85,10 +85,6 @@ impl ExecutionTimer for Timer {
 }
 #[allow(clippy::expect_used)] // reason: fixed authored message test fixtures.
 pub fn message(id: &str) -> MessageEnvelope<Vec<u8>> {
-    message_in_partition(id, "order-1")
-}
-#[allow(clippy::expect_used)] // reason: fixed authored recovery fixtures.
-pub fn message_in_partition(id: &str, key: &str) -> MessageEnvelope<Vec<u8>> {
     let contract = ContractIdentity::new(
         rss_contract::ContractId::from_static("orders.created"),
         rss_contract::ContractVersion::from_static_major(1),
@@ -109,7 +105,7 @@ pub fn message_in_partition(id: &str, key: &str) -> MessageEnvelope<Vec<u8>> {
             authored,
             MessageMetadataExtensions::new(
                 None,
-                Some(PartitionKey::parse(key).expect("partition")),
+                Some(PartitionKey::parse("order-1").expect("partition")),
                 None,
                 BTreeMap::new(),
             ),

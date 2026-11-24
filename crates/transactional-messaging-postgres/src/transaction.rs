@@ -763,7 +763,7 @@ impl PgRuntime {
         let mut lease = lease;
         #[cfg(feature = "integration")]
         {
-            lease.state.fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
+            lease.fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(lease)
     }
@@ -785,7 +785,7 @@ impl PgRuntime {
         let mut lease = lease;
         #[cfg(feature = "integration")]
         if let Some(fault) = fault {
-            lease.state.fault = fault as u8;
+            lease.fault = fault as u8;
         }
         Ok(lease)
     }
@@ -1044,12 +1044,8 @@ pub(crate) enum PoolAccess<'a> {
 }
 
 pub(crate) struct ConnectionLease {
-    pub(crate) connection: PoolConnection<Postgres>,
+    connection: PoolConnection<Postgres>,
     _ordinary_slot: Option<OwnedSemaphorePermit>,
-    pub(crate) state: ConnectionState,
-}
-
-pub(crate) struct ConnectionState {
     quarantine: bool,
     #[cfg(feature = "integration")]
     fault: u8,
@@ -1062,23 +1058,13 @@ impl ConnectionLease {
         Ok(Self {
             connection: pool.acquire().await?,
             _ordinary_slot: permit,
-            state: ConnectionState {
-                quarantine: true,
-                #[cfg(feature = "integration")]
-                fault: 0,
-            },
+            quarantine: true,
+            #[cfg(feature = "integration")]
+            fault: 0,
         })
     }
     pub(crate) async fn begin(&mut self) -> Result<BorrowedTransaction<'_>, sqlx::Error> {
-        self.state.begin(&mut self.connection).await
-    }
-}
-impl ConnectionState {
-    pub(crate) async fn begin<'a>(
-        &'a mut self,
-        connection: &'a mut PgConnection,
-    ) -> Result<BorrowedTransaction<'a>, sqlx::Error> {
-        let transaction = connection.begin().await?;
+        let transaction = (*self.connection).begin().await?;
         Ok(BorrowedTransaction {
             transaction,
             quarantine: &mut self.quarantine,
@@ -1089,7 +1075,7 @@ impl ConnectionState {
 }
 impl Drop for ConnectionLease {
     fn drop(&mut self) {
-        if self.state.quarantine {
+        if self.quarantine {
             self.connection.close_on_drop();
         }
     }

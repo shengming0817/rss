@@ -23,10 +23,6 @@ no exporter, worker, scheduler or operational process is installed.
 
 Replay uses a new caller-provided MessageId and the original authored metadata/payload, including
 route and partition. A new Outbox row joins the partition tail; existing subscribers may all see it.
-List `Source::ConsumerHead` to see unresolved ordinary ordered rejections. Use its exact target
-and version with `Action::Resolve(Resolution::AcceptedGap)` to release that consumer group and
-partition. Exact inspection also shows the releasing operation after resolution. This applies to
-receipt-only consumers as well. The original Inbox rejection remains available for duplicates.
 Transport context is not captured or replayed. Same-ID redrive cannot extend the original delivery
 window. Expired resolution is distinct from publication; compensation evidence is a published
 same-tenant message whose authored causation binds the resolved target. Products decide whether the

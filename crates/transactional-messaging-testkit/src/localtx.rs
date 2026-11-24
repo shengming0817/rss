@@ -354,7 +354,6 @@ const fn class_label(class: FailureClass) -> &'static str {
     match class {
         FailureClass::Transient => "transient",
         FailureClass::Permanent => "permanent",
-        FailureClass::PartitionBlocked => "partition-blocked",
         FailureClass::Infrastructure => "infrastructure",
     }
 }

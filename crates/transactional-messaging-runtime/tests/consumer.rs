@@ -435,7 +435,8 @@ impl InboxStore for ClaimErrorInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Err(MessagingError::new(
@@ -481,7 +482,8 @@ impl InboxStore for ExtendErrorInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
@@ -528,7 +530,8 @@ impl InboxStore for FakeInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let mut state = self.disposition.lock().expect("lock");
@@ -580,12 +583,11 @@ struct FakeTx {
     disposition: TerminalDisposition,
 }
 
-struct RollbackThenCommitTx {
+struct RetryThenCommitTx {
     calls: Arc<AtomicUsize>,
-    reason: FailureClass,
 }
 
-impl ConsumerTx<Vec<u8>> for RollbackThenCommitTx {
+impl ConsumerTx<Vec<u8>> for RetryThenCommitTx {
     type Claim = Claim;
     type CommitProof = Proof;
 
@@ -597,7 +599,7 @@ impl ConsumerTx<Vec<u8>> for RollbackThenCommitTx {
         _deadline: OperationDeadline,
     ) -> TransactionOutcome<Self::CommitProof> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            TransactionOutcome::rolled_back(self.reason)
+            TransactionOutcome::rolled_back(FailureClass::Transient)
         } else {
             receipt.committed(Proof, TerminalDisposition::Succeeded)
         }
@@ -1012,8 +1014,7 @@ async fn only_confirmed_transient_rollback_retries_locally() {
         },
     };
     let calls = Arc::new(AtomicUsize::new(0));
-    let transaction = RollbackThenCommitTx {
-        reason: FailureClass::Transient,
+    let transaction = RetryThenCommitTx {
         calls: Arc::clone(&calls),
     };
     let expected = subscription(&message);
@@ -1381,7 +1382,8 @@ impl InboxStore for PendingInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         if self.stage == PendingInboxStage::Claim {
@@ -1920,7 +1922,8 @@ impl InboxStore for RenewingInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.claim
@@ -2209,7 +2212,8 @@ impl InboxStore for RenewalErrorAfterInitialInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
@@ -2349,7 +2353,8 @@ impl InboxStore for TransientThenAcquiredInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -2537,7 +2542,8 @@ impl InboxStore for BlockingClaimInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.started.fetch_add(1, Ordering::SeqCst);
@@ -3145,7 +3151,8 @@ impl InboxStore for UnlimitedInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
@@ -3222,60 +3229,6 @@ impl DeliverySource<Vec<u8>> for TwoDeliverySource {
             futures::stream::iter(deliveries),
         ))
     }
-}
-
-#[tokio::test]
-async fn blocked_delivery_leaves_the_subscription_available_to_another_partition() {
-    let blocked = envelope(|m| m.id = "blocked");
-    let sub = subscription(&blocked);
-    let independent = envelope(|m| {
-        m.id = "independent";
-        m.partition = Some((TENANT_A, "orders", "other"));
-    });
-    let settled = Arc::new(AtomicUsize::new(0));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let deliveries = [blocked, independent]
-        .into_iter()
-        .map(|message| {
-            IncomingDelivery::Valid(Box::new(Delivery::new(
-                message,
-                BlockingSettlement {
-                    gate: None,
-                    settled: settled.clone(),
-                },
-            )))
-        })
-        .collect();
-    let worker = ConsumerWorker::new(
-        std::num::NonZeroU16::MIN,
-        Arc::new(TwoDeliverySource {
-            deliveries: Mutex::new(deliveries),
-        }),
-        Arc::new(UnlimitedInbox),
-        Arc::new(RollbackThenCommitTx {
-            calls: calls.clone(),
-            reason: FailureClass::PartitionBlocked,
-        }),
-        ConsumerGroup::parse("ordered").expect("group"),
-        Arc::new(TrustedIngress),
-        sub,
-        Arc::new(RealtimeClock::new()),
-        consumer_policy(),
-        Arc::new(NoopEmitter),
-        SubscriptionBackoffPolicy::STANDARD,
-    );
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(worker.run(cancel.clone()));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while settled.load(Ordering::SeqCst) < 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("both messages settled from the same subscription");
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-    cancel.cancel();
-    support::join_worker(task).await.expect("graceful stop");
 }
 
 #[tokio::test]
@@ -3699,11 +3652,13 @@ impl InboxStore for ScopedInbox {
     }
     async fn claim(
         &self,
-        verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
+        identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Claim>, MessagingError> {
-        self.0.lock().expect("scopes").push(verified.execution());
-        UnlimitedInbox.claim(verified, deadline).await
+        assert_eq!(binding.tenant(), identity.tenant_id());
+        self.0.lock().expect("scopes").push(binding);
+        UnlimitedInbox.claim(binding, identity, deadline).await
     }
     async fn read_terminal(
         &self,

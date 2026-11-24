@@ -1,10 +1,7 @@
 use rss_request_context::TenantId;
 use rss_transactional_messaging::{
     inbox::ConsumerGroup,
-    message::{
-        ContractIdentity, MessageFingerprint, MessageId, MessageRoute, MessagingDomain,
-        PartitionKey,
-    },
+    message::{ContractIdentity, MessageId, MessageRoute, MessagingDomain},
     transaction::RejectKind,
 };
 use serde::{Deserialize, Serialize};
@@ -131,28 +128,11 @@ impl Version {
         self.0
     }
 }
-/// Exact ordinary-consumer rejection. Its tenant is supplied by the enclosing request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConsumerHead {
-    /// Group sharing the ordered Inbox.
-    pub group: ConsumerGroup,
-    /// Authored namespace.
-    pub domain: MessagingDomain,
-    /// Authored ordering key.
-    pub partition: PartitionKey,
-    /// Original rejected message.
-    pub message: MessageId,
-    /// Verified authored content of that message.
-    pub fingerprint: MessageFingerprint,
-}
-
 /// Tenant-local recovery target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Target {
     /// Protected consumer dead letter.
     DeadLetter(DeadLetterId),
-    /// Ordered Inbox head, including receipt-only business rejections.
-    ConsumerHead(ConsumerHead),
     /// Original durable Outbox message.
     Outbox(MessageId),
 }
@@ -161,7 +141,6 @@ impl Target {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::DeadLetter(_) => "consumer",
-            Self::ConsumerHead(_) => "consumer_head",
             Self::Outbox(_) => "outbox",
         }
     }
@@ -169,29 +148,11 @@ impl Target {
     pub fn key(&self) -> String {
         match self {
             Self::DeadLetter(id) => id.to_string(),
-            // MessageId excludes slash, so the split is unique even when the group contains one.
-            Self::ConsumerHead(head) => {
-                format!("{}/{}", head.message.as_str(), head.group.as_str())
-            }
             Self::Outbox(id) => id.as_str().into(),
         }
     }
 }
-impl Target {
-    fn bind_coordinates(&self, request_digest: [u8; 32]) -> [u8; 32] {
-        let Self::ConsumerHead(head) = self else {
-            return request_digest;
-        };
-        // The request digest already covers tenant, target kind and unambiguous message/group key.
-        Sha256::new()
-            .chain_update(request_digest)
-            .chain_update(hash(&[head.domain.as_str(), head.partition.as_str()]))
-            .chain_update(head.fingerprint.as_bytes())
-            .finalize()
-            .into()
-    }
-}
-/// Explicit product decision for a partition-blocking message.
+/// Explicit product decision for an expired, partition-blocking message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Resolution {
     /// Product explicitly accepts the missing effect.
@@ -240,10 +201,6 @@ impl Mutation {
         if !matches!(
             (&target, &action),
             (Target::DeadLetter(_), Action::Replay(_))
-                | (
-                    Target::ConsumerHead(_),
-                    Action::Resolve(Resolution::AcceptedGap)
-                )
                 | (Target::Outbox(_), Action::Redrive | Action::Resolve(_))
         ) {
             return Err(Error::Invalid);
@@ -284,7 +241,7 @@ impl Mutation {
             Action::Resolve(Resolution::AcceptedGap) => ("accepted_gap", ""),
             Action::Resolve(Resolution::Compensated(id)) => ("compensated", id.as_str()),
         };
-        self.target.bind_coordinates(hash(&[
+        hash(&[
             "rss-recovery-mutation-v1",
             &self.tenant.to_string(),
             &self.operation.to_string(),
@@ -293,7 +250,7 @@ impl Mutation {
             &self.version.get().to_string(),
             kind,
             id,
-        ]))
+        ])
     }
 }
 pub(crate) fn hash(parts: &[&str]) -> [u8; 32] {
@@ -316,8 +273,6 @@ pub struct Query {
 /// Closed dead-letter source filter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Source {
-    /// Currently blocking ordinary consumer rejections. Exact inspection also returns released heads.
-    ConsumerHead,
     /// Rejected consumer records with protected payloads.
     Consumer,
     /// Dead-lettered or explicitly resolved Outbox records.
@@ -328,7 +283,6 @@ impl Source {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Consumer => "consumer",
-            Self::ConsumerHead => "consumer_head",
             Self::Outbox => "outbox",
         }
     }
@@ -366,7 +320,6 @@ impl Query {
     pub fn inspect(tenant: TenantId, target: Target) -> Self {
         let kind = match target {
             Target::DeadLetter(_) => Source::Consumer,
-            Target::ConsumerHead(_) => Source::ConsumerHead,
             Target::Outbox(_) => Source::Outbox,
         };
         Self {
@@ -402,17 +355,14 @@ impl Query {
         format!("{}:{}:{key}", self.tenant, self.kind.label())
     }
     pub(crate) fn digest(&self) -> [u8; 32] {
-        let digest = hash(&[
+        hash(&[
             "rss-recovery-query-v1",
             &self.tenant.to_string(),
             self.kind.label(),
             self.after.as_deref().unwrap_or(""),
             &self.limit.to_string(),
             &self.target.as_ref().map(Target::key).unwrap_or_default(),
-        ]);
-        self.target
-            .as_ref()
-            .map_or(digest, |target| target.bind_coordinates(digest))
+        ])
     }
 }
 /// Payload-free state returned by a trusted provider.
@@ -430,13 +380,6 @@ pub struct Entry {
 /// Closed payload-free recovery inspection.
 #[derive(Debug)]
 pub enum Details {
-    /// Rejection and any operation which released the ordered Inbox head.
-    ConsumerHead {
-        /// Original durable rejection.
-        reason: RejectKind,
-        /// Committed gap-acceptance operation, when released.
-        resolved_by: Option<OperationId>,
-    },
     /// Trusted rejected consumer facts and replay history.
     Consumer(ConsumerDetails),
     /// Original Outbox routing and current delivery-window decision.
@@ -501,7 +444,7 @@ pub enum Outcome {
     Replayed,
     /// Original Outbox row is eligible again.
     Redriven,
-    /// Partition head explicitly released without changing its delivery outcome.
+    /// Expired head resolved without publication.
     Resolved,
 }
 /// Provider-reported durable result; only acknowledged commit/readback establishes persistence.

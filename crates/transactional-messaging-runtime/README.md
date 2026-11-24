@@ -54,9 +54,8 @@ Busy and deferred deliveries preserve the failure cursor.
 Transient delivery failures retire the current provider stream before resubscription. Pass a nonzero delivery window explicitly. One selects serial processing. AMQP applies
 the window as per-subscription prefetch. MQTT accepts one. Independent deliveries refill on
 completion; one subscription serializes verified tenant/domain/partition keys through settlement.
-A rejected terminal head retires that subscription before starting queued successors. PostgreSQL serializes ordinary keyed effects in their transaction. A committed rejection blocks
-subsequent effects until authorized gap acceptance. After a confirmed blocked rollback the consumer releases the message lease, then briefly waits within its existing budget before requeue. Delivery order and retention across retries depend on the transport: a single-credit subscription
-can receive the same blocked message again. The broker envelope supplies no source ordinal.
+A rejected terminal head retires that subscription before starting queued successors. Durable
+cross-subscription consumer ordering requires a separate recovery contract.
 Queued and busy deliveries count toward the same window and keep their original deadlines.
 A live claim or unstarted capacity wait keeps the handle unacknowledged and rechecks at one quarter of the operation budget, clamped to 1–250 ms, until the original cutoff.
 The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.

@@ -65,8 +65,6 @@ pub enum TransactionalMessagingTransactionStatus {
     HandlerTransient,
     /// Infrastructure failure requires broker redelivery.
     InfrastructureTransient,
-    /// A committed business rejection blocks this ordered effect.
-    PartitionBlocked,
     /// A transaction failed permanently before starting or after rollback; no broker Reject is implied.
     RejectedPermanent,
     /// Commit acknowledgement was ambiguous.
@@ -85,7 +83,6 @@ impl TransactionalMessagingTransactionStatus {
             Self::Committed => "committed",
             Self::HandlerTransient => "handler_transient",
             Self::InfrastructureTransient => "infrastructure_transient",
-            Self::PartitionBlocked => "partition_blocked",
             Self::RejectedPermanent => "rejected_permanent",
             Self::CommitUnknown => "commit_unknown",
             Self::RollbackFailed => "rollback_failed",

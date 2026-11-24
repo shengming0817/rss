@@ -14,8 +14,6 @@ pub enum FailureClass {
     /// Provider infrastructure failed; defer recovery to redelivery rather than local handler
     /// retry.
     Infrastructure,
-    /// An unresolved business rejection prevents this ordered effect from starting.
-    PartitionBlocked,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,10 +483,6 @@ mod consumer {
                 | TransactionOutcomeState::RolledBack(FailureClass::Infrastructure) => {
                     TransactionalMessagingTransactionStatus::InfrastructureTransient
                 }
-                TransactionOutcomeState::NotStarted(FailureClass::PartitionBlocked)
-                | TransactionOutcomeState::RolledBack(FailureClass::PartitionBlocked) => {
-                    TransactionalMessagingTransactionStatus::PartitionBlocked
-                }
                 TransactionOutcomeState::RollbackFailed => {
                     TransactionalMessagingTransactionStatus::RollbackFailed
                 }
@@ -791,26 +785,6 @@ mod consumer {
     }
 
     impl VerifiedConsumerBinding {
-        /// Reject just this delivery when durable content belongs to a different envelope.
-        pub fn validate_fingerprint(
-            &self,
-            durable: MessageFingerprint,
-        ) -> Result<(), IngressRejection> {
-            if self.fingerprint == durable {
-                Ok(())
-            } else {
-                Err(IngressRejection {
-                    reason: EnvelopeValidationFailure::FingerprintConflict,
-                })
-            }
-        }
-
-        /// Authored fingerprint established before durable admission.
-        #[must_use]
-        pub const fn fingerprint(&self) -> MessageFingerprint {
-            self.fingerprint
-        }
-
         /// Host-selected execution identity for this delivery, never refreshed after claiming.
         #[must_use]
         pub const fn execution(&self) -> crate::fence::ExecutionBinding {

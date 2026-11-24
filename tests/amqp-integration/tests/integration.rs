@@ -178,7 +178,8 @@ impl InboxStore for LiveInbox {
 
     async fn claim(
         &self,
-        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _binding: rss_transactional_messaging::fence::ExecutionBinding,
+        _identity: &rss_transactional_messaging::inbox::ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(()))

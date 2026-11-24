@@ -532,6 +532,7 @@ pub use producer::{MemoryOutboxStore, MemoryPublisher};
 
 #[cfg(feature = "consumer")]
 mod consumer {
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
@@ -551,34 +552,39 @@ mod consumer {
     #[error("memory inbox or settlement fault")]
     struct MemoryConsumerError;
 
-    enum InboxStatus {
-        Pending(Option<u64>),
-        Terminal(TerminalDisposition),
+    #[derive(Clone, Eq, Hash, PartialEq)]
+    struct InboxKey {
+        tenant: [u8; 16],
+        group: Box<str>,
+        message_id: Box<str>,
+        contract_id: Box<str>,
+        contract_major: u32,
+        schema_digest: Box<str>,
     }
 
-    struct InboxRecord {
-        identity: ConsumerIdentity,
-        fingerprint: MessageFingerprint,
-        status: InboxStatus,
+    enum InboxRecord {
+        Claimed {
+            epoch: u64,
+        },
+        Terminal {
+            identity: ConsumerIdentity,
+            fingerprint: MessageFingerprint,
+            disposition: TerminalDisposition,
+        },
     }
 
-    impl InboxRecord {
-        fn terminal(&self) -> Option<TerminalReceipt> {
-            match self.status {
-                InboxStatus::Terminal(result) => Some(TerminalReceipt::from_durable(
-                    self.identity.clone(),
-                    self.fingerprint,
-                    result,
-                )),
-                InboxStatus::Pending(_) => None,
+    struct InboxState {
+        records: HashMap<InboxKey, InboxRecord>,
+        next_epoch: u64,
+    }
+
+    impl Default for InboxState {
+        fn default() -> Self {
+            Self {
+                records: HashMap::new(),
+                next_epoch: 1,
             }
         }
-    }
-
-    #[derive(Default)]
-    struct InboxState {
-        records: Vec<InboxRecord>,
-        epoch: u64,
     }
 
     /// Deterministic, non-durable implementation of the canonical inbox port.
@@ -611,39 +617,30 @@ mod consumer {
             fingerprint: MessageFingerprint,
             disposition: TerminalDisposition,
         ) {
-            let mut state = self
-                .inner
+            let key = identity_key(&identity);
+            self.inner
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(row) = state
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .records
-                .iter_mut()
-                .find(|row| row.identity == identity)
-            {
-                row.fingerprint = fingerprint;
-                row.status = InboxStatus::Terminal(disposition);
-            } else {
-                state.records.push(InboxRecord {
-                    identity,
-                    fingerprint,
-                    status: InboxStatus::Terminal(disposition),
-                });
-            }
+                .insert(
+                    key,
+                    InboxRecord::Terminal {
+                        identity,
+                        fingerprint,
+                        disposition,
+                    },
+                );
         }
 
         /// Expire the current claim so a later call can acquire a new epoch.
         pub fn expire(&self, identity: &ConsumerIdentity) {
+            let key = identity_key(identity);
             let mut state = self
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(row) = state
-                .records
-                .iter_mut()
-                .find(|row| &row.identity == identity)
-                && let InboxStatus::Pending(lease) = &mut row.status
-            {
-                *lease = None;
+            if matches!(state.records.get(&key), Some(InboxRecord::Claimed { .. })) {
+                state.records.remove(&key);
             }
         }
     }
@@ -659,39 +656,39 @@ mod consumer {
 
         async fn claim(
             &self,
-            verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+            binding: rss_transactional_messaging::fence::ExecutionBinding,
+            identity: &ConsumerIdentity,
             _deadline: OperationDeadline,
         ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-            let identity = verified.identity();
+            if binding.tenant() != identity.tenant_id() {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::OwnershipLost,
+                    std::io::Error::other("fixture execution tenant mismatch"),
+                ));
+            }
+            let key = identity_key(identity);
             let mut state = self
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let epoch = state.epoch.saturating_add(1);
-            if let Some(row) = state
-                .records
-                .iter_mut()
-                .find(|row| &row.identity == identity)
-            {
-                if let Some(receipt) = row.terminal() {
-                    return Ok(IdempotencyDisposition::Terminal(receipt));
+            match state.records.get(&key) {
+                Some(InboxRecord::Claimed { .. }) => Ok(IdempotencyDisposition::InProgress),
+                Some(InboxRecord::Terminal {
+                    identity,
+                    fingerprint,
+                    disposition,
+                }) => Ok(IdempotencyDisposition::Terminal(
+                    TerminalReceipt::from_durable(identity.clone(), *fingerprint, *disposition),
+                )),
+                None => {
+                    let epoch = state.next_epoch;
+                    state.next_epoch = state.next_epoch.saturating_add(1);
+                    state
+                        .records
+                        .insert(key.clone(), InboxRecord::Claimed { epoch });
+                    Ok(IdempotencyDisposition::Acquired((identity.clone(), epoch)))
                 }
-                if let Err(rejection) = verified.validate_fingerprint(row.fingerprint) {
-                    return Ok(IdempotencyDisposition::Conflict(rejection));
-                }
-                if matches!(row.status, InboxStatus::Pending(Some(_))) {
-                    return Ok(IdempotencyDisposition::InProgress);
-                }
-                row.status = InboxStatus::Pending(Some(epoch));
-            } else {
-                state.records.push(InboxRecord {
-                    identity: identity.clone(),
-                    fingerprint: verified.fingerprint(),
-                    status: InboxStatus::Pending(Some(epoch)),
-                });
             }
-            state.epoch = epoch;
-            Ok(IdempotencyDisposition::Acquired((identity.clone(), epoch)))
         }
 
         async fn read_terminal(
@@ -710,11 +707,18 @@ mod consumer {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Ok(state
-                .records
-                .iter()
-                .find(|row| &row.identity == identity)
-                .and_then(InboxRecord::terminal))
+            Ok(match state.records.get(&identity_key(identity)) {
+                Some(InboxRecord::Terminal {
+                    identity,
+                    fingerprint,
+                    disposition,
+                }) => Some(TerminalReceipt::from_durable(
+                    identity.clone(),
+                    *fingerprint,
+                    *disposition,
+                )),
+                _ => None,
+            })
         }
 
         async fn extend(
@@ -729,10 +733,11 @@ mod consumer {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Ok(if state.records.iter().any(|row| row.identity == claim.0 && matches!(row.status, InboxStatus::Pending(Some(epoch)) if epoch == claim.1)) {
-                LeaseStatus::Held { remaining: self.lease }
-            } else {
-                LeaseStatus::Lost
+            Ok(match state.records.get(&identity_key(&claim.0)) {
+                Some(InboxRecord::Claimed { epoch }) if *epoch == claim.1 => LeaseStatus::Held {
+                    remaining: self.lease,
+                },
+                _ => LeaseStatus::Lost,
             })
         }
 
@@ -751,10 +756,28 @@ mod consumer {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let index = state.records.iter().position(|row| row.identity == claim.0 && matches!(row.status, InboxStatus::Pending(Some(epoch)) if epoch == claim.1))
-                .ok_or_else(|| MessagingError::new(MessagingErrorKind::OwnershipLost, MemoryConsumerError))?;
-            state.records.swap_remove(index);
-            Ok(())
+            let key = identity_key(&claim.0);
+            if matches!(state.records.get(&key), Some(InboxRecord::Claimed { epoch }) if *epoch == claim.1)
+            {
+                state.records.remove(&key);
+                Ok(())
+            } else {
+                Err(MessagingError::new(
+                    MessagingErrorKind::OwnershipLost,
+                    MemoryConsumerError,
+                ))
+            }
+        }
+    }
+
+    fn identity_key(identity: &ConsumerIdentity) -> InboxKey {
+        InboxKey {
+            tenant: identity.tenant_id().octets(),
+            group: identity.group().as_str().into(),
+            message_id: identity.message_id().as_str().into(),
+            contract_id: identity.contract().id().as_str().into(),
+            contract_major: identity.contract().version().major(),
+            schema_digest: identity.contract().schema_digest().as_str().into(),
         }
     }
 

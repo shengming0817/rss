@@ -8,7 +8,7 @@ use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging::inbox::{
-    ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
+    ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
 };
 use rss_transactional_messaging::message::{
     AuthoredMessageMetadata, ContractIdentity, MessageEnvelope, MessageFingerprint, MessageId,
@@ -36,18 +36,16 @@ fn envelope(
     id: &str,
     payload: &[u8],
 ) -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error>> {
-    envelope_in_partition(
+    envelope_for_tenant(
         id,
         payload,
         TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
-        Some("customer-7"),
     )
 }
-fn envelope_in_partition(
+fn envelope_for_tenant(
     id: &str,
     payload: &[u8],
     tenant: TenantId,
-    key: Option<&str>,
 ) -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error>> {
     let metadata = MessageMetadata::new(
         AuthoredMessageMetadata::new(
@@ -65,7 +63,7 @@ fn envelope_in_partition(
         ),
         MessageMetadataExtensions::new(
             None,
-            key.map(PartitionKey::parse).transpose()?,
+            Some(PartitionKey::parse("customer-7")?),
             None,
             BTreeMap::new(),
         ),
@@ -75,38 +73,6 @@ fn envelope_in_partition(
         metadata,
         payload.to_vec(),
     ))
-}
-
-fn verified(
-    message: &MessageEnvelope<Vec<u8>>,
-    group: &str,
-) -> Result<
-    rss_transactional_messaging::transaction::VerifiedConsumerBinding,
-    Box<dyn std::error::Error>,
-> {
-    use rss_transactional_messaging::{message::SubscriptionIdentity, transaction::*};
-    struct Validator;
-    impl IngressValidator<Vec<u8>> for Validator {
-        fn validate(
-            &self,
-            input: IngressChallenge<'_, Vec<u8>>,
-        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
-            let execution = crate::execution(input.message().metadata().tenant_id(), 1);
-            Ok(input.verified(execution))
-        }
-    }
-    let meta = message.metadata();
-    verify_ingress(
-        &Validator,
-        ConsumerGroup::parse(group)?,
-        &SubscriptionIdentity::new(
-            meta.domain().clone(),
-            meta.route().clone(),
-            meta.contract().clone(),
-        ),
-        message,
-    )
-    .map_err(|_| "fixture ingress".into())
 }
 
 fn deadline(
@@ -378,14 +344,31 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     let clock = FakeClock::new();
     let store = MemoryInboxStore::new();
     let message = envelope("message-inbox", b"payload")?;
-    let binding = verified(&message, "orders-worker")?;
-    let identity = binding.identity().clone();
-    let claim = match store.claim(&binding, deadline(&clock)?).await? {
+    let identity = ConsumerIdentity::new(
+        message.metadata().tenant_id(),
+        ConsumerGroup::parse("orders-worker")?,
+        message.id().clone(),
+        message.metadata().contract().clone(),
+    );
+    let claim = match store
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
+    {
         IdempotencyDisposition::Acquired(claim) => claim,
         _ => return Err("first claim must acquire".into()),
     };
     assert!(matches!(
-        store.claim(&binding, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::InProgress
     ));
     assert!(matches!(
@@ -398,7 +381,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         LeaseStatus::Lost
     );
 
-    let successor = match store.claim(&binding, deadline(&clock)?).await? {
+    let successor = match store
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
+    {
         IdempotencyDisposition::Acquired(claim) => claim,
         _ => return Err("successor must acquire".into()),
     };
@@ -420,7 +410,13 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         TerminalDisposition::Succeeded,
     );
     assert!(matches!(
-        store.claim(&binding, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     assert_eq!(
@@ -432,75 +428,142 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         Some(MessagingErrorKind::OwnershipLost)
     );
     store.expire(&identity);
-    let IdempotencyDisposition::Terminal(receipt) =
-        store.claim(&binding, deadline(&clock)?).await?
+    let IdempotencyDisposition::Terminal(receipt) = store
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
     else {
         return Err("terminal lost".into());
     };
     assert!(receipt.matches(&identity, MessageFingerprint::of(&message)));
     assert_eq!(receipt.disposition(), TerminalDisposition::Succeeded);
-    let other_message = envelope_in_partition(
-        "message-inbox",
-        b"payload",
+    let other = ConsumerIdentity::new(
         TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
-        Some("customer-7"),
-    )?;
-    let other_binding = verified(&other_message, "orders-worker")?;
-    let other = other_binding.identity().clone();
+        identity.group().clone(),
+        identity.message_id().clone(),
+        identity.contract().clone(),
+    );
     assert!(matches!(
-        store.claim(&other_binding, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(other.tenant_id(), 1),
+                &other,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
     store.store_terminal(
         other.clone(),
-        MessageFingerprint::of(&other_message),
+        MessageFingerprint::of(&message),
         TerminalDisposition::Succeeded,
     );
     assert!(matches!(
-        store.claim(&binding, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
     assert!(matches!(
-        store.claim(&other_binding, deadline(&clock)?).await?,
+        store
+            .claim(
+                crate::execution(other.tenant_id(), 1),
+                &other,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Terminal(_)
     ));
 
     let releasable = MemoryInboxStore::new();
-    let claim = match releasable.claim(&binding, deadline(&clock)?).await? {
+    let claim = match releasable
+        .claim(
+            crate::execution(identity.tenant_id(), 1),
+            &identity,
+            deadline(&clock)?,
+        )
+        .await?
+    {
         IdempotencyDisposition::Acquired(claim) => claim,
         _ => return Err("release fixture must acquire".into()),
     };
-    let unkeyed = envelope_in_partition(
-        message.id().as_str(),
-        b"payload",
-        identity.tenant_id(),
-        None,
-    )?;
-    let altered = verified(&unkeyed, "orders-worker")?;
-    assert!(matches!(
-        releasable.claim(&altered, deadline(&clock)?).await?,
-        IdempotencyDisposition::Conflict(_)
-    ));
     releasable.release(claim, deadline(&clock)?).await?;
     assert!(matches!(
-        releasable.claim(&binding, deadline(&clock)?).await?,
+        releasable
+            .claim(
+                crate::execution(identity.tenant_id(), 1),
+                &identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
 
     let collision_store = MemoryInboxStore::new();
     let first_message = envelope("c", b"payload")?;
-    let first = verified(&first_message, "a:b")?;
+    let first_identity = ConsumerIdentity::new(
+        first_message.metadata().tenant_id(),
+        ConsumerGroup::parse("a:b")?,
+        first_message.id().clone(),
+        first_message.metadata().contract().clone(),
+    );
     let second_message = envelope("b:c", b"payload")?;
-    let second = verified(&second_message, "a")?;
+    let second_identity = ConsumerIdentity::new(
+        second_message.metadata().tenant_id(),
+        ConsumerGroup::parse("a")?,
+        second_message.id().clone(),
+        second_message.metadata().contract().clone(),
+    );
     assert!(matches!(
-        collision_store.claim(&first, deadline(&clock)?).await?,
+        collision_store
+            .claim(
+                crate::execution(first_identity.tenant_id(), 1),
+                &first_identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
     assert!(matches!(
-        collision_store.claim(&second, deadline(&clock)?).await?,
+        collision_store
+            .claim(
+                crate::execution(second_identity.tenant_id(), 1),
+                &second_identity,
+                deadline(&clock)?
+            )
+            .await?,
         IdempotencyDisposition::Acquired(_)
     ));
 
+    let changed_schema_identity = ConsumerIdentity::new(
+        second_message.metadata().tenant_id(),
+        ConsumerGroup::parse("a")?,
+        second_message.id().clone(),
+        ContractIdentity::new(
+            second_message.metadata().contract().id().clone(),
+            second_message.metadata().contract().version(),
+            SchemaDigest::parse(
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            )?,
+        ),
+    );
+    assert!(matches!(
+        collision_store
+            .claim(
+                crate::execution(changed_schema_identity.tenant_id(), 1),
+                &changed_schema_identity,
+                deadline(&clock)?
+            )
+            .await?,
+        IdempotencyDisposition::Acquired(_)
+    ));
     Ok(())
 }
 
@@ -554,12 +617,7 @@ async fn outbox_same_message_id_is_independent_across_tenants() -> TestResult {
             store
                 .append(
                     &mut (),
-                    PendingMessage::new(envelope_in_partition(
-                        "shared-id",
-                        b"payload",
-                        tenant,
-                        Some("customer-7")
-                    )?)
+                    PendingMessage::new(envelope_for_tenant("shared-id", b"payload", tenant)?)
                 )
                 .await?,
             AppendOutcome::Inserted
@@ -601,12 +659,7 @@ async fn outbox_same_message_id_is_independent_across_tenants() -> TestResult {
             store
                 .append(
                     &mut (),
-                    PendingMessage::new(envelope_in_partition(
-                        "shared-id",
-                        b"payload",
-                        tenant,
-                        Some("customer-7")
-                    )?)
+                    PendingMessage::new(envelope_for_tenant("shared-id", b"payload", tenant)?)
                 )
                 .await?,
             AppendOutcome::AlreadyPresent

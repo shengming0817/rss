@@ -246,7 +246,6 @@ fn expect_disposition<C>(
                 IdempotencyDisposition::Acquired(_) => "acquired",
                 IdempotencyDisposition::CapacityBusy => "capacity-busy",
                 IdempotencyDisposition::InProgress => "in-progress",
-                IdempotencyDisposition::Conflict(_) => "conflict",
                 IdempotencyDisposition::Terminal(_) => "terminal",
             };
             if actual == expected {

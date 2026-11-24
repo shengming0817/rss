@@ -102,7 +102,10 @@ async fn roundtrip(runtime: Arc<PgRuntime>, binding: ExecutionBinding) -> anyhow
         &envelope,
     )
     .map_err(|_| anyhow::anyhow!("ingress"))?;
-    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&verified, deadline()).await? else {
+    let IdempotencyDisposition::Acquired(claim) = inbox
+        .claim(verified.execution(), verified.identity(), deadline())
+        .await?
+    else {
         anyhow::bail!("missing inbox claim")
     };
     let result =
