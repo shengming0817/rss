@@ -360,7 +360,7 @@ mod producer {
                 .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
         }
 
-        async fn lease_status(
+        async fn extend(
             &self,
             claim: &Self::Claim,
             deadline: OperationDeadline,
@@ -381,14 +381,6 @@ mod producer {
             } else {
                 OutboxLeaseStatus::Lost
             })
-        }
-
-        async fn extend(
-            &self,
-            claim: &Self::Claim,
-            deadline: OperationDeadline,
-        ) -> Result<OutboxLeaseStatus, MessagingError> {
-            self.lease_status(claim, deadline).await
         }
 
         fn message(claim: &Self::Claim) -> &PendingMessage<P> {

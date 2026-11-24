@@ -214,7 +214,7 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
     );
     store.fence_claims();
     assert_eq!(
-        store.lease_status(&claim, deadline(&clock)?).await?,
+        store.extend(&claim, deadline(&clock)?).await?,
         OutboxLeaseStatus::Lost
     );
     let error = match store
@@ -260,7 +260,7 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
         .ok_or("expired claim")?;
     assert_eq!(
         store
-            .lease_status(&claim, expired_deadline(&clock)?)
+            .extend(&claim, expired_deadline(&clock)?)
             .await?,
         OutboxLeaseStatus::Lost
     );
@@ -649,7 +649,7 @@ async fn outbox_same_message_id_is_independent_across_tenants() -> TestResult {
         .settle(a, OutboxSettlement::Published(()), deadline(&clock)?)
         .await?;
     assert!(matches!(
-        store.lease_status(&b, deadline(&clock)?).await?,
+        store.extend(&b, deadline(&clock)?).await?,
         OutboxLeaseStatus::Held { .. }
     ));
     store
@@ -720,7 +720,7 @@ async fn outbox_old_attempt_cannot_change_successor_or_terminal() -> TestResult 
                 .await;
             assert_eq!(result.err().map(|error| error.kind()), Some(expected));
             assert!(matches!(
-                store.lease_status(&current, deadline(&clock)?).await?,
+                store.extend(&current, deadline(&clock)?).await?,
                 OutboxLeaseStatus::Held { .. }
             ));
         }

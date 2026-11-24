@@ -15,9 +15,6 @@ impl OutboxRelayStore<Vec<u8>> for EmptyRelay {
         OutboxClaimBatch::try_from_provider(Vec::new(), limit)
             .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant,error))
     }
-    async fn lease_status(&self, _: &Self::Claim, _: OperationDeadline) -> Result<OutboxLeaseStatus, MessagingError> {
-        Ok(OutboxLeaseStatus::Lost)
-    }
     async fn extend(&self, _: &Self::Claim, _: OperationDeadline) -> Result<OutboxLeaseStatus, MessagingError> {
         Ok(OutboxLeaseStatus::Lost)
     }

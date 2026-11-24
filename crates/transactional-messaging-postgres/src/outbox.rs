@@ -302,6 +302,15 @@ impl<R> PgOutboxStore<R> {
             && self.writer.runtime.storage == claim.binding.storage()
             && claim.binding.tenant() == claim.message.envelope().metadata().tenant_id()
     }
+    #[cfg(feature = "recovery")]
+    pub(crate) async fn inspect_lease(
+        &self,
+        claim: &PgOutboxClaim,
+        deadline: OperationDeadline,
+    ) -> Result<OutboxLeaseStatus, MessagingError> {
+        self.lease(claim, deadline, 0).await
+    }
+
     async fn lease(
         &self,
         claim: &PgOutboxClaim,
@@ -432,13 +441,6 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         })).await.map_err(PgError::port)?;
         OutboxClaimBatch::try_from_provider(batch, limit)
             .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))
-    }
-    async fn lease_status(
-        &self,
-        claim: &Self::Claim,
-        deadline: OperationDeadline,
-    ) -> Result<OutboxLeaseStatus, MessagingError> {
-        self.lease(claim, deadline, 0).await
     }
     async fn extend(
         &self,

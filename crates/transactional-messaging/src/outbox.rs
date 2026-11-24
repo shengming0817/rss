@@ -328,14 +328,7 @@ pub trait OutboxRelayStore<P>: Send + Sync {
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<OutboxClaimBatch<Self::Claim>, MessagingError>> + Send;
 
-    /// Check ownership using provider-authoritative time and fencing state.
-    fn lease_status(
-        &self,
-        claim: &Self::Claim,
-        deadline: OperationDeadline,
-    ) -> impl Future<Output = Result<OutboxLeaseStatus, MessagingError>> + Send;
-
-    /// Extend only a still-owned lease and return the post-renewal remaining time.
+    /// Extend only a still-owned lease and return the authoritative lease and remaining same-ID delivery window.
     /// Return `Lost` if fenced or expired; renewal must not reset the same-ID delivery window.
     fn extend(
         &self,

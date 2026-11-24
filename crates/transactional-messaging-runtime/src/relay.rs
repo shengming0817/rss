@@ -198,27 +198,6 @@ where
     C: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let lease_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
-    let lease = within(clock, lease_deadline, |deadline| {
-        store.lease_status(&claim, deadline)
-    })
-    .await
-    .and_then(std::convert::identity);
-    let lease = match lease {
-        Ok(lease) => lease,
-        Err(error) => {
-            emit_runtime_failure(
-                emitter,
-                TransactionalMessagingRuntimePhase::RelayLease,
-                &error,
-            );
-            return Err(error);
-        }
-    };
-    if matches!(lease, OutboxLeaseStatus::Lost) {
-        emitter.emit(TransactionalMessagingObservation::RelayLeaseLost);
-        return Ok(None);
-    }
     let extend_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
     let extend_started = clock.now();
     let extended = within(clock, extend_deadline, |deadline| {

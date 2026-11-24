@@ -376,7 +376,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
     ) -> Result<bool, PgError> {
         match self
             .outbox
-            .lease_status(source, remaining(self, cutoff))
+            .inspect_lease(source, remaining(self, cutoff))
             .await
             .map_err(pg)?
         {

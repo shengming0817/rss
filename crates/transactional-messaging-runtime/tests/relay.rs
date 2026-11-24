@@ -104,14 +104,6 @@ impl OutboxRelayStore<Vec<u8>> for Store {
             .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
     }
 
-    async fn lease_status(
-        &self,
-        _claim: &Self::Claim,
-        _deadline: OperationDeadline,
-    ) -> Result<OutboxLeaseStatus, MessagingError> {
-        Ok(self.lease)
-    }
-
     async fn extend(
         &self,
         _claim: &Self::Claim,
@@ -366,17 +358,6 @@ impl OutboxRelayStore<Vec<u8>> for AuditedStore {
         let count = limit.get().min(claims.len());
         OutboxClaimBatch::try_from_provider(claims.drain(..count).collect(), limit)
             .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
-    }
-
-    async fn lease_status(
-        &self,
-        _claim: &Self::Claim,
-        _deadline: OperationDeadline,
-    ) -> Result<OutboxLeaseStatus, MessagingError> {
-        Ok(OutboxLeaseStatus::Held {
-            delivery_remaining: None,
-            remaining: Duration::from_secs(10),
-        })
     }
 
     async fn extend(
@@ -837,7 +818,6 @@ async fn exhausted_authoritative_lease_window_is_recoverable_not_invariant() {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PendingRelayStage {
     Claim,
-    Lease,
     Extend,
     Settle,
 }
@@ -881,21 +861,6 @@ impl OutboxRelayStore<Vec<u8>> for PendingStore {
         let count = limit.get().min(claims.len());
         OutboxClaimBatch::try_from_provider(claims.drain(..count).collect(), limit)
             .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
-    }
-
-    async fn lease_status(
-        &self,
-        _claim: &Self::Claim,
-        _deadline: OperationDeadline,
-    ) -> Result<OutboxLeaseStatus, MessagingError> {
-        if self.stage == Some(PendingRelayStage::Lease) {
-            self.started.fetch_add(1, Ordering::SeqCst);
-            return std::future::pending().await;
-        }
-        Ok(OutboxLeaseStatus::Held {
-            delivery_remaining: None,
-            remaining: Duration::from_secs(10),
-        })
     }
 
     async fn extend(
@@ -969,7 +934,6 @@ impl Publisher<Vec<u8>> for CountingPublisher {
 async fn never_ready_relay_provider_stages_are_bounded_and_stop_downstream_work() {
     for stage in [
         PendingRelayStage::Claim,
-        PendingRelayStage::Lease,
         PendingRelayStage::Extend,
         PendingRelayStage::Settle,
     ] {
