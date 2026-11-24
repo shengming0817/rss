@@ -3,20 +3,20 @@ use super::*;
 use rss_transactional_messaging_postgres::PgTransaction;
 
 // Count client statements on the very same backend, excluding this observer.
-async fn calls(tx: &mut PgTransaction<'_>) -> Result<[i64; 5], PgError> {
-    let (authority, commands, publication, save, clock): (i64, i64, i64, i64, i64) =
+async fn calls(tx: &mut PgTransaction<'_>) -> Result<([i64; 5], i64), PgError> {
+    let (authority, commands, publication, save, clock, total): (i64, i64, i64, i64, i64, i64) =
         tx.with_connection(|c| Box::pin(async move {
             sqlx::query_as("SELECT
                 coalesce(sum(n) FILTER (WHERE statement LIKE '%rss_device_command.lock_authority%'),0)::bigint,
                 coalesce(sum(n) FILTER (WHERE statement LIKE '%rss_device_command.commands%'),0)::bigint,
                 coalesce(sum(n) FILTER (WHERE statement LIKE '%rss_transactional_messaging.outbox%'),0)::bigint,
                 coalesce(sum(n) FILTER (WHERE statement LIKE '%rss_device_command.save_page%'),0)::bigint,
-                coalesce(sum(n) FILTER (WHERE statement LIKE '%clock_timestamp()%'),0)::bigint
+                coalesce(sum(n) FILTER (WHERE statement LIKE '%clock_timestamp()%'),0)::bigint, coalesce(sum(n),0)::bigint
                 FROM (SELECT statement, generic_plans + custom_plans AS n FROM pg_prepared_statements
                       WHERE statement NOT LIKE '%pg_prepared_statements%') plans")
                 .fetch_one(c).await
         })).await?;
-    Ok([authority, commands, publication, save, clock])
+    Ok(([authority, commands, publication, save, clock], total))
 }
 
 async fn measured(
@@ -26,7 +26,7 @@ async fn measured(
     expected: [i64; 5],
 ) -> anyhow::Result<Vec<Option<Command>>> {
     let store = f.store.clone();
-    let (commands, delta) = committed(
+    let (commands, delta, total) = committed(
         f.runtime
             .local_tx_with_context(
                 crate::execution(s.tenant(), 1),
@@ -34,12 +34,13 @@ async fn measured(
                 ExactCommandIds::new(ids)?,
                 move |page, tx| {
                     Box::pin(async move {
-                        let before = calls(tx).await?;
+                        let (before, total_before) = calls(tx).await?;
                         let commands = store.recover_exact(tx, s, *page).await?;
-                        let after = calls(tx).await?;
+                        let (after, total_after) = calls(tx).await?;
                         Ok((
                             commands,
                             std::array::from_fn::<_, 5, _>(|i| after[i] - before[i]),
+                            total_after - total_before,
                         ))
                     })
                 },
@@ -51,6 +52,11 @@ async fn measured(
         ids.len()
     );
     assert_eq!(delta, expected);
+    assert_eq!(
+        total,
+        delta.iter().sum::<i64>(),
+        "unexpected extra client SQL"
+    );
     Ok(commands)
 }
 

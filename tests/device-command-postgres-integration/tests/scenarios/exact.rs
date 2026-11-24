@@ -76,6 +76,7 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
             .await
             .is_err()
     );
+    damaged_foreign_command(f, s, other_device, coordinate).await?;
     let foreign_scope = Scope::new(TenantId::parse(OTHER)?, s.device());
     f.initialize(foreign_scope, coordinate).await?;
     assert_eq!(
@@ -116,6 +117,31 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
         .is_err()
     );
     foreign.runtime.close().await;
+    Ok(())
+}
+
+async fn damaged_foreign_command(
+    f: &Fixture,
+    s: Scope,
+    other: Scope,
+    coordinate: Coordinate,
+) -> anyhow::Result<()> {
+    use rss_transactional_messaging::error::MessagingErrorKind;
+    let name = "exact-damaged-foreign";
+    f.queue(name, other, coordinate).await?;
+    sqlx::query("UPDATE rss_device_command.commands SET version=2 WHERE tenant_id=$1::uuid AND command_id=$2")
+        .bind(s.tenant().to_string()).bind(name).execute(&f.owner).await?;
+    for (scope, expected) in [
+        (s, MessagingErrorKind::OwnershipLost),
+        (other, MessagingErrorKind::Invariant),
+    ] {
+        let err = f
+            .recover_exact(&[name], scope)
+            .await
+            .err()
+            .ok_or(Error::InvalidSnapshot)?;
+        assert_eq!(err.downcast::<PgError>()?.kind(), expected);
+    }
     Ok(())
 }
 

@@ -95,6 +95,14 @@ pub(crate) fn decode(row: PgRow) -> Result<Stored, PgError> {
         fingerprint,
     })
 }
+// The tenant predicate and RLS select the tenant. Fence the device before decoding
+// command facts so even a malformed foreign snapshot yields the same ownership error.
+fn decode_for_device(row: PgRow, device: &str) -> Result<Stored, PgError> {
+    if row.try_get::<&str, _>("device")? != device {
+        return Err(error(Error::Fenced));
+    }
+    decode(row)
+}
 pub(crate) async fn read(
     tx: &mut PgTransaction<'_>,
     s: Scope,
@@ -103,13 +111,10 @@ pub(crate) async fn read(
     scope(tx, s)?;
     let t = s.tenant().to_string();
     let id = id.as_str().to_owned();
-    let r=tx.with_connection(move |c|Box::pin(async move {
+    let device = s.device().as_uuid().to_string();
+    tx.with_connection(move |c|Box::pin(async move {
         sqlx::query("SELECT *,tenant_id::text AS tenant,device_id::text AS device FROM rss_device_command.commands WHERE tenant_id=$1::uuid AND command_id=$2").bind(t).bind(id).fetch_optional(c).await
-    })).await?.map(decode).transpose()?;
-    if r.as_ref().is_some_and(|r| r.command.spec().scope() != s) {
-        return Err(error(Error::Fenced));
-    }
-    Ok(r)
+    })).await?.map(|row| decode_for_device(row, &device)).transpose()
 }
 pub(crate) async fn exact_rows(
     tx: &mut PgTransaction<'_>,
@@ -134,16 +139,13 @@ pub(crate) async fn exact_rows(
             ORDER BY requested.position")
             .bind(tenant).bind(requested).fetch_all(c).await
     })).await?;
+    let device = scope.device().as_uuid().to_string();
     rows.into_iter()
         .map(|row| {
             if row.try_get::<Option<&str>, _>("command_id")?.is_none() {
                 return Ok(None);
             }
-            let stored = decode(row)?;
-            if stored.command.spec().scope() != scope {
-                return Err(error(Error::Fenced));
-            }
-            Ok(Some(stored))
+            decode_for_device(row, &device).map(Some)
         })
         .collect()
 }
