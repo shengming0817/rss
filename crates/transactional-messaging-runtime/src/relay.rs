@@ -194,9 +194,14 @@ async fn claim_heads<P, S: OutboxRelayStore<P>>(
     .await
     .and_then(std::convert::identity)
     .and_then(|claims| {
-        claims
-            .validate_limit(limit)
-            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
+        claims.validate_limit(limit).map_err(|error| {
+            tracing::warn!(
+                actual = error.actual(),
+                limit = error.limit(),
+                "outbox provider exceeded the requested claim limit"
+            );
+            MessagingError::new(MessagingErrorKind::Invariant, error)
+        })?;
         Ok(claims)
     })
     .inspect_err(|error| {
