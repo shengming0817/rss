@@ -3,12 +3,15 @@
 Provider-neutral execution algorithms and managed worker integration for
 `rss-transactional-messaging`.
 
-The producer side owns `relay_once(binding, ...)`, bounded concurrent claim dispatch, publish-before-settlement,
-same-ID ambiguous retry, and a polling worker with skipped missed ticks. Every already claimed entry
-is drained before a batch error is returned. Cancellation stops new claims; the active batch may
-finish within the host's explicit shutdown budget. `RelayConfig` accepts polling intervals from
-at least 100ms and an explicit `NonZeroUsize` capacity; the same limit bounds both
-durable claims and concurrent publication work in the public batch API.
+The producer side owns `relay_once(binding, ...)`, which claims one bounded batch, drains it,
+and returns the first error in claim order. Each publication starts with one fenced lease
+extension that returns both remaining windows. The long-running worker refills free slots
+as individual claims finish settlement, polling active work even while a claim request is pending.
+`RelayConfig::new(claim_limit, max_in_flight, idle_scan_interval, error_backoff)` controls each
+request size, total admitted work, empty-scan interval and recoverable-error delay. Both delays
+must be at least 100ms. A completion can wake an idle scan. A recoverable infrastructure failure
+holds further requests until the error delay elapses. Cancellation or a fatal error stops new
+requests and drains every admitted claim, including the reply to a request already in progress.
 Every relay store/publisher future passes through the core-owned absolute-deadline race. Publish
 timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; claim, lease and
 settlement timeout stop downstream work without inventing durable state.
@@ -56,7 +59,7 @@ runs on an application's Tokio host or through the optional RSS lifecycle bridge
 spawn tasks or catch provider panics. Constructors and directly awaited loops can borrow ports;
 only spawning or RSS registration requires owned, `'static` dependencies. The crate remains
 Tokio-based: `consume_once` uses Tokio selection and cooperative yielding, and the relay loop
-uses a Tokio interval with skipped missed ticks.
+uses Tokio selection and the injected execution timer for admission delays.
 
 A cancellation token stops new work; it does not discard an active delivery or batch. Keep driving
 the future so renewal, transaction outcome, and settlement can finish. The operation and settlement

@@ -2,6 +2,8 @@
 // reason: deterministic in-memory fixtures must fail loudly on poisoned locks or script drift.
 
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
+#[path = "relay/worker.rs"]
+mod worker;
 mod support;
 
 use std::collections::BTreeMap;
@@ -166,6 +168,10 @@ fn message() -> PendingMessage<Vec<u8>> {
 }
 
 fn message_with_id(id: &str) -> PendingMessage<Vec<u8>> {
+    partitioned_message(id, None)
+}
+
+fn partitioned_message(id: &str, partition: Option<&str>) -> PendingMessage<Vec<u8>> {
     let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
     let metadata = MessageMetadata::new(
         AuthoredMessageMetadata::new(
@@ -182,7 +188,7 @@ fn message_with_id(id: &str) -> PendingMessage<Vec<u8>> {
                 .expect("schema"),
             ),
         ),
-        MessageMetadataExtensions::new(None, None, None, BTreeMap::new()),
+        MessageMetadataExtensions::new(None, partition.map(|key| rss_transactional_messaging::message::PartitionKey::parse(key).expect("partition")), None, BTreeMap::new()),
     );
     PendingMessage::new(MessageEnvelope::new(
         MessageId::parse(id).expect("id"),
@@ -491,7 +497,7 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
         Arc::clone(&publisher),
         Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
-        RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
+        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), cancellation.clone()));
@@ -526,7 +532,7 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
         Arc::new(ScriptedPublisher::new([])),
         Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
-        RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
+        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
     );
     let (registration, status) = worker.into_registration(
         execution(fixture_tenant(), 1),
@@ -565,9 +571,9 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
     let worker = RelayWorker::<Vec<u8>, _, _, _, _>::new(
         Arc::clone(&store),
         Arc::new(ScriptedPublisher::new([])),
-        Arc::new(ScriptedTimer::new([1])),
+        Arc::new(ScriptedTimer::new([1, 2])),
         Arc::new(NoopEmitter),
-        RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
+        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), cancellation.clone()));
@@ -1063,7 +1069,7 @@ async fn directly_awaited_relay_accepts_borrowed_timer_and_stops_before_claim() 
         Arc::new(ScriptedPublisher::new([])),
         Arc::new(support::BorrowedTimer(&timer)),
         Arc::new(NoopEmitter),
-        RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN).expect("config"),
+        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     cancellation.cancel();
@@ -1091,13 +1097,18 @@ impl rss_request_context::ExecutionTimer for ShutdownTimer {
 }
 
 #[test]
-fn relay_polling_keeps_only_the_busy_loop_floor() {
-    assert!(RelayConfig::new(Duration::from_millis(99), NonZeroUsize::MIN).is_err());
-    for seconds in [301, 90_000] {
-        let config = RelayConfig::new(Duration::from_secs(seconds), NonZeroUsize::MIN)
-            .expect("finite polling");
-        assert_eq!(config.poll_interval(), Duration::from_secs(seconds));
-    }
+fn relay_delays_share_only_the_busy_loop_floor() {
+    let config = |idle, backoff| RelayConfig::new(limit(), NonZeroUsize::MIN, idle, backoff);
+    let floor = Duration::from_millis(100);
+    let short = Duration::from_millis(99);
+    assert!(config(short, floor).is_err());
+    assert!(config(floor, short).is_err());
+    let long = Duration::from_secs(90_000);
+    let valid = config(floor, long).expect("independent delays");
+    assert_eq!(valid.claim_limit(), limit());
+    assert_eq!(valid.max_in_flight(), NonZeroUsize::MIN);
+    assert_eq!(valid.idle_scan_interval(), floor);
+    assert_eq!(valid.error_backoff(), long);
 }
 
 #[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.

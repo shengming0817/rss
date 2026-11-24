@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream::{self, StreamExt as _};
+use futures::stream::{self, FuturesUnordered, StreamExt as _};
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::observability::{
     TransactionalMessagingDisposition, TransactionalMessagingEmitter,
@@ -14,58 +14,60 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingRuntimePhase,
 };
 use rss_transactional_messaging::outbox::{
-    OutboxDisposition, OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement,
+    OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement,
 };
 use rss_transactional_messaging::policy::{DeliveryBudget, within};
 use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
     Publisher,
 };
-use tokio::time::MissedTickBehavior;
+use rss_transactional_messaging::fence::ExecutionBinding;
 
-const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MIN_SCAN_DELAY: Duration = Duration::from_millis(100);
 
-/// Invalid relay loop configuration.
+/// A scan delay below the operational floor could busy-loop on a failing or empty store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum RelayConfigError {
-    /// Polling faster than the supported operational floor would create a busy loop.
-    #[error("relay poll interval must be at least 100ms")]
-    PollIntervalTooSmall,
-}
+#[error("relay idle scan interval and error backoff must each be at least 100ms")]
+pub struct RelayConfigError;
 
-/// Validated polling and backpressure configuration for one relay worker.
+/// Admission and backpressure configuration for one relay worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelayConfig {
-    poll_interval: Duration,
+    claim_limit: NonZeroUsize,
     max_in_flight: NonZeroUsize,
+    idle_scan_interval: Duration,
+    error_backoff: Duration,
 }
 
 impl RelayConfig {
-    /// Validate one relay loop configuration.
+    /// Set the per-request claim bound, total work capacity and independent scan delays.
     pub fn new(
-        poll_interval: Duration,
+        claim_limit: NonZeroUsize,
         max_in_flight: NonZeroUsize,
+        idle_scan_interval: Duration,
+        error_backoff: Duration,
     ) -> Result<Self, RelayConfigError> {
-        if poll_interval < MIN_POLL_INTERVAL {
-            return Err(RelayConfigError::PollIntervalTooSmall);
+        if idle_scan_interval.min(error_backoff) < MIN_SCAN_DELAY {
+            return Err(RelayConfigError);
         }
-        Ok(Self {
-            poll_interval,
-            max_in_flight,
-        })
+        Ok(Self { claim_limit, max_in_flight, idle_scan_interval, error_backoff })
     }
 
-    /// Return the fixed polling interval.
+    /// Maximum number of durable claims per request.
     #[must_use]
-    pub const fn poll_interval(self) -> Duration {
-        self.poll_interval
-    }
+    pub const fn claim_limit(self) -> NonZeroUsize { self.claim_limit }
 
-    /// Return the hard concurrency and claim bound.
+    /// Maximum number of claims being prepared, published or settled.
     #[must_use]
-    pub const fn max_in_flight(self) -> NonZeroUsize {
-        self.max_in_flight
-    }
+    pub const fn max_in_flight(self) -> NonZeroUsize { self.max_in_flight }
+
+    /// Time between empty scans in the absence of completed work.
+    #[must_use]
+    pub const fn idle_scan_interval(self) -> Duration { self.idle_scan_interval }
+
+    /// Minimum wait before a new scan after a recoverable infrastructure error.
+    #[must_use]
+    pub const fn error_backoff(self) -> Duration { self.error_backoff }
 }
 
 /// Counts the closed outcomes produced by one bounded relay batch.
@@ -126,28 +128,7 @@ where
     E: TransactionalMessagingEmitter,
 {
     let budget = store.delivery_budget();
-    let claim_started = clock.now();
-    let claim_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
-    let claims = match within(clock, claim_deadline, |deadline| {
-        store.claim_partition_heads(binding, limit, deadline)
-    })
-    .await
-    .and_then(std::convert::identity)
-    {
-        Ok(claims) => claims,
-        Err(error) => {
-            emit_runtime_failure(
-                emitter,
-                TransactionalMessagingRuntimePhase::RelayClaim,
-                &error,
-            );
-            return Err(error);
-        }
-    };
-    emitter.emit(TransactionalMessagingObservation::RelayTick {
-        phase: TransactionalMessagingRelayPhase::Claim,
-        duration: clock.now().saturating_duration_since(claim_started),
-    });
+    let claims = claim_heads(binding, store, clock, budget, emitter, limit).await?;
 
     let mut results = stream::iter(claims.into_iter().enumerate().map(
         |(index, claim)| async move {
@@ -181,6 +162,46 @@ where
         Some(error) => Err(error),
         None => Ok(report),
     }
+}
+
+async fn claim_heads<P, S: OutboxRelayStore<P>>(
+    binding: ExecutionBinding,
+    store: &S,
+    clock: &impl ExecutionTimer,
+    budget: DeliveryBudget,
+    emitter: &impl TransactionalMessagingEmitter,
+    limit: NonZeroUsize,
+) -> Result<OutboxClaimBatch<S::Claim>, MessagingError> {
+    let claim_started = clock.now();
+    let claim_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
+    let claims = match within(clock, claim_deadline, |deadline| {
+        store.claim_partition_heads(binding, limit, deadline)
+    })
+    .await
+    .and_then(std::convert::identity)
+    {
+        Ok(claims) if claims.len() <= limit.get() => claims,
+        Ok(_) => {
+            let error = MessagingError::new(MessagingErrorKind::Invariant,
+                std::io::Error::other("outbox batch exceeds requested capacity"));
+            emit_runtime_failure(emitter, TransactionalMessagingRuntimePhase::RelayClaim, &error);
+            return Err(error);
+        }
+        Err(error) => {
+            emit_runtime_failure(
+                emitter,
+                TransactionalMessagingRuntimePhase::RelayClaim,
+                &error,
+            );
+            return Err(error);
+        }
+    };
+    emitter.emit(TransactionalMessagingObservation::RelayTick {
+        phase: TransactionalMessagingRelayPhase::Claim,
+        duration: clock.now().saturating_duration_since(claim_started),
+    });
+
+    Ok(claims)
 }
 
 async fn relay_claim<P, S, U, C, E>(
@@ -379,46 +400,121 @@ where
         binding: rss_transactional_messaging::fence::ExecutionBinding,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<(), MessagingError> {
-        absolute_deadline(
-            self.clock.as_ref(),
-            self.config.poll_interval(),
-            self.emitter.as_ref(),
-        )?;
-        let mut ticker = tokio::time::interval(self.config.poll_interval());
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            absolute_deadline(
-                self.clock.as_ref(),
-                self.config.poll_interval(),
-                self.emitter.as_ref(),
-            )?;
+        let clock = self.clock.as_ref();
+        let emitter = self.emitter.as_ref();
+        let store = self.store.as_ref();
+        let budget = store.delivery_budget();
+        let mut active = FuturesUnordered::new();
+        let mut admission = Admission::Ready;
+
+        while !token.is_cancelled() && !matches!(admission, Admission::Stopped(_)) {
+            let free = self.config.max_in_flight.get() - active.len();
+            if let Some(limit) = NonZeroUsize::new(free.min(self.config.claim_limit.get()))
+                && matches!(admission, Admission::Ready)
+            {
+                // A claim can already be durable while its reply is pending. Finish this
+                // one request even if cancellation or a fatal settlement stops admission.
+                let scan = claim_heads(binding, store, clock, budget, emitter, limit);
+                tokio::pin!(scan);
+                let before = active.len();
+                let claims = loop {
+                    tokio::select! {
+                        biased;
+                        result = &mut scan => break result,
+                        Some(result) = active.next(), if !active.is_empty() => {
+                            admission.completed(result, &self.config, clock, emitter);
+                        }
+                    }
+                };
+                match claims {
+                    Ok(batch) if batch.is_empty() => {
+                        if before == active.len() && matches!(admission, Admission::Ready) {
+                            admission = Admission::delay(clock, emitter, self.config.idle_scan_interval, Admission::Idle);
+                        }
+                    }
+                    Ok(batch) => {
+                        for claim in batch {
+                            active.push(relay_claim(store, self.publisher.as_ref(), clock, budget, emitter, claim));
+                        }
+                    }
+                    Err(error) => admission.failed(error, &self.config, clock, emitter),
+                }
+                // Ready in-memory providers must also share the caller's executor.
+                tokio::task::yield_now().await;
+                continue;
+            }
             tokio::select! {
                 biased;
-                () = token.cancelled() => return Ok(()),
-                _ = ticker.tick() => {}
-            }
-            let result = relay_once(
-                binding,
-                self.store.as_ref(),
-                self.publisher.as_ref(),
-                self.clock.as_ref(),
-                self.emitter.as_ref(),
-                self.config.max_in_flight(),
-            )
-            .await;
-            if let Err(error) = result {
-                if !matches!(
-                    error.kind(),
-                    MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed
-                ) {
-                    return Err(error);
+                () = token.cancelled() => break,
+                Some(result) = active.next(), if !active.is_empty() => {
+                    admission.completed(result, &self.config, clock, emitter);
                 }
-                tracing::warn!(
-                    error_kind = error.kind().as_label(),
-                    "relay batch will retry"
-                );
+                () = admission.wait(clock) => admission = Admission::Ready,
             }
         }
+        while let Some(result) = active.next().await {
+            admission.completed(result, &self.config, clock, emitter);
+        }
+        match admission {
+            Admission::Stopped(error) => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
+enum Admission {
+    Ready,
+    Idle(Deadline),
+    Backoff(Deadline),
+    Stopped(MessagingError),
+}
+
+impl Admission {
+    fn delay(
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+        duration: Duration,
+        state: fn(Deadline) -> Self,
+    ) -> Self {
+        absolute_deadline(clock, duration, emitter).map_or_else(Self::Stopped, state)
+    }
+
+    async fn wait(&self, clock: &impl ExecutionTimer) {
+        match self {
+            Self::Idle(at) | Self::Backoff(at) => clock.sleep_until(*at).await,
+            _ => std::future::pending().await,
+        }
+    }
+
+    fn completed(
+        &mut self,
+        result: Result<Option<OutboxDisposition>, MessagingError>,
+        config: &RelayConfig,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+    ) {
+        match result {
+            Err(error) => self.failed(error, config, clock, emitter),
+            Ok(_) if matches!(self, Self::Idle(_)) => *self = Self::Ready,
+            Ok(_) => {}
+        }
+    }
+
+    fn failed(
+        &mut self,
+        error: MessagingError,
+        config: &RelayConfig,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+    ) {
+        if matches!(self, Self::Stopped(_)) { return; }
+        *self = match error.kind() {
+            MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed => {
+                tracing::warn!(error_kind = error.kind().as_label(), "relay admission will retry");
+                Self::delay(clock, emitter, config.error_backoff, Self::Backoff)
+            }
+            _ => Self::Stopped(error),
+        };
     }
 }
 
