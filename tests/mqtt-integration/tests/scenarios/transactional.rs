@@ -160,12 +160,28 @@ async fn scenario() -> anyhow::Result<()> {
     case.uncertain(&mut stream, true).await?;
     case.invalid(&mut stream).await?;
     case.expired_retirement(&mut stream).await?;
+    // The driver may already be Ready on a replacement while the old stream still owns its lease.
+    case.publish("late-stream-drop").await?;
+    let before = support::ready_generation(&case.connection)?;
+    let (_, old) = next(&mut stream).await?.into_parts();
+    rss_transactional_messaging::transport::DeliverySettlement::abandon(
+        old,
+        support::deadline(&*case.clock),
+    )
+    .await?;
+    support::wait_reconnected(&case.connection, before).await?;
+    let replacement = support::ready_generation(&case.connection)?;
     drop(stream);
-    let recovered = tokio::time::timeout(
+    let mut recovered = tokio::time::timeout(
         Duration::from_secs(5),
         source.deliveries(&case.subscription, std::num::NonZeroU16::MIN),
     )
     .await??;
+    assert_committed(
+        case.process(next(&mut recovered).await?, None, false, true)
+            .await?,
+    );
+    assert_eq!(support::ready_generation(&case.connection)?, replacement);
     drop(recovered);
     drop(resource);
     case.database.runtime.close().await;

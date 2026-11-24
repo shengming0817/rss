@@ -127,6 +127,8 @@ pub(super) async fn run(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> {
         shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
         shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
     }
+    drain_after_failed_head(rabbit, false).await?;
+    drain_after_failed_head(rabbit, true).await?;
     busy_redelivery(rabbit).await
 }
 
@@ -209,6 +211,119 @@ async fn busy_redelivery(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> 
     assert_eq!(transaction.effects.load(Ordering::SeqCst), 1);
     drop(stream);
     shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
+    shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    Ok(())
+}
+
+struct DuringRetirement {
+    reject: bool,
+    requeue: Arc<Notify>,
+    finish: Arc<Notify>,
+}
+impl ConsumerTx<Vec<u8>> for DuringRetirement {
+    type Claim = ();
+    type CommitProof = ();
+    async fn execute(
+        &self,
+        _: &(),
+        msg: &MessageEnvelope<Vec<u8>>,
+        receipt: rss_transactional_messaging::transaction::ReceiptIntent,
+        _: OperationDeadline,
+    ) -> TransactionOutcome<()> {
+        match msg.id().as_str() {
+            "retry-head" => {
+                self.requeue.notified().await;
+                if self.reject {
+                    return rejected(receipt);
+                }
+                TransactionOutcome::rolled_back(
+                    rss_transactional_messaging::transaction::FailureClass::Infrastructure,
+                )
+            }
+            "independent" => {
+                self.finish.notified().await;
+                committed(receipt)
+            }
+            id => panic!("partition successor unexpectedly started: {id}"),
+        }
+    }
+}
+struct Requeued(Arc<Notify>);
+impl TransactionalMessagingEmitter for Requeued {
+    fn emit(&self, event: TransactionalMessagingObservation) {
+        use rss_transactional_messaging::observability::{
+            TransactionalMessagingDisposition, TransactionalMessagingIoOutcome,
+        };
+        if matches!(
+            event,
+            TransactionalMessagingObservation::ConsumerSettlement {
+                action: TransactionalMessagingDisposition::Requeue
+                    | TransactionalMessagingDisposition::Reject,
+                outcome: TransactionalMessagingIoOutcome::Ok
+            }
+        ) {
+            self.0.notify_one();
+        }
+    }
+}
+async fn drain_after_failed_head(
+    rabbit: &testkit::RabbitFixture,
+    reject: bool,
+) -> anyhow::Result<()> {
+    let url = isolated_url(rabbit, "rss_retire_window").await?;
+    let route = MessageRoute::parse("rss.retire")?;
+    let (sub, resource) = prepared_subscriber(&url, &route, "retire", true).await?;
+    let (publisher, publisher_resource) = connected_publisher(&url, "retire-pub").await?;
+    let subscription = subscription_for(&envelope(&route, "template"), &route);
+    let requeue = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
+    let requeued = Arc::new(Notify::new());
+    let (observed, mut admitted) = mpsc::unbounded_channel();
+    let stop = CancellationToken::new();
+    let worker = ConsumerWorker::new(
+        NonZeroU16::new(3).expect("three"),
+        Arc::new(sub),
+        Arc::new(LiveInbox),
+        Arc::new(DuringRetirement {
+            reject,
+            requeue: requeue.clone(),
+            finish: finish.clone(),
+        }),
+        ConsumerGroup::parse("retire")?,
+        Arc::new(ObserveIngress(observed)),
+        subscription,
+        Arc::new(TokioClock::new()),
+        consumer_policy(),
+        Arc::new(Requeued(requeued.clone())),
+        SubscriptionBackoffPolicy::STANDARD,
+    );
+    let task = tokio::spawn(worker.run(stop.clone()));
+    for (id, key) in [("retry-head", "k"), ("next", "k"), ("independent", "other")] {
+        assert!(matches!(
+            publisher
+                .publish(
+                    &envelope_in_partition(&route, id, vec![1], key),
+                    provider_deadline()
+                )
+                .await,
+            PublishOutcome::Confirmed(())
+        ));
+        assert_eq!(admitted.recv().await.as_deref(), Some(id));
+    }
+    stop.cancel();
+    requeue.notify_one();
+    requeued.notified().await;
+    finish.notify_one();
+    task.await??;
+    shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
+    let vhost = url.rsplit('/').next().expect("vhost");
+    assert_eq!(
+        rabbit
+            .broker_queue_total_depth(vhost, route.as_str())
+            .await?,
+        if reject { 1 } else { 2 },
+        "independent delivery ACKed while the ordered head and successor remain"
+    );
     shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }

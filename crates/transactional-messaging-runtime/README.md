@@ -43,11 +43,13 @@ without exposing a general-purpose Reject constructor.
 `ConsumerWorker` supervises subscription establishment, unexpected stream termination, and
 transient delivery-processing failures with a distinct unbounded, saturating exponential backoff.
 Opening a stream does not reset backoff: consecutive subscribe errors, empty streams and
-recoverable processing errors share the failure cursor. Only a completed delivery-processing
-operation (including successful settlement or invalid-delivery rejection) resets it to the base.
+recoverable processing errors share the failure cursor. A committed result, verified terminal duplicate, or settled rejection resets it to the base.
+Busy and deferred deliveries preserve the failure cursor.
 Transient delivery failures retire the current provider stream before resubscription. Pass a nonzero delivery window explicitly. One selects serial processing. AMQP applies
 the window as per-subscription prefetch. MQTT accepts one. Independent deliveries refill on
 completion; one subscription serializes verified tenant/domain/partition keys through settlement.
+A rejected terminal head retires that subscription before starting queued successors. Durable
+cross-subscription consumer ordering requires a separate recovery contract.
 Queued and busy deliveries count toward the same window and keep their original deadlines.
 A live claim or unstarted capacity wait keeps the handle unacknowledged and retries at the Inbox
 lease interval until the operation cutoff. Graceful cancellation seals admission before draining.

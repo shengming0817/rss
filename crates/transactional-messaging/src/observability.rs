@@ -238,6 +238,8 @@ pub enum TransactionalMessagingObservation {
     InboxBacklogUnavailable,
     /// An in-progress claim was observed.
     ConsumerClaimInProgress,
+    /// Ordinary execution capacity was occupied before a durable claim started.
+    ConsumerClaimCapacityBusy,
     /// An ingress envelope was rejected with a stable provider-neutral reason.
     #[cfg(feature = "consumer")]
     ConsumerIngressRejected {
@@ -284,6 +286,9 @@ impl TransactionalMessagingObservation {
             Self::InboxBacklog { .. } => TransactionalMessagingEvent::InboxBacklog,
             Self::InboxBacklogUnavailable => TransactionalMessagingEvent::InboxBacklogUnavailable,
             Self::ConsumerClaimInProgress => TransactionalMessagingEvent::ConsumerClaimInProgress,
+            Self::ConsumerClaimCapacityBusy => {
+                TransactionalMessagingEvent::ConsumerClaimCapacityBusy
+            }
             #[cfg(feature = "consumer")]
             Self::ConsumerIngressRejected { .. } => {
                 TransactionalMessagingEvent::ConsumerIngressRejected
@@ -330,6 +335,8 @@ pub enum TransactionalMessagingMetric {
     InboxOldestStaleClaimAgeSeconds,
     /// Count of consumer claims already in progress.
     ConsumerClaimInProgressTotal,
+    /// Ordinary execution capacity was occupied before a durable claim started.
+    ConsumerClaimCapacityBusyTotal,
     /// Count of ingress validation rejections by closed reason.
     ConsumerIngressRejectedTotal,
     /// Count of consumer transaction outcomes.
@@ -348,7 +355,7 @@ pub enum TransactionalMessagingMetric {
 
 impl TransactionalMessagingMetric {
     /// Complete metric inventory in stable order.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::RuntimeFailureTotal,
         Self::OutboxPublishTotal,
         Self::OutboxPublishFailureTotal,
@@ -359,6 +366,7 @@ impl TransactionalMessagingMetric {
         Self::InboxStaleClaimDepth,
         Self::InboxOldestStaleClaimAgeSeconds,
         Self::ConsumerClaimInProgressTotal,
+        Self::ConsumerClaimCapacityBusyTotal,
         Self::ConsumerIngressRejectedTotal,
         Self::ConsumerTransactionOutcomeTotal,
         Self::ConsumerSettlementTotal,
@@ -382,6 +390,7 @@ impl TransactionalMessagingMetric {
             Self::InboxStaleClaimDepth => "inbox_stale_claim_depth",
             Self::InboxOldestStaleClaimAgeSeconds => "inbox_oldest_stale_claim_age_seconds",
             Self::ConsumerClaimInProgressTotal => "consumer_claim_in_progress_total",
+            Self::ConsumerClaimCapacityBusyTotal => "consumer_claim_capacity_busy_total",
             Self::ConsumerIngressRejectedTotal => "transactional_messaging_ingress_rejected_total",
             Self::ConsumerTransactionOutcomeTotal => "consumer_tx_outcome_total",
             Self::ConsumerSettlementTotal => "consumer_settle_total",
@@ -410,6 +419,7 @@ impl TransactionalMessagingMetric {
             | Self::InboxStaleClaimDepth
             | Self::InboxOldestStaleClaimAgeSeconds
             | Self::ConsumerClaimInProgressTotal
+            | Self::ConsumerClaimCapacityBusyTotal
             | Self::ConsumerLeaseLostTotal
             | Self::RelayLeaseLostTotal
             | Self::ConsumerReleaseFailedTotal => &[],
@@ -438,6 +448,8 @@ pub enum TransactionalMessagingEvent {
     InboxBacklogUnavailable,
     /// A consumer claim that is already in progress.
     ConsumerClaimInProgress,
+    /// Ordinary execution capacity was occupied before a durable claim started.
+    ConsumerClaimCapacityBusy,
     /// One ingress rejection with a closed reason.
     ConsumerIngressRejected,
     /// One consumer transaction outcome.
@@ -456,7 +468,7 @@ pub enum TransactionalMessagingEvent {
 
 impl TransactionalMessagingEvent {
     /// Complete event inventory in stable order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::RuntimeFailure,
         Self::OutboxPublish,
         Self::OutboxPublishFailure,
@@ -466,6 +478,7 @@ impl TransactionalMessagingEvent {
         Self::InboxBacklog,
         Self::InboxBacklogUnavailable,
         Self::ConsumerClaimInProgress,
+        Self::ConsumerClaimCapacityBusy,
         Self::ConsumerIngressRejected,
         Self::ConsumerTransaction,
         Self::ConsumerSettlement,
@@ -488,6 +501,9 @@ impl TransactionalMessagingEvent {
             Self::InboxBacklog => "transactional_messaging.inbox.backlog",
             Self::InboxBacklogUnavailable => "transactional_messaging.inbox.backlog_unavailable",
             Self::ConsumerClaimInProgress => "transactional_messaging.consumer.claim_in_progress",
+            Self::ConsumerClaimCapacityBusy => {
+                "transactional_messaging.consumer.claim_capacity_busy"
+            }
             Self::ConsumerIngressRejected => "transactional_messaging.consumer.ingress_rejected",
             Self::ConsumerTransaction => "transactional_messaging.consumer.transaction",
             Self::ConsumerSettlement => "transactional_messaging.consumer.settlement",
@@ -519,6 +535,7 @@ impl TransactionalMessagingEvent {
             Self::OutboxBacklogUnavailable
             | Self::InboxBacklogUnavailable
             | Self::ConsumerClaimInProgress
+            | Self::ConsumerClaimCapacityBusy
             | Self::ConsumerLeaseLost
             | Self::RelayLeaseLost
             | Self::ConsumerReleaseFailed => &[],

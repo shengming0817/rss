@@ -395,10 +395,7 @@ impl PgRuntime {
         })
         .await??;
         let reserve = u32::from(
-            matches!(
-                profile,
-                Profile::Runtime | Profile::Consumer | Profile::Recovery
-            ) && config.max_connections > 1,
+            matches!(profile, Profile::Runtime | Profile::Consumer) && config.max_connections > 1,
         );
         let runtime = Self {
             ordinary_slots: Arc::new(Semaphore::new((config.max_connections - reserve) as usize)),

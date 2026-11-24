@@ -34,10 +34,15 @@ impl DeliverySource<Vec<u8>> for One {
         ))
     }
 }
-struct Sink;
+struct Sink(Arc<Notify>);
 impl TransactionalMessagingEmitter for Sink {
-    fn emit(&self, _: TransactionalMessagingObservation) {
-        // reason: real Inbox rows and one-shot settlement recorders own this test's evidence.
+    fn emit(&self, observation: TransactionalMessagingObservation) {
+        if matches!(
+            observation,
+            TransactionalMessagingObservation::ConsumerClaimCapacityBusy
+        ) {
+            self.0.notify_one();
+        }
     }
 }
 pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
@@ -56,6 +61,7 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     let token = CancellationToken::new();
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
+    let busy = Arc::new(Notify::new());
     let mut tasks = Vec::new();
     let mut recorders = Vec::new();
     for id in ["window-held", "window-waiting"] {
@@ -90,7 +96,7 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
             sub,
             Arc::new(Timer::new()),
             ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
-            Arc::new(Sink),
+            Arc::new(Sink(busy.clone())),
             SubscriptionBackoffPolicy::STANDARD,
         );
         tasks.push(tokio::spawn(worker.run(token.clone())));
@@ -101,6 +107,7 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     let remaining = || {
         sqlx::query_scalar::<_,i64>("SELECT (extract(epoch FROM lease_until)*1000)::bigint FROM rss_transactional_messaging.inbox WHERE message_id='window-held'").fetch_one(owner)
     };
+    tokio::time::timeout(Duration::from_secs(3), busy.notified()).await?;
     let initial = remaining().await?;
     testkit::await_try(Duration::from_secs(5), async || {
         Ok::<_, anyhow::Error>((remaining().await? > initial + 900).then_some(()))

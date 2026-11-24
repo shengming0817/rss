@@ -229,7 +229,12 @@ where
                     .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
                 ProcessingDisposition::InProgress
             }
-            Ok(IdempotencyDisposition::CapacityBusy) => ProcessingDisposition::CapacityBusy,
+            Ok(IdempotencyDisposition::CapacityBusy) => {
+                execution
+                    .emitter
+                    .emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
+                ProcessingDisposition::CapacityBusy
+            }
 
             Err(error) => {
                 emit_runtime_failure(
@@ -1013,6 +1018,7 @@ where
             HashMap::<PartitionIdentity, VecDeque<PreparedDelivery<P, S::Settlement>>>::new();
         let mut outstanding = 0usize;
         let mut stopped = false;
+        let mut retiring = false;
         let mut cause = Ok(None);
         loop {
             if stopped && active.is_empty() {
@@ -1033,10 +1039,13 @@ where
                     outstanding -= 1;
                     let reusable = match result {
                         Ok(
-                            ProcessingDisposition::Committed(_)
-                            | ProcessingDisposition::Duplicate(_)
-                            | ProcessingDisposition::Rejected(_),
+                            ProcessingDisposition::Committed(terminal)
+                            | ProcessingDisposition::Duplicate(terminal),
                         ) => {
+                            *recovery_attempt = NonZeroU32::MIN;
+                            key.is_none() || terminal == TerminalDisposition::Succeeded
+                        }
+                        Ok(ProcessingDisposition::Rejected(_)) => {
                             *recovery_attempt = NonZeroU32::MIN;
                             true
                         }
@@ -1053,14 +1062,15 @@ where
                     if !reusable {
                         stopped = true;
                         stream.stop_admission();
-                        // The unstarted siblings own no claim. Their broker handles must follow
-                        // the failed head through session recovery.
-                        partitions.clear();
+                        // Dropping an unstarted AMQP handle forces the channel closed. Hold
+                        // queued handles until active siblings finish their one-shot settlement.
+                        retiring = true;
                         if cause.is_ok() {
                             cause = Ok(Some(TransactionalMessagingSubscribeOutcome::DeliveryError));
                         }
                     }
-                    if let Some(key) = key
+                    if !retiring
+                        && let Some(key) = key
                         && let Entry::Occupied(mut lane) = partitions.entry(key)
                     {
                         if let Some(next) = lane.get_mut().pop_front() {

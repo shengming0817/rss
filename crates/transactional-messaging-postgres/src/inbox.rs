@@ -170,6 +170,27 @@ pub(crate) async fn lock_identity(
         .execute(&mut *tx.connection).await?;
     Ok(())
 }
+fn acknowledged_lease(
+    status: LeaseStatus,
+    elapsed: Duration,
+    policy: LeaseRenewalPolicy,
+) -> Result<LeaseStatus, PgError> {
+    let LeaseStatus::Held { remaining } = status else {
+        return Ok(LeaseStatus::Lost);
+    };
+    let remaining = remaining.saturating_sub(elapsed);
+    if remaining.is_zero() {
+        return Ok(LeaseStatus::Lost);
+    }
+    if !policy.fits(remaining) {
+        return Err(PgError::classified(
+            MessagingErrorKind::Transient,
+            std::io::Error::other("insufficient acknowledged Inbox lease headroom"),
+        ));
+    }
+    Ok(LeaseStatus::Held { remaining })
+}
+
 pub(crate) async fn extend_locked(
     tx: &mut PgTransaction<'_>,
     identity: &ConsumerIdentity,
@@ -276,11 +297,8 @@ impl InboxStore for PgInboxStore {
             "PostgreSQL Inbox renewal"
         );
         checked
-            .map(|(observed, status)| match status {
-                LeaseStatus::Held { remaining } => LeaseStatus::Held {
-                    remaining: remaining.saturating_sub(now.saturating_duration_since(observed)),
-                },
-                LeaseStatus::Lost => LeaseStatus::Lost,
+            .and_then(|(observed, status)| {
+                acknowledged_lease(status, now.saturating_duration_since(observed), self.policy)
             })
             .map_err(PgError::port)
             .or_else(|error| {
@@ -349,5 +367,30 @@ mod tests {
                 Err(PgError::InvalidLeaseDuration)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_ack_can_consume_renewal_headroom() -> Result<(), Box<dyn std::error::Error>> {
+        let ttl = Duration::from_millis(900);
+        let policy = LeaseRenewalPolicy::from_ttl(ttl)?;
+        let check =
+            |elapsed| acknowledged_lease(LeaseStatus::Held { remaining: ttl }, elapsed, policy);
+        assert_eq!(
+            check(Duration::from_millis(100))?,
+            LeaseStatus::Held {
+                remaining: Duration::from_millis(800)
+            }
+        );
+        assert_eq!(
+            check(Duration::from_millis(600)).err().map(|e| e.kind()),
+            Some(MessagingErrorKind::Transient)
+        );
+        assert_eq!(check(ttl)?, LeaseStatus::Lost);
+        Ok(())
     }
 }

@@ -370,7 +370,10 @@ pub trait DeliverySource<P>: Send + Sync {
     /// Stream of decoded envelopes or explicit decode rejections.
     type Deliveries: Stream<Item = IncomingDelivery<P, Self::Settlement>> + Send + Unpin;
 
-    /// Establish a stream for this subscription, or return a classified admission error.
+    /// Establish a stream for this subscription and its explicit maximum in-flight deliveries.
+    /// Apply the matching transport window when the protocol offers credit (AMQP prefetch).
+    /// Providers that cannot support the requested concurrency must reject it at establishment
+    /// with a permanent configuration error. Window one selects serial processing.
     fn deliveries(
         &self,
         subscription: &SubscriptionIdentity,
