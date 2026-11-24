@@ -7,42 +7,60 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
         ("head-rollback", true, false, Some("first")),
         ("append-rollback", false, true, None),
     ] {
-        let head = ordered(&format!("{lane}-first"), lane, "partition");
-        let tail = ordered(&format!("{lane}-next"), lane, "partition");
-        let tenant = head.metadata().tenant_id();
-        let pairs = serde_json::json!([[lane, "partition"]]);
-        let claim = seed_claim(raw, &head).await?;
-        let mut writer = sql_tx(raw, tenant).await?;
-        sql_prepare(&mut writer, pairs).await?;
-        sql_append(&mut writer, &tail).await?;
-        // The writer owns the allocator and may next need this source. A standalone
-        // handoff must release the source on contention, before either session waits.
-        let mut relay = sql_tx(raw, tenant).await?;
-        let error = settle(&mut relay, tenant, &claim)
-            .await
-            .expect_err("busy source allocator");
-        assert_eq!(code(&error).as_deref(), Some("55P03"));
-        relay.rollback().await?;
-        if commit_append {
-            writer.commit().await?;
-        } else {
-            writer.rollback().await?;
-        }
-        finish_claim(sql_tx(raw, tenant).await?, tenant, claim, commit_settlement).await?;
-        let marked:Vec<String> = sqlx::query_scalar("SELECT message_id FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND partition_head")
-            .bind(tenant.to_string()).bind(lane).fetch_all(owner).await?;
-        assert_eq!(
-            marked,
-            expected
-                .into_iter()
-                .map(|suffix| format!("{lane}-{suffix}"))
-                .collect::<Vec<_>>()
-        );
+        concurrent_handoff(raw, owner, lane, commit_append, commit_settlement, expected).await?;
     }
+    standalone_and_declared(raw, owner).await?;
     late_declaration(raw).await?;
     stale_snapshot(raw).await?;
     crossed_declarations(raw).await?;
     capacity(raw).await
+}
+
+async fn concurrent_handoff(
+    raw: &PgPool,
+    owner: &PgPool,
+    lane: &str,
+    commit_append: bool,
+    commit_settlement: bool,
+    expected: Option<&str>,
+) -> anyhow::Result<()> {
+    let head = ordered(&format!("{lane}-first"), lane, "partition");
+    let tail = ordered(&format!("{lane}-next"), lane, "partition");
+    let tenant = head.metadata().tenant_id();
+    let pairs = serde_json::json!([[lane, "partition"]]);
+    let claim = seed_claim(raw, &head).await?;
+    let mut writer = sql_tx(raw, tenant).await?;
+    sql_prepare(&mut writer, pairs).await?;
+    sql_append(&mut writer, &tail).await?;
+    // The writer owns the allocator and may next need this source. A standalone
+    // handoff must release the source on contention, before either session waits.
+    assert_busy(raw, tenant, &claim).await?;
+    end_transaction(writer, commit_append).await?;
+    finish_claim(sql_tx(raw, tenant).await?, tenant, claim, commit_settlement).await?;
+    let marked:Vec<String> = sqlx::query_scalar("SELECT message_id FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND partition_head")
+            .bind(tenant.to_string()).bind(lane).fetch_all(owner).await?;
+    assert_eq!(
+        marked,
+        expected
+            .into_iter()
+            .map(|suffix| format!("{lane}-{suffix}"))
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+async fn assert_busy(
+    raw: &PgPool,
+    tenant: TenantId,
+    claim: &(i64, String, i64),
+) -> anyhow::Result<()> {
+    let mut relay = sql_tx(raw, tenant).await?;
+    let error = settle(&mut relay, tenant, claim)
+        .await
+        .expect_err("busy source allocator");
+    assert_eq!(code(&error).as_deref(), Some("55P03"));
+    relay.rollback().await?;
+    Ok(())
 }
 
 async fn seed_claim(
@@ -88,6 +106,10 @@ async fn finish_claim(
 ) -> anyhow::Result<()> {
     let result = settle(&mut tx, tenant, &claim).await?;
     assert_eq!(result, "settled");
+    end_transaction(tx, commit).await
+}
+
+async fn end_transaction(tx: Transaction<'_, Postgres>, commit: bool) -> anyhow::Result<()> {
     if commit {
         tx.commit().await?;
     } else {
@@ -109,6 +131,43 @@ async fn fixed_snapshot(
         .fetch_one(&mut *old).await?;
     assert!(first);
     Ok(old)
+}
+
+// The combined writer owns both declared allocators and is waiting on the
+// standalone caller's source row. Only the writer may wait in this schedule.
+async fn standalone_and_declared(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> {
+    let head = ordered("composed-first", "composed", "source");
+    let tenant = head.metadata().tenant_id();
+    let claim = seed_claim(raw, &head).await?;
+    let mut standalone = sql_tx(raw, tenant).await?;
+    let _:i64=sqlx::query_scalar("SELECT lease_us FROM rss_transactional_messaging.outbox_lease($1::uuid,$2,$3::uuid,$4,0,NULL)")
+        .bind(tenant.to_string()).bind(claim.0).bind(&claim.1).bind(claim.2).fetch_one(&mut *standalone).await?;
+    let mut combined = sql_tx(raw, tenant).await?;
+    sql_prepare(
+        &mut combined,
+        serde_json::json!([["composed", "source"], ["composed", "output"]]),
+    )
+    .await?;
+    sql_append(
+        &mut combined,
+        &ordered("composed-result", "composed", "output"),
+    )
+    .await?;
+    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *combined)
+        .await?;
+    let complete = finish_claim(combined, tenant, claim.clone(), true);
+    let release = async {
+        wait_lock(owner, pid).await?;
+        let busy = settle(&mut standalone, tenant, &claim)
+            .await
+            .expect_err("source cannot wait for allocator");
+        assert_eq!(code(&busy).as_deref(), Some("55P03"));
+        standalone.rollback().await?;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(complete, release)?;
+    Ok(())
 }
 
 async fn late_declaration(raw: &PgPool) -> anyhow::Result<()> {

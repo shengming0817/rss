@@ -233,48 +233,7 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     } else {
         "slow-confirm"
     };
-    let request = CommandSpec::new(
-        s,
-        CommandId::parse(name)?,
-        c,
-        StateDigest::from_bytes([7; 32]),
-        expires,
-    );
-    let msg = message(name, s.tenant())?;
-    let store = f.store.clone();
-    committed(
-        f.runtime
-            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.queue(tx, request, msg).await })
-            })
-            .await,
-    )?;
-    f.publish().await?;
-    if !exact {
-        let later = CommandSpec::new(
-            s,
-            CommandId::parse("slow-confirm-z")?,
-            c,
-            StateDigest::from_bytes([7; 32]),
-            expires,
-        );
-        let msg = message("slow-confirm-z", s.tenant())?;
-        let store = f.store.clone();
-        committed(
-            f.runtime
-                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.queue(tx, later, msg).await })
-                })
-                .await,
-        )?;
-        f.publish().await?;
-        assert_eq!(
-            f.recover_exact("slow-confirm-z", s)
-                .await?
-                .map(|c| c.status()),
-            Some(Status::Published)
-        );
-    }
+    prepare_waiting_page(&f, s, c, name, expires, exact).await?;
     let mut lock = f.owner.begin().await?;
     sqlx::query("LOCK TABLE rss_transactional_messaging.outbox IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
@@ -310,6 +269,56 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     f.runtime.close().await;
     Ok(())
 }
+async fn prepare_waiting_page(
+    f: &Fixture,
+    s: Scope,
+    c: Coordinate,
+    name: &str,
+    expires: i64,
+    exact: bool,
+) -> anyhow::Result<()> {
+    queue_expiring(f, s, c, name, expires).await?;
+    if !exact {
+        queue_expiring(f, s, c, "slow-confirm-z", expires).await?;
+    }
+    f.publish().await?;
+    if !exact {
+        assert_eq!(
+            f.recover_exact("slow-confirm-z", s)
+                .await?
+                .map(|c| c.status()),
+            Some(Status::Published)
+        );
+    }
+    Ok(())
+}
+
+async fn queue_expiring(
+    f: &Fixture,
+    s: Scope,
+    coordinate: Coordinate,
+    id: &str,
+    expires: i64,
+) -> anyhow::Result<()> {
+    let request = CommandSpec::new(
+        s,
+        CommandId::parse(id)?,
+        coordinate,
+        StateDigest::from_bytes([7; 32]),
+        expires,
+    );
+    let msg = message(id, s.tenant())?;
+    let store = f.store.clone();
+    committed(
+        f.runtime
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move { store.queue(tx, request, msg).await })
+            })
+            .await,
+    )?;
+    Ok(())
+}
+
 pub(crate) async fn catalog_drift(f: &Fixture) -> anyhow::Result<()> {
     super::admission::executable_contract(f).await?;
     for (change, restore) in [
