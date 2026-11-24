@@ -2,8 +2,8 @@ use crate::{
     ChStore, Operation,
     control::{self, Fence},
     cursor::Position,
+    page::{Request, View},
     projection::{RAW_FIELDS, Raw, hex, literal},
-    page::{Request,View},
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
@@ -113,49 +113,118 @@ impl<C: Clock> Operation<'_, C> {
             if size > self.limits.max_bytes.get() as usize || rows.len() > limit as usize {
                 return Err(Error::BudgetExceeded);
             }
-            rows.push(ObservedSample {sample:row.sample()?, received_at:Timestamp::new(row.received_at)?});
+            rows.push(ObservedSample {
+                sample: row.sample()?,
+                received_at: Timestamp::new(row.received_at)?,
+            });
         }
         Ok(rows)
     }
-    async fn history(
-        &self,
-        q: &Query,
-        after: Option<&Continuation>,
-        deadline: Deadline,
-    ) -> Result<Page, Error> {
-        let (mut page,next)=self.page(Request::Raw(q),after,deadline,async |_,_|Ok(()),
-            async |view,()|self.history_page(q,view,deadline).await).await?;
-        page.next=next;
-        Ok(page)
+}
+impl Request for Query {
+    type Position = Position;
+    type Metadata = ();
+    type Page = Page;
+    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.history.v2";
+    const AGGREGATE: bool = false;
+    fn query(&self) -> &Query {
+        self
     }
-    async fn history_page(&self,q:&Query,view:View<Position>,deadline:Deadline) -> Result<(Page,Option<Position>),Error> {
-        let availability=control::availability(q,&view.fences)?;
-        if !view.exists {return Ok((Page {rows:Vec::new(),availability,next:None},None));}
-        let latest=q.mode()==QueryMode::Latest;
-        let mut condition=format!("{} AND revision<={} AND observed_at>={} AND observed_at<{}{}",selection(q.selection())?,view.published,q.window().start().micros(),q.window().end().micros(),visible(&view.fences)?);
-        if let Some(previous)=view.position {condition.push_str(&position(&previous,latest));}
-        let points=q.budget().max_points.get();
-        let groups=q.budget().max_series.get();
-        let mut more_groups=false;
-        if !latest && groups<points && matches!(q.selection(),Selection::Resource{..}) {
-            let sql=format!("SELECT DISTINCT series,source,generation FROM rss_ts_ch.raw FINAL WHERE {condition} ORDER BY series,source,generation LIMIT {}",u64::from(groups)+1);
-            let keys=self.ch_query(&self.reader,&sql,deadline)?.fetch_all::<(String,String,String)>().await.map_err(|_|Error::Unavailable)?;
-            if keys.len()>groups as usize {
-                let (series,source,generation)=&keys[groups as usize-1];
-                condition.push_str(&format!(" AND (series,source,generation)<=({},{},{})",literal(series),literal(source),literal(generation)));
-                more_groups=true;
+    fn binding(&self) -> Result<Digest, Error> {
+        self.binding()
+    }
+    fn fence_start(&self) -> i64 {
+        self.window().start().micros()
+    }
+    async fn metadata<C: Clock>(
+        &self,
+        _: &Operation<'_, C>,
+        _: &mut sqlx::PgConnection,
+        _: &View<Position>,
+    ) -> Result<(), Error> {
+        Ok(()) // reason: raw pages only need the shared fence snapshot.
+    }
+    async fn read<C: Clock>(
+        &self,
+        store: &Operation<'_, C>,
+        view: View<Position>,
+        (): (),
+        deadline: Deadline,
+    ) -> Result<(Page, Option<Position>), Error> {
+        let q = self;
+        let availability = control::availability(q, &view.fences)?;
+        if !view.exists {
+            return Ok((
+                Page {
+                    rows: Vec::new(),
+                    availability,
+                    next: None,
+                },
+                None,
+            ));
+        }
+        let latest = q.mode() == QueryMode::Latest;
+        let mut condition = format!(
+            "{} AND revision<={} AND observed_at>={} AND observed_at<{}{}",
+            selection(q.selection())?,
+            view.published,
+            q.window().start().micros(),
+            q.window().end().micros(),
+            visible(&view.fences)?
+        );
+        if let Some(previous) = view.position {
+            condition.push_str(&position(&previous, latest));
+        }
+        let points = q.budget().max_points.get();
+        let groups = q.budget().max_series.get();
+        let mut more_groups = false;
+        if !latest && groups < points && matches!(q.selection(), Selection::Resource { .. }) {
+            let sql = format!(
+                "SELECT DISTINCT series,source,generation FROM rss_ts_ch.raw FINAL WHERE {condition} ORDER BY series,source,generation LIMIT {}",
+                u64::from(groups) + 1
+            );
+            let keys = store
+                .ch_query(&store.reader, &sql, deadline)?
+                .fetch_all::<(String, String, String)>()
+                .await
+                .map_err(|_| Error::Unavailable)?;
+            if keys.len() > groups as usize {
+                let (series, source, generation) = &keys[groups as usize - 1];
+                condition.push_str(&format!(
+                    " AND (series,source,generation)<=({},{},{})",
+                    literal(series),
+                    literal(source),
+                    literal(generation)
+                ));
+                more_groups = true;
             }
         }
-        let limit=if latest {points.min(groups)}else{points};
-        let mut rows=if latest {
-            let sql=format!("SELECT {RAW_FIELDS} FROM (SELECT {RAW_FIELDS} FROM rss_ts_ch.raw FINAL WHERE {condition} ORDER BY series,source,generation,observed_at DESC,sequence DESC,sample_id DESC LIMIT 1 BY series,source,generation) ORDER BY {ORDER} LIMIT {}",u64::from(limit)+1);
-            self.fetch_raw(&sql,limit,deadline).await?
-        }else{self.raw_rows(&condition,ORDER,limit,deadline).await?};
-        let more=more_groups || rows.len()>limit as usize;
+        let limit = if latest { points.min(groups) } else { points };
+        let mut rows = if latest {
+            let sql = format!(
+                "SELECT {RAW_FIELDS} FROM (SELECT {RAW_FIELDS} FROM rss_ts_ch.raw FINAL WHERE {condition} ORDER BY series,source,generation,observed_at DESC,sequence DESC,sample_id DESC LIMIT 1 BY series,source,generation) ORDER BY {ORDER} LIMIT {}",
+                u64::from(limit) + 1
+            );
+            store.fetch_raw(&sql, limit, deadline).await?
+        } else {
+            store.raw_rows(&condition, ORDER, limit, deadline).await?
+        };
+        let more = more_groups || rows.len() > limit as usize;
         rows.truncate(limit as usize);
         q.validate_page(&rows)?;
-        let next=if more {Some(Position::of(&rows.last().ok_or(Error::Invariant)?.sample)?)}else{None};
-        Ok((Page{rows,availability,next:None},next))
+        let next = if more {
+            Some(Position::of(&rows.last().ok_or(Error::Invariant)?.sample)?)
+        } else {
+            None
+        };
+        Ok((
+            Page {
+                rows,
+                availability,
+                next: None,
+            },
+            next,
+        ))
     }
 }
 impl<C: Clock> Reader for ChStore<C> {
@@ -169,9 +238,11 @@ impl<C: Clock> Reader for ChStore<C> {
         let operation = owner
             .read_operation(self, q.request().selection().scope(), deadline)
             .await?;
-        operation
-            .bounded(deadline, operation.history(q.request(), after, deadline))
-            .await
+        let (mut page, next) = operation
+            .bounded(deadline, operation.page(q.request(), after, deadline))
+            .await?;
+        page.next = next;
+        Ok(page)
     }
     async fn aggregate(
         &self,
@@ -183,11 +254,10 @@ impl<C: Clock> Reader for ChStore<C> {
         let operation = owner
             .read_operation(self, q.request().spec().stream().scope(), deadline)
             .await?;
-        operation
-            .bounded(
-                deadline,
-                crate::aggregate::read(&operation, q.request(), after, deadline),
-            )
-            .await
+        let (mut page, next) = operation
+            .bounded(deadline, operation.page(q.request(), after, deadline))
+            .await?;
+        page.next = next;
+        Ok(page)
     }
 }

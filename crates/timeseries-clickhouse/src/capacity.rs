@@ -39,7 +39,12 @@ impl State {
 impl Capacity {
     pub(crate) fn new(slots: u32, units: u32) -> Self {
         Self {
-            state: Mutex::new(State { slots, units, closed: false, queue: VecDeque::new() }),
+            state: Mutex::new(State {
+                slots,
+                units,
+                closed: false,
+                queue: VecDeque::new(),
+            }),
             changed: Notify::new(),
         }
     }
@@ -52,8 +57,15 @@ impl Capacity {
     }
     pub(crate) async fn acquire(&self, units: u32) -> Result<Permit<'_>, Error> {
         let ticket = Arc::new(());
-        self.state().queue.push_back(Waiter {ticket: ticket.clone(), units, bypassed:false});
-        let mut registration = Registration {capacity:self, ticket:Some(ticket.clone())};
+        self.state().queue.push_back(Waiter {
+            ticket: ticket.clone(),
+            units,
+            bypassed: false,
+        });
+        let mut registration = Registration {
+            capacity: self,
+            ticket: Some(ticket.clone()),
+        };
         loop {
             // Construct before inspecting the queue so notify_waiters cannot be lost.
             let changed = self.changed.notified();
@@ -73,7 +85,10 @@ impl Capacity {
                     state.units -= units;
                     registration.ticket.take();
                     self.changed.notify_waiters();
-                    return Ok(Permit {capacity:self, units});
+                    return Ok(Permit {
+                        capacity: self,
+                        units,
+                    });
                 }
             }
             changed.await;
@@ -87,7 +102,10 @@ struct Registration<'a> {
 impl Drop for Registration<'_> {
     fn drop(&mut self) {
         if let Some(ticket) = &self.ticket {
-            self.capacity.state().queue.retain(|w| !Arc::ptr_eq(&w.ticket, ticket));
+            self.capacity
+                .state()
+                .queue
+                .retain(|w| !Arc::ptr_eq(&w.ticket, ticket));
             self.capacity.changed.notify_waiters();
         }
     }

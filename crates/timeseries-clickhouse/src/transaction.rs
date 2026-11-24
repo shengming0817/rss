@@ -95,7 +95,12 @@ impl<C: Clock> Operation<'_, C> {
             result => result,
         }
     }
-    pub(crate) async fn session(&self, scope: &Scope, deadline: Deadline, begin: &'static str) -> Result<Session, Error> {
+    pub(crate) async fn session(
+        &self,
+        scope: &Scope,
+        deadline: Deadline,
+        begin: &'static str,
+    ) -> Result<Session, Error> {
         self.scope(scope)?;
         let mut s = Session {
             connection: self.resources.pool.acquire().await.map_err(sql_error)?,

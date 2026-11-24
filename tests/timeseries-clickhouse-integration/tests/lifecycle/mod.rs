@@ -391,3 +391,44 @@ async fn new_reader_is_verified_on_an_already_admitted_owner() -> anyhow::Result
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn one_small_write_passes_a_blocked_full_width_read() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-fair").await?;
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let mut caps = limits()?;
+    caps.operation_permits = NonZeroU32::new(8).ok_or(Error::Invariant)?;
+    caps.query_threads = caps.operation_permits;
+    caps.max_in_flight = NonZeroU32::new(2).ok_or(Error::Invariant)?;
+    let store = proxy.store_with_limits(f.pool.clone(), caps).await?;
+    let other = bind(&store.owner, OTHER, "ch_other").await?;
+    let a = definition(TENANT)?;
+    let b = definition(OTHER)?;
+    register(&store, &a).await?;
+    register(&other, &b).await?;
+    let q = read_request(&b, 1)?;
+    proxy.arm(4);
+    let held = write(&store, stream_batch(&a, "left", "held", 1)?);
+    tokio::pin!(held);
+    tokio::select! { result=&mut held=>anyhow::bail!("held write finished: {result:?}"), ready=proxy.wait_held()=>ready?, }
+    let wide = other.query(&q, None, deadline()?);
+    tokio::pin!(wide);
+    tokio::select! {biased; _=&mut wide=>anyhow::bail!("wide read skipped its capacity wait"), ()=std::future::ready(())=>{} }
+    confirmed(write(&other, stream_batch(&b, "right", "bypass", 1)?).await?)?;
+    let late = write(&other, stream_batch(&b, "third", "late", 2)?);
+    tokio::pin!(late);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut late)
+            .await
+            .is_err()
+    );
+    proxy.release();
+    confirmed(held.await?)?;
+    proxy.arm(5);
+    tokio::select! { result=&mut late=>anyhow::bail!("second bypass: {result:?}"), _=&mut wide=>anyhow::bail!("read missed gate"),ready=proxy.wait_held()=>ready?, }
+    assert!(proxy.raw_read_threads().await.contains(&(8, 8)));
+    proxy.release();
+    assert_eq!(wide.await?.rows.len(), 1);
+    confirmed(late.await?)?;
+    Ok(())
+}

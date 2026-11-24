@@ -1,4 +1,5 @@
 //! One resource owner, independently revocable tenant capabilities, borrowed operations.
+use crate::capacity::{Capacity, Permit};
 use crate::{ConnectionConfig, Credentials, CursorKey, Limits, config::Connections, probe};
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::{Atomicity, Error, Guarantees, Scope};
@@ -11,7 +12,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use crate::capacity::{Capacity, Permit};
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 /// Sole owner of one admitted installation's PG pool and HTTPS transport.
@@ -190,9 +190,7 @@ impl<C> Shared<C> {
         weight: NonZeroU32,
     ) -> Result<(Permit<'_>, RwLockReadGuard<'_, Resources>), Error> {
         self.open()?;
-        let capacity = self
-            .capacity
-            .acquire(weight.get()).await?;
+        let capacity = self.capacity.acquire(weight.get()).await?;
         let resources = self.resources.read().await;
         self.open()?;
         let resources =

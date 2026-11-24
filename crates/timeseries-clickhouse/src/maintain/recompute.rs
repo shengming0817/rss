@@ -97,8 +97,12 @@ pub(super) async fn step<C: Clock>(
     let mut processed = 0;
     for row in rows.into_iter().take(r.budget().rows.get() as usize) {
         let sample = row.sample;
-        let input=sample.input();
-        fold.last = Some((input.observed_at.micros(), input.sequence, input.id.as_str().to_owned()));
+        let input = sample.input();
+        fold.last = Some((
+            input.observed_at.micros(),
+            input.sequence,
+            input.id.as_str().to_owned(),
+        ));
         let builder = fold.builder.as_mut().ok_or(Error::Invariant)?;
         aggregate::mask(builder, &fences, spec, sample.input().observed_at)?;
         builder.push(sample, store.limits.max_points.get() as usize)?;
@@ -176,7 +180,7 @@ async fn publish<C: Clock>(
     }
     sqlx::query("INSERT INTO rss_ts_ch.summaries(tenant_id,namespace,spec_digest,semantics,spec,lo,hi,object_id,source,generation,series) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7,$8::text::uuid,$9,$10,$11) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET object_id=excluded.object_id,hi=excluded.hi,dirty_from=NULL")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(spec.semantics()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(p.row.lo).bind(p.row.hi).bind(&p.row.object_id).bind(spec.stream().source().as_str()).bind(spec.stream().generation().as_str()).bind(projection::hex(spec.series().digest()?.as_bytes())).execute(&mut *c).await.map_err(sql_error)?;
-    control::summary_changed(c,r.scope()).await?;
+    control::summary_changed(c, r.scope()).await?;
     sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE id=$1::text::uuid")
         .bind(&p.attempt)
         .execute(&mut *c)

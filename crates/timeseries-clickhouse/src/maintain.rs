@@ -99,8 +99,15 @@ async fn simple(
                 limits.max_fences.get(),
             )
             .await?;
-            control::fence_changed(c,r.scope()).await?;
-            control::invalidate(c, r.scope(), selection, window.start().micros(), limits.max_points.get()).await?;
+            control::fence_changed(c, r.scope()).await?;
+            control::invalidate(
+                c,
+                r.scope(),
+                selection,
+                window.start().micros(),
+                limits.max_points.get(),
+            )
+            .await?;
         }
         MaintenanceAction::Restore {
             selection,
@@ -112,8 +119,15 @@ async fn simple(
             if rows != 1 {
                 return Err(Error::HistoryExpired);
             }
-            control::fence_changed(c,r.scope()).await?;
-            control::invalidate(c, r.scope(), selection, window.start().micros(), limits.max_points.get()).await?;
+            control::fence_changed(c, r.scope()).await?;
+            control::invalidate(
+                c,
+                r.scope(),
+                selection,
+                window.start().micros(),
+                limits.max_points.get(),
+            )
+            .await?;
         }
         MaintenanceAction::CloseStream { stream } => {
             sqlx::query("INSERT INTO rss_ts_ch.streams(tenant_id,namespace,source,generation,closed) VALUES($1::text::uuid,$2,$3,$4,true) ON CONFLICT(tenant_id,namespace,source,generation) DO UPDATE SET closed=true")

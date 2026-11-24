@@ -1,9 +1,12 @@
+mod pages;
+mod revision;
 use super::*;
 
 #[tokio::test]
 async fn monotone_frontiers_stay_bounded_and_preserve_replay() -> anyhow::Result<()> {
     let mut f = Fixture::new("ch-frontier").await?;
     let mut small = limits()?;
+    small.max_fences = NonZeroU32::new(2).ok_or(Error::InvalidInput)?;
     small.max_points = NonZeroU32::new(2).ok_or(Error::InvalidInput)?;
     f.store = Fixture::connect_options(
         &f.ch,

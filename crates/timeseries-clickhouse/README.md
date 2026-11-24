@@ -28,7 +28,7 @@ ref: ClickHouse/clickhouse-rs src/lib.rs@v0.15.3
 ## Installation and authority
 
 The external PG migrator adopts a dedicated NOLOGIN, NOSUPERUSER, NOBYPASSRLS schema
-owner and executes `CONTROL_SQL`. Schema version 2 is fresh-install only. During installation the owner sets
+owner and executes `CONTROL_SQL`. Schema version 3 is fresh-install only. During installation the owner sets
 `installation.max_pending_batches` to a per-namespace publication window from 1 to 16 (default 1).
 All runtime owners consult the same installation row when allocating a revision. Runtime must not be a member of that owner or have
 schema CREATE, installation writes, superuser, BYPASSRLS, CREATEROLE or replication.
@@ -81,7 +81,9 @@ Reader configurations share the transport, never another tenant's authentication
 Set `Limits.query_threads` explicitly (use 1 for conservative operation). A public query or
 aggregate acquires that many permits at once and runs its SELECTs with the corresponding
 `max_threads` and `max_final_threads`. Other calls and tenant binding use one permit.
-The thread setting must fit the owner capacity. Reader and maintenance profiles must accept their
+The thread setting must fit the owner capacity. Every operation also occupies one of the owner’s
+`Limits.max_in_flight` request slots. When a queued head cannot fit, one fitting successor
+may pass it. Subsequent releases accumulate for that head. Reader and maintenance profiles must accept their
 query settings and allow the full range of positive execution timeouts, including individual
 values, because each caller supplies its own deadline.
 Queueing, PG acquisition, HTTP and settlement use one absolute deadline. Scan, output and
@@ -123,9 +125,14 @@ the namespace has no unpublished batches.
 Raw values retain typed canonical JSON, exact integer timestamps/sequences, original
 receipt time and digest. Integers never round-trip through float. History and latest
 use query-time deduplication, canonical ordering and authenticated keyset cursors.
-Raw pagination fixes its publication ceiling but does not promise a cross-call
-lifecycle snapshot. Queries hold a namespace shared lock while consulting ClickHouse;
-publication and lifecycle changes take its exclusive lock. Scan, output, memory and
+Raw pagination fixes its publication ceiling across calls. History and latest consult the
+namespace fence generation. Aggregate pages additionally bind the publication ceiling and
+the summary-reference generation. A changed dependency on continuation returns
+`HistoryExpired`; restart pagination. A short PG read-only snapshot selects matching
+fences and summary references. The reader releases PG before ClickHouse IO and rechecks
+the page dependencies before returning. An unstable first page retries once within the
+same deadline, then returns `Unavailable`. `Limits.max_fences` bounds namespace frontiers
+independently of sample budgets. Scan, output, memory and
 time budgets fail explicitly rather than returning a successful truncated result.
 
 Recompute persists bounded core-fold checkpoints and publishes immutable ClickHouse

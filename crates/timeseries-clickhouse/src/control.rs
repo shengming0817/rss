@@ -70,54 +70,72 @@ pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<
     rows.into_iter().map(fence).collect()
 }
 fn fence(r: sqlx::postgres::PgRow) -> Result<Fence, Error> {
-            Ok(Fence {
-                id: Id::new(r.try_get::<String, _>("id").map_err(sql_error)?)?,
-                kind: r.try_get("kind").map_err(sql_error)?,
-                selection: decode(
-                    r.try_get::<String, _>("selection")
-                        .map_err(sql_error)?
-                        .as_bytes(),
-                )?,
-                window: Interval::new(
-                    Timestamp::new(r.try_get("lo").map_err(sql_error)?)?,
-                    Timestamp::new(r.try_get("hi").map_err(sql_error)?)?,
-                )?,
-                until: r.try_get("restore_until").map_err(sql_error)?,
-                restored: r.try_get("restored").map_err(sql_error)?,
-            })
-
+    Ok(Fence {
+        id: Id::new(r.try_get::<String, _>("id").map_err(sql_error)?)?,
+        kind: r.try_get("kind").map_err(sql_error)?,
+        selection: decode(
+            r.try_get::<String, _>("selection")
+                .map_err(sql_error)?
+                .as_bytes(),
+        )?,
+        window: Interval::new(
+            Timestamp::new(r.try_get("lo").map_err(sql_error)?)?,
+            Timestamp::new(r.try_get("hi").map_err(sql_error)?)?,
+        )?,
+        until: r.try_get("restore_until").map_err(sql_error)?,
+        restored: r.try_get("restored").map_err(sql_error)?,
+    })
 }
 /// Both selector shapes denormalize to the same subject/resource index expressions.
-pub(crate) async fn visible_fences(c: &mut PgConnection, q: &Query, start: i64, limits: &crate::Limits) -> Result<Vec<Fence>,Error> {
+pub(crate) async fn visible_fences(
+    c: &mut PgConnection,
+    q: &Query,
+    start: i64,
+    limits: &crate::Limits,
+) -> Result<Vec<Fence>, Error> {
     use futures::TryStreamExt;
-    let sel=q.selection();
-    let (subject,resource)=match sel {
-        Selection::Exact {series,..}=>(series.subject(),series.resource()),
-        Selection::Resource {subject,resource,..}=>(subject,resource),
+    let sel = q.selection();
+    let (subject, resource) = match sel {
+        Selection::Exact { series, .. } => (series.subject(), series.resource()),
+        Selection::Resource {
+            subject, resource, ..
+        } => (subject, resource),
     };
-    let doc=String::from_utf8(bytes(sel)?).map_err(|_| Error::Invariant)?;
-    let mut rows=sqlx::query(include_str!("visible_fences.sql"))
-        .bind(sel.scope().tenant().to_string()).bind(sel.scope().namespace().as_str())
-        .bind(subject.as_str()).bind(resource.as_str()).bind(start).bind(q.window().end().micros())
-        .bind(doc).bind(i64::from(limits.max_fences.get())+1).fetch(c);
-    let mut result=Vec::new();
-    let mut remaining=limits.max_bytes.get() as usize;
-    while let Some(row)=rows.try_next().await.map_err(sql_error)? {
-        if result.len() >= limits.max_fences.get() as usize { return Err(Error::BudgetExceeded); }
-        let size=row.try_get::<&str,_>("selection").map_err(sql_error)?.len()
-             + row.try_get::<&str,_>("id").map_err(sql_error)?.len() + 32;
-        remaining=remaining.checked_sub(size).ok_or(Error::BudgetExceeded)?;
+    let doc = String::from_utf8(bytes(sel)?).map_err(|_| Error::Invariant)?;
+    let mut rows = sqlx::query(include_str!("visible_fences.sql"))
+        .bind(sel.scope().tenant().to_string())
+        .bind(sel.scope().namespace().as_str())
+        .bind(subject.as_str())
+        .bind(resource.as_str())
+        .bind(start)
+        .bind(q.window().end().micros())
+        .bind(doc)
+        .bind(i64::from(limits.max_fences.get()) + 1)
+        .fetch(c);
+    let mut result = Vec::new();
+    let mut remaining = limits.max_bytes.get() as usize;
+    while let Some(row) = rows.try_next().await.map_err(sql_error)? {
+        if result.len() >= limits.max_fences.get() as usize {
+            return Err(Error::BudgetExceeded);
+        }
+        let size = row
+            .try_get::<&str, _>("selection")
+            .map_err(sql_error)?
+            .len()
+            + row.try_get::<&str, _>("id").map_err(sql_error)?.len()
+            + 32;
+        remaining = remaining.checked_sub(size).ok_or(Error::BudgetExceeded)?;
         result.push(fence(row)?);
     }
     Ok(result)
 }
 
-pub(crate) async fn fence_changed(c: &mut PgConnection,s: &Scope) -> Result<(),Error> {
+pub(crate) async fn fence_changed(c: &mut PgConnection, s: &Scope) -> Result<(), Error> {
     sqlx::query("UPDATE rss_ts_ch.namespaces SET fence_epoch=fence_epoch+1 WHERE tenant_id=$1::text::uuid AND namespace=$2")
       .bind(s.tenant().to_string()).bind(s.namespace().as_str()).execute(c).await.map_err(sql_error)?;
     Ok(())
 }
-pub(crate) async fn summary_changed(c: &mut PgConnection,s: &Scope) -> Result<(),Error> {
+pub(crate) async fn summary_changed(c: &mut PgConnection, s: &Scope) -> Result<(), Error> {
     sqlx::query("UPDATE rss_ts_ch.namespaces SET summary_epoch=summary_epoch+1 WHERE tenant_id=$1::text::uuid AND namespace=$2")
       .bind(s.tenant().to_string()).bind(s.namespace().as_str()).execute(c).await.map_err(sql_error)?;
     Ok(())
@@ -149,8 +167,12 @@ pub(crate) async fn put_fence(
     // Reject new distinct frontiers atomically, before poisoning future reads.
     let count:i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 LIMIT $3) bounded")
         .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(i64::from(max)+1).fetch_one(&mut *c).await.map_err(sql_error)?;
-    if count > i64::from(max) { return Err(Error::BudgetExceeded); }
-    if kind == "pruned" { fence_changed(c,r.scope()).await?; }
+    if count > i64::from(max) {
+        return Err(Error::BudgetExceeded);
+    }
+    if kind == "pruned" {
+        fence_changed(c, r.scope()).await?;
+    }
     bump(c, r.scope()).await
 }
 pub(crate) fn availability(query: &Query, fences: &[Fence]) -> Result<Availability, Error> {

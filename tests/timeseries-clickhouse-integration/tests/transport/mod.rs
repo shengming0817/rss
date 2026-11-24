@@ -212,9 +212,13 @@ async fn serve(
         .find(|(key, _)| key == "query")
         .map(|(_, v)| v.into_owned())
         .unwrap_or_default();
-    if sql.contains("FROM rss_ts_ch.raw FINAL")
-        || String::from_utf8_lossy(&data).contains("FROM rss_ts_ch.raw FINAL")
-    {
+    let body_sql = String::from_utf8_lossy(&data);
+    let reads_raw = sql.contains("FROM rss_ts_ch.raw") || body_sql.contains("FROM rss_ts_ch.raw");
+    let reads_page = sql.contains("FROM rss_ts_ch.raw FINAL")
+        || body_sql.contains("FROM rss_ts_ch.raw FINAL")
+        || sql.contains("FROM rss_ts_ch.summaries FINAL")
+        || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
+    if reads_raw {
         let settings: std::collections::HashMap<_, _> =
             url::form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()).collect();
         if let Some(threads) = settings.get("max_threads").and_then(|s| s.parse().ok())
@@ -233,17 +237,18 @@ async fn serve(
         let prefix = format!("INSERT INTO rss_ts_ch.{table}");
         sql.starts_with(&prefix) || data.starts_with(prefix.as_bytes())
     });
-    let mode = if is_insert {
-        state.mode.swap(0, Ordering::SeqCst)
-    } else {
-        0
-    };
+    let mode = state
+        .mode
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
+            ((m == 5 && reads_page) || (m != 5 && is_insert)).then_some(0)
+        })
+        .unwrap_or(0);
     let captured = Captured {
         uri: parts.uri,
         headers: parts.headers,
         body: data,
     };
-    if mode != 0 {
+    if is_insert && mode != 0 {
         *state.saved.lock().await = Some(captured.clone());
     }
     if mode == 2 {
@@ -257,7 +262,7 @@ async fn serve(
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("discarded real response"));
     }
-    if mode == 4 && response.status().is_success() {
+    if matches!(mode, 4 | 5) && response.status().is_success() {
         state.entered.add_permits(1);
         state
             .release
