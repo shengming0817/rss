@@ -125,6 +125,37 @@ async fn reuse(
     let b = Scope::new(a.tenant(), uuid::Uuid::new_v4());
     let other = Scope::new(TenantId::parse(&uuid::Uuid::new_v4().to_string())?, a.id());
     let capacity = history_capacity()?;
+    reject_invalid_attempt_limit(pool, a, one, capacity).await?;
+    store.register(a, one, capacity, c).await?;
+    store.register(other, two, capacity, c).await?;
+    let next = overlapping_instances(store, pool, a, other, one, c).await?;
+    let v2 = Definition::new(
+        "orders",
+        Identity::new(
+            one.identity().contract().clone(),
+            rss_contract::ContractVersion::from_static_major(2),
+            one.identity().schema().clone(),
+            one.identity().generation().clone(),
+        ),
+        two.steps().to_vec(),
+    )?;
+    reject_rebinding(store, pool, a, &v2, c).await?;
+    store.register(b, &v2, capacity, c).await?;
+    let mut expected = [a.id(), b.id(), next.id()];
+    expected.sort_unstable();
+    let page = store
+        .candidates(CandidateFilter::Runnable, a.tenant(), None, 100, c)
+        .await?;
+    assert_eq!(page.iter().map(|s| s.id()).collect::<Vec<_>>(), expected);
+    run_bound_versions(store, [(a, one), (b, &v2), (other, two)], c).await
+}
+
+async fn reject_invalid_attempt_limit(
+    pool: &PgPool,
+    a: Scope,
+    one: &Definition,
+    capacity: HistoryCapacity,
+) -> anyhow::Result<()> {
     for invalid in [
         serde_json::Value::Null,
         serde_json::json!("1"),
@@ -145,10 +176,21 @@ async fn reuse(
         );
         tx.rollback().await?;
     }
-    store.register(a, one, capacity, c).await?;
-    store.register(other, two, capacity, c).await?;
+    Ok(())
+}
+
+async fn overlapping_instances(
+    store: &PgStore,
+    pool: &PgPool,
+    a: Scope,
+    other: Scope,
+    one: &Definition,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<Scope> {
+    let held = Scope::new(a.tenant(), uuid::Uuid::new_v4());
+    let next = Scope::new(a.tenant(), uuid::Uuid::new_v4());
     let mut tx = tenant_tx(pool, a).await?;
-    register(&mut tx, b, one).await?;
+    register(&mut tx, held, one).await?;
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rss_saga.definitions WHERE tenant_id=$1::text::uuid",
     )
@@ -156,10 +198,9 @@ async fn reuse(
     .fetch_one(&mut *tx)
     .await?;
     assert_eq!(count, 0);
-    let next = Scope::new(a.tenant(), uuid::Uuid::new_v4());
     tokio::time::timeout(
         Duration::from_secs(5),
-        store.register(next, one, capacity, c),
+        store.register(next, one, history_capacity()?, c),
     )
     .await??;
     let denied = sqlx::query("UPDATE rss_saga.definitions SET definition=definition")
@@ -172,33 +213,15 @@ async fn reuse(
         Some("42501")
     );
     tx.rollback().await?;
-    let v2 = Definition::new(
-        "orders",
-        Identity::new(
-            one.identity().contract().clone(),
-            rss_contract::ContractVersion::from_static_major(2),
-            one.identity().schema().clone(),
-            one.identity().generation().clone(),
-        ),
-        two.steps().to_vec(),
-    )?;
-    assert!(
-        matches!(store.register(a,&v2,capacity,c).await,Err(e) if e.kind()==ErrorKind::Conflict)
-    );
-    let mut tx = tenant_tx(pool, a).await?;
-    let versions: Vec<String> = sqlx::query_scalar("SELECT version FROM rss_saga.definitions")
-        .fetch_all(&mut *tx)
-        .await?;
-    assert_eq!(versions, ["v1"]);
-    tx.commit().await?;
-    store.register(b, &v2, capacity, c).await?;
-    let mut expected = [a.id(), b.id(), next.id()];
-    expected.sort_unstable();
-    let page = store
-        .candidates(CandidateFilter::Runnable, a.tenant(), None, 100, c)
-        .await?;
-    assert_eq!(page.iter().map(|s| s.id()).collect::<Vec<_>>(), expected);
-    for (s, d) in [(a, one), (b, &v2), (other, two)] {
+    Ok(next)
+}
+
+async fn run_bound_versions(
+    store: &PgStore,
+    instances: [(Scope, &Definition); 3],
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    for (s, d) in instances {
         let registry = registry(d.clone(), Arc::new(Effects::default()), false)?;
         let executor = Executor::new(store.clone(), protection()?, registry, read_budget()?);
         assert!(
@@ -212,5 +235,24 @@ async fn reuse(
             2 * d.steps().len() as u64
         );
     }
+    Ok(())
+}
+
+async fn reject_rebinding(
+    store: &PgStore,
+    pool: &PgPool,
+    a: Scope,
+    version: &Definition,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    assert!(
+        matches!(store.register(a,version,history_capacity()?,c).await,Err(e) if e.kind()==ErrorKind::Conflict)
+    );
+    let mut tx = tenant_tx(pool, a).await?;
+    let versions: Vec<String> = sqlx::query_scalar("SELECT version FROM rss_saga.definitions")
+        .fetch_all(&mut *tx)
+        .await?;
+    assert_eq!(versions, ["v1"]);
+    tx.commit().await?;
     Ok(())
 }

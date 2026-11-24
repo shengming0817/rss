@@ -7,7 +7,6 @@ pub(super) async fn drift(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    let mut accepted = Vec::new();
     let mut cases = Vec::new();
     for (object, privilege) in [
         ("SCHEMA rss_saga", "USAGE"),
@@ -86,6 +85,16 @@ pub(super) async fn drift(
         }
     }
     function_cases(owner, &mut cases).await?;
+    check_drift_cases(pool, owner, control, cases).await
+}
+
+async fn check_drift_cases(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+    cases: Vec<Case>,
+) -> anyhow::Result<()> {
+    let mut accepted = Vec::new();
     let count = cases.len();
     for (label, change, restore) in cases {
         PgStore::new(pool.clone(), control).await?;

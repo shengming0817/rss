@@ -58,13 +58,9 @@ async fn suite() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(180), &cancel);
-    assert!(matches!(
-        PgStore::new(owner.clone(), &control).await,
-        Err(ref failure) if failure.kind()==rss_saga::ErrorKind::StorageContract
-    ));
-    let store = PgStore::new(pool.clone(), &control).await?;
-    let d = definition(&["one", "two", "three"])?;
+    let store = runtime_store(&owner, &pool, &control).await?;
     registration::verify(&store, &pool, &owner, &control).await?;
+    let d = definition(&["one", "two", "three"])?;
     run_scenarios(&store, &owner, &pool, &fixture, &d, &control).await?;
     eprintln!("saga T2: history bounds");
     history::bounds(&store, &owner, &control).await?;
@@ -75,6 +71,16 @@ async fn suite() -> anyhow::Result<()> {
     drop(network);
     Ok(())
 }
+async fn runtime_store(
+    owner: &PgPool,
+    pool: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<PgStore> {
+    assert!(matches!(PgStore::new(owner.clone(), c).await,
+        Err(e) if e.kind() == ErrorKind::StorageContract));
+    Ok(PgStore::new(pool.clone(), c).await?)
+}
+
 async fn lease_and_isolation(
     store: &PgStore,
     owner: &PgPool,
