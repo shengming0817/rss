@@ -195,7 +195,13 @@ async fn resolve_consumer_head(
     if request.version().get() != 1 {
         return Err(Error::Conflict.into());
     }
-    crate::consumer::lock_partition(tx, &head.group, &head.domain, &head.partition).await?;
+    let lock =
+        crate::consumer::partition_lock(tx.tenant_id(), &head.group, &head.domain, &head.partition);
+    let key = lock.key().as_bigint().ok_or_else(PgError::invariant)?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(key)
+        .execute(&mut *tx.connection)
+        .await?;
     let result = sqlx::query("UPDATE rss_transactional_messaging.inbox SET resolved_by=$7::uuid
         WHERE tenant_id=$1::uuid AND consumer_group=$2 AND domain=$3 AND partition_key=$4
         AND message_id=$5 AND fingerprint=$6 AND disposition IN ('rejected_permanent','rejected_invariant') AND resolved_by IS NULL")

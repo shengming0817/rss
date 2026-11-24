@@ -32,6 +32,15 @@ async fn deliver(
     message: MessageEnvelope<Vec<u8>>,
     count: &Count,
 ) -> anyhow::Result<(ProcessingDisposition, Vec<SettlementKind>)> {
+    deliver_with_ttl(runtime, message, count, Duration::from_secs(30)).await
+}
+
+async fn deliver_with_ttl(
+    runtime: &Arc<PgRuntime>,
+    message: MessageEnvelope<Vec<u8>>,
+    count: &Count,
+    ttl: Duration,
+) -> anyhow::Result<(ProcessingDisposition, Vec<SettlementKind>)> {
     let meta = message.metadata();
     let sub = SubscriptionIdentity::new(
         meta.domain().clone(),
@@ -50,7 +59,7 @@ async fn deliver(
         ),
         count,
     );
-    let inbox = inbox(runtime)?;
+    let inbox = PgInboxStore::new(runtime.clone(), LeaseRenewalPolicy::from_ttl(ttl)?)?;
     let settlement = RecordingSettlement::new();
     let result = consume_once(
         &inbox,
@@ -80,6 +89,13 @@ pub(super) async fn run(
     for (key, protected) in [("receipt-head", false), ("protected-head", true)] {
         let original = message_in_partition(&format!("{key}-a"), key);
         let successor = message_in_partition(&format!("{key}-b"), key);
+        if protected {
+            sqlx::query(
+                "ALTER ROLE recovery_runtime SET default_transaction_isolation TO 'serializable'",
+            )
+            .execute(owner)
+            .await?;
+        }
         reject_after_takeover(owner, config, &original, &successor, protected).await?;
         let restarted = connect(config).await?;
         let count = Count(AtomicUsize::new(0));
@@ -93,6 +109,9 @@ pub(super) async fn run(
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
         restarted.close().await;
     }
+    sqlx::query("ALTER ROLE recovery_runtime RESET default_transaction_isolation")
+        .execute(owner)
+        .await?;
     Ok(())
 }
 
@@ -150,6 +169,7 @@ async fn reject_after_takeover(
 }
 struct HeldReject {
     entered: tokio::sync::mpsc::Sender<i32>,
+    expected_isolation: &'static str,
     release: Arc<tokio::sync::Notify>,
 }
 impl PgConsumerEffect<Vec<u8>> for HeldReject {
@@ -159,16 +179,19 @@ impl PgConsumerEffect<Vec<u8>> for HeldReject {
         msg: &MessageEnvelope<Vec<u8>>,
         deadline: OperationDeadline,
     ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
-        let pid = tx
+        let (pid, isolation) = tx
             .with_connection(|connection| {
                 Box::pin(async move {
-                    sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-                        .fetch_one(connection)
-                        .await
+                    sqlx::query_as::<_, (i32, String)>(
+                        "SELECT pg_backend_pid(),current_setting('transaction_isolation')",
+                    )
+                    .fetch_one(connection)
+                    .await
                 })
             })
             .await
             .map_err(PgConsumerEffectFailure::infrastructure)?;
+        assert_eq!(isolation, self.expected_isolation);
         self.entered
             .send(pid)
             .await
@@ -189,6 +212,11 @@ async fn reject_while_waiting(
     let (entered, mut started) = tokio::sync::mpsc::channel(1);
     let release = Arc::new(tokio::sync::Notify::new());
     let effect = HeldReject {
+        expected_isolation: if protected {
+            "serializable"
+        } else {
+            "read committed"
+        },
         entered,
         release: release.clone(),
     };
@@ -244,7 +272,13 @@ async fn assert_blocked(
     count: &Count,
 ) -> anyhow::Result<()> {
     assert_eq!(
-        deliver(restarted, successor.clone(), count).await?,
+        deliver_with_ttl(
+            restarted,
+            successor.clone(),
+            count,
+            Duration::from_millis(150)
+        )
+        .await?,
         (
             ProcessingDisposition::PartitionBlocked,
             vec![SettlementKind::Requeue]

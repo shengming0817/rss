@@ -705,20 +705,29 @@ where
             .await?;
             Ok(ProcessingDisposition::Committed(disposition))
         }
-        FoldedOutcome::NotStarted(FailureClass::PartitionBlocked)
-        | FoldedOutcome::RolledBack(FailureClass::PartitionBlocked) => {
+        FoldedOutcome::NotStarted(class) | FoldedOutcome::RolledBack(class) => {
             let cutoff = state.deadlines.operation();
-            let wake = cutoff.capped(execution.timer, execution.contention_interval());
-            let _ = within(execution.timer, cutoff, |_| {
-                execution.timer.sleep_until(wake)
-            })
-            .await;
-            release_or_abandon(inbox, execution, state).await?;
-            Ok(ProcessingDisposition::PartitionBlocked)
-        }
-        FoldedOutcome::NotStarted(_class) | FoldedOutcome::RolledBack(_class) => {
-            release_or_abandon(inbox, execution, state).await?;
-            Ok(ProcessingDisposition::Deferred)
+            let deadline = state.deadlines.settlement();
+            let settlement = release_or_abandon(inbox, execution, state).await?;
+            let disposition = if class == FailureClass::PartitionBlocked {
+                let wake = cutoff.capped(execution.timer, execution.contention_interval());
+                let _ = within(execution.timer, cutoff, |_| {
+                    execution.timer.sleep_until(wake)
+                })
+                .await;
+                ProcessingDisposition::PartitionBlocked
+            } else {
+                ProcessingDisposition::Deferred
+            };
+            settle_observed(
+                settlement,
+                SettlementDecision::requeue(),
+                deadline,
+                execution.timer,
+                execution.emitter,
+            )
+            .await?;
+            Ok(disposition)
         }
         FoldedOutcome::RollbackFailed | FoldedOutcome::CommitUnknown => {
             abandon_observed(
@@ -750,7 +759,7 @@ async fn release_or_abandon<P, S, I, V, R, E>(
     inbox: &I,
     execution: &ConsumerExecution<'_, V, R, E>,
     state: AcquiredDelivery<P, S, I::Claim>,
-) -> Result<(), MessagingError>
+) -> Result<S, MessagingError>
 where
     S: DeliverySettlement,
     I: InboxStore,
@@ -764,16 +773,7 @@ where
     .await
     .and_then(std::convert::identity)
     {
-        Ok(()) => {
-            settle_observed(
-                state.settlement,
-                SettlementDecision::requeue(),
-                deadline,
-                execution.timer,
-                execution.emitter,
-            )
-            .await
-        }
+        Ok(()) => Ok(state.settlement),
         Err(error) => {
             execution
                 .emitter

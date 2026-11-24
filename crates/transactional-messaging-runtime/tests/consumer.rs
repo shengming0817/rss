@@ -580,11 +580,12 @@ struct FakeTx {
     disposition: TerminalDisposition,
 }
 
-struct RetryThenCommitTx {
+struct RollbackThenCommitTx {
     calls: Arc<AtomicUsize>,
+    reason: FailureClass,
 }
 
-impl ConsumerTx<Vec<u8>> for RetryThenCommitTx {
+impl ConsumerTx<Vec<u8>> for RollbackThenCommitTx {
     type Claim = Claim;
     type CommitProof = Proof;
 
@@ -596,7 +597,7 @@ impl ConsumerTx<Vec<u8>> for RetryThenCommitTx {
         _deadline: OperationDeadline,
     ) -> TransactionOutcome<Self::CommitProof> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            TransactionOutcome::rolled_back(FailureClass::Transient)
+            TransactionOutcome::rolled_back(self.reason)
         } else {
             receipt.committed(Proof, TerminalDisposition::Succeeded)
         }
@@ -1011,7 +1012,8 @@ async fn only_confirmed_transient_rollback_retries_locally() {
         },
     };
     let calls = Arc::new(AtomicUsize::new(0));
-    let transaction = RetryThenCommitTx {
+    let transaction = RollbackThenCommitTx {
+        reason: FailureClass::Transient,
         calls: Arc::clone(&calls),
     };
     let expected = subscription(&message);
@@ -3220,6 +3222,60 @@ impl DeliverySource<Vec<u8>> for TwoDeliverySource {
             futures::stream::iter(deliveries),
         ))
     }
+}
+
+#[tokio::test]
+async fn blocked_delivery_leaves_the_subscription_available_to_another_partition() {
+    let blocked = envelope(|m| m.id = "blocked");
+    let sub = subscription(&blocked);
+    let independent = envelope(|m| {
+        m.id = "independent";
+        m.partition = Some((TENANT_A, "orders", "other"));
+    });
+    let settled = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let deliveries = [blocked, independent]
+        .into_iter()
+        .map(|message| {
+            IncomingDelivery::Valid(Box::new(Delivery::new(
+                message,
+                BlockingSettlement {
+                    gate: None,
+                    settled: settled.clone(),
+                },
+            )))
+        })
+        .collect();
+    let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
+        Arc::new(TwoDeliverySource {
+            deliveries: Mutex::new(deliveries),
+        }),
+        Arc::new(UnlimitedInbox),
+        Arc::new(RollbackThenCommitTx {
+            calls: calls.clone(),
+            reason: FailureClass::PartitionBlocked,
+        }),
+        ConsumerGroup::parse("ordered").expect("group"),
+        Arc::new(TrustedIngress),
+        sub,
+        Arc::new(RealtimeClock::new()),
+        consumer_policy(),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::STANDARD,
+    );
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(cancel.clone()));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while settled.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both messages settled from the same subscription");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    cancel.cancel();
+    support::join_worker(task).await.expect("graceful stop");
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 //! Static trusted effect composition, with private ACK-only commit evidence.
 use crate::{PgInboxClaim, PgRuntime, PgTransaction, transaction::stage};
 use rss_redact::RedactedSource;
-use rss_request_context::{Clock, Deadline};
+use rss_request_context::{Clock, Deadline, TenantId};
 use rss_transactional_messaging::{
     inbox::ConsumerGroup,
     message::{
@@ -13,6 +13,7 @@ use rss_transactional_messaging::{
         TransactionOutcome,
     },
 };
+use sqlx::postgres::PgAdvisoryLock;
 use std::sync::Arc;
 
 /// An effect failed without a terminal business rejection. Provider diagnostics stay redacted.
@@ -170,14 +171,30 @@ pub(crate) async fn execute_transaction<
         Ok(value) => value,
         _ => return TransactionOutcome::not_started(FailureClass::Infrastructure),
     };
-    let mut transaction =
-        match stage(timer, cutoff, LocalTxDeadlineStage::Begin, lease.begin()).await {
-            Ok(value) => value,
-            _ => return TransactionOutcome::not_started(FailureClass::Infrastructure),
-        };
+    let partition = message.metadata().partition().filter(|_| source.is_none());
+    let Ok(mut connection) = stage(
+        timer,
+        cutoff,
+        LocalTxDeadlineStage::Acquire,
+        consumer_connection(&mut lease.connection, claim, partition),
+    )
+    .await
+    else {
+        return TransactionOutcome::not_started(FailureClass::Infrastructure);
+    };
+    let mut transaction = match stage(
+        timer,
+        cutoff,
+        LocalTxDeadlineStage::Begin,
+        lease.state.begin(connection.as_mut()),
+    )
+    .await
+    {
+        Ok(value) => value,
+        _ => return TransactionOutcome::not_started(FailureClass::Infrastructure),
+    };
     let mut tx = PgTransaction::new(transaction.connection(), claim.binding, cutoff, runtime);
     let body = within(timer, cutoff, |_| async {
-        let partition = message.metadata().partition().filter(|_| source.is_none());
         let disposition =
             effect_body(effect, mode, &mut tx, claim, message, partition, &intent).await?;
         if let (EffectResult::Terminal(disposition), Some((store, source))) = (disposition, source)
@@ -202,9 +219,6 @@ pub(crate) async fn execute_transaction<
             .map_err(PgConsumerEffectFailure::infrastructure)?;
         Ok(disposition)
     });
-    if cutoff.remaining(timer.now()).unwrap_or_default().is_zero() {
-        return TransactionOutcome::commit_unknown();
-    }
     finish(transaction, body, intent, timer, cutoff).await
 }
 
@@ -235,6 +249,9 @@ async fn finish(
     timer: &crate::transaction::PgTimer,
     cutoff: Deadline,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
+    if cutoff.remaining(timer.now()).unwrap_or_default().is_zero() {
+        return TransactionOutcome::commit_unknown();
+    }
     let rollback = match body {
         Ok(EffectResult::Terminal(disposition)) => {
             return match stage(
@@ -288,13 +305,6 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
     partition: Option<&PartitionIdentity>,
     intent: &ReceiptIntent,
 ) -> Result<EffectResult, PgConsumerEffectFailure> {
-    if partition.is_some() {
-        // Read the winner's receipt in a fresh snapshot after the partition lock is granted.
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-            .execute(&mut *tx.connection)
-            .await
-            .map_err(PgConsumerEffectFailure::infrastructure)?;
-    }
     if let Err(error) = tx.setup().await {
         if error.kind() == rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost {
             return Ok(EffectResult::Fenced);
@@ -302,14 +312,6 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
         return Err(PgConsumerEffectFailure::infrastructure(error));
     }
     if let Some(partition) = partition {
-        lock_partition(
-            tx,
-            claim.identity.group(),
-            partition.domain(),
-            partition.key(),
-        )
-        .await
-        .map_err(PgConsumerEffectFailure::infrastructure)?;
         let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND consumer_group=$2 AND domain=$3 AND partition_key=$4 AND resolved_by IS NULL)")
             .bind(tx.tenant_id().to_string()).bind(claim.identity.group().as_str()).bind(partition.domain().as_str()).bind(partition.key().as_str())
             .fetch_one(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?;
@@ -377,16 +379,39 @@ async fn apply_effect<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: Consumer
     Ok(disposition)
 }
 
-pub(crate) async fn lock_partition(
-    tx: &mut PgTransaction<'_>,
+// Hold the SQLx guard across BEGIN, the business snapshot and its commit/rollback acknowledgement.
+async fn consumer_connection<'a>(
+    connection: &'a mut sqlx::PgConnection,
+    claim: &PgInboxClaim,
+    partition: Option<&PartitionIdentity>,
+) -> Result<impl AsMut<sqlx::PgConnection> + use<'a>, sqlx::Error> {
+    match partition {
+        Some(partition) => {
+            let lock = partition_lock(
+                claim.binding.tenant(),
+                claim.identity.group(),
+                partition.domain(),
+                partition.key(),
+            );
+            Ok(sqlx::Either::Left(lock.acquire(connection).await?))
+        }
+        None => Ok(sqlx::Either::Right(connection)),
+    }
+}
+
+pub(crate) fn partition_lock(
+    tenant: TenantId,
     group: &ConsumerGroup,
     domain: &MessagingDomain,
     key: &PartitionKey,
-) -> Result<(), crate::PgError> {
-    // The hash only selects a transaction lock. Receipt lookups always use all four exact coordinates.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('rss.inbox', $1::uuid, $2::text, $3::text, $4::text)::text, 0))")
-        .bind(tx.tenant_id().to_string()).bind(group.as_str()).bind(domain.as_str()).bind(key.as_str()).execute(&mut *tx.connection).await?;
-    Ok(())
+) -> PgAdvisoryLock {
+    // All four components exclude control characters. Hash collisions only serialize unrelated work.
+    PgAdvisoryLock::new(format!(
+        "rss.inbox\n{tenant}\n{}\n{}\n{}",
+        group.as_str(),
+        domain.as_str(),
+        key.as_str()
+    ))
 }
 
 /// Explicit receipt-only composition; application DLQ persistence is not selected.

@@ -309,8 +309,7 @@ Capture occurs only after verified ingress and rollback of a rejected business e
 transaction as the terminal Inbox receipt. Protection/storage failure prevents terminal commit.
 Configure an `rss-data-protection::Aead` implementation with external key ownership; no default key
 or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
-Ordinary keyed effects take a transaction-scoped lock for the tenant, group, domain and partition key.
-After acquiring it, the transaction checks for an unresolved business rejection before entering the handler.
+Ordinary keyed consumers lock the tenant, group, domain and partition key on the PostgreSQL session before starting the business transaction. The SQLx pool holds the same PostgreSQL session through commit or rollback. Deploy keyed broker consumers with a direct connection or a session-pooling proxy. The handler inherits the configured transaction isolation level and runs only after checking for an unresolved rejection.
 A committed rejection stores its partition on the original Inbox receipt until authorized gap acceptance.
 A confirmed rollback releases the partition; another admitted message may execute before the original retry.
 Duplicate deliveries follow their original receipt. The operator can resolve receipt-only rejections without payload access.
