@@ -120,7 +120,7 @@ mod producer {
         PublishOutcome, Publisher,
     };
 
-    use super::{Arc, Duration, Mutex};
+    use super::{Arc, Clock, Duration, FakeClock, Mutex};
     use rss_request_context::TenantId;
 
     fn identity<P>(message: &PendingMessage<P>) -> (TenantId, MessageId) {
@@ -140,6 +140,7 @@ mod producer {
 
     enum OutboxEntryState {
         Pending,
+        RetrySince(std::time::Instant),
         Claimed { attempt: u64 },
         DeadLetter,
     }
@@ -177,6 +178,7 @@ mod producer {
     /// Deterministic, non-durable implementation of the canonical outbox port.
     pub struct MemoryOutboxStore<P> {
         inner: Arc<Mutex<OutboxState<P>>>,
+        clock: FakeClock,
         budget: rss_transactional_messaging::policy::DeliveryBudget,
     }
 
@@ -184,6 +186,7 @@ mod producer {
         fn clone(&self) -> Self {
             Self {
                 inner: Arc::clone(&self.inner),
+                clock: self.clock.clone(),
                 budget: self.budget,
             }
         }
@@ -195,6 +198,7 @@ mod producer {
         fn default() -> Self {
             Self {
                 inner: Arc::new(Mutex::new(OutboxState::default())),
+                clock: FakeClock::new(),
                 budget: rss_transactional_messaging::policy::DeliveryBudget::new(
                     Duration::from_secs(30),
                     Duration::from_secs(2),
@@ -211,6 +215,12 @@ mod producer {
         #[must_use]
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Provider clock for retry eligibility. Advance it by one second to make a retry due.
+        #[must_use]
+        pub fn clock(&self) -> &FakeClock {
+            &self.clock
         }
 
         /// Fence all outstanding claims without modifying pending facts.
@@ -326,6 +336,7 @@ mod producer {
                 next_attempt,
                 ..
             } = &mut *state;
+            let now = self.clock.now();
             for entry in entries {
                 if entry.message.envelope().metadata().tenant_id() != binding.tenant() {
                     continue;
@@ -345,6 +356,9 @@ mod producer {
                 }
                 let claimable = match entry.state {
                     OutboxEntryState::Pending => true,
+                    OutboxEntryState::RetrySince(at) => {
+                        now.saturating_duration_since(at) >= Duration::from_secs(1)
+                    }
                     OutboxEntryState::Claimed { .. } => false,
                     OutboxEntryState::DeadLetter => false,
                 };
@@ -360,7 +374,7 @@ mod producer {
                 .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
         }
 
-        async fn lease_status(
+        async fn extend(
             &self,
             claim: &Self::Claim,
             deadline: OperationDeadline,
@@ -381,14 +395,6 @@ mod producer {
             } else {
                 OutboxLeaseStatus::Lost
             })
-        }
-
-        async fn extend(
-            &self,
-            claim: &Self::Claim,
-            deadline: OperationDeadline,
-        ) -> Result<OutboxLeaseStatus, MessagingError> {
-            self.lease_status(claim, deadline).await
         }
 
         fn message(claim: &Self::Claim) -> &PendingMessage<P> {
@@ -438,7 +444,7 @@ mod producer {
                     state.entries.remove(position);
                 }
                 OutboxSettlement::Retry => {
-                    state.entries[position].state = OutboxEntryState::Pending;
+                    state.entries[position].state = OutboxEntryState::RetrySince(self.clock.now());
                 }
                 OutboxSettlement::DeadLetter => {
                     state.entries[position].state = OutboxEntryState::DeadLetter;

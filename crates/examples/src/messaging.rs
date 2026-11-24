@@ -132,7 +132,12 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
             publisher.clone(),
             Arc::new(clock.clone()),
             Arc::new(observations),
-            RelayConfig::new(Duration::from_millis(100), NonZeroUsize::MIN)?,
+            RelayConfig::new(
+                NonZeroUsize::MIN,
+                NonZeroUsize::MIN,
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+            )?,
         );
         let (registration, _) = worker.into_registration(
             binding()?,

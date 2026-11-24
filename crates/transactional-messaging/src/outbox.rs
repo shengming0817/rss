@@ -248,13 +248,20 @@ impl<C> OutboxClaimBatch<C> {
         claims: Vec<C>,
         limit: NonZeroUsize,
     ) -> Result<Self, OutboxClaimBatchError> {
-        if claims.len() > limit.get() {
+        let batch = Self { claims };
+        batch.validate_limit(limit)?;
+        Ok(batch)
+    }
+
+    /// Verify a received batch against the caller's actual request capacity.
+    pub fn validate_limit(&self, limit: NonZeroUsize) -> Result<(), OutboxClaimBatchError> {
+        if self.len() > limit.get() {
             return Err(OutboxClaimBatchError {
                 limit: limit.get(),
-                actual: claims.len(),
+                actual: self.len(),
             });
         }
-        Ok(Self { claims })
+        Ok(())
     }
 
     /// Number of admitted claims.
@@ -328,14 +335,7 @@ pub trait OutboxRelayStore<P>: Send + Sync {
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<OutboxClaimBatch<Self::Claim>, MessagingError>> + Send;
 
-    /// Check ownership using provider-authoritative time and fencing state.
-    fn lease_status(
-        &self,
-        claim: &Self::Claim,
-        deadline: OperationDeadline,
-    ) -> impl Future<Output = Result<OutboxLeaseStatus, MessagingError>> + Send;
-
-    /// Extend only a still-owned lease and return the post-renewal remaining time.
+    /// Extend only a still-owned lease and return the authoritative lease and remaining same-ID delivery window.
     /// Return `Lost` if fenced or expired; renewal must not reset the same-ID delivery window.
     fn extend(
         &self,
@@ -349,7 +349,8 @@ pub trait OutboxRelayStore<P>: Send + Sync {
     /// Consume a claim and atomically persist its resolution using a fencing compare-and-set.
     /// `Published` marks confirmed publication durably before unblocking a successor; it does not
     /// require receipt persistence. `Retry` keeps the original identity and content; `DeadLetter`
-    /// keeps an ordered successor blocked.
+    /// keeps an ordered successor blocked. The store schedules the next eligibility of a retry:
+    /// give other due heads a turn and defer a failing record so immediate scans cannot hot-loop.
     fn settle(
         &self,
         claim: Self::Claim,

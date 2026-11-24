@@ -500,11 +500,11 @@ impl OutboxDriver for Driver {
         let claim = self
             .claim(message(&self.h.id()).metadata().tenant_id())
             .await?;
-        let first = self.store().lease_status(&claim, deadline()).await?;
+        let first = self.store().extend(&claim, deadline()).await?;
         let renewed = self.store().extend(&claim, deadline()).await?;
         sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 second' WHERE message_id=$1")
             .bind(self.h.id()).execute(&self.h.owner).await.map_err(port)?;
-        let expired = self.store().lease_status(&claim, deadline()).await?;
+        let expired = self.store().extend(&claim, deadline()).await?;
         Ok(Some([first, renewed, expired]))
     }
     fn reset(&self) {
@@ -589,7 +589,7 @@ impl OutboxDriver for Driver {
             .claim(message(&self.h.id()).metadata().tenant_id())
             .await?;
         *self.head.lock().await = Some(current);
-        let status = self.store().lease_status(&old, deadline()).await?;
+        let status = self.store().extend(&old, deadline()).await?;
         self.fenced_settle(old).await?;
         Ok(status)
     }

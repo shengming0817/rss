@@ -364,7 +364,7 @@ async fn run() -> anyhow::Result<()> {
         LeaseStatus::Lost
     ));
     assert!(matches!(
-        restored.lease_status(&old_outbox, deadline()).await?,
+        restored.extend(&old_outbox, deadline()).await?,
         OutboxLeaseStatus::Lost
     ));
     assert!(
