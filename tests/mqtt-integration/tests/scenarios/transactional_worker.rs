@@ -52,8 +52,9 @@ impl DeliverySource<Vec<u8>> for LoseFirstSettlement {
     async fn deliveries(
         &self,
         subscription: &SubscriptionIdentity,
+        window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
-        let stream = self.source.deliveries(subscription).await?;
+        let stream = self.source.deliveries(subscription, window).await?;
         let stream = futures::stream::unfold(stream, |mut stream| async move {
             stream.next().await.map(|item| (item, stream))
         });
@@ -84,7 +85,8 @@ impl DeliverySource<Vec<u8>> for LoseFirstSettlement {
             }
         });
         Ok(ManagedDeliveryStream::from_provider(
-            Box::pin(mapped) as FaultDeliveries
+            rss_transactional_messaging::transport::StreamOnStop::Retain,
+            Box::pin(mapped) as FaultDeliveries,
         ))
     }
 }
@@ -104,6 +106,7 @@ fn worker<S: DeliverySource<Vec<u8>>>(
     token: CancellationToken,
 ) -> anyhow::Result<impl Future<Output = Result<(), MessagingError>>> {
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         source,
         Arc::new(PgInboxStore::new(
             database.runtime.clone(),
@@ -219,7 +222,12 @@ async fn terminal() -> anyhow::Result<()> {
         *state.borrow(),
         rss_mqtt::ConnectionState::Failed(rss_mqtt::MqttError::UnsupportedQos)
     );
-    assert!(source.deliveries(&subscription()?).await.is_err());
+    assert!(
+        source
+            .deliveries(&subscription()?, std::num::NonZeroU16::MIN)
+            .await
+            .is_err()
+    );
     server.await??;
     drop(resource);
     database.runtime.close().await;

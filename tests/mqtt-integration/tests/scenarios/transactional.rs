@@ -154,6 +154,7 @@ async fn scenario() -> anyhow::Result<()> {
         inbox,
         subscription,
     };
+    case.busy_duplicate(&mut stream).await?;
     case.committed(&mut stream).await?;
     case.uncertain(&mut stream, false).await?;
     case.uncertain(&mut stream, true).await?;
@@ -162,7 +163,7 @@ async fn scenario() -> anyhow::Result<()> {
     drop(stream);
     let recovered = tokio::time::timeout(
         Duration::from_secs(5),
-        source.deliveries(&case.subscription),
+        source.deliveries(&case.subscription, std::num::NonZeroU16::MIN),
     )
     .await??;
     drop(recovered);
@@ -217,6 +218,64 @@ impl TransactionCase {
             fault,
         };
         Ok(consume_once(&self.inbox, &transaction, &execution, delivery).await?)
+    }
+    async fn busy_duplicate(&self, stream: &mut Stream) -> anyhow::Result<()> {
+        use rss_transactional_messaging::{
+            inbox::{IdempotencyDisposition, InboxStore},
+            transaction::verify_ingress,
+        };
+        let id = "live-owner";
+        self.publish(id).await?;
+        let delivery = next(stream).await?;
+        let verifier = Validator(true);
+        let group = ConsumerGroup::parse("mqtt-transactional")?;
+        let verified = verify_ingress(&verifier, group.clone(), &self.subscription, &message(id)?)
+            .map_err(|_| anyhow::anyhow!("fixture ingress"))?;
+        let IdempotencyDisposition::Acquired(holder) = self
+            .inbox
+            .claim(
+                verified.execution(),
+                verified.identity(),
+                support::deadline(&*self.clock),
+            )
+            .await?
+        else {
+            anyhow::bail!("missing owner");
+        };
+        let before = support::ready_generation(&self.connection)?;
+        let short = PgInboxStore::new(
+            self.database.runtime.clone(),
+            LeaseRenewalPolicy::from_ttl(Duration::from_millis(600))?,
+        )?;
+        let execution = ConsumerExecution::new(
+            group,
+            &verifier,
+            &self.subscription,
+            &*self.clock,
+            ConsumerExecutionPolicy::new(
+                RetryPolicy::STANDARD,
+                ExecutionBudget::new(Duration::from_millis(800), Duration::from_millis(150))?,
+            ),
+            &Emitter,
+        );
+        let tx = PgConsumerTx::receipt_only(self.database.runtime.clone(), Effect(false));
+        let processing = consume_once(&short, &tx, &execution, delivery);
+        tokio::pin!(processing);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), &mut processing)
+                .await
+                .is_err()
+        );
+        assert_eq!(support::ready_generation(&self.connection)?, before);
+        assert_eq!(processing.await?, ProcessingDisposition::InProgress);
+        support::wait_reconnected(&self.connection, before).await?;
+        assert_eq!(support::ready_generation(&self.connection)?, before + 1);
+        self.inbox
+            .release(holder, support::deadline(&*self.clock))
+            .await?;
+        assert_committed(self.process(next(stream).await?, None, false, true).await?);
+        assert_eq!(count(&self.database, id).await?, 1);
+        Ok(())
     }
     async fn committed(&self, stream: &mut Stream) -> anyhow::Result<()> {
         self.database.append("committed").await?;
@@ -303,10 +362,26 @@ async fn start_stream(
         MessageRoute::parse("wrong")?,
         subscription.contract().clone(),
     );
-    assert!(source.deliveries(&wrong).await.is_err());
-    let mut stream = source.deliveries(subscription).await?;
     assert!(
-        source.deliveries(subscription).await.is_err(),
+        source
+            .deliveries(&wrong, std::num::NonZeroU16::MIN)
+            .await
+            .is_err()
+    );
+    assert!(
+        source
+            .deliveries(subscription, std::num::NonZeroU16::new(2).expect("two"))
+            .await
+            .is_err()
+    );
+    let mut stream = source
+        .deliveries(subscription, std::num::NonZeroU16::MIN)
+        .await?;
+    assert!(
+        source
+            .deliveries(subscription, std::num::NonZeroU16::MIN)
+            .await
+            .is_err(),
         "no second admission owner"
     );
     assert!(

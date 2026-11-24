@@ -45,9 +45,13 @@ transient delivery-processing failures with a distinct unbounded, saturating exp
 Opening a stream does not reset backoff: consecutive subscribe errors, empty streams and
 recoverable processing errors share the failure cursor. Only a completed delivery-processing
 operation (including successful settlement or invalid-delivery rejection) resets it to the base.
-Transient delivery failures retire the current provider stream before resubscription. It processes
-exactly one delivery at a time, so the next delivery is not polled until the current settlement
-completes. Graceful shutdown stops admission and lets the current delivery finish. The same loop
+Transient delivery failures retire the current provider stream before resubscription. Pass a nonzero delivery window explicitly. One selects serial processing. AMQP applies
+the window as per-subscription prefetch. MQTT accepts one. Independent deliveries refill on
+completion; one subscription serializes verified tenant/domain/partition keys through settlement.
+Queued and busy deliveries count toward the same window and keep their original deadlines.
+A live claim or unstarted capacity wait keeps the handle unacknowledged and retries at the Inbox
+lease interval until the operation cutoff. Graceful cancellation seals admission before draining.
+The same loop
 runs on an application's Tokio host or through the optional RSS lifecycle bridge.
 
 ## Caller-driven Tokio workers

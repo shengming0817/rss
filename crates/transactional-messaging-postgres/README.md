@@ -13,6 +13,10 @@ Every operation consumes one injected monotonic deadline. Unacknowledged transac
 quarantines the connection. PostgreSQL time, not the application clock, decides durable lease
 ownership and same-ID delivery expiry. No legacy schema is read, migrated or adopted.
 
+Consumer-capable runtimes share one pool across workers and reserve one connection for
+Inbox and local-projection renewal. Constructing an Inbox requires at least two connections.
+Before claim SQL, occupied ordinary capacity is reported separately from a live durable claim.
+
 ## Installation and privileges
 
 Use an external migrator to provision a `rss_tmsg_relay` role with

@@ -69,6 +69,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         Box::pin(examples::run(&fixture, &network, &owner)).await?;
         let timer = Timer::new();
         let config = PgConfig::new(&params.host, params.port, &params.database, "tmsg_runtime", PgPassword::new("fixture-only"), rss_transactional_messaging_postgres::PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?);
+        Box::pin(adversarial::consumer_window::run(config.clone(), &owner)).await?;
         Box::pin(dynamic_scope::run(config.clone(), &owner)).await?;
         transaction_only_permissions(&fixture, &owner, config.clone()).await?;
         consumer_only_permissions(&owner, config.clone()).await?;

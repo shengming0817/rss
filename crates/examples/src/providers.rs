@@ -315,7 +315,7 @@ async fn run_inner(input: FixtureInput) -> anyhow::Result<()> {
     let subscriber = finish(operation, cleanup).await?;
     assert!(runtime.is_closed());
     assert!(
-        DeliverySource::deliveries(&subscriber, &subscription)
+        DeliverySource::deliveries(&subscriber, &subscription, std::num::NonZeroU16::MIN)
             .await
             .is_err()
     );
@@ -402,7 +402,8 @@ async fn transfer(
             Err,
             Err,
         )?;
-    let mut deliveries = DeliverySource::deliveries(subscriber, &subscription).await?;
+    let mut deliveries =
+        DeliverySource::deliveries(subscriber, &subscription, std::num::NonZeroU16::MIN).await?;
     let report = relay_once(
         authority,
         store.as_ref(),

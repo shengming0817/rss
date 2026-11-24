@@ -36,11 +36,12 @@ struct SourceInner {
     shared: Arc<crate::handles::Shared>,
 }
 struct StreamLease {
+    generation: u64,
     admission: Option<Admission>,
     inner: Arc<SourceInner>,
 }
 impl StreamLease {
-    async fn ready(&self) -> Result<(), MessagingError> {
+    async fn ready(&mut self) -> Result<(), MessagingError> {
         let retired = self.admission.as_ref().and_then(|a| a.retired);
         let Some(retired) = retired else {
             return Ok(());
@@ -52,7 +53,10 @@ impl StreamLease {
                     return Err(MessagingError::new(Kind::Permanent, error));
                 }
                 ConnectionState::Closed => return Err(messaging(MqttError::Closed)),
-                ConnectionState::Ready { generation, .. } if generation > retired => return Ok(()),
+                ConnectionState::Ready { generation, .. } if generation > retired => {
+                    self.generation = generation;
+                    return Ok(());
+                }
                 _ => {}
             }
             state
@@ -62,20 +66,24 @@ impl StreamLease {
         }
     }
     async fn next(&mut self) -> Result<Option<crate::Delivery>, MqttError> {
-        self.admission
+        let delivery = self
+            .admission
             .as_mut()
             .ok_or(MqttError::Closed)?
             .receiver
             .next()
-            .await
+            .await?;
+        if let Some(item) = &delivery {
+            self.generation = item.settlement.generation;
+        }
+        Ok(delivery)
     }
 }
 impl Drop for StreamLease {
     fn drop(&mut self) {
         if let Some(mut admission) = self.admission.take() {
-            let generation = self.inner.shared.generation.load(Ordering::Acquire);
-            self.inner.shared.abandon(generation);
-            admission.retired = Some(generation);
+            self.inner.shared.abandon(self.generation);
+            admission.retired = Some(self.generation);
             // Poison can only occur in trusted synchronous admission ownership code. Restore the
             // sole receiver so resource Drop still closes it; never mint a broker acknowledgement.
             *self
@@ -188,8 +196,9 @@ impl DeliverySource<Vec<u8>> for MqttDeliverySource {
     async fn deliveries(
         &self,
         subscription: &SubscriptionIdentity,
+        window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
-        if subscription != &self.subscription {
+        if window != std::num::NonZeroU16::MIN || subscription != &self.subscription {
             return Err(messaging(MqttError::InvalidConfig));
         }
         match *self.inner.shared.state.borrow() {
@@ -206,7 +215,10 @@ impl DeliverySource<Vec<u8>> for MqttDeliverySource {
             .map_err(|_| messaging(MqttError::Closed))?
             .take()
             .ok_or_else(|| MessagingError::new(Kind::Conflict, MqttError::InvalidConfig))?;
-        let lease = StreamLease {
+        let mut lease = StreamLease {
+            generation: admission
+                .retired
+                .unwrap_or_else(|| self.inner.shared.generation.load(Ordering::Acquire)),
             admission: Some(admission),
             inner: self.inner.clone(),
         };
@@ -235,7 +247,8 @@ impl DeliverySource<Vec<u8>> for MqttDeliverySource {
             },
         );
         Ok(ManagedDeliveryStream::from_provider(
-            Box::pin(stream) as MqttDeliveries
+            rss_transactional_messaging::transport::StreamOnStop::Retain,
+            Box::pin(stream) as MqttDeliveries,
         ))
     }
 }

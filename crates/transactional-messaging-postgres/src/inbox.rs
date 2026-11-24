@@ -1,5 +1,7 @@
 //! Durable inbox identity and lease CAS adapted from baseline cotx/eventing.rs.
+use crate::transaction::PoolAccess;
 use crate::{PgError, PgRuntime, PgTransaction, transaction::settled};
+use rss_request_context::Clock as _;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     inbox::{ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
@@ -36,6 +38,9 @@ pub struct PgInboxStore {
 impl PgInboxStore {
     /// Bind the shared pool and lease policy.
     pub fn new(runtime: Arc<PgRuntime>, policy: LeaseRenewalPolicy) -> Result<Self, PgError> {
+        if runtime.pool.options().get_max_connections() < 2 {
+            return Err(PgError::InsufficientRenewalCapacity);
+        }
         Ok(Self {
             runtime,
             lease_ms: milliseconds(policy.ttl())?,
@@ -102,6 +107,60 @@ async fn read(
         .fetch_optional(&mut *transaction.connection).await?)
 }
 
+impl PgInboxStore {
+    pub(crate) async fn claim_with_access(
+        &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
+        identity: &ConsumerIdentity,
+        deadline: OperationDeadline,
+        access: PoolAccess,
+    ) -> Result<IdempotencyDisposition<PgInboxClaim>, MessagingError> {
+        if binding.tenant() != identity.tenant_id() {
+            return Err(PgError::lost().port());
+        }
+        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
+        let identity = identity.clone();
+        let lease_ms = self.lease_ms;
+        settled(
+            self.runtime
+                .transaction_with_access(
+                    binding,
+                    cutoff,
+                    (),
+                    true,
+                    access,
+                    #[cfg(feature = "integration")]
+                    None,
+                    move |_, tx| {
+                        Box::pin(async move {
+                            let row = sqlx::query(CLAIM_SQL)
+                                .bind(identity.tenant_id().to_string())
+                                .bind(identity.message_id().as_str())
+                                .bind(identity.group().as_str())
+                                .bind(contract_key(identity.contract())?)
+                                .bind(lease_ms)
+                                .fetch_optional(&mut *tx.connection)
+                                .await?;
+                            if let Some(row) = row {
+                                return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
+                                    binding: *tx.binding(),
+                                    identity,
+                                    token: row.try_get("token")?,
+                                }));
+                            }
+                            let row = read(tx, &identity).await?.ok_or_else(PgError::invariant)?;
+                            Ok(match receipt(&row, &identity)? {
+                                Some(value) => IdempotencyDisposition::Terminal(value),
+                                None => IdempotencyDisposition::InProgress,
+                            })
+                        })
+                    },
+                )
+                .await,
+        )
+        .map_err(PgError::port)
+    }
+}
 pub(crate) async fn lock_identity(
     tx: &mut PgTransaction<'_>,
     identity: &ConsumerIdentity,
@@ -142,37 +201,14 @@ impl InboxStore for PgInboxStore {
         if binding.tenant() != identity.tenant_id() {
             return Err(PgError::lost().port());
         }
-        let identity = identity.clone();
-        let lease_ms = self.lease_ms;
-        settled(
-            self.runtime
-                .local_tx(binding, deadline, move |tx| {
-                    Box::pin(async move {
-                        let row = sqlx::query(CLAIM_SQL)
-                            .bind(identity.tenant_id().to_string())
-                            .bind(identity.message_id().as_str())
-                            .bind(identity.group().as_str())
-                            .bind(contract_key(identity.contract())?)
-                            .bind(lease_ms)
-                            .fetch_optional(&mut *tx.connection)
-                            .await?;
-                        if let Some(row) = row {
-                            return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
-                                binding: *tx.binding(),
-                                identity,
-                                token: row.try_get("token")?,
-                            }));
-                        }
-                        let row = read(tx, &identity).await?.ok_or_else(PgError::invariant)?;
-                        Ok(match receipt(&row, &identity)? {
-                            Some(value) => IdempotencyDisposition::Terminal(value),
-                            None => IdempotencyDisposition::InProgress,
-                        })
-                    })
-                })
-                .await,
-        )
-        .map_err(PgError::port)
+        self.runtime
+            .validate_binding(binding)
+            .map_err(PgError::port)?;
+        let Some(permit) = self.runtime.try_claim_slot().map_err(PgError::port)? else {
+            return Ok(IdempotencyDisposition::CapacityBusy);
+        };
+        self.claim_with_access(binding, identity, deadline, PoolAccess::Admitted(permit))
+            .await
     }
     async fn read_terminal(
         &self,
@@ -210,24 +246,50 @@ impl InboxStore for PgInboxStore {
         let identity = claim.identity.clone();
         let token = claim.token.clone();
         let lease_ms = self.lease_ms;
-        settled(
+        let timer = &self.runtime.timer;
+        let started = timer.now();
+        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
+        let checked = settled(
             self.runtime
-                .local_tx(claim.binding, deadline, move |tx| {
-                    Box::pin(async move {
-                        lock_identity(tx, &identity).await?;
-                        extend_locked(tx, &identity, &token, lease_ms).await
-                    })
-                })
+                .transaction_with_access(
+                    claim.binding,
+                    cutoff,
+                    (),
+                    true,
+                    PoolAccess::Renewal,
+                    #[cfg(feature = "integration")]
+                    None,
+                    move |_, tx| {
+                        Box::pin(async move {
+                            lock_identity(tx, &identity).await?;
+                            let observed = tx.timer.now();
+                            let status = extend_locked(tx, &identity, &token, lease_ms).await?;
+                            Ok((observed, status))
+                        })
+                    },
+                )
                 .await,
-        )
-        .map_err(PgError::port)
-        .or_else(|error| {
-            if error.kind() == MessagingErrorKind::OwnershipLost {
-                Ok(LeaseStatus::Lost)
-            } else {
-                Err(error)
-            }
-        })
+        );
+        let now = timer.now();
+        tracing::debug!(
+            renewal_us = now.saturating_duration_since(started).as_micros() as u64,
+            "PostgreSQL Inbox renewal"
+        );
+        checked
+            .map(|(observed, status)| match status {
+                LeaseStatus::Held { remaining } => LeaseStatus::Held {
+                    remaining: remaining.saturating_sub(now.saturating_duration_since(observed)),
+                },
+                LeaseStatus::Lost => LeaseStatus::Lost,
+            })
+            .map_err(PgError::port)
+            .or_else(|error| {
+                if error.kind() == MessagingErrorKind::OwnershipLost {
+                    Ok(LeaseStatus::Lost)
+                } else {
+                    Err(error)
+                }
+            })
     }
     async fn release(
         &self,

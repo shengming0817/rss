@@ -182,8 +182,9 @@ impl DeliverySource<Vec<u8>> for AmqpSubscriber {
     async fn deliveries(
         &self,
         subscription: &SubscriptionIdentity,
+        window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
-        self.0.deliveries(subscription).await
+        self.0.deliveries(subscription, window).await
     }
 }
 impl AmqpSubscriberResource {

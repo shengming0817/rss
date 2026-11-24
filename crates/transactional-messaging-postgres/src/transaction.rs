@@ -15,6 +15,7 @@ use sqlx::{
     postgres::PgPoolOptions,
 };
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 /// Closed, non-sensitive storage-contract diagnostic returned by the live catalog probe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +96,9 @@ pub enum PgError {
     /// Invalid connection identity or credentials.
     #[error("invalid PostgreSQL connection configuration")]
     InvalidConnectionConfig,
+    /// Consumer effects require a separate connection for renewal.
+    #[error("consumer renewal requires at least two PostgreSQL connections")]
+    InsufficientRenewalCapacity,
     /// Invalid pool size.
     #[error("invalid PostgreSQL pool limits")]
     InvalidPoolLimits,
@@ -278,6 +282,7 @@ where
 
 /// Shared bounded pool. A caller supplies a timer sharing the runtime's monotonic time domain.
 pub struct PgRuntime {
+    ordinary_slots: Arc<Semaphore>,
     pub(crate) pool: PgPool,
     pub(crate) storage: StorageIdentity,
     pub(crate) timer: PgTimer,
@@ -389,7 +394,14 @@ impl PgRuntime {
                 .await
         })
         .await??;
+        let reserve = u32::from(
+            matches!(
+                profile,
+                Profile::Runtime | Profile::Consumer | Profile::Recovery
+            ) && config.max_connections > 1,
+        );
         let runtime = Self {
+            ordinary_slots: Arc::new(Semaphore::new((config.max_connections - reserve) as usize)),
             pool,
             storage,
             timer,
@@ -544,8 +556,42 @@ impl PgRuntime {
         &self,
         binding: ExecutionBinding,
         cutoff: Deadline,
+        context: C,
+        lock: bool,
+        #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
+        operation: F,
+    ) -> LocalTxAttempt<T, PgError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut C,
+                &'a mut PgTransaction<'_>,
+            ) -> BoxFuture<'a, Result<T, PgError>>
+            + Send,
+    {
+        self.transaction_with_access(
+            binding,
+            cutoff,
+            context,
+            lock,
+            PoolAccess::Ordinary,
+            #[cfg(feature = "integration")]
+            injection,
+            operation,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Private transaction kernel binds the connection admission, scope, and one absolute cutoff."
+    )]
+    pub(crate) async fn transaction_with_access<T: Send, C: Send, F>(
+        &self,
+        binding: ExecutionBinding,
+        cutoff: Deadline,
         mut context: C,
         lock: bool,
+        access: PoolAccess,
         #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
         operation: F,
     ) -> LocalTxAttempt<T, PgError>
@@ -564,6 +610,7 @@ impl PgRuntime {
             cutoff,
             LocalTxDeadlineStage::Acquire,
             self.acquire_for_transaction(
+                access,
                 #[cfg(feature = "integration")]
                 injection,
             ),
@@ -652,6 +699,7 @@ impl PgRuntime {
     /// leaves the pool closed, and another call can resume waiting. Repeated and concurrent
     /// calls are safe. Dropping the runtime is not a substitute for awaiting graceful close.
     pub async fn close(&self) {
+        self.ordinary_slots.close();
         self.pool.close().await;
     }
 
@@ -668,8 +716,43 @@ impl PgRuntime {
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub(crate) async fn ordinary_slot(&self) -> Result<OwnedSemaphorePermit, sqlx::Error> {
+        self.ordinary_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| sqlx::Error::PoolClosed)
+    }
+
+    pub(crate) fn try_claim_slot(&self) -> Result<Option<OwnedSemaphorePermit>, PgError> {
+        match self.ordinary_slots.clone().try_acquire_owned() {
+            Ok(permit) => Ok(Some(permit)),
+            Err(TryAcquireError::NoPermits) => Ok(None),
+            Err(TryAcquireError::Closed) => Err(sqlx::Error::PoolClosed.into()),
+        }
+    }
     pub(crate) async fn acquire(&self) -> Result<ConnectionLease, sqlx::Error> {
-        let lease = ConnectionLease::acquire(&self.pool).await?;
+        self.acquire_with(PoolAccess::Ordinary).await
+    }
+    async fn acquire_with(&self, access: PoolAccess) -> Result<ConnectionLease, sqlx::Error> {
+        let start = self.timer.now();
+        let permit = match access {
+            PoolAccess::Ordinary => Some(self.ordinary_slot().await?),
+            PoolAccess::Admitted(permit) => Some(permit),
+            PoolAccess::Renewal => None,
+        };
+        let admitted = self.timer.now();
+        let result = ConnectionLease::acquire(&self.pool, permit).await;
+        tracing::debug!(
+            admission_wait_us = admitted.saturating_duration_since(start).as_micros() as u64,
+            pool_acquire_us = self
+                .timer
+                .now()
+                .saturating_duration_since(admitted)
+                .as_micros() as u64,
+            "PostgreSQL connection acquisition"
+        );
+        let lease = result?;
         #[cfg(feature = "integration")]
         let mut lease = lease;
         #[cfg(feature = "integration")]
@@ -681,6 +764,7 @@ impl PgRuntime {
 
     pub(crate) async fn acquire_for_transaction(
         &self,
+        access: PoolAccess,
         #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
     ) -> Result<ConnectionLease, sqlx::Error> {
         #[cfg(feature = "integration")]
@@ -690,7 +774,7 @@ impl PgRuntime {
         } else {
             None
         };
-        let lease = self.acquire().await?;
+        let lease = self.acquire_with(access).await?;
         #[cfg(feature = "integration")]
         let mut lease = lease;
         #[cfg(feature = "integration")]
@@ -797,7 +881,7 @@ pub struct PgTransaction<'tx> {
     scope_restored: bool,
     binding: ExecutionBinding,
     cutoff: Deadline,
-    timer: &'tx PgTimer,
+    pub(crate) timer: &'tx PgTimer,
     owner: &'tx PgRuntime,
 }
 impl PgTransaction<'_> {
@@ -947,16 +1031,27 @@ pub(crate) struct TransactionInjection {
     pub(crate) before_acquire: BoxFuture<'static, ()>,
 }
 
+pub(crate) enum PoolAccess {
+    Ordinary,
+    Admitted(OwnedSemaphorePermit),
+    Renewal,
+}
+
 pub(crate) struct ConnectionLease {
     connection: PoolConnection<Postgres>,
+    _ordinary_slot: Option<OwnedSemaphorePermit>,
     quarantine: bool,
     #[cfg(feature = "integration")]
     fault: u8,
 }
 impl ConnectionLease {
-    pub(crate) async fn acquire(pool: &PgPool) -> Result<Self, sqlx::Error> {
+    pub(crate) async fn acquire(
+        pool: &PgPool,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> Result<Self, sqlx::Error> {
         Ok(Self {
             connection: pool.acquire().await?,
+            _ordinary_slot: permit,
             quarantine: true,
             #[cfg(feature = "integration")]
             fault: 0,
@@ -1049,6 +1144,7 @@ mod tests {
             .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
         pool.close().await;
         let runtime = PgRuntime {
+            ordinary_slots: Arc::new(Semaphore::new(1)),
             storage: StorageIdentity::new([1; 16], [2; 16])?,
             pool,
             timer: PgTimer(Arc::new(Frozen)),

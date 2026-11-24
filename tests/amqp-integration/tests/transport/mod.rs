@@ -82,7 +82,7 @@ impl BrokerDriver<'_> {
         let pending = envelope(&route, "cancel-pending");
         let subscription = subscription_for(&first, &route);
         let mut stream = subscriber
-            .deliveries(&subscription)
+            .deliveries(&subscription, std::num::NonZeroU16::MIN)
             .await
             .map_err(|e| ConformanceError::delivery(e.kind()))?;
         publish_confirmed(&publisher, &first).await?;
@@ -147,7 +147,7 @@ impl BrokerDriver<'_> {
         let message = envelope(&route, kind.name());
         let subscription = subscription_for(&message, &route);
         let mut stream = subscriber
-            .deliveries(&subscription)
+            .deliveries(&subscription, std::num::NonZeroU16::MIN)
             .await
             .map_err(|e| ConformanceError::delivery(e.kind()))?;
         publish_confirmed(&publisher, &message).await?;
@@ -197,7 +197,7 @@ impl BrokerDriver<'_> {
             .await
             .map_err(LiveConformanceFailure::into_conformance)?;
             let mut stream = replacement
-                .deliveries(subscription)
+                .deliveries(subscription, std::num::NonZeroU16::MIN)
                 .await
                 .map_err(|e| ConformanceError::delivery(e.kind()))?;
             let ids = observe_redelivery(&mut stream, subscription, kind).await?;
@@ -207,7 +207,7 @@ impl BrokerDriver<'_> {
             // Abandon/timeout must retire the old channel themselves. Keep both the old stream
             // and resource alive while a fresh channel on this exact resource observes requeue.
             let mut replacement = subscriber
-                .deliveries(subscription)
+                .deliveries(subscription, std::num::NonZeroU16::MIN)
                 .await
                 .map_err(|e| ConformanceError::delivery(e.kind()))?;
             let ids = observe_redelivery(&mut replacement, subscription, kind).await?;
@@ -392,7 +392,9 @@ pub(super) async fn expired_settlement_never_acks_and_redelivers(
     let (publisher, publisher_resource) = connected_publisher(&url, "expired-settle-pub").await?;
     let message = envelope(&route, "expired-settle-message");
     let subscription = subscription_for(&message, &route);
-    let mut stream = subscriber.deliveries(&subscription).await?;
+    let mut stream = subscriber
+        .deliveries(&subscription, std::num::NonZeroU16::MIN)
+        .await?;
     assert_expired_admission(&publisher, &message, &mut stream).await?;
     publish_confirmed(&publisher, &message).await?;
     let delivery = next_valid_delivery(&mut stream).await?;
@@ -426,8 +428,12 @@ pub(super) async fn headers_roundtrip_and_subscription_cancel_is_isolated(
     let other = envelope(&other_route, "adjacent-message");
     let subscription = subscription_for(&message, &route);
     let other_subscription = subscription_for(&other, &other_route);
-    let mut first_stream = subscriber.deliveries(&subscription).await?;
-    let mut other_stream = subscriber.deliveries(&other_subscription).await?;
+    let mut first_stream = subscriber
+        .deliveries(&subscription, std::num::NonZeroU16::MIN)
+        .await?;
+    let mut other_stream = subscriber
+        .deliveries(&other_subscription, std::num::NonZeroU16::MIN)
+        .await?;
     let (received, settlement) =
         observe_headers(&publisher, &message, &mut first_stream, &mut other_stream).await?;
     drop(first_stream);
@@ -436,7 +442,10 @@ pub(super) async fn headers_roundtrip_and_subscription_cancel_is_isolated(
     acknowledge_adjacent_delivery(&mut other_stream, &other, &other_subscription).await?;
     drop(resource);
     assert!(
-        subscriber.deliveries(&subscription).await.is_err(),
+        subscriber
+            .deliveries(&subscription, std::num::NonZeroU16::MIN)
+            .await
+            .is_err(),
         "dropping the unique owner must fence surviving handles"
     );
     close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
@@ -535,7 +544,7 @@ pub(super) async fn subscription_cannot_register_after_resource_shutdown(
         prepared_subscriber(&url, &route, "register-shutdown", true).await?;
     let subscription = subscription_for(&envelope(&route, "register-shutdown"), &route);
     let (entered, resume) = subscriber.pause_next_subscription_registration_for_test();
-    let registration = subscriber.deliveries(&subscription);
+    let registration = subscriber.deliveries(&subscription, std::num::NonZeroU16::MIN);
     tokio::pin!(registration);
     tokio::select! {
         _ = &mut registration => anyhow::bail!("subscription must pause before registration"),
@@ -661,7 +670,7 @@ async fn observe_cancel_successor(
     .await
     .map_err(LiveConformanceFailure::into_conformance)?;
     let mut replacement_stream = replacement
-        .deliveries(subscription)
+        .deliveries(subscription, std::num::NonZeroU16::MIN)
         .await
         .map_err(|e| ConformanceError::delivery(e.kind()))?;
     let delivery = next_valid_delivery(&mut replacement_stream)
@@ -730,8 +739,11 @@ pub(super) async fn subscriber_recovers_after_broker_connection_loss(
         "subscriber recovery proof",
     )
     .await?;
-    let mut recovered =
-        tokio::time::timeout(TIMEOUT, subscriber.deliveries(&subscription)).await??;
+    let mut recovered = tokio::time::timeout(
+        TIMEOUT,
+        subscriber.deliveries(&subscription, std::num::NonZeroU16::MIN),
+    )
+    .await??;
     let (publisher, publisher_resource) = connected_publisher(&url, "recovery-publisher").await?;
     publish_confirmed(&publisher, &message).await?;
     let delivery = next_valid_delivery(&mut recovered).await?;
@@ -740,7 +752,12 @@ pub(super) async fn subscriber_recovers_after_broker_connection_loss(
     acknowledge(settlement, &received, &subscription).await?;
     close(publisher_resource.shutdown(Duration::from_secs(5))).await?;
     close(resource.shutdown(Duration::from_secs(5))).await?;
-    assert!(subscriber.deliveries(&subscription).await.is_err());
+    assert!(
+        subscriber
+            .deliveries(&subscription, std::num::NonZeroU16::MIN)
+            .await
+            .is_err()
+    );
     Ok(())
 }
 
@@ -779,7 +796,9 @@ pub(super) async fn subscriber_never_provisions_a_missing_queue(
     .await?;
     let route = MessageRoute::parse("rss.transport.not-provisioned")?;
     let subscription = subscription_for(&envelope(&route, "missing-queue"), &route);
-    let result = subscriber.deliveries(&subscription).await;
+    let result = subscriber
+        .deliveries(&subscription, std::num::NonZeroU16::MIN)
+        .await;
     assert!(
         result.is_err(),
         "production delivery must not create an absent broker queue"
@@ -825,7 +844,9 @@ async fn lose_subscriber_connection(
     subscription: &SubscriptionIdentity,
     reason: &str,
 ) -> anyhow::Result<()> {
-    let mut old = subscriber.deliveries(subscription).await?;
+    let mut old = subscriber
+        .deliveries(subscription, std::num::NonZeroU16::MIN)
+        .await?;
     rabbit
         .broker_force_close_one_connection(url.rsplit('/').next().expect("fixture vhost"), reason)
         .await?;
@@ -839,12 +860,12 @@ async fn assert_recovery_installation_fenced(
     subscription: &SubscriptionIdentity,
 ) -> anyhow::Result<()> {
     let (entered, resume) = subscriber.pause_next_recovery_installation_for_test();
-    let mut first = Box::pin(subscriber.deliveries(subscription));
+    let mut first = Box::pin(subscriber.deliveries(subscription, std::num::NonZeroU16::MIN));
     tokio::select! {
         result = &mut first => anyhow::bail!("recovery completed before barrier: {}", result.is_ok()),
         result = tokio::time::timeout(TIMEOUT, entered) => { result??; }
     }
-    let mut waiter = Box::pin(subscriber.deliveries(subscription));
+    let mut waiter = Box::pin(subscriber.deliveries(subscription, std::num::NonZeroU16::MIN));
     assert!(
         tokio::time::timeout(Duration::from_millis(30), &mut waiter)
             .await
@@ -866,7 +887,12 @@ async fn assert_recovery_installation_fenced(
         .map(|_| ())
         .expect_err("closed subscriber must reject replacement");
     assert_eq!(error.kind(), MessagingErrorKind::Permanent);
-    assert!(subscriber.deliveries(subscription).await.is_err());
+    assert!(
+        subscriber
+            .deliveries(subscription, std::num::NonZeroU16::MIN)
+            .await
+            .is_err()
+    );
     Ok(())
 }
 
@@ -1038,7 +1064,9 @@ async fn standalone_subscriber_close_case(
     let (subscriber, resource) = prepared_subscriber(url, route, mode, true).await?;
     let message = envelope(route, mode);
     let subscription = subscription_for(&message, route);
-    let mut stream = subscriber.deliveries(&subscription).await?;
+    let mut stream = subscriber
+        .deliveries(&subscription, std::num::NonZeroU16::MIN)
+        .await?;
     publish_confirmed(publisher, &message).await?;
     let delivery = next_valid_delivery(&mut stream).await?;
     let (_, settlement) = (*delivery).into_parts();
@@ -1053,7 +1081,12 @@ async fn standalone_subscriber_close_case(
         }
         _ => interrupt_paused_subscriber_close(resource, &settlement, mode == "deadline").await?,
     }
-    assert!(subscriber.deliveries(&subscription).await.is_err());
+    assert!(
+        subscriber
+            .deliveries(&subscription, std::num::NonZeroU16::MIN)
+            .await
+            .is_err()
+    );
     testkit::await_try(TIMEOUT, async || {
         let count = rabbit
             .broker_consumer_count(url.rsplit('/').next().expect("vhost"), route.as_str())
@@ -1132,7 +1165,9 @@ async fn assert_subscriber_close_order(
     let (publisher, publisher_resource) = connected_publisher(&url, "ordered-close-pub").await?;
     let message = envelope(&route, "ordered-close");
     let subscription = subscription_for(&message, &route);
-    let mut stream = subscriber.deliveries(&subscription).await?;
+    let mut stream = subscriber
+        .deliveries(&subscription, std::num::NonZeroU16::MIN)
+        .await?;
     publish_confirmed(&publisher, &message).await?;
     let delivery = next_valid_delivery(&mut stream).await?;
     let (_, settlement) = (*delivery).into_parts();

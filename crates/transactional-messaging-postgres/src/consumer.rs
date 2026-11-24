@@ -141,6 +141,7 @@ pub(crate) async fn execute_transaction<
         cutoff,
         LocalTxDeadlineStage::Acquire,
         runtime.acquire_for_transaction(
+            crate::transaction::PoolAccess::Ordinary,
             #[cfg(feature = "integration")]
             injection,
         ),
