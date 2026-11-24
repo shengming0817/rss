@@ -65,7 +65,10 @@ fn continuation(sql: &mut QueryBuilder<Postgres>, mode: QueryMode, p: &Position)
 
 // The scope and time window have already been applied by availability() in this
 // page's snapshot. Bind all fences once, independently of the PG parameter limit.
-fn excluded(availability: &Availability) -> Result<String, Error> {
+pub(crate) fn excluded(availability: &Availability) -> Result<Option<String>, Error> {
+    if availability.excluded.is_empty() {
+        return Ok(None);
+    }
     let mut ranges = Vec::with_capacity(availability.excluded.len());
     for range in &availability.excluded {
         let mut row = match &range.selection {
@@ -86,7 +89,30 @@ fn excluded(availability: &Availability) -> Result<String, Error> {
         row["hi"] = range.window.end().micros().into();
         ranges.push(row);
     }
-    crate::lifecycle::json(&ranges)
+    crate::lifecycle::json(&ranges).map(Some)
+}
+
+pub(crate) fn push_excluded(sql: &mut QueryBuilder<Postgres>, excluded: Option<&str>) {
+    if let Some(excluded) = excluded {
+        sql.push("excluded AS MATERIALIZED (
+              SELECT lo,hi,decode(series,'base64') AS series_digest,source,generation,subject,resource,keys
+              FROM jsonb_to_recordset(")
+            .push_bind(excluded)
+            .push("::text::jsonb) AS f(lo bigint,hi bigint,series text,source text,generation text,
+                                      subject text,resource text,keys text[])), ");
+    }
+}
+
+pub(crate) fn filter_excluded(sql: &mut QueryBuilder<Postgres>, has_exclusions: bool) {
+    if has_exclusions {
+        sql.push(
+            " AND NOT EXISTS (SELECT FROM excluded f
+            WHERE s.observed_at >= f.lo AND s.observed_at < f.hi AND (
+                (s.series_digest,s.source,s.generation) = (f.series_digest,f.source,f.generation)
+                OR (s.subject=f.subject AND s.resource=f.resource
+                    AND (cardinality(f.keys)=0 OR s.key=ANY(f.keys)))))",
+        );
+    }
 }
 
 pub(super) fn samples(
@@ -96,14 +122,8 @@ pub(super) fn samples(
 ) -> Result<QueryBuilder<Postgres>, Error> {
     let exact = matches!(q.selection(), Selection::Exact { .. });
     let mut sql = QueryBuilder::new("WITH ");
-    if !availability.excluded.is_empty() {
-        sql.push("excluded AS MATERIALIZED (
-              SELECT lo,hi,decode(series,'base64') AS series_digest,source,generation,subject,resource,keys
-              FROM jsonb_to_recordset(")
-            .push_bind(excluded(availability)?)
-            .push("::text::jsonb) AS f(lo bigint,hi bigint,series text,source text,generation text,
-                                      subject text,resource text,keys text[])), ");
-    }
+    let excluded = excluded(availability)?;
+    push_excluded(&mut sql, excluded.as_deref());
     sql.push("selected AS (SELECT ");
     if q.mode() == QueryMode::Latest && !exact {
         sql.push("DISTINCT ON (").push(GROUP).push(") ");
@@ -120,15 +140,7 @@ pub(super) fn samples(
     if let Some(position) = after {
         continuation(&mut sql, q.mode(), position);
     }
-    if !availability.excluded.is_empty() {
-        sql.push(
-            " AND NOT EXISTS (SELECT FROM excluded f
-            WHERE s.observed_at >= f.lo AND s.observed_at < f.hi AND (
-                (s.series_digest,s.source,s.generation) = (f.series_digest,f.source,f.generation)
-                OR (s.subject=f.subject AND s.resource=f.resource
-                    AND (cardinality(f.keys)=0 OR s.key=ANY(f.keys)))))",
-        );
-    }
+    filter_excluded(&mut sql, excluded.is_some());
     sql.push(" ORDER BY ");
     let points = i64::from(q.budget().max_points.get());
     let limit = match q.mode() {

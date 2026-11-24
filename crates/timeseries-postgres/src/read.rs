@@ -1,4 +1,4 @@
-mod query;
+pub(crate) mod query;
 use crate::transaction::Mode;
 use crate::{
     CursorKey, Limits, PgStore,

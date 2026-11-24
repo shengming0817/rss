@@ -52,7 +52,7 @@ async fn safe_raw(
             spec.series().definition().spec().metric,
             Metric::Bool | Metric::State { .. }
         ) && spec.coverage() == CoveragePolicy::ObservedOnly
-            && let Some(prior) = crate::aggregate::predecessor(c, &spec, raw_before).await?
+            && let Some(prior) = crate::aggregate::predecessor(c, &spec, raw_before, limits).await?
         {
             anchor_limit = anchor_limit.min(prior.input().observed_at.micros());
         }

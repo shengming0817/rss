@@ -688,3 +688,130 @@ async fn refresh_sees_prior_stream_commit_under_host_repeatable_read() -> anyhow
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn mixed_tiles_page_at_first_unreturned_bucket() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-mixed-page").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let samples = [1, 11, 21, 31]
+        .into_iter()
+        .map(|i| sample(&d, &format!("p{i}"), i, i as u64))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    f.write(&batch("four", samples)?).await?;
+    let sp = spec(&d, 10)?;
+    for (lo, hi) in [(0, 10), (30, 40)] {
+        complete(
+            &f.store,
+            plan(
+                &format!("tile-{lo}"),
+                MaintenanceAction::Recompute {
+                    spec: sp.clone(),
+                    window: window(lo, hi)?,
+                },
+                1,
+            )?,
+        )
+        .await?;
+    }
+    let query = Authorized::<AggregateQuery>::verify(
+        &authority(TENANT)?,
+        AggregateQuery::new(
+            sp,
+            window(0, 40)?,
+            QueryBudget {
+                max_series: NonZeroU32::MIN,
+                max_points: NonZeroU32::new(3).ok_or(Error::InvalidInput)?,
+            },
+            AggregateOp::Mean,
+        )?,
+    )?;
+    let first = f.store.aggregate(&query, None, deadline()?).await?;
+    assert_eq!(first.refreshed_through, Some(Timestamp::new(10)?));
+    assert_eq!(first.buckets.len(), 3);
+    for (b, expected) in first.buckets.iter().zip([1, 11, 21]) {
+        assert!(matches!(b.value,AggregateValue::Mean {sum:Sum::U128(v),..} if v==expected));
+    }
+    let token = first.next.ok_or(Error::Invariant)?;
+    let last = f.store.aggregate(&query, Some(&token), deadline()?).await?;
+    assert_eq!(last.buckets.len(), 1);
+    assert_eq!(last.buckets[0].window, window(30, 40)?);
+    assert_eq!(last.refreshed_through, Some(Timestamp::new(40)?));
+    assert!(last.next.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn raw_byte_overflow_preserves_the_committed_fold() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-fold-budget").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    f.write(&batch(
+        "pair",
+        vec![sample(&d, "small", 1, 1)?, sample(&d, "later", 2, 2)?],
+    )?)
+    .await?;
+    let sp = spec(&d, 10)?;
+    let request = Authorized::<MaintenanceRequest>::verify(
+        &authority(TENANT)?,
+        plan(
+            "bounded",
+            MaintenanceAction::Recompute {
+                spec: sp.clone(),
+                window: window(0, 10)?,
+            },
+            1,
+        )?,
+    )?;
+    let MaintenanceProgress::More { next, .. } =
+        confirmed(f.store.step(&request, None, deadline()?).await?)?
+    else {
+        anyhow::bail!("expected a durable checkpoint")
+    };
+    let before: Vec<u8> =
+        sqlx::query_scalar("SELECT state FROM rss_timeseries.plans WHERE id='bounded'")
+            .fetch_one(&f.admin)
+            .await?;
+    let mut caps = limits()?;
+    caps.max_bytes = NonZeroU32::MIN;
+    let narrow = PgStore::new(
+        f.profile.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        Timer,
+        caps,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    assert_eq!(
+        narrow.step(&request, Some(&next), deadline()?).await.err(),
+        Some(Error::BudgetExceeded)
+    );
+    let after: Vec<u8> =
+        sqlx::query_scalar("SELECT state FROM rss_timeseries.plans WHERE id='bounded'")
+            .fetch_one(&f.admin)
+            .await?;
+    assert_eq!(before, after);
+    let query = Authorized::<AggregateQuery>::verify(
+        &authority(TENANT)?,
+        AggregateQuery::new(
+            sp,
+            window(0, 10)?,
+            QueryBudget {
+                max_series: NonZeroU32::MIN,
+                max_points: NonZeroU32::MIN,
+            },
+            AggregateOp::Mean,
+        )?,
+    )?;
+    assert_eq!(
+        narrow.aggregate(&query, None, deadline()?).await.err(),
+        Some(Error::BudgetExceeded)
+    );
+    complete_after(&f.store, &request, Some(next)).await?;
+    assert_eq!(
+        narrow.aggregate(&query, None, deadline()?).await.err(),
+        Some(Error::BudgetExceeded)
+    );
+    Ok(())
+}

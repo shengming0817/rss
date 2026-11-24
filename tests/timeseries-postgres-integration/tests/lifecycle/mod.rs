@@ -885,3 +885,46 @@ async fn history_page_uses_one_snapshot_across_fence_and_raw_reads() -> anyhow::
     assert_eq!(next.availability.excluded.len(), 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn receipt_expiry_keeps_the_exclusive_boundary_across_steps() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-expire-page").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let stream = sample(&d, "shape", 1, 1)?.input().stream.clone();
+    for (i, name) in ["a", "b", "boundary"].into_iter().enumerate() {
+        f.write(&batch(name, vec![sample(&d, name, i as i64, 1)?])?)
+            .await?;
+    }
+    sqlx::query("UPDATE rss_timeseries.batches SET received_at=CASE WHEN batch_id='boundary' THEN 10 ELSE 1 END,replay_until=11").execute(&f.admin).await?;
+    let request = Authorized::<MaintenanceRequest>::verify(
+        &authority(TENANT)?,
+        plan(
+            "expire",
+            MaintenanceAction::ExpireReceipts {
+                stream,
+                before: Timestamp::new(10)?,
+            },
+            1,
+        )?,
+    )?;
+    let mut token = None;
+    for _ in 0..2 {
+        let MaintenanceProgress::More { processed: 1, next } =
+            confirmed(f.store.step(&request, token.as_ref(), deadline()?).await?)?
+        else {
+            anyhow::bail!("expected one expired receipt");
+        };
+        token = Some(next);
+    }
+    assert!(matches!(
+        confirmed(f.store.step(&request, token.as_ref(), deadline()?).await?)?,
+        MaintenanceProgress::Complete { processed: 0, .. }
+    ));
+    let live: Vec<String> =
+        sqlx::query_scalar("SELECT batch_id FROM rss_timeseries.batches WHERE NOT expired")
+            .fetch_all(&f.admin)
+            .await?;
+    assert_eq!(live, ["boundary"]);
+    Ok(())
+}
