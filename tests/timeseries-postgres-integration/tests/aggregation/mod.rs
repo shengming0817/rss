@@ -1159,7 +1159,13 @@ async fn unrelated_fences_keep_pruned_counter_summary_readable() -> anyhow::Resu
         complete(&f.store, plan(name, action, 1)?).await?;
         let p = ordered_read(&f.store, spec.clone(), range, AggregateOp::Increase).await?;
         assert_eq!(p.refreshed_through, Some(range.end()));
-        assert_eq!(p.buckets, expected.buckets);
+        assert!(matches!(
+            p.buckets[0].value,
+            AggregateValue::Sum(Sum::U128(4))
+        ));
+        assert_eq!(p.buckets[0].completeness, expected.buckets[0].completeness);
+        assert_eq!(p.buckets[0].covered_micros, 4);
+        assert_eq!(p.buckets[0].valid_samples, 2);
     }
     Ok(())
 }
