@@ -78,6 +78,22 @@ async fn expire(owner: &sqlx::PgPool, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn wait_for_expiry(owner: &sqlx::PgPool, id: &str, ttl: Duration) -> anyhow::Result<()> {
+    let initial = facts(owner, id).await?;
+    let wait = sqlx::query("SELECT pg_sleep_until(lease_until + interval '1 millisecond') FROM rss_transactional_messaging.outbox WHERE message_id=$1")
+        .bind(id).fetch_one(owner);
+    tokio::time::timeout(ttl + Duration::from_secs(2), wait).await??;
+    let expired: bool = sqlx::query_scalar("SELECT lease_until <= clock_timestamp() FROM rss_transactional_messaging.outbox WHERE message_id=$1")
+        .bind(id).fetch_one(owner).await?;
+    assert!(expired);
+    assert_eq!(
+        facts(owner, id).await?,
+        initial,
+        "expired with the original token and CAS deadline"
+    );
+    Ok(())
+}
+
 pub(super) async fn run(
     runtime: Arc<PgRuntime>,
     owner: &sqlx::PgPool,
@@ -129,13 +145,7 @@ impl Race {
     ) -> anyhow::Result<Option<PgOutboxClaim>> {
         match self {
             Self::Expired => {
-                let wait = sqlx::query("SELECT pg_sleep_until(lease_until + interval '1 millisecond') FROM rss_transactional_messaging.outbox WHERE message_id=$1")
-                    .bind(id).fetch_one(owner);
-                tokio::time::timeout(
-                    store.delivery_budget().lease_ttl() + Duration::from_secs(2),
-                    wait,
-                )
-                .await??;
+                wait_for_expiry(owner, id, store.delivery_budget().lease_ttl()).await?
             }
             Self::Takeover => {
                 expire(owner, id).await?;
@@ -164,15 +174,6 @@ impl Race {
         binding: ExecutionBinding,
     ) -> anyhow::Result<()> {
         let before = facts(owner, id).await?;
-        if self == Self::Expired {
-            assert_eq!(
-                &before, initial,
-                "expired with the original token and CAS deadline"
-            );
-            let expired: bool = sqlx::query_scalar("SELECT lease_until <= clock_timestamp() FROM rss_transactional_messaging.outbox WHERE message_id=$1")
-                .bind(id).fetch_one(owner).await?;
-            assert!(expired);
-        }
         let publisher = MemoryPublisher::new([]);
         let result = relay_once(
             binding,
