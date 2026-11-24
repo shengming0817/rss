@@ -200,14 +200,14 @@ impl<C: Clock> Operation<'_, C> {
         p: &Prepared,
         deadline: Deadline,
     ) -> Result<(), Error> {
-        let rows=self.ch_query(&self.reader,"SELECT sample_id,digest,received_at FROM rss_ts_ch.raw FINAL WHERE tenant=? AND namespace=? AND revision=? ORDER BY sample_id",deadline)?
-            .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).fetch_all::<(String,String,i64)>().await.map_err(|e|projection::provider_error("projection-verification",e))?;
-        let mut expected = p
-            .rows
-            .iter()
-            .map(|r| (r.sample_id.clone(), r.digest.clone(), r.received_at))
-            .collect::<Vec<_>>();
-        expected.sort();
+        // These columns complete the raw sorting key after the fixed tenant, namespace and
+        // revision. Only exact retries collapse; a conflicting digest or receipt survives merges.
+        let mut rows=self.ch_query(&self.reader,"SELECT DISTINCT series,source,generation,observed_at,sequence,sample_id,digest,received_at FROM rss_ts_ch.raw WHERE tenant=? AND namespace=? AND revision=? LIMIT ?",deadline)?
+            .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).bind(p.rows.len() as u64+1)
+            .fetch_all::<(String,String,String,i64,u64,String,String,i64)>().await.map_err(|e|projection::provider_error("projection-verification",e))?;
+        let mut expected=p.rows.iter().map(|r|(r.series.clone(),r.source.clone(),r.generation.clone(),r.observed_at,r.sequence,r.sample_id.clone(),r.digest.clone(),r.received_at)).collect::<Vec<_>>();
+        rows.sort_unstable();
+        expected.sort_unstable();
         if rows != expected {
             return Err(Error::Invariant);
         }

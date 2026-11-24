@@ -171,7 +171,7 @@ async fn catalog(ch: &Connections) -> Result<(), Error> {
             "raw",
             "ReplacingMergeTree",
             "intDiv(observed_at,2592000000000)",
-            "tenant,namespace,series,source,generation,observed_at,sequence,sample_id",
+            "tenant,namespace,series,source,generation,observed_at,sequence,sample_id,revision,digest,received_at",
         ),
         (
             "summaries",
@@ -245,6 +245,11 @@ async fn catalog(ch: &Connections) -> Result<(), Error> {
             }
         }
     }
+    let primary=ch.maintenance.query("SELECT primary_key FROM system.tables WHERE database='rss_ts_ch' AND name='raw'")
+        .fetch_one::<String>().await.map_err(|_|Error::Unavailable)?;
+    let indexes=ch.maintenance.query("SELECT name,expr,type_full,granularity FROM system.data_skipping_indices WHERE database='rss_ts_ch' AND table='raw'")
+        .fetch_all::<(String,String,String,u64)>().await.map_err(|_|Error::Unavailable)?;
+    if compact(&primary)!="tenant,namespace,series,source,generation,observed_at,sequence,sample_id" || indexes != vec![("raw_revision".into(),"revision".into(),"bloom_filter(0.001)".into(),1)] {return Err(Error::Invariant);}
     columns(ch).await?;
     let attachments = ch
         .maintenance
