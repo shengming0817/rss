@@ -66,7 +66,10 @@ pub(crate) async fn owner_pages(database_clock: &Fixture) -> anyhow::Result<()> 
     let mut expected = Vec::new();
     for i in 0..60 {
         let mut command = f.queue(&format!("owner-{i}"), s, old).await?;
-        command.transition(Event::Supersede, current, clock.now())?;
+        assert_eq!(
+            command.transition(Event::Supersede, current, clock.now())?,
+            Outcome::Advanced
+        );
         expected.push(command);
     }
     let store = f.store.clone();
@@ -79,7 +82,10 @@ pub(crate) async fn owner_pages(database_clock: &Fixture) -> anyhow::Result<()> 
     )?;
     for name in ["owner-publish-a", "owner-publish-b"] {
         let mut command = f.queue(name, s, current).await?;
-        command.transition(Event::Published, current, 100)?;
+        assert_eq!(
+            command.transition(Event::Published, current, 100)?,
+            Outcome::Advanced
+        );
         expected.push(command);
     }
     super::regressions::queue_expiring(&f, s, current, "owner-expire", 100).await?;
@@ -87,7 +93,10 @@ pub(crate) async fn owner_pages(database_clock: &Fixture) -> anyhow::Result<()> 
         .load("owner-expire", s)
         .await?
         .ok_or(Error::InvalidSnapshot)?;
-    expiring.transition(Event::Expire, current, 100)?;
+    assert_eq!(
+        expiring.transition(Event::Expire, current, 100)?,
+        Outcome::Advanced
+    );
     expected.push(expiring);
     let later = f.queue("owner-65", s, current).await?;
     let unselected = f.queue("another-owner", s, current).await?;
@@ -102,6 +111,12 @@ pub(crate) async fn owner_pages(database_clock: &Fixture) -> anyhow::Result<()> 
     assert_eq!(f.load("owner-65", s).await?.as_ref(), Some(&later));
     later_page(&f, s, later).await?;
 
+    database_clock_calls(database_clock, s).await?;
+    f.runtime.close().await;
+    Ok(())
+}
+
+async fn database_clock_calls(database_clock: &Fixture, s: Scope) -> anyhow::Result<()> {
     // The PostgreSQL clock must not be sampled for all-terminal or all-missing requests.
     let terminal = [CommandId::parse("owner-0")?, CommandId::parse("owner-1")?];
     let missing = [
@@ -126,7 +141,6 @@ pub(crate) async fn owner_pages(database_clock: &Fixture) -> anyhow::Result<()> 
         slot.as_ref()
             .is_some_and(|c| c.status() == Status::Published)
     }));
-    f.runtime.close().await;
     Ok(())
 }
 
