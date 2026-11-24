@@ -739,7 +739,9 @@ impl PgRuntime {
             PoolAccess::Renewal => None,
         };
         let admitted = self.timer.now();
-        let result = ConnectionLease::acquire(&self.pool, permit).await;
+        // SQLx pool acquisition includes TLS connection setup. Keep that state out of each
+        // caller's transaction, renewal and handler futures when they are composed together.
+        let result = Box::pin(ConnectionLease::acquire(&self.pool, permit)).await;
         tracing::debug!(
             admission_wait_us = admitted.saturating_duration_since(start).as_micros() as u64,
             pool_acquire_us = self

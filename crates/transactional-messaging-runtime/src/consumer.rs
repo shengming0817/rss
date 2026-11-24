@@ -10,9 +10,7 @@ use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::inbox::{
     ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
 };
-use rss_transactional_messaging::message::{
-    MessageEnvelope, PartitionIdentity, SubscriptionIdentity,
-};
+use rss_transactional_messaging::message::{PartitionIdentity, SubscriptionIdentity};
 use rss_transactional_messaging::observability::{
     TransactionalMessagingDisposition, TransactionalMessagingEmitter,
     TransactionalMessagingIoOutcome, TransactionalMessagingObservation,
@@ -129,47 +127,66 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let prepared = PreparedDelivery::valid(execution, delivery, execution.deadlines()?);
+    let prepared = PreparedDelivery::valid(execution, Box::new(delivery), execution.deadlines()?);
     process_prepared(inbox, transaction, execution, prepared).await
 }
 
-enum Ingress<P> {
-    Verified(MessageEnvelope<P>, VerifiedConsumerBinding),
-    Rejected(EnvelopeValidationFailure, SettlementDecision),
+enum Ingress<P, S> {
+    Verified(Box<Delivery<P, S>>, VerifiedConsumerBinding),
+    Rejected(EnvelopeValidationFailure, SettlementDecision, S),
 }
 
 struct PreparedDelivery<P, S> {
-    ingress: Ingress<P>,
+    ingress: Ingress<P, S>,
     deadlines: ExecutionDeadlines,
-    settlement: S,
 }
 
 impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
     fn valid<V: IngressValidator<P>, R, E>(
         execution: &ConsumerExecution<'_, V, R, E>,
-        delivery: Delivery<P, S>,
+        delivery: Box<Delivery<P, S>>,
         deadlines: ExecutionDeadlines,
     ) -> Self {
-        let (message, settlement) = delivery.into_parts();
         let ingress = match verify_ingress(
             execution.validator,
             execution.group.clone(),
             execution.subscription,
-            &message,
+            delivery.message(),
         ) {
-            Ok(binding) => Ingress::Verified(message, binding),
-            Err(rejection) => Ingress::Rejected(rejection.reason(), rejection.into_decision()),
+            Ok(binding) => Ingress::Verified(delivery, binding),
+            Err(rejection) => Ingress::Rejected(
+                rejection.reason(),
+                rejection.into_decision(),
+                delivery.into_parts().1,
+            ),
         };
-        Self {
-            ingress,
-            deadlines,
-            settlement,
+        Self { ingress, deadlines }
+    }
+
+    fn incoming<V: IngressValidator<P>, R, E>(
+        execution: &ConsumerExecution<'_, V, R, E>,
+        item: IncomingDelivery<P, S>,
+        deadlines: ExecutionDeadlines,
+    ) -> Self {
+        match item {
+            IncomingDelivery::Valid(delivery) => Self::valid(execution, delivery, deadlines),
+            IncomingDelivery::Invalid(invalid) => {
+                let (rejection, settlement) = invalid.into_parts();
+                PreparedDelivery {
+                    ingress: Ingress::Rejected(
+                        rejection.reason(),
+                        rejection.into_decision(),
+                        settlement,
+                    ),
+                    deadlines,
+                }
+            }
         }
     }
 
     fn partition(&self) -> Option<&PartitionIdentity> {
         match &self.ingress {
-            Ingress::Verified(message, _) => message.metadata().partition(),
+            Ingress::Verified(delivery, _) => delivery.message().metadata().partition(),
             Ingress::Rejected(..) => None,
         }
     }
@@ -189,15 +206,11 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let PreparedDelivery {
-        ingress,
-        settlement,
-        deadlines,
-    } = prepared;
-    let (message, binding) =
+    let PreparedDelivery { ingress, deadlines } = prepared;
+    let ((message, settlement), binding) =
         match ingress {
-            Ingress::Verified(message, binding) => (message, binding),
-            Ingress::Rejected(failure, decision) => {
+            Ingress::Verified(delivery, binding) => (delivery.into_parts(), binding),
+            Ingress::Rejected(failure, decision, settlement) => {
                 execution.emitter.emit(
                     TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure },
                 );
@@ -1037,28 +1050,13 @@ where
                 }
                 SubscriptionEvent::Completed(key, result) => {
                     outstanding -= 1;
-                    let reusable = match result {
-                        Ok(
-                            ProcessingDisposition::Committed(terminal)
-                            | ProcessingDisposition::Duplicate(terminal),
-                        ) => {
-                            *recovery_attempt = NonZeroU32::MIN;
-                            key.is_none() || terminal == TerminalDisposition::Succeeded
-                        }
-                        Ok(ProcessingDisposition::Rejected(_)) => {
-                            *recovery_attempt = NonZeroU32::MIN;
-                            true
-                        }
-                        Ok(_) => key.is_none(),
-                        Err(error) => {
-                            if (!is_recoverable(error.kind()) || token.is_cancelled())
-                                && cause.is_ok()
-                            {
-                                cause = Err(error);
-                            }
-                            false
-                        }
-                    };
+                    let reusable = can_continue(
+                        result,
+                        key.is_some(),
+                        token.is_cancelled(),
+                        recovery_attempt,
+                        &mut cause,
+                    );
                     if !reusable {
                         stopped = true;
                         stream.stop_admission();
@@ -1095,22 +1093,7 @@ where
                             continue;
                         }
                     };
-                    let item = match item {
-                        IncomingDelivery::Valid(delivery) => {
-                            PreparedDelivery::valid(&execution, *delivery, deadlines)
-                        }
-                        IncomingDelivery::Invalid(invalid) => {
-                            let (rejection, settlement) = invalid.into_parts();
-                            PreparedDelivery {
-                                ingress: Ingress::Rejected(
-                                    rejection.reason(),
-                                    rejection.into_decision(),
-                                ),
-                                deadlines,
-                                settlement,
-                            }
-                        }
-                    };
+                    let item = PreparedDelivery::incoming(&execution, item, deadlines);
                     outstanding += 1;
                     if let Some(key) = item.partition() {
                         match partitions.entry(key.clone()) {
@@ -1126,6 +1109,34 @@ where
                     active.push(start(item));
                 }
             }
+        }
+    }
+}
+
+fn can_continue(
+    result: Result<ProcessingDisposition, MessagingError>,
+    ordered: bool,
+    cancelled: bool,
+    recovery_attempt: &mut NonZeroU32,
+    cause: &mut Result<Option<TransactionalMessagingSubscribeOutcome>, MessagingError>,
+) -> bool {
+    match result {
+        Ok(
+            ProcessingDisposition::Committed(terminal) | ProcessingDisposition::Duplicate(terminal),
+        ) => {
+            *recovery_attempt = NonZeroU32::MIN;
+            !ordered || terminal == TerminalDisposition::Succeeded
+        }
+        Ok(ProcessingDisposition::Rejected(_)) => {
+            *recovery_attempt = NonZeroU32::MIN;
+            true
+        }
+        Ok(_) => !ordered,
+        Err(error) => {
+            if (!is_recoverable(error.kind()) || cancelled) && cause.is_ok() {
+                *cause = Err(error);
+            }
+            false
         }
     }
 }

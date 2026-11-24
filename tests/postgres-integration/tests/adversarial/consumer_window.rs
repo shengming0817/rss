@@ -104,6 +104,30 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
             entered.notified().await;
         }
     }
+    verify_renewal_under_saturation(owner, &busy).await?;
+    release.notify_one();
+    testkit::await_try(Duration::from_secs(4), async || {
+        Ok::<_, anyhow::Error>(
+            recorders
+                .iter()
+                .all(|r| !r.settlements().is_empty())
+                .then_some(()),
+        )
+    })
+    .await?;
+    token.cancel();
+    for task in tasks {
+        task.await??;
+    }
+    verify_settled(owner, &recorders).await?;
+    runtime.close().await;
+    Ok(())
+}
+
+async fn verify_renewal_under_saturation(
+    owner: &sqlx::PgPool,
+    busy: &Notify,
+) -> anyhow::Result<()> {
     let remaining = || {
         sqlx::query_scalar::<_,i64>("SELECT (extract(epoch FROM lease_until)*1000)::bigint FROM rss_transactional_messaging.inbox WHERE message_id='window-held'").fetch_one(owner)
     };
@@ -119,20 +143,13 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     .fetch_one(owner)
     .await?;
     assert_eq!(waiting_rows, 0, "saturation must precede a durable claim");
-    release.notify_one();
-    testkit::await_try(Duration::from_secs(4), async || {
-        Ok::<_, anyhow::Error>(
-            recorders
-                .iter()
-                .all(|r| !r.settlements().is_empty())
-                .then_some(()),
-        )
-    })
-    .await?;
-    token.cancel();
-    for task in tasks {
-        task.await??;
-    }
+    Ok(())
+}
+
+async fn verify_settled(
+    owner: &sqlx::PgPool,
+    recorders: &[RecordingSettlement],
+) -> anyhow::Result<()> {
     for recorder in recorders {
         assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
         assert_eq!(recorder.abandon_count(), 0);
@@ -142,6 +159,5 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.inbox WHERE message_id=$1 AND disposition='succeeded'").bind(id).fetch_one(owner).await?;
         assert_eq!(receipts, 1);
     }
-    runtime.close().await;
     Ok(())
 }

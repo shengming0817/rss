@@ -253,6 +253,12 @@ impl<P, S> Delivery<P, S> {
             settlement,
         }
     }
+    /// Borrow the decoded envelope for ingress validation while retaining settlement ownership.
+    #[must_use]
+    pub const fn message(&self) -> &MessageEnvelope<P> {
+        &self.message
+    }
+
     /// Consume the delivery to verify its envelope and later settle through its original handle.
     pub fn into_parts(self) -> (MessageEnvelope<P>, S) {
         (self.message, self.settlement)

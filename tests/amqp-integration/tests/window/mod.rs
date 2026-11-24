@@ -39,104 +39,159 @@ impl ConsumerTx<Vec<u8>> for Gate {
     }
 }
 
-pub(super) async fn run(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> {
-    for window in [NonZeroU16::MIN, NonZeroU16::new(2).expect("two")] {
+struct Broker {
+    url: String,
+    route: MessageRoute,
+    sub: AmqpSubscriber,
+    resource: AmqpSubscriberResource,
+    publisher: AmqpPublisher,
+    publisher_resource: AmqpPublisherResource,
+}
+
+impl Broker {
+    async fn open(rabbit: &testkit::RabbitFixture) -> anyhow::Result<Self> {
         let url = isolated_url(rabbit, "rss_window").await?;
         let route = MessageRoute::parse("rss.window")?;
         let (sub, resource) = prepared_subscriber(&url, &route, "window", true).await?;
         let (publisher, publisher_resource) = connected_publisher(&url, "window-pub").await?;
-        let subscription = subscription_for(&envelope(&route, "template"), &route);
-        let (starts, mut started) = mpsc::unbounded_channel();
-        let (sees, mut admitted) = mpsc::unbounded_channel();
-        let release = Arc::new(Notify::new());
-        let token = CancellationToken::new();
-        let sub = Arc::new(sub);
-        let worker = ConsumerWorker::new(
-            window,
-            sub.clone(),
-            Arc::new(LiveInbox),
-            Arc::new(Gate {
-                started: starts,
-                release: release.clone(),
-            }),
-            ConsumerGroup::parse("window")?,
-            Arc::new(ObserveIngress(sees)),
-            subscription.clone(),
-            Arc::new(TokioClock::new()),
-            ConsumerExecutionPolicy::new(
-                RetryPolicy::STANDARD,
-                ExecutionBudget::new(TIMEOUT, Duration::from_secs(3))?,
-            ),
-            Arc::new(NoopEmitter),
-            SubscriptionBackoffPolicy::STANDARD,
-        );
-        let task = tokio::spawn(worker.run(token.clone()));
-        for (id, key) in [
-            ("a", "ordered"),
-            ("b", "other"),
-            ("c", "other"),
-            ("d", "ordered"),
-            ("e", "other"),
-        ] {
-            assert!(matches!(
-                publisher
-                    .publish(
-                        &envelope_in_partition(&route, id, vec![1], key),
-                        provider_deadline()
-                    )
-                    .await,
-                PublishOutcome::Confirmed(())
-            ));
-        }
-        assert_eq!(started.recv().await.as_deref(), Some("a"));
-        assert_eq!(admitted.recv().await.as_deref(), Some("a"));
-        let vhost = url.rsplit('/').next().expect("vhost");
-        assert_eq!(
-            rabbit
-                .broker_consumer_prefetch(vhost, route.as_str())
-                .await?,
-            [window.get()]
-        );
-        if window.get() == 2 {
-            for id in ["b", "c"] {
-                assert_eq!(started.recv().await.as_deref(), Some(id));
-                assert_eq!(admitted.recv().await.as_deref(), Some(id));
-            }
-            assert_eq!(admitted.recv().await.as_deref(), Some("d"));
-        }
-        assert!(started.try_recv().is_err());
-        assert!(admitted.try_recv().is_err());
-        token.cancel();
-        testkit::await_try(TIMEOUT, async || {
-            Ok::<_, anyhow::Error>(
-                (rabbit.broker_consumer_count(vhost, route.as_str()).await? == 0).then_some(()),
-            )
+        Ok(Self {
+            url,
+            route,
+            sub,
+            resource,
+            publisher,
+            publisher_resource,
         })
-        .await?;
-        release.notify_one();
-        task.await??;
-        if window.get() == 2 {
-            assert_eq!(started.recv().await.as_deref(), Some("d"));
-        }
-        assert!(started.recv().await.is_none());
-        let mut fresh = sub.deliveries(&subscription, NonZeroU16::MIN).await?;
-        let delivery = next_valid_delivery(&mut fresh).await?;
-        let expected = if window.get() == 2 { "e" } else { "b" };
-        assert_eq!(delivery.into_parts().0.id().as_str(), expected);
-        drop(fresh);
-        shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
-        shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    }
+}
+
+pub(super) async fn run(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> {
+    for window in [NonZeroU16::MIN, NonZeroU16::new(2).expect("two")] {
+        drain_window(rabbit, window).await?;
     }
     drain_after_failed_head(rabbit, false).await?;
     drain_after_failed_head(rabbit, true).await?;
     busy_redelivery(rabbit).await
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "Keep broker registration, cancellation, and post-drain redelivery in their observed order."
+)]
+async fn drain_window(rabbit: &testkit::RabbitFixture, window: NonZeroU16) -> anyhow::Result<()> {
+    let Broker {
+        url,
+        route,
+        sub,
+        resource,
+        publisher,
+        publisher_resource,
+    } = Broker::open(rabbit).await?;
+    let subscription = subscription_for(&envelope(&route, "template"), &route);
+    let (starts, mut started) = mpsc::unbounded_channel();
+    let (sees, mut admitted) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let token = CancellationToken::new();
+    let sub = Arc::new(sub);
+    let worker = ConsumerWorker::new(
+        window,
+        sub.clone(),
+        Arc::new(LiveInbox),
+        Arc::new(Gate {
+            started: starts,
+            release: release.clone(),
+        }),
+        ConsumerGroup::parse("window")?,
+        Arc::new(ObserveIngress(sees)),
+        subscription.clone(),
+        Arc::new(TokioClock::new()),
+        ConsumerExecutionPolicy::new(
+            RetryPolicy::STANDARD,
+            ExecutionBudget::new(TIMEOUT, Duration::from_secs(3))?,
+        ),
+        Arc::new(NoopEmitter),
+        SubscriptionBackoffPolicy::STANDARD,
+    );
+    let task = tokio::spawn(worker.run(token.clone()));
+    for (id, key) in [
+        ("a", "ordered"),
+        ("b", "other"),
+        ("c", "other"),
+        ("d", "ordered"),
+        ("e", "other"),
+    ] {
+        assert!(matches!(
+            publisher
+                .publish(
+                    &envelope_in_partition(&route, id, vec![1], key),
+                    provider_deadline()
+                )
+                .await,
+            PublishOutcome::Confirmed(())
+        ));
+    }
+    let vhost = url.rsplit('/').next().expect("vhost");
+    assert_eq!(
+        rabbit
+            .broker_consumer_prefetch(vhost, route.as_str())
+            .await?,
+        [window.get()]
+    );
+    assert_active_window(window, &mut started, &mut admitted).await;
+    token.cancel();
+    testkit::await_try(TIMEOUT, async || {
+        Ok::<_, anyhow::Error>(
+            (rabbit.broker_consumer_count(vhost, route.as_str()).await? == 0).then_some(()),
+        )
+    })
+    .await?;
+    release.notify_one();
+    task.await??;
+    if window.get() == 2 {
+        assert_eq!(started.recv().await.as_deref(), Some("d"));
+    }
+    assert!(started.recv().await.is_none());
+    let mut fresh = sub.deliveries(&subscription, NonZeroU16::MIN).await?;
+    let delivery = next_valid_delivery(&mut fresh).await?;
+    let expected = if window.get() == 2 { "e" } else { "b" };
+    assert_eq!(delivery.into_parts().0.id().as_str(), expected);
+    drop(fresh);
+    shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
+    shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    Ok(())
+}
+
+async fn assert_active_window(
+    window: NonZeroU16,
+    started: &mut mpsc::UnboundedReceiver<String>,
+    admitted: &mut mpsc::UnboundedReceiver<String>,
+) {
+    assert_eq!(started.recv().await.as_deref(), Some("a"));
+    assert_eq!(admitted.recv().await.as_deref(), Some("a"));
+    if window.get() == 2 {
+        for id in ["b", "c"] {
+            assert_eq!(started.recv().await.as_deref(), Some(id));
+            assert_eq!(admitted.recv().await.as_deref(), Some(id));
+        }
+        assert_eq!(admitted.recv().await.as_deref(), Some("d"));
+    }
+    assert!(started.try_recv().is_err());
+    assert!(admitted.try_recv().is_err());
+}
+
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "The timed pause, negative settlement and redelivery assertions observe one physical delivery lifecycle."
+)]
 async fn busy_redelivery(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> {
-    let url = isolated_url(rabbit, "rss_busy_delivery").await?;
-    let route = MessageRoute::parse("rss.busy")?;
-    let (subscriber, resource) = prepared_subscriber(&url, &route, "busy", true).await?;
-    let (publisher, publisher_resource) = connected_publisher(&url, "busy-pub").await?;
+    let Broker {
+        route,
+        sub: subscriber,
+        resource,
+        publisher,
+        publisher_resource,
+        ..
+    } = Broker::open(rabbit).await?;
     let message = envelope(&route, "live-owner");
     let subscription = subscription_for(&message, &route);
     let mut stream = subscriber
@@ -144,23 +199,7 @@ async fn busy_redelivery(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> 
         .await?;
     let store = MemoryInboxStore::new();
     let group = ConsumerGroup::parse("busy")?;
-    let verified = rss_transactional_messaging::transaction::verify_ingress(
-        &LiveIngress,
-        group.clone(),
-        &subscription,
-        &message,
-    )
-    .map_err(|_| anyhow::anyhow!("fixture binding"))?;
-    let IdempotencyDisposition::Acquired(holder) = store
-        .claim(
-            verified.execution(),
-            verified.identity(),
-            provider_deadline(),
-        )
-        .await?
-    else {
-        anyhow::bail!("original claim");
-    };
+    let holder = claim_original(&store, &group, &subscription, &message).await?;
     assert!(matches!(
         publisher.publish(&message, provider_deadline()).await,
         PublishOutcome::Confirmed(())
@@ -215,6 +254,32 @@ async fn busy_redelivery(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> 
     Ok(())
 }
 
+async fn claim_original(
+    store: &MemoryInboxStore,
+    group: &ConsumerGroup,
+    subscription: &SubscriptionIdentity,
+    message: &MessageEnvelope<Vec<u8>>,
+) -> anyhow::Result<<MemoryInboxStore as InboxStore>::Claim> {
+    let verified = rss_transactional_messaging::transaction::verify_ingress(
+        &LiveIngress,
+        group.clone(),
+        subscription,
+        message,
+    )
+    .map_err(|_| anyhow::anyhow!("fixture binding"))?;
+    let IdempotencyDisposition::Acquired(holder) = store
+        .claim(
+            verified.execution(),
+            verified.identity(),
+            provider_deadline(),
+        )
+        .await?
+    else {
+        anyhow::bail!("original claim");
+    };
+    Ok(holder)
+}
+
 struct DuringRetirement {
     reject: bool,
     requeue: Arc<Notify>,
@@ -240,11 +305,14 @@ impl ConsumerTx<Vec<u8>> for DuringRetirement {
                     rss_transactional_messaging::transaction::FailureClass::Infrastructure,
                 )
             }
-            "independent" => {
+            id => {
+                assert_eq!(
+                    id, "independent",
+                    "partition successor unexpectedly started"
+                );
                 self.finish.notified().await;
                 committed(receipt)
             }
-            id => panic!("partition successor unexpectedly started: {id}"),
         }
     }
 }
@@ -270,10 +338,14 @@ async fn drain_after_failed_head(
     rabbit: &testkit::RabbitFixture,
     reject: bool,
 ) -> anyhow::Result<()> {
-    let url = isolated_url(rabbit, "rss_retire_window").await?;
-    let route = MessageRoute::parse("rss.retire")?;
-    let (sub, resource) = prepared_subscriber(&url, &route, "retire", true).await?;
-    let (publisher, publisher_resource) = connected_publisher(&url, "retire-pub").await?;
+    let Broker {
+        url,
+        route,
+        sub,
+        resource,
+        publisher,
+        publisher_resource,
+    } = Broker::open(rabbit).await?;
     let subscription = subscription_for(&envelope(&route, "template"), &route);
     let requeue = Arc::new(Notify::new());
     let finish = Arc::new(Notify::new());
@@ -316,11 +388,8 @@ async fn drain_after_failed_head(
     finish.notify_one();
     task.await??;
     shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
-    let vhost = url.rsplit('/').next().expect("vhost");
     assert_eq!(
-        rabbit
-            .broker_queue_total_depth(vhost, route.as_str())
-            .await?,
+        topology::ready_depth(&url, route.as_str()).await?,
         if reject { 1 } else { 2 },
         "independent delivery ACKed while the ordered head and successor remain"
     );
