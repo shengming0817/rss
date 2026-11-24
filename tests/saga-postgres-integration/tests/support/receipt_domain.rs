@@ -67,39 +67,6 @@ pub(super) async fn writes(
     Ok(())
 }
 
-pub(super) async fn upgrade(owner: &PgPool) -> anyhow::Result<()> {
-    let row: (uuid::Uuid, i32, sqlx::types::Json<serde_json::Value>) = sqlx::query_as(
-        "SELECT saga_id,step,protected FROM rss_saga.step_receipts ORDER BY saga_id,step LIMIT 1",
-    )
-    .fetch_one(owner)
-    .await?;
-    for (path, value) in corruptions() {
-        sqlx::query("UPDATE rss_saga.step_receipts SET protected=jsonb_set(protected,$2,$3) WHERE saga_id=$1 AND step=$4").bind(row.0).bind(path).bind(sqlx::types::Json(value)).bind(row.1).execute(owner).await?;
-        let mut conn = owner.acquire().await?;
-        sqlx::raw_sql("SET ROLE saga_owner")
-            .execute(&mut *conn)
-            .await?;
-        let result = sqlx::raw_sql(include_str!(
-            "../../../../crates/saga-postgres/migrations/0002_add_history_bounds.sql"
-        ))
-        .execute(&mut *conn)
-        .await;
-        sqlx::raw_sql("ROLLBACK; RESET ROLE")
-            .execute(&mut *conn)
-            .await?;
-        assert!(
-            matches!(result,Err(ref e) if e.as_database_error().is_some_and(|d|d.code().as_deref()==Some("RS003")))
-        );
-        sqlx::query("UPDATE rss_saga.step_receipts SET protected=$2 WHERE saga_id=$1 AND step=$3")
-            .bind(row.0)
-            .bind(&row.2)
-            .bind(row.1)
-            .execute(owner)
-            .await?;
-    }
-    Ok(())
-}
-
 async fn reject_definer(
     pool: &PgPool,
     lease: &Lease,

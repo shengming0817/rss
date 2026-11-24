@@ -14,6 +14,8 @@ mod process;
 mod receipt_domain;
 #[path = "support/redis_effect.rs"]
 mod redis_effect;
+#[path = "support/registration.rs"]
+mod registration;
 use common::*;
 use rss_request_context::TenantId;
 use rss_saga::*;
@@ -56,11 +58,8 @@ async fn suite() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(180), &cancel);
-    assert!(matches!(
-        PgStore::new(owner.clone(), &control).await,
-        Err(ref failure) if failure.kind()==rss_saga::ErrorKind::StorageContract
-    ));
-    let store = PgStore::new(pool.clone(), &control).await?;
+    let store = runtime_store(&owner, &pool, &control).await?;
+    registration::verify(&store, &pool, &owner, &control).await?;
     let d = definition(&["one", "two", "three"])?;
     run_scenarios(&store, &owner, &pool, &fixture, &d, &control).await?;
     eprintln!("saga T2: history bounds");
@@ -72,6 +71,16 @@ async fn suite() -> anyhow::Result<()> {
     drop(network);
     Ok(())
 }
+async fn runtime_store(
+    owner: &PgPool,
+    pool: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<PgStore> {
+    assert!(matches!(PgStore::new(owner.clone(), c).await,
+        Err(e) if e.kind() == ErrorKind::StorageContract));
+    Ok(PgStore::new(pool.clone(), c).await?)
+}
+
 async fn lease_and_isolation(
     store: &PgStore,
     owner: &PgPool,
@@ -423,31 +432,6 @@ async fn typed_success_receipt(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn history_upgrade() -> anyhow::Result<()> {
-    let network = testkit::bridge_network("saga-history-upgrade").await?;
-    let fixture = testkit::postgres_tls(
-        testkit::NetworkAttachment {
-            network: network.name(),
-            dns_name: "saga-history-upgrade",
-        },
-        testkit::PgTlsServerIdentity::MatchingHost,
-    )
-    .await?;
-    let (owner, pool) = provision(&fixture).await?;
-    let clock = Clock::new();
-    let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(120), &cancel);
-    tokio::time::timeout(
-        Duration::from_secs(120),
-        history::upgrade(&owner, &pool, &control),
-    )
-    .await??;
-    pool.close().await;
-    owner.close().await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit resource measurement profiles; ordinary CI has no performance SLO"]
 async fn history_measurements() -> anyhow::Result<()> {
     let network = testkit::bridge_network("saga-history-measure").await?;
@@ -471,5 +455,50 @@ async fn history_measurements() -> anyhow::Result<()> {
     .await??;
     pool.close().await;
     owner.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "explicit paired registration profile; requires PostgreSQL psql and pgbench on PATH"]
+async fn registration_measurements() -> anyhow::Result<()> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt as _;
+    let network = testkit::bridge_network("saga-registration-profile").await?;
+    let fixture = testkit::postgres_tls(
+        testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: "saga-registration-profile",
+        },
+        testkit::PgTlsServerIdentity::MatchingHost,
+    )
+    .await?;
+    let (owner, pool) = provision(&fixture).await?;
+    pool.close().await;
+    owner.close().await;
+    let params = fixture.params();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut child = tokio::process::Command::new("python3")
+        .arg("tests/saga-postgres-integration/tests/support/registration_profile.py")
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let input = serde_json::to_vec(&serde_json::json!({
+        "host": params.host, "port": params.port, "db": params.database,
+        "user": params.username, "password": params.password, "ca": fixture.ca_pem(),
+        "definition": definition(&["one","two","three"])?, "capacity": history_capacity()?,
+    }))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing profile stdin"))?
+        .write_all(&input)
+        .await?;
+    anyhow::ensure!(
+        tokio::time::timeout(Duration::from_secs(600), child.wait())
+            .await??
+            .success(),
+        "registration profile failed"
+    );
     Ok(())
 }
