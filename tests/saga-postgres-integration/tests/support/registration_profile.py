@@ -1,4 +1,5 @@
 """Manual baseline/candidate measurement inside the Rust test's disposable TLS fixture."""
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -18,10 +19,10 @@ def git(*args):
     return subprocess.check_output(["/usr/bin/git", *args], text=True)
 
 
-def psql(env, query):
+def psql(env, query, timeout=120):
     return subprocess.check_output(
         ["psql", "-XqAt", "-v", "ON_ERROR_STOP=1", "-f", "-"],
-        env=env, input=query, text=True, timeout=120,
+        env=env, input=query, text=True, timeout=timeout,
     ).strip()
 
 
@@ -29,38 +30,50 @@ def sql_json(value):
     return "'" + json.dumps(value, separators=(",", ":")).replace("'", "''") + "'::jsonb"
 
 
+@contextmanager
+def psql_process(env, *args, **streams):
+    process = subprocess.Popen(["psql", "-XqAt", "-v", "ON_ERROR_STOP=1", *args],
+                               env=env, text=True, **streams)
+    try:
+        yield process
+    finally:
+        # Reap clients on every exception, including a timeout or failure of the other client.
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+
+
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise TimeoutError("registration contention deadline")
+    return seconds
+
+
 def contention(admin, runtime, call):
-    args = ["psql", "-XqAt", "-v", "ON_ERROR_STOP=1"]
-    with subprocess.Popen(args, env=runtime, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as holder:
-        try:
-            holder.stdin.write(f"BEGIN; SELECT {call}; SELECT 'held';\n")
-            holder.stdin.flush()
-            for line in holder.stdout:
-                if line.strip() == "held":
-                    break
-            else:
+    deadline = time.monotonic() + 20
+    with tempfile.TemporaryFile() as ready, psql_process(
+            runtime, stdin=subprocess.PIPE, stdout=ready) as holder:
+        holder.stdin.write(f"BEGIN; SELECT 'held' FROM {call};\n")
+        holder.stdin.flush()
+        while os.pread(ready.fileno(), 5, 0) != b"held\n":
+            if holder.poll() is not None:
                 raise RuntimeError("holder exited before registration")
-            with subprocess.Popen(args + ["-c", f"SELECT {call}"], env=dict(runtime, PGAPPNAME="saga_waiter"),
-                                  stdout=subprocess.DEVNULL) as waiter:
-                try:
-                    end = time.monotonic() + 10
-                    while waiter.poll() is None:
-                        wait = psql(admin, "SELECT wait_event FROM pg_stat_activity WHERE application_name='saga_waiter' AND cardinality(pg_blocking_pids(pid))>0")
-                        if wait:
-                            return wait
-                        if time.monotonic() >= end:
-                            raise TimeoutError("registration produced no lock witness or completion")
-                    if waiter.returncode:
-                        raise RuntimeError("waiting registration failed")
-                    return "completed before holder commit"
-                finally:
-                    holder.stdin.write("COMMIT;\n")
-                    holder.stdin.close()
-                    if waiter.wait(timeout=10):
-                        raise RuntimeError("registration failed after holder release")
-        finally:
-            if not holder.stdin.closed:
-                holder.stdin.close()
+            time.sleep(min(0.01, remaining(deadline)))
+        with psql_process(dict(runtime, PGAPPNAME="saga_waiter"), "-c", f"SELECT {call}",
+                          stdout=subprocess.DEVNULL) as waiter:
+            wait = ""
+            while waiter.poll() is None and not wait:
+                wait = psql(admin, "SELECT wait_event FROM pg_stat_activity "
+                            "WHERE application_name='saga_waiter' AND cardinality(pg_blocking_pids(pid))>0",
+                            timeout=remaining(deadline))
+            holder.stdin.write("COMMIT;\n")
+            holder.stdin.close()
+            if holder.wait(timeout=remaining(deadline)) or waiter.wait(timeout=remaining(deadline)):
+                raise RuntimeError("registration transaction failed")
+            return wait or "completed before holder commit"
 
 
 def measure(directory, label, admin, runtime, call, size):

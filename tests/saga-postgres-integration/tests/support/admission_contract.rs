@@ -47,30 +47,7 @@ pub(super) async fn drift(
             format!("GRANT {privilege} ON {object} TO saga_runtime"),
         ));
     }
-    for (label, change, restore) in [
-        (
-            "cross-tenant unique index",
-            "CREATE UNIQUE INDEX global_version ON rss_saga.definitions(contract,version) WHERE version='v99'",
-            "DROP INDEX rss_saga.global_version",
-        ),
-        (
-            "definition body writable",
-            "GRANT UPDATE(definition) ON rss_saga.definitions TO saga_runtime",
-            "REVOKE UPDATE(definition) ON rss_saga.definitions FROM saga_runtime",
-        ),
-        (
-            "nullable instance binding",
-            "ALTER TABLE rss_saga.instances ALTER COLUMN version DROP NOT NULL",
-            "ALTER TABLE rss_saga.instances ALTER COLUMN version SET NOT NULL",
-        ),
-        (
-            "missing definition reference",
-            "ALTER TABLE rss_saga.instances DROP CONSTRAINT instance_definition",
-            "ALTER TABLE rss_saga.instances ADD CONSTRAINT instance_definition FOREIGN KEY(tenant_id,contract,version) REFERENCES rss_saga.definitions",
-        ),
-    ] {
-        cases.push((label.into(), change.into(), restore.into()));
-    }
+    definition_cases(&mut cases);
     history_cases(&mut cases);
     policy_cases(&mut cases);
     for table in ["definitions", "instances", "journal"] {
@@ -117,6 +94,48 @@ async fn check_drift_cases(
 }
 
 type Case = (String, String, String);
+fn definition_cases(cases: &mut Vec<Case>) {
+    for (label, change, restore) in [
+        (
+            "inherited relation",
+            "CREATE TABLE public.saga_fixture_child () INHERITS (rss_saga.definitions)",
+            "DROP TABLE public.saga_fixture_child",
+        ),
+        (
+            "external validator",
+            "CREATE FUNCTION public.valid_definition(jsonb) RETURNS boolean LANGUAGE sql AS 'SELECT rss_saga.valid_definition($1)'; ALTER TABLE rss_saga.definitions DROP CONSTRAINT saga_definition, ADD CONSTRAINT saga_definition CHECK(public.valid_definition(definition))",
+            "ALTER TABLE rss_saga.definitions DROP CONSTRAINT saga_definition, ADD CONSTRAINT saga_definition CHECK(rss_saga.valid_definition(definition)); DROP FUNCTION public.valid_definition(jsonb)",
+        ),
+        (
+            "unexpected foreign key",
+            "CREATE TABLE public.saga_fixture_tenants(id uuid PRIMARY KEY); ALTER TABLE rss_saga.definitions ADD FOREIGN KEY(tenant_id) REFERENCES public.saga_fixture_tenants(id) ON UPDATE CASCADE NOT VALID",
+            "DROP TABLE public.saga_fixture_tenants CASCADE",
+        ),
+        (
+            "cross-tenant unique index",
+            "CREATE UNIQUE INDEX global_version ON rss_saga.definitions(contract,version) WHERE version='v99'",
+            "DROP INDEX rss_saga.global_version",
+        ),
+        (
+            "definition body writable",
+            "GRANT UPDATE(definition) ON rss_saga.definitions TO saga_runtime",
+            "REVOKE UPDATE(definition) ON rss_saga.definitions FROM saga_runtime",
+        ),
+        (
+            "nullable instance binding",
+            "ALTER TABLE rss_saga.instances ALTER COLUMN version DROP NOT NULL",
+            "ALTER TABLE rss_saga.instances ALTER COLUMN version SET NOT NULL",
+        ),
+        (
+            "missing definition reference",
+            "ALTER TABLE rss_saga.instances DROP CONSTRAINT instance_definition",
+            "ALTER TABLE rss_saga.instances ADD CONSTRAINT instance_definition FOREIGN KEY(tenant_id,contract,version) REFERENCES rss_saga.definitions",
+        ),
+    ] {
+        cases.push((label.into(), change.into(), restore.into()));
+    }
+}
+
 fn history_cases(cases: &mut Vec<Case>) {
     for (table, name, expr) in [
         (

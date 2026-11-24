@@ -3,8 +3,12 @@ mod functions;
 use crate::{Error, sql_error};
 use sqlx::{PgConnection, PgPool, Row as _};
 pub(super) async fn validate(pool: &PgPool) -> Result<(), Error> {
-    let mut connection = pool.acquire().await.map_err(sql_error)?;
-    let conn = &mut *connection;
+    let mut transaction = pool.begin().await.map_err(sql_error)?;
+    let conn = &mut *transaction;
+    sqlx::query("SET LOCAL search_path TO pg_catalog")
+        .execute(&mut *conn)
+        .await
+        .map_err(sql_error)?;
     let ok: Option<bool> = sqlx::query_scalar(
         r#"
 WITH reachable AS (
@@ -33,7 +37,8 @@ FROM pg_namespace n JOIN pg_roles o ON o.oid=n.nspowner WHERE n.nspname='rss_sag
     definition_columns(conn).await?;
     functions::validate(conn).await?;
     constraints(conn).await?;
-    triggers(conn).await
+    triggers(conn).await?;
+    transaction.commit().await.map_err(sql_error)
 }
 async fn tables(conn: &mut PgConnection) -> Result<(), Error> {
     let rows=sqlx::query(r#"
@@ -42,7 +47,11 @@ WITH reachable AS (
 )
 SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity,c.relowner=n.nspowner AS owned,
     c.relpersistence='p' AND has_table_privilege(current_user,c.oid,'SELECT')
+        AND NOT EXISTS(SELECT FROM pg_inherits WHERE inhrelid=c.oid OR inhparent=c.oid)
         AND NOT EXISTS(SELECT FROM pg_rewrite WHERE ev_class=c.oid)
+        -- The named keys and their actions are checked below. No other outgoing FK may write these rows.
+        AND (SELECT count(*) FROM pg_constraint fk WHERE fk.conrelid=c.oid AND fk.contype='f')
+            = CASE WHEN c.relname='definitions' THEN 0 ELSE 1 END
         AND NOT EXISTS(SELECT FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
             WHERE a.grantee=0)
         AND NOT EXISTS(SELECT FROM pg_attribute col,
@@ -135,25 +144,33 @@ async fn triggers(conn: &mut PgConnection) -> Result<(), Error> {
 }
 
 async fn constraints(conn: &mut PgConnection) -> Result<(), Error> {
-    for (table, name, expression) in [
+    for (table, name, procedure, expression) in [
         (
             "definitions",
             "saga_definition",
+            "rss_saga.valid_definition(jsonb)",
             "valid_definition(definition)",
         ),
         (
             "instances",
             "saga_history_instance",
+            "rss_saga.valid_instance(jsonb,bigint,bigint,bigint,bigint)",
             "valid_instance(progress, revision, history_encoded_bytes, history_entry_limit, history_byte_limit)",
         ),
         (
             "journal",
             "saga_history_journal",
+            "rss_saga.valid_journal(text,bigint,bigint,bytea,jsonb,bigint)",
             "valid_journal(kind, seq, attempt, effect_key, protected, encoded_bytes)",
         ),
     ] {
-        let actual: Option<String> = sqlx::query_scalar("SELECT pg_get_expr(conbin,conrelid) FROM pg_constraint WHERE conrelid=to_regclass('rss_saga.'||$1) AND conname=$2 AND contype='c' AND convalidated AND NOT connoinherit")
-            .bind(table).bind(name).fetch_optional(&mut *conn).await.map_err(sql_error)?;
+        let actual: Option<String> = sqlx::query_scalar(r#"
+SELECT pg_get_expr(c.conbin,c.conrelid) FROM pg_constraint c
+WHERE c.conrelid=to_regclass('rss_saga.'||$1) AND c.conname=$2 AND c.contype='c' AND c.convalidated AND NOT c.connoinherit
+  AND EXISTS(SELECT FROM pg_depend d WHERE d.classid='pg_constraint'::regclass AND d.objid=c.oid
+             AND d.refclassid='pg_proc'::regclass AND d.refobjid=to_regprocedure($3))
+"#)
+            .bind(table).bind(name).bind(procedure).fetch_optional(&mut *conn).await.map_err(sql_error)?;
         if actual
             .as_deref()
             .is_none_or(|value| value.strip_prefix("rss_saga.").unwrap_or(value) != expression)

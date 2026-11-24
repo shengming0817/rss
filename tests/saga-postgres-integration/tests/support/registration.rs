@@ -111,33 +111,33 @@ pub(super) async fn verify(
     first_registration(&contender_store, pool, owner, &two, true, c).await?;
     first_registration(&contender_store, pool, owner, &two, false, c).await?;
     contender_store.close(c).await;
-    reuse(store, pool, &one, &two, c).await
+    reuse(store, pool, &two, &one, c).await
 }
 
 async fn reuse(
     store: &PgStore,
     pool: &PgPool,
-    one: &Definition,
-    two: &Definition,
+    original: &Definition,
+    alternate: &Definition,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let a = scope(&uuid::Uuid::new_v4().to_string())?;
     let b = Scope::new(a.tenant(), uuid::Uuid::new_v4());
     let other = Scope::new(TenantId::parse(&uuid::Uuid::new_v4().to_string())?, a.id());
     let capacity = history_capacity()?;
-    reject_invalid_attempt_limit(pool, a, one, capacity).await?;
-    store.register(a, one, capacity, c).await?;
-    store.register(other, two, capacity, c).await?;
-    let next = overlapping_instances(store, pool, a, other, one, c).await?;
+    reject_invalid_attempt_limit(pool, a, original, capacity).await?;
+    store.register(a, original, capacity, c).await?;
+    store.register(other, alternate, capacity, c).await?;
+    let next = overlapping_instances(store, pool, a, other, original, c).await?;
     let v2 = Definition::new(
         "orders",
         Identity::new(
-            one.identity().contract().clone(),
+            original.identity().contract().clone(),
             rss_contract::ContractVersion::from_static_major(2),
-            one.identity().schema().clone(),
-            one.identity().generation().clone(),
+            original.identity().schema().clone(),
+            original.identity().generation().clone(),
         ),
-        two.steps().to_vec(),
+        alternate.steps().to_vec(),
     )?;
     reject_rebinding(store, pool, a, &v2, c).await?;
     store.register(b, &v2, capacity, c).await?;
@@ -147,7 +147,7 @@ async fn reuse(
         .candidates(CandidateFilter::Runnable, a.tenant(), None, 100, c)
         .await?;
     assert_eq!(page.iter().map(|s| s.id()).collect::<Vec<_>>(), expected);
-    run_bound_versions(store, [(a, one), (b, &v2), (other, two)], c).await
+    run_bound_versions(store, [(a, original), (b, &v2), (other, alternate)], c).await
 }
 
 async fn reject_invalid_attempt_limit(
@@ -221,9 +221,15 @@ async fn run_bound_versions(
     instances: [(Scope, &Definition); 3],
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    for (s, d) in instances {
+    for (index, (s, d)) in instances.into_iter().enumerate() {
         let registry = registry(d.clone(), Arc::new(Effects::default()), false)?;
         let executor = Executor::new(store.clone(), protection()?, registry, read_budget()?);
+        if index == 0 {
+            // v1 has a second step. Resolving the latest one-step version here cannot admit it.
+            let advanced = executor.run(s, 1, c).await?;
+            assert_eq!(advanced.head().revision(), 2);
+            assert_eq!(advanced.head().status(), Status::Running);
+        }
         assert!(
             store
                 .candidates(CandidateFilter::Runnable, s.tenant(), None, 100, c)
