@@ -3,7 +3,7 @@ use rss_observation::*;
 use rss_observation_postgres::{PgSource, PgStore};
 use rss_request_context::{Deadline, TenantId};
 use sqlx::{
-    PgPool,
+    PgPool, Row,
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
 use std::{
@@ -103,7 +103,7 @@ pub struct Fixture {
     _network: testkit::BridgeNetwork,
 }
 impl Fixture {
-    pub async fn new(v1: bool) -> anyhow::Result<Self> {
+    pub async fn new() -> anyhow::Result<Self> {
         let network = testkit::bridge_network("obs-projection").await?;
         let server = testkit::postgres_tls(
             testkit::NetworkAttachment {
@@ -134,30 +134,7 @@ impl Fixture {
                     .password("owner-fixture"),
             )
             .await?;
-        if v1 {
-            let sql = {
-                include_str!(
-                    "../../../../crates/observation-postgres/migrations/0001_create_observation.sql"
-                )
-            };
-            sqlx::raw_sql(sql).execute(&owner).await?;
-            sqlx::raw_sql(rss_projection_postgres::MIGRATION_SQL)
-                .execute(&owner)
-                .await?;
-            sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_observation,rss_projection TO handoff_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_observation,rss_projection TO handoff_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation,rss_projection TO handoff_runtime;").execute(&owner).await?;
-            sqlx::raw_sql(include_str!(
-                "../../../../crates/examples/src/observation/facts.sql"
-            ))
-            .execute(&owner)
-            .await?;
-            sqlx::raw_sql(
-                "GRANT SELECT,INSERT,UPDATE,DELETE ON public.observation_facts TO handoff_runtime;",
-            )
-            .execute(&owner)
-            .await?;
-        } else {
-            installer::install(&mut *owner.acquire().await?).await?;
-        }
+        installer::install(&mut *owner.acquire().await?).await?;
         let options = options.username("handoff_runtime").password("fixture-only");
         let pool = PgPoolOptions::new()
             .max_connections(8)
@@ -171,6 +148,52 @@ impl Fixture {
             server,
             _network: network,
         })
+    }
+    // Stage the actual receive write funnel and keep settlement under the test's control.
+    pub async fn stage(
+        &self,
+        input: &VerifiedBatch,
+    ) -> anyhow::Result<(sqlx::Transaction<'static, sqlx::Postgres>, i32)> {
+        let mut tx = self.pool.begin().await?;
+        let (pid, _): (i32, String) =
+            sqlx::query_as("SELECT pg_backend_pid(), set_config('rss.tenant_id',$1,true)")
+                .bind(input.scope().tenant().to_string())
+                .fetch_one(&mut *tx)
+                .await?;
+        let row = sqlx::query("SELECT state,policy FROM rss_observation.lock_stream($1)")
+            .bind(input.scope().encode()?)
+            .fetch_one(&mut *tx)
+            .await?;
+        let state = rss_observation::State::decode(row.try_get("state")?)?;
+        let policy = rss_observation::Policy::decode(row.try_get("policy")?)?;
+        let decision = state.advance(input.batch(), 100, &policy)?;
+        sqlx::query(
+            "SELECT rss_observation.commit_batch($1,$2,$3::numeric,$4,$5,$6,$7,$8,$9::numeric,$10)",
+        )
+        .bind(input.scope().encode()?)
+        .bind(input.batch().id().as_str())
+        .bind(input.batch().sequence().to_string())
+        .bind(input.batch().encode())
+        .bind(input.fingerprint().as_slice())
+        .bind(100_i64)
+        .bind(policy.encode()?)
+        .bind(decision.encode()?)
+        .bind(state.revision().to_string())
+        .bind(decision.outcome().is_applicable())
+        .execute(&mut *tx)
+        .await?;
+        Ok((tx, pid))
+    }
+    pub async fn wait_for_blocked(&self, blocker: i32, count: i64) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND usename='handoff_runtime' AND $1=ANY(pg_blocking_pids(pid))")
+                    .bind(blocker).fetch_one(&self.admin).await?;
+                if waiting == count { return Ok::<_, sqlx::Error>(()); }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.map_err(|_| anyhow::anyhow!("expected {count} receivers blocked by backend {blocker}"))??;
+        Ok(())
     }
     pub async fn store(&self) -> anyhow::Result<Arc<PgStore<Clock>>> {
         Ok(Arc::new(
@@ -201,4 +224,12 @@ impl Fixture {
         )
         .await?)
     }
+}
+
+pub fn assert_same_record(actual: &Record, expected: &Record) {
+    assert_eq!(actual.scope(), expected.scope());
+    assert_eq!(actual.batch(), expected.batch());
+    assert_eq!(actual.received_at(), expected.received_at());
+    assert_eq!(actual.policy(), expected.policy());
+    assert_eq!(actual.decision(), expected.decision());
 }

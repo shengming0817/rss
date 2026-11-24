@@ -384,7 +384,7 @@ async fn schema_checks(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_err());
-    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:2'")
+    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:3'")
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_ok());

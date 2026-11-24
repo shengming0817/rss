@@ -22,19 +22,9 @@ GRANT SELECT ON ALL TABLES IN SCHEMA rss_observation TO observation_runtime;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation TO observation_runtime;
 ```
 
-Runtime admission accepts only storage revision 2. `MIGRATION_SQL` installs the current schema;
-`UPGRADE_SQL` performs the one-way revision 1 → 2 conversion. Stop writers and execute the upgrade
-as the dedicated schema owner, outside an enclosing transaction (the SQL owns BEGIN/COMMIT).
-It takes exclusive locks, temporarily removes FORCE RLS for owner-only batch backfill, restores it,
-and commits the new journal with unchanged raw reports, fingerprints, receipts and decisions.
-On any error, the external migrator must ROLLBACK/discard its connection before retrying. Grant
-runtime SELECT on the new `rss_observation.journals` table after upgrading.
-
-Historical applicable rows are assigned positions in canonical stream/sequence order; ordering
-between streams has no historical fact-authority meaning. There were no prior journal checkpoints:
-initialize a fresh projection from its beginning, never reuse an unrelated source's checkpoint.
-No revision-1 runtime, dual reads, old API aliases, data deletion or historical device-command
-import is provided. Future persisted changes require an explicit upgrade and admission contract.
+Install `MIGRATION_SQL` in a fresh schema as one transaction. Runtime admission verifies storage
+revision 3, its catalog definitions and effective privileges, including those on the tenant
+admission and journal tables.
 
 ## Transaction and recovery
 
@@ -47,11 +37,13 @@ sequence. Exact activation replay returns its original revision without reactiva
 and stream, rechecks duplicates after waiting, computes the core decision and commits raw canonical
 bytes, fingerprint, received time, policy, receipt/decision and the stream update together. One
 `batches` row is both the receipt and complete recoverable representation. Its core-computed applicable
-flag admits only validated snapshots/deltas. The same transaction assigns an independent positive
-`log_position` under a per-tenant allocator row lock. Lock order is object → stream → tenant
-journal, held to settlement; no higher position can become visible while a lower position could
-still commit. Rollback rolls back allocation, and exact retry never allocates again. Exhaustion
-rejects every new report; exact replay still returns the original receipt. The batch itself is the immutable journal entry; there is
+flag admits only validated snapshots/deltas. Applicable reports allocate a positive `log_position` under the tenant journal row lock, held
+through settlement. Rollback releases the position for reuse. Projection can only see committed
+positions in allocation order. Activation creates the tenant admission row once. Inapplicable
+reports take a shared lock on that row through settlement and keep a NULL position. Allocating
+the last position closes admission in the same transaction, after earlier admitted reports settle.
+Later activations preserve closure. Exhaustion rejects every new report and exact replay still
+returns the original receipt. The batch itself is the immutable journal entry; there is
 no copied event payload, outbox, publication state or background worker. SQL functions enforce expected
 revision and atomic writes; only the Rust core owns snapshot/delta decisions.
 
@@ -74,7 +66,7 @@ a future closes its unconfirmed connection. Runtime budgets outside PostgreSQL's
 clock owns receipt time and baseline expiry; the host-injected clock owns the operation budget.
 
 Core `u64` producer sequence and revision use checked PostgreSQL `numeric(20,0)` without bigint
-narrowing. V1 retains all reports/receipts/retired epochs and has no cleanup API. Replay retention
+narrowing. The store retains all reports/receipts/retired epochs and has no cleanup API. Replay retention
 is a minimum guarantee; an existing receipt does not expire. Baseline validity is separate and
 only a new higher complete snapshot restores an expired baseline. The independent server journal position uses the signed bigint range supported by Projection.
 There is no consumer release acknowledgment or cleanup API.
@@ -115,7 +107,7 @@ source lineage (the example uses `rss.observation.v1`), reuses it across restart
 after rebuilding the input journal. This does not authenticate database provenance. Source lineage
 is independent of Reference v1 encoding, producer epoch and source-local positions.
 The flag controls dependencies and APIs only: every installation and every receive uses the same
-revision-2 journal, including when this feature is disabled. `high_water` and `read` query visible
+revision-3 journal, including when this feature is disabled. `high_water` and `read` query visible
 immutable batch positions, never producer sequence, wall-clock time or current lifecycle state.
 Historical applicable records remain replayable after retirement, expiry or NeedSnapshot.
 
@@ -177,8 +169,7 @@ consumer-owned assets maintained in the non-published repository examples and co
 no Inventory, source precedence, device authentication or compliance policy enters the component.
 
 Real PostgreSQL T2 in `postgres-integration --test observation_projection` proves ordered
-visibility/rollback, large references, multi-source/tenant/registration/epoch separation, one-way
-upgrade/rollback, atomic effect/checkpoint recovery and worker-process kill after staged SQL.
+visibility/rollback, large references, multi-source/tenant/registration/epoch separation, tenant admission at exhaustion, atomic effect/checkpoint recovery and worker-process kill after staged SQL.
 Package proof consumes core, base adapter, Source-only and PostgreSQL-bridge compositions from
 exact `.crate` files; the Source-only closure rejects the concrete Projection PostgreSQL adapter.
 

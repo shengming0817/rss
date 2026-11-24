@@ -3,14 +3,14 @@ mod budget;
 mod fixture;
 #[path = "../../../../crates/examples/src/observation/install.rs"]
 mod installer;
+mod journal;
 mod process;
 mod scenarios;
-mod upgrade;
 use fixture::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn durable_handoff() -> anyhow::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(180), async {
-        let f = Fixture::new(false).await?;
+        let f = Fixture::new().await?;
         scenarios::composition(&f).await?;
         budget::verify(&f).await?;
         scenarios::ordered_visibility(&f).await?;
@@ -22,15 +22,9 @@ async fn durable_handoff() -> anyhow::Result<()> {
     Ok(())
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_way_upgrade() -> anyhow::Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(90), upgrade::run()).await??;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn corrupt_rows_keep_safe_coordinates_and_settlement() -> anyhow::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(90), async {
-        let f = Fixture::new(false).await?;
+        let f = Fixture::new().await?;
         scenarios::restore_diagnostics(&f).await
     })
     .await?
