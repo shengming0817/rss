@@ -1,4 +1,6 @@
 //! Cloneable port and move-only lifecycle owner. Native handles never enter async tasks.
+#[cfg(feature = "test-support")]
+use crate::engine::lock;
 use crate::{
     KafkaConfig, KafkaError, KafkaPublishReceipt,
     engine::{self, Shared, now},
@@ -13,8 +15,6 @@ use rss_transactional_messaging::{
     },
 };
 use std::{sync::Arc, time::Duration};
-#[cfg(feature = "test-support")]
-use crate::engine::lock;
 use tokio::sync::oneshot;
 
 /// Cloneable publishing capability; retains neither native client nor process control.
@@ -103,7 +103,10 @@ impl Publisher<Vec<u8>> for KafkaPublisher {
         if deadline.timeout().is_zero() {
             return engine::expired();
         }
-        let receiver = match self.shared.enqueue(end, || Record::encode(message, &self.config)) {
+        let receiver = match self
+            .shared
+            .enqueue(end, || Record::encode(message, &self.config))
+        {
             Ok(receiver) => receiver,
             Err(outcome) => return outcome,
         };

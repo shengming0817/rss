@@ -1,7 +1,7 @@
 use super::support::*;
 use anyhow::Context;
 use rdkafka::{
-    ClientConfig,
+    ClientConfig, Message,
     admin::{AdminClient, AdminOptions, AlterConfig, ResourceSpecifier},
 };
 use rss_request_context::Clock;
@@ -46,29 +46,43 @@ async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
     let timer = Timer::new();
     let start = timer.now();
     let mut workers = tokio::task::JoinSet::new();
-    for _ in 0..32 {
+    let sample = Arc::new(MessageEnvelope::new(
+        rss_transactional_messaging::message::MessageId::parse("load-sample")?,
+        message.metadata().clone(),
+        message.payload().clone(),
+    ));
+    for worker in 0..32 {
+        let sample = sample.clone();
         let publisher = publisher.clone();
         let message = message.clone();
         workers.spawn(async move {
             let timer = Timer::new();
             let mut latencies = Vec::new();
-            for _ in 0..32 {
+            let mut sample_receipt = None;
+            for index in 0..32 {
+                let is_sample = worker == 0 && index == 0;
+                let input = if is_sample { &sample } else { &message };
                 let start = timer.now();
                 let outcome = publisher
-                    .publish(&message, deadline(Duration::from_secs(5))?)
+                    .publish(input, deadline(Duration::from_secs(5))?)
                     .await;
-                anyhow::ensure!(
-                    matches!(outcome, PublishOutcome::Confirmed(_)),
-                    "load publication was not confirmed"
-                );
+                let PublishOutcome::Confirmed(receipt) = outcome else {
+                    anyhow::bail!("load publication was not confirmed");
+                };
+                if is_sample {
+                    sample_receipt = Some(receipt);
+                }
                 latencies.push(timer.now().saturating_duration_since(start).as_micros());
             }
-            Ok::<_, anyhow::Error>(latencies)
+            Ok::<_, anyhow::Error>((latencies, sample_receipt))
         });
     }
     let mut latencies = Vec::new();
+    let mut receipt = None;
     while let Some(result) = workers.join_next().await {
-        latencies.extend(result??);
+        let (times, sample) = result??;
+        latencies.extend(times);
+        receipt = receipt.or(sample);
     }
     let elapsed = timer.now().saturating_duration_since(start).as_secs_f64();
     latencies.sort_unstable();
@@ -76,6 +90,14 @@ async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
     assert_eq!(publisher.pending_for_test(), 0);
     resource.shutdown(Duration::from_secs(5)).await?;
     assert_eq!(f.topic_end_offset().await?, 1024);
+    let records = read_records(f, "load-sample", 1).await?;
+    let record = &records[0];
+    assert_record_payload(record, "load-sample", sample.payload());
+    let receipt = receipt.context("missing sample receipt")?;
+    assert_eq!(
+        (record.topic(), record.partition(), record.offset()),
+        (receipt.topic(), receipt.partition(), receipt.offset())
+    );
     emit(&format!(
         "steady queued=64 in_flight=32 budget_bytes=32000000 concurrency=32 confirmed=1024 refused=0 ambiguous=0 elapsed_s={elapsed:.6} records_per_s={:.3} p50_us={} p95_us={} p99_us={}",
         1024.0 / elapsed,
@@ -90,7 +112,7 @@ async fn saturated_queue(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
         64,
         1,
         RECORD_BYTES,
-        16_000_000,
+        32_000_000,
         KafkaTimeouts::low_latency(Duration::from_secs(10))?,
     )?;
     let (publisher, resource) =
@@ -122,16 +144,19 @@ async fn saturated_queue(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
         );
     }
     assert_eq!(publisher.pending_for_test(), 1);
-    let outcome = publisher
-        .publish(&message, deadline(Duration::from_secs(1))?)
-        .await;
-    // A failure with no ambiguity is definite non-publication.
-    assert!(!outcome.is_ambiguous());
-    let failure = outcome.failure().context("missing refusal")?;
-    assert_eq!(failure.kind(), PublishFailureKind::Transient);
-    assert_eq!(failure.stage(), PublishFailureStage::Admission);
+    for _ in 0..256 {
+        let outcome = publisher
+            .publish(&message, deadline(Duration::from_secs(1))?)
+            .await;
+        let PublishOutcome::DefinitelyNotPublished(failure) = outcome else {
+            anyhow::bail!("saturated admission must refuse before native send");
+        };
+        assert_eq!(failure.kind(), PublishFailureKind::Transient);
+        assert_eq!(failure.stage(), PublishFailureStage::Admission);
+        assert_eq!(failure.reason(), PublishFailureReason::TransportUnavailable);
+    }
     emit(&format!(
-        "saturated queued=64 in_flight=1 budget_bytes=16000000 queued_ambiguous=64 cancelled_pending=1 refused=1 full_queue_rss_bytes={}",
+        "saturated queued=64 in_flight=1 budget_bytes=32000000 queued_ambiguous=64 cancelled_pending=1 refused=256 full_queue_rss_bytes={}",
         resident_bytes()?
     ))?;
     let _ = release.send(());

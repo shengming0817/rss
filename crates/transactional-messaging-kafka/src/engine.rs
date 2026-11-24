@@ -79,15 +79,30 @@ impl Shared {
         deadline: Instant,
         encode: impl FnOnce() -> Option<Record>,
     ) -> Result<oneshot::Receiver<Outcome>, Outcome> {
-        let slot = self.slots.clone().try_acquire_owned().map_err(|_| unavailable())?;
+        let slot = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| unavailable())?;
         if now() >= deadline {
             return Err(expired());
         }
-        let record = encode().ok_or_else(|| PublishOutcome::DefinitelyNotPublished(
-            failure(Kind::Permanent, Stage::Encode, Reason::InvalidMessage),
-        ))?;
+        let record = encode().ok_or_else(|| {
+            PublishOutcome::DefinitelyNotPublished(failure(
+                Kind::Permanent,
+                Stage::Encode,
+                Reason::InvalidMessage,
+            ))
+        })?;
         let (reply, receiver) = oneshot::channel();
-        let queued = QueuedCommand { command: Command { record, deadline, reply }, _slot: slot };
+        let queued = QueuedCommand {
+            command: Command {
+                record,
+                deadline,
+                reply,
+            },
+            _slot: slot,
+        };
         let sent = {
             let state = lock(&self.admission);
             let sender = state.sender.as_ref().ok_or_else(unavailable)?;

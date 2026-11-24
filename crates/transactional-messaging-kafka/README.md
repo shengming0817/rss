@@ -43,12 +43,11 @@ when the explicit aggregate budget and native representations permit them.
 
 The static record-accounting budget is checked before allocating queues or record bodies:
 
-- `queued * record_bytes` for Rust queued records;
-- `ceil(in_flight * record_bytes / 1024) * 1024` for native records, including KB rounding;
-- `3 * record_bytes` for one worker-owned dequeued/sending record and two record-sized encoding
-  charges (the candidate plus temporary header strings/copies);
-- `(queued + 2) * size_of::<Command>()` and `in_flight * size_of::<(token, reply)>()` for logical
-  Rust command/pending-entry storage, including the worker and candidate commands.
+- Each of the `queued` slots covers one record and up to one record of encoding scratch.
+  One more record is charged to the worker after dequeue: `(2 * queued + 1) * record_bytes`.
+- Native records are charged `ceil(in_flight * record_bytes / 1024) * 1024`.
+- The preallocated channel and concurrent candidates each charge `queued * size_of::<QueuedCommand>()`.
+  The worker charges one `Command`; the pending map charges `in_flight * size_of::<(token, reply)>()`.
 
 All arithmetic and conversions are checked; construction rejects an insufficient aggregate budget.
 `record_bytes` retains the adapter's accounting of payload, key, topic and headers, including the
@@ -86,7 +85,8 @@ own limits. A synchronous native rejection is definite; a broker rejection deliv
 acceptance remains ambiguous with a classified failure.
 
 Reliability settings stay fixed: `acks=all`, `enable.idempotence=true`, retries=2147483647,
-max-in-flight per connection=5, finite native queue limits and delivery timeout. A full queue returns
+max-in-flight per connection=5, finite native queue limits and delivery timeout. A publish reserves one slot before encoding. Its command owns the slot until dequeue, including
+when the caller stops waiting. Concurrent calls enter FIFO order at successful enqueue. A full queue returns
 a definite transient refusal immediately; the library adds no local retry loop. Topic auto-creation is off.
 Callers provision topics, replication, ISR, ACLs, credentials and stable routing. Tenant metadata is
 an authored assertion, not authentication; broker/product authorization remains necessary.
