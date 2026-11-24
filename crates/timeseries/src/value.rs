@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 /// Exact opaque identity: 1..=256 UTF-8 bytes, no control characters.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "String")]
 pub struct Id(String);
 impl Id {
     pub fn new(value: impl Into<String>) -> Result<Self, Error> {

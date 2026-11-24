@@ -37,30 +37,79 @@ fn points(samples: &[Sample]) -> Vec<&Sample> {
     }
     out
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct CounterPoint {
+    at: Timestamp,
+    start: Timestamp,
+    value: Option<Number>,
+}
+impl CounterPoint {
+    fn of(s: &Sample) -> Result<Self, Error> {
+        Ok(Self {
+            at: s.input().observed_at,
+            start: s.input().interval.ok_or(Error::Invariant)?.start(),
+            value: number(s),
+        })
+    }
+    fn defect(self, next: Self, max_gap: u64) -> Result<Option<Completeness>, Error> {
+        let (Some(x), Some(y)) = (self.value, next.value) else {
+            return Ok(Some(Completeness::Gaps));
+        };
+        if self.start != next.start || next.at == next.start || numeric::compare(y, x)?.is_lt() {
+            return Ok(Some(Completeness::ResetBoundary));
+        }
+        Ok(((next.at.micros() - self.at.micros()) as u64 > max_gap).then_some(Completeness::Gaps))
+    }
+}
+
+// An explicit cut before the first observation contributes Gaps and no increase.
+// Compare that to the uninterrupted pair, even if a Delete currently masks it.
+// A later sample at the first timestamp replaces the earlier one by sequence/ID.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct CounterBoundary {
+    prior: CounterPoint,
+    first_at: Option<Timestamp>,
+    sensitive: bool,
+}
+impl CounterBoundary {
+    pub(super) fn new(s: &Sample) -> Result<Self, Error> {
+        Ok(Self {
+            prior: CounterPoint::of(s)?,
+            first_at: None,
+            sensitive: true,
+        })
+    }
+    pub(super) fn observe(&mut self, s: &Sample, max_gap: u64) -> Result<(), Error> {
+        let at = s.input().observed_at;
+        if self.first_at.is_none_or(|first| first == at) {
+            self.first_at = Some(at);
+            self.sensitive =
+                self.prior.defect(CounterPoint::of(s)?, max_gap)? != Some(Completeness::Gaps);
+        }
+        Ok(())
+    }
+    pub(super) fn sensitive(&self) -> bool {
+        self.sensitive
+    }
+}
 fn cumulative(
     a: &Sample,
     b: &Sample,
     max_gap: u64,
     defects: &mut BTreeSet<Completeness>,
 ) -> Result<Option<Contribution>, Error> {
-    let (Some(x), Some(y)) = (number(a), number(b)) else {
-        defects.insert(Completeness::Gaps);
-        return Ok(None);
-    };
-    let ai = a.input().interval.ok_or(Error::Invariant)?;
-    let bi = b.input().interval.ok_or(Error::Invariant)?;
-    if ai.start() != bi.start() || bi.width_micros() == 0 || numeric::compare(y, x)?.is_lt() {
-        defects.insert(Completeness::ResetBoundary);
-        return Ok(None);
-    }
-    let window = Interval::new(a.input().observed_at, b.input().observed_at)?;
-    if window.width_micros() > max_gap {
-        defects.insert(Completeness::Gaps);
+    let a = CounterPoint::of(a)?;
+    let b = CounterPoint::of(b)?;
+    if let Some(defect) = a.defect(b, max_gap)? {
+        defects.insert(defect);
         return Ok(None);
     }
     Ok(Some(Contribution {
-        window,
-        increase: difference(x, y)?,
+        window: Interval::new(a.at, b.at)?,
+        increase: difference(
+            a.value.ok_or(Error::Invariant)?,
+            b.value.ok_or(Error::Invariant)?,
+        )?,
     }))
 }
 pub(super) fn counter(

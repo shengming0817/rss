@@ -4,6 +4,7 @@ pub(super) struct Fold {
     at: Timestamp,
     revision: Revision,
     builder: Option<SummaryBuilder>,
+    delete_from: Timestamp,
     last: Option<(Timestamp, u64, Id)>,
 }
 pub(super) async fn step(
@@ -23,24 +24,25 @@ pub(super) async fn step(
     {
         return Err(Error::InvalidInput);
     }
+    let availability_query = Query::new(
+        spec.selection(),
+        window,
+        QueryBudget {
+            max_points: r.budget().rows,
+            max_series: r.budget().rows,
+        },
+        QueryMode::History,
+    )?;
+    let available =
+        crate::lifecycle::availability(c, &availability_query, limits.max_points.get()).await?;
+    if available
+        .excluded
+        .iter()
+        .any(|f| f.reason == UnavailableReason::Pruned)
+    {
+        return Err(Error::HistoryExpired);
+    }
     if state.fold.is_none() {
-        let q = Query::new(
-            spec.selection(),
-            window,
-            QueryBudget {
-                max_points: r.budget().rows,
-                max_series: r.budget().rows,
-            },
-            QueryMode::History,
-        )?;
-        if crate::lifecycle::availability(c, &q, limits.max_points.get())
-            .await?
-            .excluded
-            .iter()
-            .any(|f| f.reason == UnavailableReason::Pruned)
-        {
-            return Err(Error::HistoryExpired);
-        }
         sqlx::query("SELECT rss_timeseries.register_summary($1::text::uuid,$2,$3,$4,$5,$6)")
             .bind(r.scope().tenant().to_string())
             .bind(r.scope().namespace().as_str())
@@ -55,25 +57,9 @@ pub(super) async fn step(
             at: window.start(),
             revision,
             builder: None,
+            delete_from: window.start(),
             last: None,
         });
-    }
-    let availability_query = Query::new(
-        spec.selection(),
-        window,
-        QueryBudget {
-            max_points: r.budget().rows,
-            max_series: r.budget().rows,
-        },
-        QueryMode::History,
-    )?;
-    if crate::lifecycle::availability(c, &availability_query, limits.max_points.get())
-        .await?
-        .excluded
-        .iter()
-        .any(|f| f.reason == UnavailableReason::Pruned)
-    {
-        return Err(Error::HistoryExpired);
     }
     let fold = state.fold.as_mut().ok_or(Error::Invariant)?;
     if fold.revision != revision {
@@ -85,8 +71,11 @@ pub(super) async fn step(
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
         let mut builder = SummaryBuilder::new(spec.clone(), bucket)?;
-        let prior = crate::aggregate::predecessor(c, spec, fold.at).await?;
+        let prior = crate::aggregate::predecessor(c, spec, fold.at, limits).await?;
         crate::aggregate::ensure_boundary(c, spec, fold.at, prior.as_ref(), limits).await?;
+        fold.delete_from = prior
+            .as_ref()
+            .map_or(bucket.end(), |p| p.input().observed_at);
         if let Some(prior) = prior {
             builder.push(prior, limits.max_points.get() as usize)?;
         }
@@ -100,21 +89,18 @@ pub(super) async fn step(
     let gaps =
         crate::aggregate::deletions(c, spec, Interval::new(gap_start, bucket.end())?, limits)
             .await?;
-    let s = spec.stream();
-    let last = fold.last.as_ref();
-    let rows=sqlx::query("SELECT raw FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND observed_at >= $6 AND observed_at<$7 AND ($8::bigint IS NULL OR (observed_at,sequence,sample_id)>($8,$9::text::numeric,$10::text COLLATE \"C\")) AND rss_timeseries.visible(convert_from(raw,'UTF8')::jsonb,observed_at) ORDER BY observed_at,sequence,sample_id LIMIT $11")
- .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(spec.series().digest()?.as_bytes().as_slice()).bind(bucket.start().micros()).bind(bucket.end().micros()).bind(last.map(|p|p.0.micros())).bind(last.map(|p|p.1.to_string())).bind(last.map(|p|p.2.as_str())).bind(i64::from(r.budget().rows.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
-    let more = rows.len() > r.budget().rows.get() as usize;
-    let mut total = 0usize;
+    let mut scan = crate::aggregate::scan::Scan::new(spec, bucket, &available, fold.last.clone())?;
     let mut processed = 0;
-    for row in rows.into_iter().take(r.budget().rows.get() as usize) {
-        let raw: Vec<u8> = row.try_get("raw").map_err(sql_error)?;
-        total = total.checked_add(raw.len()).ok_or(Error::BudgetExceeded)?;
-        if total > limits.max_bytes.get() as usize {
-            return Err(Error::BudgetExceeded);
-        }
-        let sample: Sample = serde_json::from_slice(&raw).map_err(|_| Error::Invariant)?;
+    let cap = r.budget().rows.get();
+    while processed < cap {
+        let Some(sample) = scan
+            .next(c, bucket.end(), (cap - processed) as usize, limits)
+            .await?
+        else {
+            break;
+        };
         let i = sample.input();
+        fold.delete_from = fold.delete_from.min(i.observed_at);
         fold.last = Some((i.observed_at, i.sequence, i.id.clone()));
         crate::aggregate::mask(
             fold.builder.as_mut().ok_or(Error::Invariant)?,
@@ -127,18 +113,17 @@ pub(super) async fn step(
             .push(sample, limits.max_points.get() as usize)?;
         processed += 1;
     }
-    if !more {
+    if !scan.more() {
         crate::aggregate::mask(
             fold.builder.as_mut().ok_or(Error::Invariant)?,
             &gaps,
             bucket.end(),
         )?;
-        let summary = fold
-            .builder
-            .take()
-            .ok_or(Error::Invariant)?
-            .finish(limits.max_points.get() as usize)?;
-        crate::aggregate::store(c, spec, &summary, limits).await?;
+        let builder = fold.builder.take().ok_or(Error::Invariant)?;
+        let gap_sensitive =
+            fold.delete_from < bucket.start() && builder.predecessor_gap_sensitive();
+        let summary = builder.finish(limits.max_points.get() as usize)?;
+        crate::aggregate::store(c, spec, &summary, fold.delete_from, gap_sensitive, limits).await?;
         fold.at = bucket.end();
         fold.last = None;
         if fold.at == window.end() {

@@ -5,7 +5,11 @@ use crate::{
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
-use sqlx::{PgConnection, Row, postgres::PgRow};
+use sqlx::{
+    PgConnection, Postgres, Row,
+    postgres::{PgArguments, PgRow},
+    query::Query as SqlQuery,
+};
 pub(crate) async fn lookup(
     c: &mut PgConnection,
     q: &ReceiptQuery,
@@ -41,15 +45,17 @@ fn receipt(row: &PgRow, q: &ReceiptQuery) -> Result<Receipt, Error> {
 }
 struct PreparedBatch {
     identity: ReceiptQuery,
-    payloads: Vec<Vec<u8>>,
-    sample_digests: Vec<Vec<u8>>,
-    series_digests: Vec<Vec<u8>>,
-    definitions: Vec<Vec<u8>>,
-    definition_digests: Vec<Vec<u8>>,
+    count: usize,
+    query: SqlQuery<'static, Postgres, PgArguments>,
 }
 
 impl PreparedBatch {
-    fn new(batch: &Batch, clock: &impl Clock, deadline: Deadline) -> Result<Self, Error> {
+    fn new(
+        batch: &Batch,
+        clock: &impl Clock,
+        deadline: Deadline,
+        horizon: u64,
+    ) -> Result<Self, Error> {
         check(clock, deadline)?;
         let identity = ReceiptQuery {
             stream: batch.stream().clone(),
@@ -78,37 +84,32 @@ impl PreparedBatch {
             definition_digests.push(def.digest()?.as_bytes().to_vec());
         }
         check(clock, deadline)?;
-        Ok(Self {
-            identity,
-            payloads,
-            sample_digests,
-            series_digests,
-            definitions,
-            definition_digests,
-        })
-    }
-
-    async fn admit(self, c: &mut PgConnection, horizon: u64) -> Result<Outcome<Receipt>, Error> {
-        let stream = &self.identity.stream;
-        let count = self.payloads.len();
-        let row = sqlx::query(
+        let stream = &identity.stream;
+        let count = payloads.len();
+        let query = sqlx::query(
             "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
         )
         .bind(stream.scope().tenant().to_string())
         .bind(stream.scope().namespace().as_str())
         .bind(stream.source().as_str())
         .bind(stream.generation().as_str())
-        .bind(self.identity.batch_id.as_str())
-        .bind(self.identity.digest.as_bytes().as_slice())
-        .bind(self.payloads)
-        .bind(self.sample_digests)
-        .bind(self.series_digests)
-        .bind(self.definitions)
-        .bind(self.definition_digests)
-        .bind(i64::try_from(horizon).map_err(|_| Error::NumericRange)?)
-        .fetch_one(c)
-        .await
-        .map_err(sql_error)?;
+        .bind(identity.batch_id.as_str())
+        .bind(identity.digest.as_bytes().as_slice())
+        .bind(payloads)
+        .bind(sample_digests)
+        .bind(series_digests)
+        .bind(definitions)
+        .bind(definition_digests)
+        .bind(i64::try_from(horizon).map_err(|_| Error::NumericRange)?);
+        Ok(Self {
+            identity,
+            count,
+            query,
+        })
+    }
+
+    async fn admit(self, c: &mut PgConnection) -> Result<Outcome<Receipt>, Error> {
+        let row = self.query.fetch_one(c).await.map_err(sql_error)?;
         if let Some(raw) = row
             .try_get::<Option<&[u8]>, _>("suspect_raw")
             .map_err(sql_error)?
@@ -117,7 +118,7 @@ impl PreparedBatch {
             return Err(Error::Conflict);
         }
         let result = receipt(&row, &self.identity)?;
-        if (result.new_samples() + result.replayed_samples()) as usize != count {
+        if (result.new_samples() + result.replayed_samples()) as usize != self.count {
             return Err(Error::Invariant);
         }
         Ok(if row.try_get("replay").map_err(sql_error)? {
@@ -137,13 +138,21 @@ impl<C: Clock> Writer for PgStore<C> {
         deadline: Deadline,
     ) -> Result<Outcome<Receipt>, Error> {
         let tenant = request.request().stream().scope().tenant();
-        self.profile.check_tenant(tenant)?;
-        let batch = PreparedBatch::new(request.request(), &self.clock, deadline)?;
-        let horizon = self.limits.replay_micros.get();
         let out = self
-            .transaction(tenant, deadline, Mode::Write, move |c, _| {
-                Box::pin(batch.admit(c, horizon))
-            })
+            .prepared_transaction(
+                tenant,
+                deadline,
+                Mode::Write,
+                || {
+                    PreparedBatch::new(
+                        request.request(),
+                        &self.clock,
+                        deadline,
+                        self.limits.replay_micros.get(),
+                    )
+                },
+                |c, _, batch| Box::pin(batch.admit(c)),
+            )
             .await?;
         Ok(flatten(out))
     }

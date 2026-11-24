@@ -1,3 +1,7 @@
+CREATE INDEX batches_expiry ON rss_timeseries.batches
+ (tenant_id,namespace,source,generation,received_at,batch_id) WHERE NOT expired;
+CREATE INDEX batches_replay ON rss_timeseries.batches
+ (tenant_id,namespace,source,generation,replay_until) INCLUDE (received_at) WHERE NOT expired;
 CREATE INDEX samples_history ON rss_timeseries.samples(tenant_id,namespace,series_digest,source,generation,observed_at,sequence,sample_id);
 CREATE INDEX samples_resource ON rss_timeseries.samples(tenant_id,namespace,subject,resource,key,observed_at);
 DO $$ DECLARE n text; BEGIN
@@ -37,6 +41,8 @@ CREATE TABLE rss_timeseries.namespaces (
 CREATE TABLE rss_timeseries.fences (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
  kind text NOT NULL CHECK(kind IN ('cutoff','delete','pruned')), selection jsonb NOT NULL,
+ series_digest bytea, CHECK ((selection->>'selection'='exact') = (series_digest IS NOT NULL)),
+ CHECK (octet_length(series_digest)=32),
  lo bigint NOT NULL CHECK(lo>=0), hi bigint NOT NULL CHECK(hi>=lo), restore_until bigint,
  restored boolean NOT NULL DEFAULT false, PRIMARY KEY(tenant_id,namespace,id)
 );
@@ -55,11 +61,22 @@ CREATE TABLE rss_timeseries.summary_ranges (
 CREATE TABLE rss_timeseries.summaries (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
  spec_digest bytea NOT NULL CHECK(octet_length(spec_digest)=32), semantics bytea NOT NULL CHECK(octet_length(semantics)=32),
- spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo AND lo>=0),
+ source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
+ series_digest bytea NOT NULL CHECK(octet_length(series_digest)=32),
+ subject text COLLATE "C" NOT NULL, resource text COLLATE "C" NOT NULL, key text COLLATE "C" NOT NULL,
+ lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo AND lo>=0),
+ impact int8range NOT NULL CHECK(NOT isempty(impact) AND NOT lower_inf(impact) AND NOT upper_inf(impact)
+                                AND lower(impact) BETWEEN 0 AND lo AND upper(impact)=hi),
+ -- Earliest observation used by the fold (possibly a predecessor), or hi for an empty fold.
+ delete_from bigint NOT NULL CHECK(delete_from BETWEEN lower(impact) AND hi),
+ gap_sensitive boolean NOT NULL CHECK(NOT gap_sensitive OR delete_from<lo),
  dirty boolean NOT NULL DEFAULT false, data bytea NOT NULL,
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo)
 );
-CREATE INDEX summaries_semantics ON rss_timeseries.summaries(tenant_id,namespace,semantics,lo,hi);
+CREATE INDEX summaries_semantics ON rss_timeseries.summaries(tenant_id,namespace,semantics,lo,hi DESC) WHERE NOT dirty;
+CREATE INDEX summaries_stream ON rss_timeseries.summaries
+ (tenant_id,namespace,source,generation,series_digest) WHERE NOT dirty;
+CREATE INDEX summaries_impact ON rss_timeseries.summaries USING gist (impact) WHERE NOT dirty;
 DO $$ DECLARE n text; BEGIN
  FOREACH n IN ARRAY ARRAY['namespaces','fences','plans','summary_ranges','summaries'] LOOP
   EXECUTE format('ALTER TABLE rss_timeseries.%I ENABLE ROW LEVEL SECURITY',n);
@@ -97,24 +114,61 @@ LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeserie
  ELSE a->'scope'=b->'scope' AND a->>'subject'=b->>'subject' AND a->>'resource'=b->>'resource'
  AND (jsonb_array_length(a->'keys')=0 OR jsonb_array_length(b->'keys')=0 OR (a->'keys') ?| ARRAY(SELECT jsonb_array_elements_text(b->'keys'))) END
 $$;
-CREATE FUNCTION rss_timeseries.visible(j jsonb,at_time bigint) RETURNS boolean
+-- Compare a trusted selector to the same structured columns on samples and summaries.
+CREATE FUNCTION rss_timeseries.matches_row(sel jsonb,wanted bytea,t uuid,n text,s text,g text,d bytea,sub text,res text,k text)
+RETURNS boolean LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
+ SELECT CASE sel->>'selection'
+ WHEN 'exact' THEN (s,g,d)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted)
+   AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}')
+ WHEN 'resource' THEN (t::text,n,sub,res)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}',sel->>'subject',sel->>'resource')
+   AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? k)
+ ELSE false END
+$$;
+CREATE FUNCTION rss_timeseries.visible(t uuid,n text,s text,g text,d bytea,sub text,res text,k text,at_time bigint) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
- SELECT NOT EXISTS(SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=(j#>>'{stream,scope,tenant}')::uuid AND f.namespace=j#>>'{stream,scope,namespace}'
- AND (f.kind='pruned' OR (f.kind='delete' AND NOT f.restored)) AND f.lo<=at_time AND f.hi>at_time AND rss_timeseries.matches(f.selection,j))
+ SELECT NOT EXISTS(SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=t AND f.namespace=n
+ AND (f.kind='pruned' OR (f.kind='delete' AND NOT f.restored)) AND f.lo<=at_time AND f.hi>at_time
+ AND rss_timeseries.matches_row(f.selection,f.series_digest,t,n,s,g,d,sub,res,k))
 $$;
--- The lower boundary (summary.hi > change.lo) is checked by the caller.
-CREATE FUNCTION rss_timeseries.affects_summary(spec jsonb,bucket_start bigint,change_end bigint) RETURNS boolean
-LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
- SELECT (spec#>>'{series,definition,metric,kind}' IN ('bool','state') AND spec#>>'{coverage,coverage}'='observedOnly')
- OR bucket_start::numeric < change_end::numeric + coalesce((spec->>'maxGap')::numeric,(spec#>>'{coverage,maxHoldMicros}')::numeric,0)
+-- Only a restoration outside the published dependency needs raw data. Keeping
+-- the probe in its own statement lets Delete proceed even if raw is locked.
+CREATE FUNCTION rss_timeseries.has_visible_sample(t uuid,n text,s text,g text,d bytea,l bigint,h bigint) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
+ SELECT EXISTS (SELECT FROM rss_timeseries.samples x
+  WHERE (x.tenant_id,x.namespace,x.source,x.generation,x.series_digest)=(t,n,s,g,d)
+  AND x.observed_at>=l AND x.observed_at<h
+  AND rss_timeseries.visible(t,n,s,g,d,x.subject,x.resource,x.key,x.observed_at))
 $$;
-CREATE FUNCTION rss_timeseries.invalidate(t uuid,n text,sel jsonb,lo_time bigint,hi_time bigint) RETURNS void
+CREATE FUNCTION rss_timeseries.invalidate(t uuid,n text,sel jsonb,wanted bytea,lo_time bigint,hi_time bigint,fence_id text,restoring boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
  UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
- UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND hi>lo_time
- AND rss_timeseries.affects_summary(convert_from(spec,'UTF8')::jsonb,lo,hi_time)
- AND rss_timeseries.matches(sel,convert_from(spec,'UTF8')::jsonb);
+ WITH scoped AS NOT MATERIALIZED (
+  SELECT * FROM rss_timeseries.summaries
+  WHERE tenant_id=t AND namespace=n AND NOT dirty AND impact && int8range(lo_time,hi_time,'[)')
+ ), candidates AS (
+  SELECT * FROM scoped WHERE sel->>'selection'='exact'
+   AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}')
+   AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted)
+  UNION ALL
+  SELECT * FROM scoped WHERE sel->>'selection'='resource'
+   AND (t::text,n,subject,resource)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}',sel->>'subject',sel->>'resource')
+   AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key)
+ )
+ UPDATE rss_timeseries.summaries m SET dirty=true FROM candidates c
+ WHERE (m.tenant_id,m.namespace,m.spec_digest,m.lo)=(t,n,c.spec_digest,c.lo)
+ AND CASE WHEN least(hi_time,c.hi)>greatest(c.lo,c.delete_from) THEN true
+     WHEN c.delete_from<c.lo AND c.delete_from>=lo_time AND c.delete_from<hi_time THEN true
+     WHEN c.gap_sensitive AND hi_time>c.delete_from AND NOT EXISTS (
+      SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=t AND f.namespace=n
+      AND f.id<>fence_id AND f.kind='delete' AND NOT f.restored
+      AND f.lo<=c.lo AND f.hi>c.delete_from
+      AND rss_timeseries.matches_row(f.selection,f.series_digest,t,n,c.source,c.generation,c.series_digest,c.subject,c.resource,c.key)
+     ) THEN true
+     WHEN restoring THEN
+      rss_timeseries.has_visible_sample(t,n,c.source,c.generation,c.series_digest,
+                                        greatest(lo_time,lower(c.impact)),least(hi_time,greatest(c.lo,c.delete_from)))
+     ELSE false END;
 END $$;
 CREATE FUNCTION rss_timeseries.put_plan(t uuid,n text,i text,b bytea,s bytea,d boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
@@ -122,7 +176,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  IF EXISTS(SELECT FROM rss_timeseries.plans WHERE tenant_id=t AND namespace=n AND id=i AND binding<>b) THEN RAISE EXCEPTION USING ERRCODE='TS001',MESSAGE='plan conflict'; END IF;
  INSERT INTO rss_timeseries.plans VALUES(t,n,i,b,s,d) ON CONFLICT(tenant_id,namespace,id) DO UPDATE SET state=excluded.state,done=excluded.done;
 END $$;
-CREATE FUNCTION rss_timeseries.put_fence(t uuid,n text,i text,k text,sel jsonb,l bigint,h bigint,u bigint) RETURNS void
+CREATE FUNCTION rss_timeseries.put_fence(t uuid,n text,i text,k text,sel jsonb,l bigint,h bigint,u bigint,wanted bytea) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
  IF EXISTS(SELECT FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND id=i) THEN RAISE EXCEPTION USING ERRCODE='TS001',MESSAGE='fence conflict'; END IF;
@@ -130,25 +184,25 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
   SELECT greatest(h,coalesce(max(hi),h)) INTO h FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind=k AND selection=sel;
   DELETE FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind=k AND selection=sel;
  END IF;
- INSERT INTO rss_timeseries.fences VALUES(t,n,i,k,sel,l,h,u,false);
+ INSERT INTO rss_timeseries.fences VALUES(t,n,i,k,sel,wanted,l,h,u,false);
  IF k='delete' THEN
-  PERFORM rss_timeseries.invalidate(t,n,sel,l,h);
+  PERFORM rss_timeseries.invalidate(t,n,sel,wanted,l,h,i,false);
  ELSIF k='pruned' THEN
   -- In-flight folds must recheck raw availability; retained materialized summaries stay valid.
   UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
  END IF;
 END $$;
 CREATE FUNCTION rss_timeseries.restore_fence(t uuid,n text,i text,sel jsonb,l bigint,h bigint) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ DECLARE wanted bytea; BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
- UPDATE rss_timeseries.fences SET restored=true WHERE tenant_id=t AND namespace=n AND id=i AND kind='delete' AND selection=sel AND lo=l AND hi=h AND NOT restored AND restore_until>floor(extract(epoch FROM clock_timestamp())*1000000)::bigint;
+ UPDATE rss_timeseries.fences SET restored=true WHERE tenant_id=t AND namespace=n AND id=i AND kind='delete' AND selection=sel AND lo=l AND hi=h AND NOT restored AND restore_until>floor(extract(epoch FROM clock_timestamp())*1000000)::bigint RETURNING series_digest INTO wanted;
  IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='TS004',MESSAGE='restore unavailable'; END IF;
- PERFORM rss_timeseries.invalidate(t,n,sel,l,h);
+ PERFORM rss_timeseries.invalidate(t,n,sel,wanted,l,h,i,true);
 END $$;
-CREATE FUNCTION rss_timeseries.put_summary(t uuid,n text,d bytea,m bytea,s bytea,l bigint,h bigint,b bytea) RETURNS void
+CREATE FUNCTION rss_timeseries.put_summary(t uuid,n text,d bytea,m bytea,s text,g text,series bytea,sub text,res text,k text,l bigint,h bigint,impact_lo bigint,delete_start bigint,sensitive boolean,b bytea) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
- INSERT INTO rss_timeseries.summaries VALUES(t,n,d,m,s,l,h,false,b) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET hi=excluded.hi,data=excluded.data,dirty=false;
+ INSERT INTO rss_timeseries.summaries VALUES(t,n,d,m,s,g,series,sub,res,k,l,h,int8range(impact_lo,h,'[)'),delete_start,sensitive,false,b) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET hi=excluded.hi,impact=excluded.impact,delete_from=excluded.delete_from,gap_sensitive=excluded.gap_sensitive,data=excluded.data,dirty=false;
 END $$;
 CREATE FUNCTION rss_timeseries.register_summary(t uuid,n text,d bytea,s bytea,l bigint,h bigint) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
@@ -160,14 +214,34 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  PERFORM rss_timeseries.lock_stream(t,n,s,g);
  UPDATE rss_timeseries.streams SET closed=true WHERE tenant_id=t AND namespace=n AND source=s AND generation=g;
 END $$;
-CREATE FUNCTION rss_timeseries.prune_rows(t uuid,n text,sel jsonb,r bigint,s bigint,cap integer) RETURNS integer
+CREATE FUNCTION rss_timeseries.prune_rows(t uuid,n text,sel jsonb,r bigint,s bigint,cap integer,wanted bytea) RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ DECLARE total integer:=0; changed integer; BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
- DELETE FROM rss_timeseries.samples WHERE (tenant_id,namespace,source,generation,sample_id,observed_at) IN
- (SELECT tenant_id,namespace,source,generation,sample_id,observed_at FROM rss_timeseries.samples WHERE tenant_id=t AND namespace=n AND observed_at<r AND rss_timeseries.matches(sel,convert_from(raw,'UTF8')::jsonb) ORDER BY observed_at,source,generation,sample_id LIMIT cap);
+ WITH scoped AS NOT MATERIALIZED (
+  SELECT * FROM rss_timeseries.samples WHERE tenant_id=t AND namespace=n AND observed_at<r
+ ), victims AS (
+  SELECT tenant_id,namespace,source,generation,sample_id,observed_at FROM scoped WHERE sel->>'selection'='exact' AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}')
+   AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted)
+  UNION ALL
+  SELECT tenant_id,namespace,source,generation,sample_id,observed_at FROM scoped WHERE sel->>'selection'='resource' AND (t::text,n)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}')
+   AND (subject,resource)=(sel->>'subject',sel->>'resource')
+     AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key)
+  ORDER BY observed_at,source,generation,sample_id LIMIT cap
+ )
+ DELETE FROM rss_timeseries.samples WHERE (tenant_id,namespace,source,generation,sample_id,observed_at) IN (SELECT * FROM victims);
  GET DIAGNOSTICS changed=ROW_COUNT; total:=total+changed;
- DELETE FROM rss_timeseries.summaries WHERE (tenant_id,namespace,spec_digest,lo) IN
- (SELECT tenant_id,namespace,spec_digest,lo FROM rss_timeseries.summaries WHERE tenant_id=t AND namespace=n AND hi<=s AND rss_timeseries.matches(sel,convert_from(spec,'UTF8')::jsonb) ORDER BY lo,spec_digest LIMIT greatest(cap-total,0));
+ WITH scoped AS NOT MATERIALIZED (
+  SELECT * FROM rss_timeseries.summaries WHERE tenant_id=t AND namespace=n AND hi<=s
+ ), victims AS (
+  SELECT tenant_id,namespace,spec_digest,lo FROM scoped WHERE sel->>'selection'='exact' AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}')
+   AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted)
+  UNION ALL
+  SELECT tenant_id,namespace,spec_digest,lo FROM scoped WHERE sel->>'selection'='resource' AND (t::text,n)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}')
+   AND (subject,resource)=(sel->>'subject',sel->>'resource')
+     AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key)
+  ORDER BY lo,spec_digest LIMIT greatest(cap-total,0)
+ )
+ DELETE FROM rss_timeseries.summaries WHERE (tenant_id,namespace,spec_digest,lo) IN (SELECT * FROM victims);
  GET DIAGNOSTICS changed=ROW_COUNT; total:=total+changed;
  DELETE FROM rss_timeseries.fences WHERE (tenant_id,namespace,id) IN
  (SELECT tenant_id,namespace,id FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind='delete' AND selection=sel AND hi<=r AND (restored OR restore_until<=floor(extract(epoch FROM clock_timestamp())*1000000)::bigint) ORDER BY id LIMIT greatest(cap-total,0));

@@ -68,11 +68,10 @@ impl std::fmt::Debug for Digest {
 // Domain and encoding version prevent cross-kind reuse. This is not a wire API.
 fn digest<T: serde::Serialize>(domain: &[u8], value: &T) -> Result<Digest, Error> {
     use sha2::{Digest as _, Sha256};
-    let bytes = serde_json::to_vec(value).map_err(|_| Error::InvalidInput)?;
     let mut h = Sha256::new();
     h.update(b"rss.timeseries.v1\0");
     h.update(domain);
     h.update([0]);
-    h.update(bytes);
+    serde_json::to_writer(&mut h, value).map_err(|_| Error::InvalidInput)?;
     Ok(Digest(h.finalize().into()))
 }

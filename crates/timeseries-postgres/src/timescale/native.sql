@@ -16,7 +16,7 @@ CREATE FUNCTION rss_timeseries.sync_gauge(t uuid,n text,s text,g text,d bytea,l 
 RETURNS TABLE(observed_at bigint,sequence numeric,sample_id text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
- RETURN QUERY UPDATE rss_timeseries.samples r SET aggregate_visible=rss_timeseries.visible(convert_from(r.raw,'UTF8')::jsonb,r.observed_at)
+ RETURN QUERY UPDATE rss_timeseries.samples r SET aggregate_visible=rss_timeseries.visible(r.tenant_id,r.namespace,r.source,r.generation,r.series_digest,r.subject,r.resource,r.key,r.observed_at)
  WHERE (r.tenant_id,r.namespace,r.source,r.generation,r.sample_id,r.observed_at) IN
  (SELECT x.tenant_id,x.namespace,x.source,x.generation,x.sample_id,x.observed_at FROM rss_timeseries.samples x
  WHERE x.tenant_id=t AND x.namespace=n AND x.source=s AND x.generation=g AND x.series_digest=d AND x.observed_at>=l AND x.observed_at<h

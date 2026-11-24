@@ -254,8 +254,8 @@ pub(super) async fn step(
             }) {
                 return Ok(Step::More(0));
             }
-            let summary = statistics(c, spec, bucket, limits).await?;
-            crate::aggregate::store(c, spec, &summary, limits).await?;
+            let (summary, first_at) = statistics(c, spec, bucket, limits).await?;
+            crate::aggregate::store(c, spec, &summary, first_at, false, limits).await?;
             fold.at = bucket.end();
             fold.phase = Phase::Project { last: None };
             Ok(if fold.at >= window.end() {
@@ -271,10 +271,10 @@ async fn statistics(
     spec: &SummarySpec,
     window: Interval,
     limits: &Limits,
-) -> Result<Summary, Error> {
+) -> Result<(Summary, Timestamp), Error> {
     let stream = spec.stream();
     let sql = format!(
-        "SELECT total::text,valid,minimum::text,maximum::text,defects FROM rss_timeseries.gauge_{} WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND bucket=$6",
+        "SELECT total::text,valid,minimum::text,maximum::text,defects,first_at FROM rss_timeseries.gauge_{} WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND series_digest=$5 AND bucket=$6",
         spec.resolution_micros()
     );
     let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
@@ -297,7 +297,9 @@ async fn statistics(
         max: None,
         gaps: false,
     };
+    let mut first_at = window.end();
     if let Some(row) = row {
+        first_at = Timestamp::new(row.try_get("first_at").map_err(sql_error)?)?;
         stats.count = u64::try_from(row.try_get::<i64, _>("valid").map_err(sql_error)?)
             .map_err(|_| Error::NumericRange)?;
         stats.gaps = row.try_get::<i64, _>("defects").map_err(sql_error)? > 0;
@@ -342,10 +344,13 @@ async fn statistics(
             NumberKind::F64 => return Err(Error::Unsupported),
         }
     }
-    stats.gaps |= !crate::aggregate::deletions(c, spec, window, limits)
-        .await?
-        .is_empty();
-    Summary::from_integer_gauge(spec, window, stats)
+    if first_at < window.end() {
+        let observed = Interval::new(first_at, window.end())?;
+        stats.gaps |= !crate::aggregate::deletions(c, spec, observed, limits)
+            .await?
+            .is_empty();
+    }
+    Ok((Summary::from_integer_gauge(spec, window, stats)?, first_at))
 }
 
 /// Physical native caches are not retained summaries. After raw pruning, purge their

@@ -13,7 +13,7 @@ rss-timeseries-postgres = { workspace = true, features = ["integration", "timesc
 rss-request-context.workspace = true
 rss-contract.workspace = true
 testkit = { path = "../../crates/testkit", features = ["containers"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process", "test-util"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 anyhow.workspace = true
 serde_json.workspace = true

@@ -65,6 +65,31 @@ impl<C: Clock> PgStore<C> {
         operation: impl for<'a> FnOnce(&'a mut PgConnection, &'a C) -> BoxFuture<'a, Result<T, Error>>
         + Send,
     ) -> Result<Outcome<T>, Error> {
+        self.prepared_transaction(
+            tenant,
+            deadline,
+            mode,
+            || Ok(()),
+            move |c, clock, ()| operation(c, clock),
+        )
+        .await
+    }
+
+    // One tenant gate and one wall-clock watchdog cover acquire, synchronous
+    // preparation, BEGIN and settlement, even when injected clock readings repeat.
+    pub(crate) async fn prepared_transaction<T: Send, P: Send>(
+        &self,
+        tenant: TenantId,
+        deadline: Deadline,
+        mode: Mode,
+        prepare: impl FnOnce() -> Result<P, Error> + Send,
+        operation: impl for<'a> FnOnce(
+            &'a mut PgConnection,
+            &'a C,
+            P,
+        ) -> BoxFuture<'a, Result<T, Error>>
+        + Send,
+    ) -> Result<Outcome<T>, Error> {
         self.profile.check_tenant(tenant)?;
         let started = AtomicBool::new(false);
         let remaining = deadline
@@ -73,7 +98,10 @@ impl<C: Clock> PgStore<C> {
         let mutation = mode == Mode::Write;
         let fault = if mutation { self.take_fault() } else { 0 };
         let result=tokio::time::timeout(remaining, async {
-            let mut lease=Lease{connection:self.pool.acquire().await.map_err(sql_error)?,settled:false};
+            let connection = self.pool.acquire().await.map_err(sql_error)?;
+            let prepared = prepare()?;
+            check(&self.clock, deadline)?;
+            let mut lease=Lease{connection,settled:false};
             let mut tx = match mode {
                 Mode::Snapshot => lease.connection.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").await,
                 _ => lease.connection.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE").await,
@@ -83,7 +111,7 @@ impl<C: Clock> PgStore<C> {
                 .bind(tenant.to_string()).bind(format!("{ms}ms")).execute(&mut *tx).await.map_err(sql_error)?;
             check(&self.clock, deadline)?;
             started.store(true,Ordering::SeqCst);
-            let result=operation(&mut tx,&self.clock).await;
+            let result=operation(&mut tx,&self.clock,prepared).await;
             // No budget remains for rollback ACK once the injected clock reaches cutoff.
             // Quarantine instead of committing a staged mutation after its deadline.
             if check(&self.clock, deadline).is_err() {

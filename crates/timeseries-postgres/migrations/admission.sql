@@ -86,12 +86,12 @@ BEGIN
    SELECT t,n,s,g,id,at_time,(j->>'sequence')::numeric,series_hash,key,version,j#>>'{series,subject}',j#>>'{series,resource}',raw,(SELECT micros FROM admission_time)
    FROM admitted JOIN identities ON sample_id=id RETURNING sample_id
   ), affected AS MATERIALIZED (
-   SELECT DISTINCT j->'stream' AS stream,j->'series' AS series,at_time FROM admitted
+   SELECT series_hash,range_agg(int8range(at_time,at_time+1,'[)')) AS changes
+   FROM admitted GROUP BY series_hash
   ), dirtied AS (
-   UPDATE rss_timeseries.summaries m SET dirty=true WHERE m.tenant_id=t AND m.namespace=n AND NOT m.dirty
-   AND EXISTS(SELECT FROM affected a WHERE m.hi>a.at_time
-     AND a.stream=convert_from(m.spec,'UTF8')::jsonb->'stream' AND a.series=convert_from(m.spec,'UTF8')::jsonb->'series'
-     AND rss_timeseries.affects_summary(convert_from(m.spec,'UTF8')::jsonb,m.lo,a.at_time+1))
+   UPDATE rss_timeseries.summaries m SET dirty=true FROM affected a
+   WHERE (m.tenant_id,m.namespace,m.source,m.generation,m.series_digest)=(t,n,s,g,a.series_hash)
+     AND NOT m.dirty AND m.impact && a.changes
   )
   SELECT r.error_code,(SELECT count(*) FROM samples),(SELECT micros FROM admission_time),b.raw,b.digest
   INTO failure,added,received,suspect_raw,suspect_digest FROM rejected r LEFT JOIN bad_definition b ON true;
