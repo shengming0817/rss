@@ -839,20 +839,51 @@ async fn retained_tiles_can_cover_a_window_past_a_longer_dead_end() -> anyhow::R
         vec![sample(&d, "a", 2, 3)?, sample(&d, "b", 8, 7)?],
     )?)
     .await?;
-    for (resolution, hi) in [(6, 6), (5, 10)] {
+    for (resolution, lo, hi) in [(6, 0, 6), (5, 0, 10), (10, 100, 110)] {
         complete(
             &f.store,
             plan(
                 &format!("recompute-{resolution}"),
                 MaintenanceAction::Recompute {
                     spec: spec(&d, resolution)?,
-                    window: window(0, hi)?,
+                    window: window(lo, hi)?,
                 },
                 2,
             )?,
         )
         .await?;
     }
+    let mut caps = limits()?;
+    caps.max_points = NonZeroU32::MIN;
+    let narrow = PgStore::new(
+        f.profile.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        Timer,
+        caps,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    // The complete [0,6) tile fits even though [0,5) is also a candidate.
+    let exact = Authorized::<AggregateQuery>::verify(
+        &authority(TENANT)?,
+        AggregateQuery::new(
+            spec(&d, 6)?,
+            window(0, 6)?,
+            QueryBudget {
+                max_points: NonZeroU32::MIN,
+                max_series: NonZeroU32::MIN,
+            },
+            AggregateOp::Mean,
+        )?,
+    )?;
+    assert_eq!(
+        narrow
+            .aggregate(&exact, None, deadline()?)
+            .await?
+            .refreshed_through,
+        Some(Timestamp::new(6)?)
+    );
     let coarse = spec(&d, 10)?;
     let before = Timestamp::new(10)?;
     complete(
@@ -868,7 +899,7 @@ async fn retained_tiles_can_cover_a_window_past_a_longer_dead_end() -> anyhow::R
     )
     .await?;
     complete(
-        &f.store,
+        &narrow,
         plan(
             "prune",
             MaintenanceAction::Prune {
@@ -876,16 +907,51 @@ async fn retained_tiles_can_cover_a_window_past_a_longer_dead_end() -> anyhow::R
                 raw_before: before,
                 summaries_before: Timestamp::new(0)?,
             },
-            2,
+            1,
         )?,
     )
     .await?;
     assert_eq!(f.count().await?, 0);
-    let page = aggregate(&f.store, coarse, 0, 10).await?;
+    let page = aggregate(&f.store, coarse.clone(), 0, 10).await?;
     assert_eq!(page.refreshed_through, Some(before));
     assert!(
         matches!(page.buckets[0].value,AggregateValue::Mean {sum:Sum::U128(10),count} if count.get()==2)
     );
+    let prefix = window(0, 2)?;
+    for (name, action) in [
+        (
+            "hide",
+            MaintenanceAction::Delete {
+                selection: coarse.selection(),
+                window: prefix,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+        ),
+        (
+            "restore",
+            MaintenanceAction::Restore {
+                selection: coarse.selection(),
+                window: prefix,
+                deletion_fence: id("hide")?,
+            },
+        ),
+    ] {
+        complete(&f.store, plan(name, action, 1)?).await?;
+        let retained = aggregate(&f.store, coarse.clone(), 0, 10).await?;
+        assert_eq!(retained.refreshed_through, Some(before));
+        assert_eq!(
+            serde_json::to_value(&retained.buckets)?,
+            serde_json::to_value(&page.buckets)?
+        );
+        assert_eq!(
+            retained
+                .availability
+                .excluded
+                .iter()
+                .any(|r| r.reason == UnavailableReason::Deleted && r.window == prefix),
+            name == "hide"
+        );
+    }
     Ok(())
 }
 

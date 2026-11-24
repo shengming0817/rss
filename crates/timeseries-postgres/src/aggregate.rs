@@ -16,7 +16,8 @@ pub(crate) async fn store(
     c: &mut PgConnection,
     spec: &SummarySpec,
     summary: &Summary,
-    predecessor: Option<(Timestamp, bool)>,
+    delete_from: Timestamp,
+    gap_sensitive: bool,
     limits: &Limits,
 ) -> Result<(), Error> {
     let data = bytes(summary)?;
@@ -24,11 +25,12 @@ pub(crate) async fn store(
         return Err(Error::BudgetExceeded);
     }
     let start = summary.window.start().micros();
-    // A new or restored observation can supply a missing predecessor. Once an
-    // anchor exists, observations strictly before it cannot replace it.
-    let predecessor_at = predecessor.map(|(at, _)| at);
-    let impact_start =
-        predecessor_at.map_or_else(|| dependency_start(spec, start), Timestamp::micros);
+    // Writes can fill an empty Gauge prefix or introduce a missing predecessor.
+    let impact_start = if delete_from < summary.window.start() {
+        delete_from.micros()
+    } else {
+        dependency_start(spec, start)
+    };
     sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
         .bind(spec.stream().scope().tenant().to_string())
         .bind(spec.stream().scope().namespace().as_str())
@@ -43,8 +45,8 @@ pub(crate) async fn store(
         .bind(start)
         .bind(summary.window.end().micros())
         .bind(impact_start)
-        .bind(predecessor_at.map(Timestamp::micros))
-        .bind(predecessor.is_some_and(|(_,sensitive)| sensitive))
+        .bind(delete_from.micros())
+        .bind(gap_sensitive)
         .bind(data)
         .execute(c)
         .await

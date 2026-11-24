@@ -4,7 +4,7 @@ use rss_timeseries::Error;
 use sqlx::{Connection, PgConnection, PgPool, Row};
 
 // Fixed PostgreSQL 17 common schema fingerprint, populated from the canonical T2 catalog.
-const COMMON_CATALOG: &str = "c58c78885d960d2ca8241e2f6903cd82";
+const COMMON_CATALOG: &str = "19c5e59964737debeeed0d9ead575767";
 pub(crate) async fn validate(
     pool: &PgPool,
     profile: &StorageProfile,
@@ -122,7 +122,7 @@ async fn validate_views(c: &mut PgConnection, resolutions: &[i64]) -> Result<(),
     for resolution in resolutions {
         let definition:String=sqlx::query_scalar("SELECT view_definition FROM timescaledb_information.continuous_aggregates WHERE view_schema='rss_timeseries' AND view_name=$1").bind(format!("gauge_{resolution}")).fetch_one(&mut *c).await.map_err(sql_error)?;
         let expected = format!(
-            "SELECT time_bucket(({resolution})::bigint, observed_at) AS bucket, tenant_id, namespace, source, generation, series_digest, gauge_kind, sum(gauge_value) AS total, count(gauge_value) AS valid, min(gauge_value) AS minimum, max(gauge_value) AS maximum, (count(*) - count(gauge_value)) AS defects FROM rss_timeseries.samples WHERE (aggregate_visible AND (gauge_kind = ANY (ARRAY['i64'::text, 'u64'::text]))) GROUP BY (time_bucket(({resolution})::bigint, observed_at)), tenant_id, namespace, source, generation, series_digest, gauge_kind;"
+            "SELECT time_bucket(({resolution})::bigint, observed_at) AS bucket, tenant_id, namespace, source, generation, series_digest, gauge_kind, sum(gauge_value) AS total, count(gauge_value) AS valid, min(gauge_value) AS minimum, max(gauge_value) AS maximum, (count(*) - count(gauge_value)) AS defects, min(observed_at) AS first_at FROM rss_timeseries.samples WHERE (aggregate_visible AND (gauge_kind = ANY (ARRAY['i64'::text, 'u64'::text]))) GROUP BY (time_bucket(({resolution})::bigint, observed_at)), tenant_id, namespace, source, generation, series_digest, gauge_kind;"
         );
         if definition
             .split_whitespace()

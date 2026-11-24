@@ -202,6 +202,19 @@ async fn native_refresh_late_delete_restore_columnstore_and_retention() -> anyho
         )?,
     )
     .await?;
+    complete(
+        &f.store,
+        plan(
+            "hide-empty-prefix",
+            MaintenanceAction::Delete {
+                selection: spec(&d, 10)?.selection(),
+                window: window(0, 1)?,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
     assert_eq!(f.count().await?, 0);
     assert!(matches!(f.write(&b).await?, Outcome::Replay(_)));
     assert_eq!(f.count().await?, 0);

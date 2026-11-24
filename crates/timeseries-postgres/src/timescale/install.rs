@@ -61,7 +61,7 @@ SELECT public.time_bucket({resolution}::bigint,observed_at) AS bucket,
  tenant_id,namespace,source,generation,series_digest,gauge_kind,
  sum(gauge_value) AS total,count(gauge_value) AS valid,
  min(gauge_value) AS minimum,max(gauge_value) AS maximum,
- count(*)-count(gauge_value) AS defects
+ count(*)-count(gauge_value) AS defects,min(observed_at) AS first_at
 FROM rss_timeseries.samples
 WHERE aggregate_visible AND gauge_kind IN ('i64','u64')
 GROUP BY bucket,tenant_id,namespace,source,generation,series_digest,gauge_kind

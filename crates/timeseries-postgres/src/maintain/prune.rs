@@ -36,36 +36,54 @@ async fn safe_raw(
     }) {
         return Ok(Err(MaintenanceBlock::RestoreWindow));
     }
-    let ranges=sqlx::query("SELECT spec,lo,hi FROM rss_timeseries.summary_ranges WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND rss_timeseries.matches($4::text::jsonb,convert_from(spec,'UTF8')::jsonb) LIMIT $5")
- .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(summaries_before.micros()).bind(json(selection)?).bind(i64::from(limits.max_points.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
-    if ranges.len() > limits.max_points.get() as usize {
-        return Err(Error::BudgetExceeded);
-    }
     let mut halo = 0u64;
     let mut anchor_limit = raw_before.micros();
-    for row in ranges {
-        let spec: SummarySpec =
-            serde_json::from_slice(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)
-                .map_err(|_| Error::Invariant)?;
-        halo = halo.max(spec.lookback());
-        if crate::aggregate::needs_history_anchor(&spec)
-            && let Some(prior) = crate::aggregate::predecessor_time(c, &spec, raw_before).await?
-        {
-            anchor_limit = anchor_limit.min(prior.micros());
+    // Page the registry in its primary-key order under the same namespace lock.
+    // Each prefix of the scan is provisional until every dependency is checked.
+    let mut after = (Vec::<u8>::new(), 0i64, 0i64);
+    let selector = json(selection)?;
+    loop {
+        let ranges = sqlx::query("SELECT spec_digest,spec,lo,hi FROM rss_timeseries.summary_ranges
+            WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3
+            AND (lo<$4 OR convert_from(spec,'UTF8')::jsonb#>>'{series,definition,metric,kind}' <> 'gauge')
+            AND rss_timeseries.matches($5::text::jsonb,convert_from(spec,'UTF8')::jsonb)
+            AND (spec_digest,lo,hi)>($6,$7,$8) ORDER BY spec_digest,lo,hi LIMIT $9")
+            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str())
+            .bind(summaries_before.micros()).bind(raw_before.micros()).bind(&selector)
+            .bind(&after.0).bind(after.1).bind(after.2)
+            .bind(i64::from(r.budget().rows.get())).fetch_all(&mut *c).await.map_err(sql_error)?;
+        if ranges.is_empty() {
+            break;
         }
+        for row in ranges {
+            let spec: SummarySpec =
+                serde_json::from_slice(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)
+                    .map_err(|_| Error::Invariant)?;
+            halo = halo.max(spec.lookback());
+            if crate::aggregate::needs_history_anchor(&spec)
+                && let Some(prior) =
+                    crate::aggregate::predecessor_time(c, &spec, raw_before).await?
+            {
+                anchor_limit = anchor_limit.min(prior.micros());
+            }
 
-        let lo: i64 = row.try_get("lo").map_err(sql_error)?;
-        let hi: i64 = row.try_get("hi").map_err(sql_error)?;
-        let start = lo.max(spec.bucket(summaries_before)?.start().micros());
-        let end = hi.min(
-            spec.bucket(Timestamp::new(raw_before.micros().saturating_sub(1))?)?
-                .end()
-                .micros(),
-        );
-        let complete:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM generate_series($4::bigint,$5::bigint-1,$6::bigint) x WHERE NOT EXISTS(SELECT FROM rss_timeseries.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=x AND NOT dirty))")
-  .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(start).bind(end).bind(spec.resolution_micros().get() as i64).fetch_one(&mut *c).await.map_err(sql_error)?;
-        if !complete {
-            return Ok(Err(MaintenanceBlock::DirtySummary));
+            let lo: i64 = row.try_get("lo").map_err(sql_error)?;
+            let hi: i64 = row.try_get("hi").map_err(sql_error)?;
+            after = (row.try_get("spec_digest").map_err(sql_error)?, lo, hi);
+            let start = lo.max(spec.bucket(summaries_before)?.start().micros());
+            let end = hi.min(raw_before.micros());
+            let complete: bool = sqlx::query_scalar(
+                "SELECT NOT EXISTS(SELECT FROM generate_series($4::bigint,$5::bigint-1,$6::bigint) x
+                 WHERE NOT EXISTS(SELECT FROM rss_timeseries.summaries WHERE tenant_id=$1::text::uuid
+                                 AND namespace=$2 AND spec_digest=$3 AND lo=x AND NOT dirty))",
+            )
+            .bind(r.scope().tenant().to_string())
+            .bind(r.scope().namespace().as_str()).bind(&after.0)
+            .bind(start).bind(end).bind(spec.resolution_micros().get() as i64)
+            .fetch_one(&mut *c).await.map_err(sql_error)?;
+            if !complete {
+                return Ok(Err(MaintenanceBlock::DirtySummary));
+            }
         }
     }
     Ok(Ok(raw_before

@@ -4,7 +4,7 @@ pub(super) struct Fold {
     at: Timestamp,
     revision: Revision,
     builder: Option<SummaryBuilder>,
-    predecessor_at: Option<Timestamp>,
+    delete_from: Timestamp,
     last: Option<(Timestamp, u64, Id)>,
 }
 pub(super) async fn step(
@@ -57,7 +57,7 @@ pub(super) async fn step(
             at: window.start(),
             revision,
             builder: None,
-            predecessor_at: None,
+            delete_from: window.start(),
             last: None,
         });
     }
@@ -73,7 +73,17 @@ pub(super) async fn step(
         let mut builder = SummaryBuilder::new(spec.clone(), bucket)?;
         let prior = crate::aggregate::predecessor(c, spec, fold.at, limits).await?;
         crate::aggregate::ensure_boundary(c, spec, fold.at, prior.as_ref(), limits).await?;
-        fold.predecessor_at = prior.as_ref().map(|p| p.input().observed_at);
+        fold.delete_from = match &prior {
+            Some(p) => p.input().observed_at,
+            None if matches!(
+                spec.series().definition().spec().metric,
+                Metric::Gauge { .. }
+            ) =>
+            {
+                bucket.end()
+            }
+            None => bucket.start(),
+        };
         if let Some(prior) = prior {
             builder.push(prior, limits.max_points.get() as usize)?;
         }
@@ -98,6 +108,7 @@ pub(super) async fn step(
             break;
         };
         let i = sample.input();
+        fold.delete_from = fold.delete_from.min(i.observed_at);
         fold.last = Some((i.observed_at, i.sequence, i.id.clone()));
         crate::aggregate::mask(
             fold.builder.as_mut().ok_or(Error::Invariant)?,
@@ -117,11 +128,10 @@ pub(super) async fn step(
             bucket.end(),
         )?;
         let builder = fold.builder.take().ok_or(Error::Invariant)?;
-        let predecessor = fold
-            .predecessor_at
-            .map(|at| (at, builder.predecessor_gap_sensitive()));
+        let gap_sensitive =
+            fold.delete_from < bucket.start() && builder.predecessor_gap_sensitive();
         let summary = builder.finish(limits.max_points.get() as usize)?;
-        crate::aggregate::store(c, spec, &summary, predecessor, limits).await?;
+        crate::aggregate::store(c, spec, &summary, fold.delete_from, gap_sensitive, limits).await?;
         fold.at = bucket.end();
         fold.last = None;
         if fold.at == window.end() {

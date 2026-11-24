@@ -72,10 +72,12 @@ pub(super) async fn plan(
 
 // A longer tile may end at a dead end. Compute the cheapest complete suffix
 // at each boundary, then prefer the longest viable tile in the original order.
-fn choose(window: Interval, tiles: Vec<Tile>, limits: &Limits) -> Result<Option<Cover>, Error> {
-    if tiles.len() > limits.max_points.get() as usize {
-        return Err(Error::BudgetExceeded);
-    }
+fn choose(window: Interval, mut tiles: Vec<Tile>, limits: &Limits) -> Result<Option<Cover>, Error> {
+    // Ordered by start, then longest first: a whole-bucket hit is always first.
+    // A bounded search can establish a cover even if other candidates exist.
+    let budget = limits.max_points.get() as usize;
+    let truncated = tiles.len() > budget;
+    tiles.truncate(budget);
     let mut suffix = HashMap::from([(window.end().micros(), 0u64)]);
     for t in tiles.iter().rev() {
         if let Some(rest) = suffix.get(&t.end) {
@@ -86,7 +88,11 @@ fn choose(window: Interval, tiles: Vec<Tile>, limits: &Limits) -> Result<Option<
     }
     let mut at = window.start().micros();
     let Some(minimum) = suffix.get(&at) else {
-        return Ok(None);
+        return if truncated {
+            Err(Error::BudgetExceeded)
+        } else {
+            Ok(None)
+        };
     };
     let cap = u64::from(limits.max_bytes.get());
     if *minimum > cap {
