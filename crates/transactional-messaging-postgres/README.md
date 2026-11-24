@@ -100,7 +100,9 @@ the source in this set and prepare before locking the source. An incomplete decl
 handoff with PZ002. A standalone handoff takes its allocator without waiting while holding the source. Contention
 rolls the transaction back with PostgreSQL 55P03 (transient). Retry with the original token and
 deadline, or recovery version. A successful standalone handoff closes ordered admission in
-that transaction. A combined operation can wait for all its allocators up front through prepare.
+that transaction. The Rust relay retains the original claim and retries only the database settlement
+after a confirmed rollback caused by this contention, within the original operation deadline.
+A combined operation can wait for all its allocators up front through prepare.
 Prepare before companion business locks when those identities are known. An empty set acquires
 nothing; one nonempty set may be declared per tenant transaction. Duplicate entries are deduplicated;
 repeated or expanded declarations and undeclared ordered append fail closed. Unordered messages

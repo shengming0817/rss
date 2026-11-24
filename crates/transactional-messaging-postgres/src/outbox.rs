@@ -4,7 +4,7 @@ use crate::{
     envelope::Envelope,
     inbox::{fingerprint, milliseconds},
 };
-use rss_request_context::{Clock, Deadline};
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     fence::ExecutionBinding,
@@ -88,6 +88,25 @@ pub(crate) struct SourceWindow {
     pub(crate) delivery: Duration,
 }
 impl PgOutboxClaim {
+    async fn settle_in(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        lease: i64,
+        disposition: &str,
+    ) -> Result<String, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
+        )
+        .bind(self.binding.tenant().to_string())
+        .bind(self.seq)
+        .bind(&self.token)
+        .bind(lease)
+        .bind(disposition)
+        .bind(&self.dr_operation)
+        .fetch_one(connection)
+        .await
+    }
+
     pub(crate) async fn lease_in(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -326,6 +345,14 @@ impl<R> PgOutboxStore<R> {
     }
 }
 
+fn settlement_status(result: &str) -> Result<(), PgError> {
+    match result {
+        "settled" => Ok(()),
+        "expired" | "lost_lease" => Err(PgError::lost()),
+        _ => Err(PgError::invariant()),
+    }
+}
+
 impl PgOutboxStore<()> {
     /// Private composition: only the consumer transaction owner may stage a local terminal result.
     pub(crate) async fn settle_local_in(
@@ -345,22 +372,7 @@ impl PgOutboxStore<()> {
                 "dead_letter"
             }
         };
-        let result: String = sqlx::query_scalar(
-            "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
-        )
-        .bind(tx.tenant_id().to_string())
-        .bind(claim.seq)
-        .bind(&claim.token)
-        .bind(*lease)
-        .bind(disposition)
-        .bind(&claim.dr_operation)
-        .fetch_one(&mut *tx.connection)
-        .await?;
-        match result.as_str() {
-            "settled" => Ok(()),
-            "expired" | "lost_lease" => Err(PgError::lost()),
-            _ => Err(PgError::invariant()),
-        }
+        settlement_status(&claim.settle_in(tx.connection, *lease, disposition).await?)
     }
 }
 impl<R> OutboxWriter<Vec<u8>> for PgOutboxStore<R> {
@@ -440,45 +452,64 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
     }
     async fn settle(
         &self,
-        claim: Self::Claim,
+        mut claim: Self::Claim,
         settlement: OutboxSettlement<R>,
         deadline: OperationDeadline,
     ) -> Result<(), MessagingError> {
         if !self.valid_claim(&claim) {
             return Err(PgError::lost().port());
         }
-        let tenant = claim.message.envelope().metadata().tenant_id();
-        let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
-            .map_err(|_| PgError::invariant().port())?;
+        let runtime = &self.writer.runtime;
+        let cutoff = runtime.cutoff(deadline).map_err(PgError::port)?;
         let disposition = match settlement {
             OutboxSettlement::Published(_) => "published",
             OutboxSettlement::Retry => "retry",
             OutboxSettlement::DeadLetter => "dead_letter",
         };
-        let lease = claim.lease_us.into_inner();
-        self.writer.runtime
-            .relay(claim.binding, cutoff, move |connection| {
-                Box::pin(async move {
-                    let result: String = sqlx::query_scalar(
-                        "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
-                    )
-                    .bind(tenant.to_string())
-                    .bind(claim.seq)
-                    .bind(claim.token)
-                    .bind(lease)
-                    .bind(disposition)
-                    .bind(claim.dr_operation)
-                    .fetch_one(connection)
-                    .await?;
-                    match result.as_str() {
-                        "settled" => Ok(()),
-                        "expired" | "lost_lease" => Err(PgError::lost()),
-                        _ => Err(PgError::invariant()),
-                    }
-                })
-            })
-            .await
-            .map_err(PgError::port)
+        // No other task can renew this move-only claim after settlement starts.
+        let lease = *claim.lease_us.get_mut();
+        let mut delay = Duration::from_millis(5);
+        loop {
+            let mut allocator_busy = false;
+            let attempt = runtime
+                .transaction_until(
+                    claim.binding,
+                    cutoff,
+                    (&claim, &mut allocator_busy),
+                    true,
+                    #[cfg(feature = "integration")]
+                    None,
+                    |(claim, allocator_busy), tx| {
+                        Box::pin(async move {
+                            let result = claim.settle_in(tx.connection, lease, disposition).await;
+                            if let Err(sqlx::Error::Database(error)) = &result {
+                                **allocator_busy = error.code().as_deref() == Some("55P03")
+                                    && error.constraint() == Some("outbox_head_allocator");
+                            }
+                            settlement_status(&result?)
+                        })
+                    },
+                )
+                .await;
+            // The SQL error alone cannot authorize a retry: rollback must be acknowledged.
+            let retry = attempt
+                .fold(
+                    |()| Ok(false),
+                    Err,
+                    |e| if allocator_busy { Ok(true) } else { Err(e) },
+                    Err,
+                    Err,
+                    Err,
+                )
+                .map_err(PgError::port)?;
+            if !retry {
+                return Ok(());
+            }
+            let wake = Deadline::from_timeout(&runtime.timer, delay)
+                .map_err(|_| PgError::invariant().port())?;
+            within(&runtime.timer, cutoff, |_| runtime.timer.sleep_until(wake)).await?;
+            delay = (delay * 2).min(Duration::from_millis(100));
+        }
     }
 }
 

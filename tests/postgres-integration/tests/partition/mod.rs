@@ -1,4 +1,5 @@
 //! INVARIANT: OUTBOX-PARTITION-ORDER-01 — public Rust and independent SQL callers.
+mod confirmed_settlement;
 mod heads;
 mod wire_contract;
 use super::{Timer, binding, deadline, fence_fixture, message, outbox_budget};
@@ -171,6 +172,7 @@ pub(super) async fn run(
     config: PgConfig,
 ) -> anyhow::Result<()> {
     Box::pin(heads::handoff(raw, owner)).await?;
+    Box::pin(confirmed_settlement::run(runtime.clone(), raw, owner)).await?;
     Box::pin(sql_digest_integrity(raw)).await?;
     Box::pin(wire_contract::run(runtime.clone(), raw)).await?;
     Box::pin(sql_protocol(raw)).await?;
@@ -183,8 +185,7 @@ pub(super) async fn run(
     Box::pin(timed_out_preparation(runtime.clone(), owner, raw)).await?;
     Box::pin(rejected_effect(runtime.clone(), owner)).await?;
     Box::pin(cached_row_ids(runtime.clone(), owner, raw)).await?;
-    Box::pin(permission_drift(owner, config)).await?;
-    Ok(())
+    Box::pin(permission_drift(owner, config)).await
 }
 
 #[allow(clippy::cognitive_complexity)] // reason: real SQL protocol cases keep rejected statements adjacent to rollback and error-code evidence.

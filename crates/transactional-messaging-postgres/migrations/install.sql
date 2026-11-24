@@ -540,13 +540,17 @@ BEGIN
  -- The source row is already locked (including direct recovery UPDATE). Never wait
  -- for a writer's allocator here: that writer may be waiting for this source.
  PERFORM 1 FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
-  AND partition_key=NEW.partition_key FOR UPDATE NOWAIT;
+  AND partition_key=NEW.partition_key FOR UPDATE SKIP LOCKED;
+ IF NOT FOUND THEN
+  IF NOT EXISTS(SELECT FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
+   AND partition_key=NEW.partition_key) THEN RAISE EXCEPTION 'partition allocator missing'; END IF;
+  RAISE EXCEPTION 'partition handoff busy' USING ERRCODE='55P03',CONSTRAINT='outbox_head_allocator';
+ END IF;
  -- Record implicit handoff without granting an append declaration. The new tuple
  -- fences stale snapshots and prepare() rejects a later nonempty declaration.
  UPDATE outbox_partitions SET declared=(prepared_by=pg_current_xact_id() AND declared),
   prepared_by=pg_current_xact_id() WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
   AND partition_key=NEW.partition_key;
- IF NOT FOUND THEN RAISE EXCEPTION 'partition allocator missing'; END IF;
  SELECT seq INTO next_seq FROM outbox WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
   AND partition_key=NEW.partition_key AND status NOT IN ('published','resolved')
   ORDER BY partition_seq LIMIT 1;
