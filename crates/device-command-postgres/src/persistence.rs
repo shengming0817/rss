@@ -111,6 +111,42 @@ pub(crate) async fn read(
     }
     Ok(r)
 }
+pub(crate) async fn exact_rows(
+    tx: &mut PgTransaction<'_>,
+    scope: Scope,
+    ids: ExactCommandIds<'_>,
+) -> Result<Vec<Option<Stored>>, PgError> {
+    if ids.as_slice().is_empty() {
+        return Ok(Vec::new());
+    }
+    let tenant = scope.tenant().to_string();
+    let requested: Vec<_> = ids
+        .as_slice()
+        .iter()
+        .map(|id| id.as_str().to_owned())
+        .collect();
+    let rows = tx.with_connection(move |c| Box::pin(async move {
+        // Look up tenant-local identities before checking device ownership. Filtering by
+        // device here would turn an out-of-scope identity into an absent command.
+        sqlx::query("SELECT cmd.*, cmd.tenant_id::text AS tenant, cmd.device_id::text AS device
+            FROM unnest($2::text[]) WITH ORDINALITY AS requested(id, position)
+            LEFT JOIN rss_device_command.commands cmd ON cmd.tenant_id=$1::uuid AND cmd.command_id=requested.id
+            ORDER BY requested.position")
+            .bind(tenant).bind(requested).fetch_all(c).await
+    })).await?;
+    rows.into_iter()
+        .map(|row| {
+            if row.try_get::<Option<&str>, _>("command_id")?.is_none() {
+                return Ok(None);
+            }
+            let stored = decode(row)?;
+            if stored.command.spec().scope() != scope {
+                return Err(error(Error::Fenced));
+            }
+            Ok(Some(stored))
+        })
+        .collect()
+}
 pub(crate) async fn save(
     tx: &mut PgTransaction<'_>,
     command: &Command,
