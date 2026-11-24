@@ -75,5 +75,6 @@ wait can be resumed. Dropping the publisher releases idle sockets and aborts its
 
 Upstream references: Standard Webhooks
 `spec/standard-webhooks.md@bece768d960f09e242f5cd5686d859e475d6b478`;
-Hyper `src/client/conn/http1.rs@e3bcd379118e707b3e49185b047d49ebbaa943fc`;
+Hyper HTTP/1 client and response persistence rules in `src/client/conn/http1.rs` and
+`src/proto/h1/role.rs@7f67699ce32d717081deb7018b4da7d679277ac0`;
 rustls `rustls/src/webpki/server_verifier.rs@f04804fa13341a9b1dc02b5d1dd8a746f2c4b7fb`.
