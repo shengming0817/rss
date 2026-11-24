@@ -91,6 +91,14 @@ async fn first_page(
     expected.reverse();
     let ids: Vec<_> = expected.iter().map(|c| c.spec().id().clone()).collect();
     let result = measured(f, s, &ids, [1, 1, 1, 1, 0]).await?;
+    // Read back every changed member after commit, outside the SQL measurement window.
+    for command in expected
+        .iter()
+        .filter(|c| matches!(c.status(), Status::Published | Status::TimedOut))
+    {
+        let durable = f.load(command.spec().id().as_str(), s).await?;
+        assert_eq!(durable.as_ref(), Some(command));
+    }
     assert_eq!(result, expected.into_iter().map(Some).collect::<Vec<_>>());
     assert_eq!(f.load("another-owner", s).await?, Some(unselected));
     Ok(())

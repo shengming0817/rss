@@ -79,9 +79,14 @@ between payload and command intent remain product responsibilities.
 - Run bounded recovery pages under `PgRuntime::local_tx`; commit before using their cursor.
   Only `Committed(page)` advances the cursor to `page.after`; all other outcomes retain the
   original cursor. The example accepts that explicit cursor instead of restarting every page.
-  Consumers with their own durable candidates may instead call `recover_exact` inside that same
-  transaction with an `ExactCommandIds` page. Every page locks authority once; a nonempty page performs one tenant-local lookup. Results follow request order; missing IDs yield empty slots and a command on
-  another device rejects the whole page. Propagate the error from the transaction callback to roll back caller writes. Terminal snapshots retain their persisted milestones.
+- For caller-selected candidates, construct `ExactCommandIds` from the caller's ID slice,
+  pass the page as the context of `PgRuntime::local_tx_with_context`, and call
+  `store.recover_exact(tx, scope, *page)` inside its callback. The
+  [device-command example](../examples/src/device_command/mod.rs) demonstrates this borrow.
+  Every page locks authority once. A nonempty page performs one tenant-local lookup and
+  returns one slot per request ID in order. Missing IDs yield empty slots. A command on
+  another device rejects the whole page. Propagate the error from the transaction callback
+  to roll back caller writes. Terminal snapshots retain their persisted milestones.
   Only changed rows enter the single version-checked page save.
   After commit ACK loss, reload exact commands/authority before deciding to retry. Preserve
   all `LocalTxAttempt` variants, including CommitUnknown and RollbackFailed. Dropped mutating
