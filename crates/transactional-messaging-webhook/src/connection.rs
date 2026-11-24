@@ -1,12 +1,17 @@
 use crate::{AuthorizedTarget, Limits};
 use bytes::Bytes;
 use http_body_util::Full;
+use hyper::body::Body as _;
 use hyper::{Request, Response, body::Incoming, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use rss_request_context::{Deadline, ExecutionTimer};
 use rss_transactional_messaging::policy::within;
-use std::{collections::HashSet, net::SocketAddr, pin::Pin, task::{Context, Waker, Poll}};
-use hyper::body::Body as _;
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
@@ -25,14 +30,20 @@ impl Connection {
         cutoff: Deadline,
     ) -> Result<Self, ()> {
         let name = match target.url.host().ok_or(())? {
-            url::Host::Domain(name) => rustls::pki_types::ServerName::try_from(name.to_owned())
-                .map_err(|_| ())?,
+            url::Host::Domain(name) => {
+                rustls::pki_types::ServerName::try_from(name.to_owned()).map_err(|_| ())?
+            }
             url::Host::Ipv4(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
             url::Host::Ipv6(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
         };
         let mut seen = HashSet::new();
-        let addresses: Vec<_> = target.network.addresses.iter().copied()
-            .filter(|a| seen.insert(*a)).collect();
+        let addresses: Vec<_> = target
+            .network
+            .addresses
+            .iter()
+            .copied()
+            .filter(|a| seen.insert(*a))
+            .collect();
         for (index, address) in addresses.iter().enumerate() {
             let now = timer.now();
             let remaining = cutoff.remaining(now).ok_or(())?;
@@ -45,12 +56,20 @@ impl Connection {
                     return Err(());
                 }
                 let tls = TlsConnector::from(target.trust.config.clone())
-                    .connect(name.clone(), stream).await.map_err(|_| ())?;
+                    .connect(name.clone(), stream)
+                    .await
+                    .map_err(|_| ())?;
                 let (sender, driver) = http1::Builder::new()
                     .max_headers(limits.headers)
                     .max_buf_size(limits.header_bytes)
-                    .handshake(TokioIo::new(tls)).await.map_err(|_| ())?;
-                let mut connection = Self { peer, sender, driver };
+                    .handshake(TokioIo::new(tls))
+                    .await
+                    .map_err(|_| ())?;
+                let mut connection = Self {
+                    peer,
+                    sender,
+                    driver,
+                };
                 tokio::select! {
                     biased;
                     _ = &mut connection.driver => Err(()),
@@ -115,4 +134,3 @@ impl Connection {
         }
     }
 }
-

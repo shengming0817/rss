@@ -6,7 +6,10 @@ use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
 };
-use tokio::{sync::{Mutex as AsyncMutex, Notify}, task::JoinHandle};
+use tokio::{
+    sync::{Mutex as AsyncMutex, Notify},
+    task::JoinHandle,
+};
 
 /// Closed failures when waiting for publisher shutdown. Admission stays closed after either error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -80,7 +83,11 @@ impl Shared {
                     return;
                 }
                 let now = timer.now();
-                while state.idle.front().is_some_and(|entry| entry.expires.is_expired(now)) {
+                while state
+                    .idle
+                    .front()
+                    .is_some_and(|entry| entry.expires.is_expired(now))
+                {
                     state.idle.pop_front();
                 }
                 state.idle.front().map(|entry| entry.expires)
@@ -129,7 +136,11 @@ pub(crate) struct Connections {
 
 impl Connections {
     pub(crate) fn new(limits: Limits) -> Self {
-        Self { shared: Arc::default(), cleaner: OnceLock::new(), limits }
+        Self {
+            shared: Arc::default(),
+            cleaner: OnceLock::new(),
+            limits,
+        }
     }
 
     pub(crate) fn admit(&self) -> Option<Admission<'_>> {
@@ -151,8 +162,10 @@ impl Connections {
         let now = timer.now();
         let index = state.idle.iter().rposition(|entry| {
             let peer = entry.connection.peer;
-            !entry.expires.is_expired(now) && &entry.identity == identity
-                && target.network.addresses.contains(&peer) && target.network.permits(peer.ip())
+            !entry.expires.is_expired(now)
+                && &entry.identity == identity
+                && target.network.addresses.contains(&peer)
+                && target.network.permits(peer.ip())
         })?;
         let mut entry = state.idle.remove(index)?;
         drop(state);
@@ -176,11 +189,14 @@ impl Connections {
         let cleaner = self.cleaner.get_or_init(|| {
             let shared = self.shared.clone();
             let timer = timer.clone();
-            AsyncMutex::new(Ok(Some(tokio::spawn(async move { shared.clean(timer.as_ref()).await }))))
+            AsyncMutex::new(Ok(Some(tokio::spawn(async move {
+                shared.clean(timer.as_ref()).await
+            }))))
         });
         // A stopped runtime cannot service future idle deadlines on this publisher.
         if let Ok(task) = cleaner.try_lock()
-            && !matches!(&*task, Ok(Some(handle)) if !handle.is_finished()) {
+            && !matches!(&*task, Ok(Some(handle)) if !handle.is_finished())
+        {
             state.idle.clear();
             return;
         }
@@ -188,13 +204,21 @@ impl Connections {
             state.idle.pop_front();
         }
         let wake = state.idle.is_empty();
-        state.idle.push_back(Idle { connection, identity, expires });
+        state.idle.push_back(Idle {
+            connection,
+            identity,
+            expires,
+        });
         if wake {
             self.shared.wake_cleaner.notify_one();
         }
     }
 
-    pub(crate) async fn close(&self, timer: &impl ExecutionTimer, deadline: Deadline) -> Result<(), CloseError> {
+    pub(crate) async fn close(
+        &self,
+        timer: &impl ExecutionTimer,
+        deadline: Deadline,
+    ) -> Result<(), CloseError> {
         self.shared.stop();
         within(timer, deadline, |_| async {
             self.shared.wait_drained().await;
@@ -206,7 +230,9 @@ impl Connections {
                 slot.as_ref().map_err(|error| *error)?;
             }
             Ok(())
-        }).await.map_err(|_| CloseError::Deadline)?
+        })
+        .await
+        .map_err(|_| CloseError::Deadline)?
     }
 }
 
@@ -214,9 +240,9 @@ impl Drop for Connections {
     fn drop(&mut self) {
         self.shared.stop();
         if let Some(cleaner) = self.cleaner.get_mut()
-            && let Ok(Some(handle)) = cleaner.get_mut() {
+            && let Ok(Some(handle)) = cleaner.get_mut()
+        {
             handle.abort();
         }
     }
 }
-

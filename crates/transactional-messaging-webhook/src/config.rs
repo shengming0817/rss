@@ -1,8 +1,8 @@
 use crate::{Error, Publication, SigningKeys, Target};
 use ipnet::IpNet;
-use sha2::{Digest as _, Sha256};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
+use sha2::{Digest as _, Sha256};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -94,7 +94,10 @@ impl TrustRoots {
         digests.sort_unstable();
         digests.dedup();
         let identity = Sha256::digest(digests.as_flattened()).into();
-        Ok(Self { config: Arc::new(config), identity })
+        Ok(Self {
+            config: Arc::new(config),
+            identity,
+        })
     }
 }
 /// Explicit address snapshot and network allowlist supplied by the host.

@@ -1,7 +1,10 @@
 use crate::{
     AuthorizationFailure, AuthorizedTarget, Limits, Publication, TargetAuthorizer, WallClock,
 };
-use crate::{connection::Connection, pool::{CloseError, Connections, Identity}};
+use crate::{
+    connection::Connection,
+    pool::{CloseError, Connections, Identity},
+};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::Request;
@@ -130,23 +133,29 @@ impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> WebhookPubl
         {
             return definite(Kind::Permanent, Stage::Admission, Reason::InvalidMessage);
         }
-        let reuse = self.limits.pool.map(|limits| (limits, Identity::of(&target)));
+        let reuse = self
+            .limits
+            .pool
+            .map(|limits| (limits, Identity::of(&target)));
         let cached = reuse.as_ref().and_then(|(_, identity)| {
-            self.connections.checkout(identity, &target, self.timer.as_ref())
+            self.connections
+                .checkout(identity, &target, self.timer.as_ref())
         });
         let mut connection = match cached {
             Some(connection) => connection,
-            None => match Connection::connect(&target, self.limits, self.timer.as_ref(), cutoff).await {
-                Ok(connection) => connection,
-                Err(()) => {
-                    let reason = if cutoff.is_expired(self.timer.now()) {
-                        Reason::DeadlineElapsed
-                    } else {
-                        Reason::TransportUnavailable
-                    };
-                    return definite(Kind::Transient, Stage::Admission, reason);
+            None => {
+                match Connection::connect(&target, self.limits, self.timer.as_ref(), cutoff).await {
+                    Ok(connection) => connection,
+                    Err(()) => {
+                        let reason = if cutoff.is_expired(self.timer.now()) {
+                            Reason::DeadlineElapsed
+                        } else {
+                            Reason::TransportUnavailable
+                        };
+                        return definite(Kind::Transient, Stage::Admission, reason);
+                    }
                 }
-            },
+            }
         };
         let seconds = self.wall_clock.unix_seconds();
         if seconds < 0 {
@@ -166,10 +175,15 @@ impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> WebhookPubl
         *sending = true;
         match connection.send(request).await {
             Ok((mut response, driver_live)) if response.status().is_success() => {
-                let receipt = WebhookPublishReceipt { status: response.status().as_u16() };
+                let receipt = WebhookPublishReceipt {
+                    status: response.status().as_u16(),
+                };
                 if let Some((limits, identity)) = reuse
-                    && driver_live && connection.finish_response(response.body_mut()) {
-                    self.connections.put(connection, identity, limits, &self.timer);
+                    && driver_live
+                    && connection.finish_response(response.body_mut())
+                {
+                    self.connections
+                        .put(connection, identity, limits, &self.timer);
                 }
                 PublishOutcome::Confirmed(receipt)
             }

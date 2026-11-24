@@ -49,14 +49,29 @@ windows and recovery. No HTTP retry extends those limits.
 
 Pass an `ExecutionTimer`, UTC clock and explicit `Limits` at construction. One
 cutoff covers authorization, connection attempts, TLS, signature, send and headers.
-Capacity is fail-fast, without a waiting queue. Each publish future directly owns
-its connection and driver: drop cancels local IO, but cannot undo remote effects.
-There are no spawned tasks or pooled connections to shut down. The host stops and
-joins its relay tasks. Response bodies are not collected or decompressed; bounded
-protocol-buffer prefetch is possible. TLS close_notify is not awaited after acceptance.
+Capacity is fail-fast. Dialing follows the authorized snapshot in order and divides
+the remaining time among the remaining distinct addresses. Each slice includes TCP,
+the actual peer check, TLS for the URL hostname and HTTP/1 readiness. A request
+is sent only once per publish call.
 
-The new package has no compatibility aliases, alternate wire encodings or optional
-security modes. It is independently consumable but not thereby published.
+The final argument to `Limits::new` selects connection reuse. Pass `None` to close
+after every request, or `Some(IdlePoolLimits::new(max_idle, idle_timeout)?)` to set a
+publisher-wide idle cap and retention time. Each checkout requires fresh authorization,
+an exact tenant, target version, URL, CA set and current/retiring signing keys, and
+a peer still present in the allowed address snapshot. The publisher signs with the
+current attempt's keys. Each active publish exclusively owns the socket and Hyper
+driver; cancellation releases both.
+
+The final 2xx headers determine acceptance. The publisher can reuse a connection
+after an empty response or an immediately complete body (up to 8 KiB and 16 frames).
+A slow or incomplete body releases the connection immediately. The driver handles
+HTTP framing; the adapter does not collect or decompress bodies.
+
+While the host Tokio runtime is active, one lazy cleanup task expires idle sockets
+even without further publications. Retain the runtime through shutdown. Call
+`publisher.close(deadline).await` to stop admission, drop idle sockets and await
+in-flight publishes and the cleanup task. A timeout leaves admission closed and the
+wait can be resumed. Dropping the publisher releases idle sockets and aborts its cleaner.
 
 Upstream references: Standard Webhooks
 `spec/standard-webhooks.md@bece768d960f09e242f5cd5686d859e475d6b478`;

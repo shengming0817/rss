@@ -149,6 +149,8 @@ fn network_limits_and_mapped_addresses() -> anyhow::Result<()> {
     ] {
         assert!(Limits::new(limits.0, limits.1, limits.2, limits.3, limits.4, None).is_err());
     }
+    assert!(IdlePoolLimits::new(0, Duration::from_secs(1)).is_err());
+    assert!(IdlePoolLimits::new(1, Duration::ZERO).is_err());
     assert!(TrustRoots::from_der([]).is_err());
     assert!(TrustRoots::from_der([vec![1, 2, 3]]).is_err());
     Ok(())
@@ -182,7 +184,8 @@ impl TargetAuthorizer for Denied {
 }
 #[tokio::test]
 async fn preflight_and_auth_denial_are_definite() -> anyhow::Result<()> {
-    let publisher = WebhookPublisher::new(Denied, Timer, Timer, Limits::new(1, 16, 1, 16, 8192, None)?);
+    let publisher =
+        WebhookPublisher::new(Denied, Timer, Timer, Limits::new(1, 16, 1, 16, 8192, None)?);
     let message = pending_message(
         MessageId::parse("id")?,
         metadata(BTreeMap::new())?,

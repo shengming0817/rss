@@ -101,7 +101,14 @@ pub fn target() -> anyhow::Result<Target> {
     ))
 }
 pub fn limits() -> anyhow::Result<Limits> {
-    Ok(Limits::new(2, 65536, 4, 32, 8192, Some(IdlePoolLimits::new(2, Duration::from_secs(30))?))?)
+    Ok(Limits::new(
+        2,
+        65536,
+        4,
+        32,
+        8192,
+        Some(IdlePoolLimits::new(2, Duration::from_secs(30))?),
+    )?)
 }
 pub fn budget() -> anyhow::Result<DeliveryBudget> {
     Ok(DeliveryBudget::new(
@@ -184,6 +191,9 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
     .await?;
     anyhow::ensure!(report.claimed() == 1, "expected one claimed delivery");
     // The fixture independently asserts the received signature and durable published status.
+    publisher
+        .close(Deadline::from_timeout(&Timer, Duration::from_secs(2))?)
+        .await?;
     runtime.close().await;
     Ok(())
 }
