@@ -188,34 +188,24 @@ async fn claim_heads<P, S: OutboxRelayStore<P>>(
 ) -> Result<OutboxClaimBatch<S::Claim>, MessagingError> {
     let claim_started = clock.now();
     let claim_deadline = absolute_deadline(clock, budget.settle_timeout(), emitter)?;
-    let claims = match within(clock, claim_deadline, |deadline| {
+    let claims = within(clock, claim_deadline, |deadline| {
         store.claim_partition_heads(binding, limit, deadline)
     })
     .await
     .and_then(std::convert::identity)
-    {
-        Ok(claims) if claims.len() <= limit.get() => claims,
-        Ok(_) => {
-            let error = MessagingError::new(
-                MessagingErrorKind::Invariant,
-                std::io::Error::other("outbox batch exceeds requested capacity"),
-            );
-            emit_runtime_failure(
-                emitter,
-                TransactionalMessagingRuntimePhase::RelayClaim,
-                &error,
-            );
-            return Err(error);
-        }
-        Err(error) => {
-            emit_runtime_failure(
-                emitter,
-                TransactionalMessagingRuntimePhase::RelayClaim,
-                &error,
-            );
-            return Err(error);
-        }
-    };
+    .and_then(|claims| {
+        claims
+            .validate_limit(limit)
+            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
+        Ok(claims)
+    })
+    .inspect_err(|error| {
+        emit_runtime_failure(
+            emitter,
+            TransactionalMessagingRuntimePhase::RelayClaim,
+            error,
+        )
+    })?;
     emitter.emit(TransactionalMessagingObservation::RelayTick {
         phase: TransactionalMessagingRelayPhase::Claim,
         duration: clock.now().saturating_duration_since(claim_started),
@@ -412,8 +402,10 @@ where
 
     /// Drive this worker on the caller's Tokio host until cancellation or failure.
     ///
-    /// Cancellation stops admission and lets in-flight work finish, including lease
-    /// renewal and settlement. Keep polling this future after cancelling the token.
+    /// Cancellation or a fatal error stops new requests. An outstanding claim request runs
+    /// to its original deadline. All handles received are driven through preparation and settlement.
+    /// If a claim committed but its reply was lost, the store recovers it under its lease and
+    /// fencing rules. Keep polling this future after cancelling the token.
     /// The host owns the final drain timeout: dropping this future (or aborting and
     /// joining its task) forcibly ends work without inventing a durable outcome.
     /// This method does not spawn a task or catch provider panics.
@@ -457,7 +449,7 @@ where
                 }
                 let request = claim_heads(binding, store, clock, budget, emitter, limit);
                 let batch = admission
-                    .scan(request, &mut active, &self.config, clock, emitter)
+                    .scan(request, &mut active, &self.config, clock, emitter, token)
                     .await;
                 for claim in batch.into_iter().flatten() {
                     active.push(relay_claim(
@@ -492,7 +484,7 @@ enum Admission {
     Ready,
     Idle(Deadline),
     Backoff(Deadline),
-    Stopped(MessagingError),
+    Stopped(Option<MessagingError>),
 }
 
 impl Admission {
@@ -514,12 +506,14 @@ impl Admission {
         config: &RelayConfig,
         clock: &impl ExecutionTimer,
         emitter: &impl TransactionalMessagingEmitter,
+        token: &tokio_util::sync::CancellationToken,
     ) -> Option<OutboxClaimBatch<T>> {
         tokio::pin!(request);
         let before = active.len();
         let claims = loop {
             tokio::select! {
                 biased;
+                () = token.cancelled(), if !matches!(self, Self::Stopped(_)) => self.stop(),
                 result = &mut request => break result,
                 Some(result) = active.next(), if !active.is_empty() => {
                     self.completed(result, config, clock, emitter);
@@ -547,12 +541,19 @@ impl Admission {
         clock: &impl ExecutionTimer,
         emitter: &impl TransactionalMessagingEmitter,
     ) -> Result<(), MessagingError> {
+        self.stop();
         while let Some(result) = active.next().await {
             self.completed(result, config, clock, emitter);
         }
         match self {
-            Admission::Stopped(error) => Err(error),
+            Admission::Stopped(Some(error)) => Err(error),
             _ => Ok(()),
+        }
+    }
+
+    fn stop(&mut self) {
+        if !matches!(self, Self::Stopped(_)) {
+            *self = Self::Stopped(None);
         }
     }
 
@@ -562,7 +563,8 @@ impl Admission {
         duration: Duration,
         state: fn(Deadline) -> Self,
     ) -> Self {
-        absolute_deadline(clock, duration, emitter).map_or_else(Self::Stopped, state)
+        absolute_deadline(clock, duration, emitter)
+            .map_or_else(|error| Self::Stopped(Some(error)), state)
     }
 
     async fn wait(&self, clock: &impl ExecutionTimer) {
@@ -593,19 +595,23 @@ impl Admission {
         clock: &impl ExecutionTimer,
         emitter: &impl TransactionalMessagingEmitter,
     ) {
-        if matches!(self, Self::Stopped(_)) {
-            return;
-        }
-        *self = match error.kind() {
-            MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed => {
-                tracing::warn!(
-                    error_kind = error.kind().as_label(),
-                    "relay admission will retry"
-                );
-                Self::delay(clock, emitter, config.error_backoff, Self::Backoff)
+        let recoverable = matches!(
+            error.kind(),
+            MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed
+        );
+        if let Self::Stopped(first_fatal) = self {
+            if first_fatal.is_none() && !recoverable {
+                *first_fatal = Some(error);
             }
-            _ => Self::Stopped(error),
-        };
+        } else if recoverable {
+            tracing::warn!(
+                error_kind = error.kind().as_label(),
+                "relay admission backing off"
+            );
+            *self = Self::delay(clock, emitter, config.error_backoff, Self::Backoff);
+        } else {
+            *self = Self::Stopped(Some(error));
+        }
     }
 }
 

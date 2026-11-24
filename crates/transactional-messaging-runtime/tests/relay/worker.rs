@@ -423,3 +423,29 @@ fn deadline_elapsed_outcome() -> PublishOutcome<()> {
         PublishFailureReason::DeadlineElapsed,
     ))
 }
+
+#[tokio::test]
+async fn settling_a_head_wakes_an_empty_scan_without_advancing_time() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let store = Arc::new(ObservedStore::new(0, 0, MessagingErrorKind::Transient));
+        store.append("head", "ordered").await;
+        store.append("successor", "ordered").await;
+        let mut run = Run::start(store.clone());
+        let head = run.next().await;
+        assert_eq!(head.0, "head");
+        run.timer.wait_registered(Duration::from_millis(100)).await;
+        assert_eq!(store.calls.load(Ordering::SeqCst), 2);
+        head.1.send(()).expect("settle ordered head during idle");
+        let successor = run.next().await;
+        assert_eq!(successor.0, "successor");
+        run.stop.cancel();
+        successor.1.send(()).expect("drain successor");
+        support::join_worker(run.worker).await.expect("drain");
+        assert_eq!(
+            store.memory.settlements(),
+            [OutboxDisposition::Published; 2]
+        );
+    })
+    .await
+    .expect("successor starts while idle clock is frozen");
+}

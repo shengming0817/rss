@@ -102,7 +102,13 @@ impl OutboxRelayStore<Vec<u8>> for Store {
         } else {
             claims.len()
         };
-        OutboxClaimBatch::try_from_provider(claims.drain(..count).collect(), limit)
+        // A misbehaving provider can construct a valid batch against a different limit.
+        let provider_limit = if self.respect_limit {
+            limit
+        } else {
+            NonZeroUsize::MAX
+        };
+        OutboxClaimBatch::try_from_provider(claims.drain(..count).collect(), provider_limit)
             .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
     }
 

@@ -128,7 +128,15 @@ impl Race {
         id: &str,
     ) -> anyhow::Result<Option<PgOutboxClaim>> {
         match self {
-            Self::Expired => expire(owner, id).await?,
+            Self::Expired => {
+                let wait = sqlx::query("SELECT pg_sleep_until(lease_until + interval '1 millisecond') FROM rss_transactional_messaging.outbox WHERE message_id=$1")
+                    .bind(id).fetch_one(owner);
+                tokio::time::timeout(
+                    store.delivery_budget().lease_ttl() + Duration::from_secs(2),
+                    wait,
+                )
+                .await??;
+            }
             Self::Takeover => {
                 expire(owner, id).await?;
                 let claim = store
@@ -156,6 +164,15 @@ impl Race {
         binding: ExecutionBinding,
     ) -> anyhow::Result<()> {
         let before = facts(owner, id).await?;
+        if self == Self::Expired {
+            assert_eq!(
+                &before, initial,
+                "expired with the original token and CAS deadline"
+            );
+            let expired: bool = sqlx::query_scalar("SELECT lease_until <= clock_timestamp() FROM rss_transactional_messaging.outbox WHERE message_id=$1")
+                .bind(id).fetch_one(owner).await?;
+            assert!(expired);
+        }
         let publisher = MemoryPublisher::new([]);
         let result = relay_once(
             binding,

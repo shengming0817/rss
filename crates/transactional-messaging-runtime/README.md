@@ -12,7 +12,9 @@ request size, total admitted work, empty-scan interval and recoverable-error del
 must be at least 100ms. A completion can wake an idle scan. A recoverable infrastructure failure
 holds further requests until the error delay elapses. A durably settled Retry follows the store's
 per-record eligibility delay so other due partitions can progress. Cancellation or a fatal error stops new
-requests and drains every admitted claim, including the reply to a request already in progress.
+requests. An outstanding claim request runs to its original deadline. The worker drains every
+handle it receives. If the database committed the claim but the reply timed out, the store's
+lease expiry and fencing govern when the original message can be claimed again.
 Every relay store/publisher future passes through the core-owned absolute-deadline race. Publish
 timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; claim, lease and
 settlement timeout stop downstream work without inventing durable state.

@@ -248,13 +248,20 @@ impl<C> OutboxClaimBatch<C> {
         claims: Vec<C>,
         limit: NonZeroUsize,
     ) -> Result<Self, OutboxClaimBatchError> {
-        if claims.len() > limit.get() {
+        let batch = Self { claims };
+        batch.validate_limit(limit)?;
+        Ok(batch)
+    }
+
+    /// Verify a received batch against the caller's actual request capacity.
+    pub fn validate_limit(&self, limit: NonZeroUsize) -> Result<(), OutboxClaimBatchError> {
+        if self.len() > limit.get() {
             return Err(OutboxClaimBatchError {
                 limit: limit.get(),
-                actual: claims.len(),
+                actual: self.len(),
             });
         }
-        Ok(Self { claims })
+        Ok(())
     }
 
     /// Number of admitted claims.
