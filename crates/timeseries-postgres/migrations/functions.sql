@@ -128,6 +128,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries A
  AND (f.kind='pruned' OR (f.kind='delete' AND NOT f.restored)) AND f.lo<=at_time AND f.hi>at_time
  AND rss_timeseries.matches_row(f.selection,f.series_digest,t,n,s,g,d,sub,res,k))
 $$;
+-- Only a restoration outside the published dependency needs raw data. Keeping
+-- the probe in its own statement lets Delete proceed even if raw is locked.
+CREATE FUNCTION rss_timeseries.has_visible_sample(t uuid,n text,s text,g text,d bytea,l bigint,h bigint) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$
+ SELECT EXISTS (SELECT FROM rss_timeseries.samples x
+  WHERE (x.tenant_id,x.namespace,x.source,x.generation,x.series_digest)=(t,n,s,g,d)
+  AND x.observed_at>=l AND x.observed_at<h
+  AND rss_timeseries.visible(t,n,s,g,d,x.subject,x.resource,x.key,x.observed_at))
+$$;
 CREATE FUNCTION rss_timeseries.invalidate(t uuid,n text,sel jsonb,wanted bytea,lo_time bigint,hi_time bigint,restoring boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
@@ -146,14 +155,11 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  )
  UPDATE rss_timeseries.summaries m SET dirty=true FROM candidates c
  WHERE (m.tenant_id,m.namespace,m.spec_digest,m.lo)=(t,n,c.spec_digest,c.lo)
- AND (hi_time>coalesce(c.predecessor_at,c.lo)
-      -- With no published predecessor, an earlier deletion cannot break a
-      -- dependency. Restore can introduce one, but only from visible raw data.
-      OR (restoring AND c.predecessor_at IS NULL AND EXISTS (
-          SELECT FROM rss_timeseries.samples x
-          WHERE (x.tenant_id,x.namespace,x.source,x.generation,x.series_digest)=(t,n,c.source,c.generation,c.series_digest)
-          AND x.observed_at>=greatest(lo_time,lower(c.impact)) AND x.observed_at<least(hi_time,c.lo)
-          AND rss_timeseries.visible(t,n,x.source,x.generation,x.series_digest,x.subject,x.resource,x.key,x.observed_at))));
+ AND CASE WHEN hi_time>coalesce(c.predecessor_at,c.lo) THEN true
+     WHEN restoring AND c.predecessor_at IS NULL THEN
+      rss_timeseries.has_visible_sample(t,n,c.source,c.generation,c.series_digest,
+                                        greatest(lo_time,lower(c.impact)),least(hi_time,c.lo))
+     ELSE false END;
 END $$;
 CREATE FUNCTION rss_timeseries.put_plan(t uuid,n text,i text,b bytea,s bytea,d boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
