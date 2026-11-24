@@ -42,6 +42,7 @@ pub(super) async fn run(
     parallel_effects(store, owner, c).await?;
     expired_transaction_keeps_conflicting_resources_locked(store, owner, c).await?;
     fairness(store, owner, c).await?;
+    partial_resource_lock(store, pool, owner, c).await?;
     rebinding(store, owner, c).await?;
     bounded_pages(store, c).await?;
     uncertainty(store, owner, c).await?;
@@ -50,25 +51,53 @@ pub(super) async fn run(
 }
 async fn fairness(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     let holder = wake(store, &scope("fair-holder")?, "holder", &["fair:b"], c).await?;
-    let held = claim(store, &holder, Duration::from_secs(5), c).await?;
+    let held = claim(store, &holder, Duration::from_secs(60), c).await?;
     let old = wake(store, &scope("fair-old")?, "old", &["fair:a", "fair:b"], c).await?;
     blocked(store, old.scope(), c).await?; // durable queue head despite B being busy
-    let young = queued_young(store, c).await?;
+    let tickets = declarations(owner, &old).await?;
+    assert_eq!(tickets.len(), 2);
+    let queue_ticket: i64 = sqlx::query_scalar("SELECT queue_ticket FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity=$3")
+        .bind(TENANT).bind(old.scope().reconciler()).bind(old.entity()).fetch_one(owner).await?;
+    assert!(
+        tickets
+            .iter()
+            .all(|(_, ticket, _, _)| *ticket == Some(queue_ticket))
+    );
+    for _ in 0..10 {
+        blocked(store, old.scope(), c).await?;
+        assert_eq!(declarations(owner, &old).await?, tickets);
+    }
+    let young = queued_young(store, owner, c).await?;
     store.release(&held, c).await?;
     finish_fair_turn(store, owner, c, old, young).await
 }
-async fn queued_young(store: &PgStore, c: &Control<'_, Clock>) -> anyhow::Result<Target> {
+type Declaration = (String, Option<i64>, String, String);
+async fn declarations(owner: &PgPool, target: &Target) -> anyhow::Result<Vec<Declaration>> {
+    Ok(sqlx::query_as("SELECT resource,waiting_ticket,ctid::text,xmin::text FROM rss_reconcile.target_resources WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity=$3 ORDER BY resource")
+        .bind(target.scope().tenant().to_string()).bind(target.scope().reconciler()).bind(target.entity()).fetch_all(owner).await?)
+}
+
+async fn queued_young(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<Target> {
     let young_scope = scope("fair-young")?;
     let young = wake(store, &young_scope, "young", &["fair:a"], c).await?;
     let separate = wake(store, &young_scope, "separate", &["fair:c"], c).await?;
+    let fresh = declarations(owner, &separate).await?;
+    assert_eq!(fresh.len(), 1);
+    assert!(fresh[0].1.is_none());
     let batch = store
         .claim_due(&young_scope, 2, 64, Duration::from_secs(5), c)
         .await?;
     assert_eq!(batch.claims.len(), 1);
     assert_eq!(batch.claims[0].target().entity(), separate.entity());
+    assert_eq!(declarations(owner, &separate).await?, fresh);
     store
         .finish(&batch.claims[0], Completion::Converged, c)
         .await?;
+    assert_eq!(declarations(owner, &separate).await?, fresh);
     for n in 0..3 {
         wake(store, &young_scope, &format!("new-{n}"), &["fair:a"], c).await?;
     }
@@ -92,6 +121,61 @@ async fn finish_fair_turn(
     let next = claim(store, &young, Duration::from_secs(5), c).await?;
     assert_eq!(next.target().entity(), young.entity()); // future old task cannot block A
     store.finish(&next, Completion::Converged, c).await?;
+    Ok(())
+}
+async fn partial_resource_lock(
+    store: &PgStore,
+    pool: &PgPool,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let scope = scope("partial-lock")?;
+    let old = wake(store, &scope, "old", &["partial:a", "partial:z"], c).await?;
+    let free = wake(store, &scope, "free", &["partial:independent"], c).await?;
+    let mut blocker = owner.begin().await?;
+    let lock = "SELECT 1 FROM rss_reconcile.resources WHERE tenant_id=$1::uuid AND resource=$2 FOR UPDATE NOWAIT";
+    sqlx::query(lock)
+        .bind(TENANT)
+        .bind("partial:z")
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    // Keep the outer claim transaction alive so its COMMIT cannot release the first lock.
+    let mut scan = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *scan)
+        .await?;
+    let granted: Vec<String> = sqlx::query_scalar("SELECT c.entity FROM rss_reconcile.claim_due($1::uuid,$2,2,16,60000) b CROSS JOIN LATERAL unnest(b.claims) c")
+        .bind(TENANT).bind(scope.reconciler()).fetch_all(&mut *scan).await?;
+    assert_eq!(granted, [free.entity()]);
+    sqlx::query(lock)
+        .bind(TENANT)
+        .bind("partial:a")
+        .fetch_one(&mut *blocker)
+        .await?;
+    scan.rollback().await?;
+    blocker.rollback().await?;
+    let fresh = claim(store, &old, Duration::from_secs(10), c).await?;
+    assert_eq!(fresh.target(), &old);
+    store.finish(&fresh, Completion::Converged, c).await?;
+    for nonblocking in [false, true] {
+        let error = sqlx::query(
+            "SELECT rss_reconcile.lock_resources($1::uuid,$2,$3,ARRAY['partial:absent'],$4)",
+        )
+        .bind(TENANT)
+        .bind(scope.reconciler())
+        .bind(old.entity())
+        .bind(nonblocking)
+        .execute(owner)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("missing resource was accepted"))?;
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("P1005")
+        );
+    }
     Ok(())
 }
 async fn rebinding(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
