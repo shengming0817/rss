@@ -50,6 +50,11 @@ pub(super) async fn drift(
     }
     for (label, change, restore) in [
         (
+            "cross-tenant unique index",
+            "CREATE UNIQUE INDEX global_version ON rss_saga.definitions(contract,version) WHERE version='v99'",
+            "DROP INDEX rss_saga.global_version",
+        ),
+        (
             "definition body writable",
             "GRANT UPDATE(definition) ON rss_saga.definitions TO saga_runtime",
             "REVOKE UPDATE(definition) ON rss_saga.definitions FROM saga_runtime",

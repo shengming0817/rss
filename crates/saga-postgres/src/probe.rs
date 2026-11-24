@@ -116,6 +116,9 @@ SELECT NOT EXISTS (
     WHERE a.attnotnull IS DISTINCT FROM true OR a.atttypid<>to_regtype(e.typ) OR a.attcollation<>e.coll
        OR a.attgenerated<>CASE WHEN e.expr IS NULL THEN '' ELSE 's' END::"char"
        OR pg_get_expr(d.adbin,d.adrelid) IS DISTINCT FROM e.expr
+) AND NOT EXISTS (
+    SELECT FROM pg_index WHERE indrelid='rss_saga.definitions'::regclass
+       AND (indisunique OR indisexclusion) AND NOT indisprimary
 )
 "#).fetch_one(conn).await.map_err(sql_error)?;
     if !valid {

@@ -119,12 +119,19 @@ END $$;
 
 CREATE FUNCTION rss_saga.valid_definition(d jsonb) RETURNS boolean LANGUAGE plpgsql SET search_path=pg_catalog,rss_saga AS $$
 BEGIN
+    IF jsonb_typeof(d->'steps') IS DISTINCT FROM 'array' THEN RETURN false; END IF;
     RETURN (octet_length(d::text) <= 2097152
         AND jsonb_typeof(d #> '{identity,contract}') = 'string'
         AND octet_length(d #>> '{identity,contract}') BETWEEN 1 AND 255
         AND jsonb_typeof(d #> '{identity,version}') = 'string'
         AND octet_length(d #>> '{identity,version}') BETWEEN 2 AND 11
-        AND jsonb_array_length(d->'steps') BETWEEN 1 AND 1024) IS TRUE;
+        AND jsonb_array_length(d->'steps') BETWEEN 1 AND 1024
+        AND NOT EXISTS (
+            SELECT FROM jsonb_array_elements(d->'steps') AS step
+            WHERE (jsonb_typeof(step->'max_failures') = 'number'
+                AND (step->>'max_failures') ~ '^[1-9][0-9]{0,9}$'
+                AND step->'max_failures' <= '4294967295'::jsonb) IS DISTINCT FROM true
+        )) IS TRUE;
 END $$;
 
 CREATE FUNCTION rss_saga.valid_instance(p jsonb,q bigint,bytes_ bigint,entries bigint,limit_bytes bigint) RETURNS boolean LANGUAGE plpgsql SET search_path=pg_catalog,rss_saga AS $$

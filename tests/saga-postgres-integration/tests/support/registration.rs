@@ -125,6 +125,26 @@ async fn reuse(
     let b = Scope::new(a.tenant(), uuid::Uuid::new_v4());
     let other = Scope::new(TenantId::parse(&uuid::Uuid::new_v4().to_string())?, a.id());
     let capacity = history_capacity()?;
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!("1"),
+        serde_json::json!(0),
+        serde_json::json!(4294967296_u64),
+    ] {
+        let mut tx = tenant_tx(pool, a).await?;
+        let mut body = serde_json::to_value(one)?;
+        body["steps"][0]["max_failures"] = invalid;
+        let rejected = sqlx::query("SELECT rss_saga.register($1,$2,$3)")
+            .bind(a.id())
+            .bind(sqlx::types::Json(body))
+            .bind(sqlx::types::Json(capacity))
+            .execute(&mut *tx)
+            .await;
+        assert!(
+            matches!(rejected, Err(e) if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23514"))
+        );
+        tx.rollback().await?;
+    }
     store.register(a, one, capacity, c).await?;
     store.register(other, two, capacity, c).await?;
     let mut tx = tenant_tx(pool, a).await?;
@@ -172,6 +192,12 @@ async fn reuse(
     assert_eq!(versions, ["v1"]);
     tx.commit().await?;
     store.register(b, &v2, capacity, c).await?;
+    let mut expected = [a.id(), b.id(), next.id()];
+    expected.sort_unstable();
+    let page = store
+        .candidates(CandidateFilter::Runnable, a.tenant(), None, 100, c)
+        .await?;
+    assert_eq!(page.iter().map(|s| s.id()).collect::<Vec<_>>(), expected);
     for (s, d) in [(a, one), (b, &v2), (other, two)] {
         let registry = registry(d.clone(), Arc::new(Effects::default()), false)?;
         let executor = Executor::new(store.clone(), protection()?, registry, read_budget()?);

@@ -104,7 +104,7 @@ ref: restatedev/restate crates/worker-api/src/invoker/invocation_reader.rs@7fcc6
 ref: launchbadge/sqlx sqlx-postgres/src/connection/stream.rs@v0.9.0
 
 The registration profile compares this checkout with the fixed pre-registry revision in one
-disposable PostgreSQL TLS fixture. Put PostgreSQL's `psql` and `pgbench` on PATH and run:
+disposable PostgreSQL TLS fixture. Put `python3` and PostgreSQL's `psql` and `pgbench` on PATH and run:
 
 ```sh
 RSS_TEST_RUN_ID=saga-registration-profile cargo run --locked -p testkit --features containers --bin rss-test-launcher -- -- cargo test --locked -p saga-postgres-integration --test suite registration_measurements -- --exact --ignored --nocapture

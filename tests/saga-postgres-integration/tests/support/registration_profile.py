@@ -118,7 +118,9 @@ def main():
         files = git("ls-tree", "-r", "--name-only", BASE, MIGRATIONS).splitlines()
         baseline = "\n".join(git("show", f"{BASE}:{path}") for path in files if path.endswith(".sql"))
         # Each version gets a clean schema with the same grants on the same disposable server.
-        for label, ddl in [(BASE, baseline), (git("rev-parse", "HEAD").strip(), Path(MIGRATIONS, "install.sql").read_text())]:
+        candidate = git("rev-parse", "HEAD").strip()
+        candidate_sql = git("show", f"{candidate}:{MIGRATIONS}/install.sql")
+        for label, ddl in [(BASE, baseline), (candidate, candidate_sql)]:
             psql(admin, "DROP SCHEMA rss_saga CASCADE; SET ROLE saga_owner;\n" + ddl +
                  "\nRESET ROLE; GRANT USAGE ON SCHEMA rss_saga TO saga_runtime; "
                  "GRANT SELECT ON ALL TABLES IN SCHEMA rss_saga TO saga_runtime; "
