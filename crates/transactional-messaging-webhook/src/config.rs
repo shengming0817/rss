@@ -16,9 +16,16 @@ pub struct IdlePoolLimits {
     pub(crate) timeout: Duration,
 }
 impl IdlePoolLimits {
-    /// Both the connection count and the idle retention time must be positive.
+    /// Require a positive count and a positive, representable monotonic retention time.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "validate platform Instant range at construction; all operational deadlines use the injected clock"
+    )]
     pub fn new(max_idle: usize, timeout: Duration) -> Result<Self, Error> {
-        if max_idle == 0 || timeout.is_zero() {
+        if max_idle == 0
+            || timeout.is_zero()
+            || std::time::Instant::now().checked_add(timeout).is_none()
+        {
             return Err(Error::Config);
         }
         Ok(Self { max_idle, timeout })

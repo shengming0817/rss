@@ -53,6 +53,7 @@ struct Idle {
 struct State {
     active: usize,
     closed: bool,
+    cleaner_stopped: bool,
     idle: VecDeque<Idle>,
 }
 
@@ -111,6 +112,23 @@ impl Shared {
             }
             changed.await;
         }
+    }
+}
+
+// The guard travels with the task, even when the runtime cancels it before its first poll.
+struct IdleOwner(Arc<Shared>);
+
+impl IdleOwner {
+    async fn run<T: ExecutionTimer>(self, timer: Arc<T>) {
+        self.0.clean(timer.as_ref()).await;
+    }
+}
+
+impl Drop for IdleOwner {
+    fn drop(&mut self) {
+        let mut state = self.0.state();
+        state.cleaner_stopped = true;
+        state.idle.clear();
     }
 }
 
@@ -179,27 +197,19 @@ impl Connections {
         limits: IdlePoolLimits,
         timer: &Arc<T>,
     ) {
+        // Every caller holds an admission until put returns: close joins the cleaner
+        // after draining admissions. Never hold the state lock across task creation.
+        self.cleaner.get_or_init(|| {
+            let owner = IdleOwner(self.shared.clone());
+            AsyncMutex::new(Ok(Some(tokio::spawn(owner.run(timer.clone())))))
+        });
         let mut state = self.shared.state();
-        if state.closed {
+        if state.closed || state.cleaner_stopped {
             return;
         }
         let Ok(expires) = Deadline::from_timeout(timer.as_ref(), limits.timeout) else {
             return;
         };
-        let cleaner = self.cleaner.get_or_init(|| {
-            let shared = self.shared.clone();
-            let timer = timer.clone();
-            AsyncMutex::new(Ok(Some(tokio::spawn(async move {
-                shared.clean(timer.as_ref()).await
-            }))))
-        });
-        // A stopped runtime cannot service future idle deadlines on this publisher.
-        if let Ok(task) = cleaner.try_lock()
-            && !matches!(&*task, Ok(Some(handle)) if !handle.is_finished())
-        {
-            state.idle.clear();
-            return;
-        }
         if state.idle.len() == limits.max_idle {
             state.idle.pop_front();
         }

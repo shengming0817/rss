@@ -143,6 +143,10 @@ async fn eight_requests_measure_tcp_tls_and_current_authorization() -> anyhow::R
             accepted(&publisher, &message(&id)?).await?;
             let record = receiver.received().await?;
             assert_eq!(record.headers["webhook-id"], id);
+            assert_eq!(
+                record.headers.get("connection").map(String::as_str),
+                pool.is_none().then_some("close")
+            );
             record.verify(&receiver.endpoint.secret)?;
             assert_eq!(
                 record.connection,
@@ -380,5 +384,57 @@ async fn close_rejects_admission_and_can_resume_wait_after_timeout() -> anyhow::
     publisher.close(cutoff()?).await?;
     wait_count(&receiver.closed, 2).await?;
     publisher.close(cutoff()?).await?;
+    receiver.stop().await
+}
+
+#[tokio::test]
+async fn admitted_publish_completes_while_close_drains() -> anyhow::Result<()> {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut receiver = Receiver::new(Mode::ReleaseHeaders(release.clone())).await?;
+    let publisher = Arc::new(receiver.publisher()?);
+    let task = {
+        let publisher = publisher.clone();
+        tokio::spawn(async move { accepted(&*publisher, &message("draining")?).await })
+    };
+    receiver.received().await?;
+    let close = publisher.close(cutoff()?);
+    tokio::pin!(close);
+    // Poll close into its drain wait before releasing the final headers.
+    tokio::select! {
+        biased;
+        result = &mut close => anyhow::bail!("close completed with an active publish: {result:?}"),
+        () = std::future::ready(()) => (),
+    }
+    assert!(matches!(
+        publisher
+            .publish(message("late")?.envelope(), deadline())
+            .await,
+        PublishOutcome::DefinitelyNotPublished(_)
+    ));
+    release.notify_one();
+    task.await??;
+    close.await?;
+    wait_count(&receiver.closed, 1).await?;
+    receiver.assert_no_request()?;
+    receiver.stop().await
+}
+
+#[tokio::test]
+async fn runtime_cancellation_releases_idle_sockets_without_another_publish() -> anyhow::Result<()>
+{
+    let mut receiver = Receiver::new(Mode::KeepAlive(EMPTY.to_vec())).await?;
+    let publisher = Arc::new(receiver.publisher()?);
+    let client = publisher.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(accepted(&*client, &message("idle-runtime")?))?;
+        Ok(())
+    })
+    .await??;
+    receiver.received().await?;
+    wait_count(&receiver.closed, 1).await?;
+    assert_eq!(publisher.close(cutoff()?).await, Err(CloseError::Cleanup));
     receiver.stop().await
 }

@@ -204,7 +204,12 @@ impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> WebhookPubl
         let mut signature =
             hyper::header::HeaderValue::from_str(&signature).map_err(|_| crate::Error::Signing)?;
         signature.set_sensitive(true);
-        Request::post(&target.url[url::Position::BeforePath..url::Position::AfterQuery])
+        let mut request =
+            Request::post(&target.url[url::Position::BeforePath..url::Position::AfterQuery]);
+        if self.limits.pool.is_none() {
+            request = request.header(hyper::header::CONNECTION, "close");
+        }
+        request
             .header(
                 "host",
                 &target.url[url::Position::BeforeHost..url::Position::AfterPort],

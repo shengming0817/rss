@@ -25,6 +25,7 @@ pub const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 pub enum Mode {
     Reply(Vec<u8>),
     KeepAlive(Vec<u8>),
+    ReleaseHeaders(Arc<tokio::sync::Notify>),
     DropResponse,
     StallHeaders,
     StallTls,
@@ -224,6 +225,11 @@ impl Server {
                 .await
                 .map_err(|_| anyhow::anyhow!("fixture record channel closed"))?;
             match mode {
+                Mode::ReleaseHeaders(release) => {
+                    release.notified().await;
+                    stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await?;
+                    stream.flush().await?;
+                }
                 Mode::KeepAlive(bytes) => {
                     stream.write_all(&bytes).await?;
                     stream.flush().await?;
