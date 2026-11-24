@@ -53,8 +53,9 @@
 
 ## Ordering
 
-- 需要顺序的 contract 必须声明 typed partition key；consumer 同 partition 串行，不同 partition 可并发。
-- DLQ 未 resolution 的 head 阻塞同 partition successor；不得因 retry、restart 或 rebalance 越过。
+- 需要顺序的 contract 必须声明 typed partition key。普通 broker Consumer 在单个订阅内串行处理同分区投递，直到结算。不同分区可并发。
+- 有序投递的业务拒绝使当前订阅退出。新订阅从实际收到的投递开始调度。
+- 源 Outbox 按持久分区序号选择队首。未解决的死信队首阻塞同分区后继，同库投影复用该领取规则。见 [Outbox 分区顺序](outbox.md#partition-order)。
 - 顺序保证不等于 exactly-once，也不替代业务 fencing。
 
 ## Dead letter
