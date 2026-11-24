@@ -9,6 +9,8 @@ mod examples;
 mod history;
 #[path = "support/measurement.rs"]
 mod measurement;
+#[path = "../../fixtures/pg_settlement.rs"]
+pub mod pg_settlement;
 mod process;
 #[path = "support/receipt_domain.rs"]
 mod receipt_domain;

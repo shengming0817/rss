@@ -1,3 +1,4 @@
+pub(super) mod permit;
 use super::*;
 use tokio::sync::oneshot;
 

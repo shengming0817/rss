@@ -83,7 +83,10 @@ async fn scenario(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let target = Target::new(Scope::new(tenant, "example")?, "entity")?;
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = slots.clone().acquire_owned().await?;
     store
+        .with_permit(permit)?
         .wake(&target, &ResourceSet::new(tenant, ["demo:row"])?, c)
         .await?;
     let business = Business(store);

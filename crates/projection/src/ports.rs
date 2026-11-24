@@ -47,6 +47,18 @@ pub trait Execution: Send + Sync {
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<ApplyOutcome, Error>> + Send;
 }
+/// A session capable of settling a nonempty ordered page atomically. Only an
+/// acknowledged commit returns one outcome per input, in the input order.
+pub trait BatchExecution: Execution {
+    /// Own the page through settlement. Validate the bound, source and expected
+    /// cursor before effects; a failed page exposes no acknowledged prefix.
+    fn execute_batch<T: Timer>(
+        &self,
+        expected: Option<Position>,
+        events: Vec<Event>,
+        control: &Control<'_, T>,
+    ) -> impl Future<Output = Result<Vec<ApplyOutcome>, Error>> + Send;
+}
 /// Checkpoint half of an explicitly at-least-once external projection.
 /// Each operation enforces the original Control and owns its settlement classification.
 pub trait ExternalCheckpoint: Send + Sync {

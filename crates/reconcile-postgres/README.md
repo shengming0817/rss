@@ -40,6 +40,10 @@ schema/ACL 变更必须停流并重新准入，空发现不重新扫描 catalog�
 
 回调只借 transaction，不获得正常 commit/rollback 权限。原始 SQL 是可信应用代码，禁止 transaction/session control、改租户或绕过本组件保护。业务表需要自身 RLS；远端网络副作用不受此事务保护。
 
+宿主已取得数据库准入许可时，使用 `store.with_permit(slot)?.renew(claim, lease, control).await` 或同一单次句柄的 local_tx、wake、bind_resources、claim_due、finish、release，以及组合业务 SQL 的 protect、wake_with、bind_with。许可在池等待、事务和连接收尾期间由 adapter 持有。已确认的结果立即返回；健康连接在 SQLx 归还探测完成后释放许可，探测最多等待 5 秒，隔离连接直接退出池容量。`close` 等待共享池排空，并等待本次构造实例及其 clones 接管的许可全部释放。若在同一池上独立构造多个 store，每个实例分别排空自己的许可。调用前应消费或丢弃尚未使用的句柄。
+
+宿主配置 `min_connections` 时，SQLx 自行维护池的最小容量；补建连接可能在原操作释放其连接槽和宿主许可之后继续运行。
+
 仅确认 commit/rollback 后复用连接。CommitUnknown、RollbackFailed 或 dropped future 隔离并关闭连接；无法确认提交不能当作已回滚重试。SQLx 负责数据库事务机制，adapter 只持有本组件的结算/错误语义。
 
 ## 可选消息组合
