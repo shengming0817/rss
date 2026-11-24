@@ -11,7 +11,8 @@ WITH reachable AS (
 )
 SELECT session_user=current_user
  AND has_schema_privilege(current_user,'rss_observation','USAGE')
- AND (SELECT bool_and(has_table_privilege(current_user,oid,'SELECT')) FROM relations)
+ -- Runtime reads stream state and durable receipts directly. The definer owns all other table access.
+ AND (SELECT bool_and(has_table_privilege(current_user,oid,'SELECT')) FROM relations WHERE relname IN ('streams','batches'))
  AND (SELECT bool_and(has_function_privilege(current_user,oid,'EXECUTE')) FROM functions)
  AND (SELECT count(*)=5 AND bool_and(relrowsecurity AND relforcerowsecurity) FROM relations)
  AND NOT EXISTS (SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole)

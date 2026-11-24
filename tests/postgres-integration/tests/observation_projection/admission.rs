@@ -4,18 +4,20 @@ use rss_projection::{BatchLimit, Source};
 #[tokio::test]
 async fn required_permissions_are_checked() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
+    let can_read_admissions: bool = sqlx::query_scalar(
+        "SELECT has_any_column_privilege(current_user,'rss_observation.admissions','SELECT')",
+    )
+    .fetch_one(&f.pool)
+    .await?;
+    assert!(!can_read_admissions);
     for (revoke, restore) in [
         (
             "REVOKE USAGE ON SCHEMA rss_observation FROM handoff_runtime",
             "GRANT USAGE ON SCHEMA rss_observation TO handoff_runtime",
         ),
         (
-            "REVOKE SELECT ON rss_observation.admissions FROM handoff_runtime",
-            "GRANT SELECT ON rss_observation.admissions TO handoff_runtime",
-        ),
-        (
-            "REVOKE SELECT ON rss_observation.journals FROM handoff_runtime",
-            "GRANT SELECT ON rss_observation.journals TO handoff_runtime",
+            "REVOKE SELECT ON rss_observation.streams FROM handoff_runtime",
+            "GRANT SELECT ON rss_observation.streams TO handoff_runtime",
         ),
         (
             "REVOKE SELECT ON rss_observation.batches FROM handoff_runtime",

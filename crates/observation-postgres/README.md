@@ -9,7 +9,7 @@ connection or arbitrary SQL callback is exposed by the observation API.
 ## Installation and privileges
 
 An external migrator executes `MIGRATION_SQL` using a dedicated NOSUPERUSER NOBYPASSRLS schema owner.
-Runtime receives schema USAGE, table SELECT, and function EXECUTE, without table DML, TRUNCATE,
+Runtime receives schema USAGE, SELECT on streams and batches, and function EXECUTE, without table DML, TRUNCATE,
 owner-role membership, CREATE or RLS bypass. Tables use FORCE RLS and transaction-local tenant
 scope. Functions have fixed search paths and revoke PUBLIC execute. The runtime is trusted
 companion infrastructure; a tenant GUC is isolation inside that boundary, not authentication of
@@ -18,7 +18,7 @@ an attacker who already possesses its database credentials.
 ```sql
 -- Run as the external owner after installing MIGRATION_SQL; provision roles separately.
 GRANT USAGE ON SCHEMA rss_observation TO observation_runtime;
-GRANT SELECT ON ALL TABLES IN SCHEMA rss_observation TO observation_runtime;
+GRANT SELECT ON rss_observation.streams, rss_observation.batches TO observation_runtime;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation TO observation_runtime;
 ```
 
@@ -121,7 +121,7 @@ reconstruction from the validated durable record. Debug/error formatting does no
 `resolve(event, &control)` returns `ApplicableRecord` under the source's tenant grant.
 `resolve_in_transaction(&mut PgTransaction, event)` (requires `projection-postgres`) resolves on the **same borrowed transaction**
 as the consumer's `PgEffect`. Provision that projection runtime role with Observation schema USAGE
-and table SELECT as well. The resolver does not change session identity, deadlines or settlement. Both resolver methods return `rss_projection::Error`; their static SQL is classified by the Observation owner before projection.
+and SELECT on rss_observation.batches as well. The resolver does not change session identity, deadlines or settlement. Both resolver methods return `rss_projection::Error`; their static SQL is classified by the Observation owner before projection.
 `read` and both resolvers expose corrupt rows as `Phase::Restore` with `diagnostic().position()` once
 a legal journal position is known. Restoration stays inside the original transaction/deadline;
 rollback failure takes precedence over a row failure. Diagnostics contain no raw record or identity.

@@ -97,11 +97,14 @@ async fn final_allocation_waits_for_admitted_report() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     let store = f.store().await?;
     let partial = first(&store, TENANT, "partial", Body::Partial(vec![])).await?;
+    let concurrent = first(&store, TENANT, "offline", failed()?).await?;
     let penultimate = first(&store, TENANT, "penultimate", snapshot()).await?;
     let last = first(&store, TENANT, "last", snapshot()).await?;
     let independent = first(&store, OTHER, "foreign", snapshot()).await?;
     seed_allocator(&f, 2).await?;
     let (tx, pid) = f.stage(&partial).await?;
+    store.receive(&concurrent, deadline()).await?;
+    assert_eq!(position(&f, &concurrent).await?, None);
     store.receive(&penultimate, deadline()).await?;
     assert_eq!(position(&f, &penultimate).await?, Some(i64::MAX - 1));
     let (last_result, settled) = tokio::join!(store.receive(&last, deadline()), async {
