@@ -2,7 +2,9 @@ use super::*;
 use sqlx::PgConnection;
 
 pub(crate) async fn verify(connection: &mut PgConnection) -> anyhow::Result<()> {
-    sqlx::raw_sql(MIGRATION_SQL).execute(&mut *connection).await?;
+    sqlx::raw_sql(MIGRATION_SQL)
+        .execute(&mut *connection)
+        .await?;
     initialize(connection, TENANT, &"s".repeat(255), &"p".repeat(255)).await?;
     let stored: (String, String) = sqlx::query_as(
         "SELECT source_id,projection_id FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid",

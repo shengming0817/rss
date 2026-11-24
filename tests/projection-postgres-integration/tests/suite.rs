@@ -1,4 +1,6 @@
 mod examples;
+#[path = "../../fixtures/pg_settlement.rs"]
+pub mod pg_settlement;
 // Application-owned declaration for this example/test projection mapping.
 const DEFINITION: rss_projection::DefinitionIdentity =
     rss_projection::DefinitionIdentity::new([1; 32]);
@@ -148,6 +150,7 @@ async fn projection_postgres_suite() -> anyhow::Result<()> {
         scenarios::application_lock_timeout_rolls_back(&store, &owner, &control).await?;
         scenarios::application_error_cannot_claim_settlement(&store, &control).await?;
         scenarios::filtered_receipts(&store, &owner, &control).await?;
+        scenarios::batch::verify(&store, &owner, &fixture, &control).await?;
         scenarios::atomic_recovery(&store, &owner, &control).await?;
         scenarios::external_recovery(&store, &control).await?;
         scenarios::direct_advance_obeys_control(&store, &control).await?;
