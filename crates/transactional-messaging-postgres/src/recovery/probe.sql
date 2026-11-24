@@ -35,14 +35,14 @@ SELECT NOT EXISTS (SELECT 1 FROM checks WHERE valid IS NOT TRUE)
   ('consumer_dead_letter','consumer_dead_letter_reason_check','CHECK ((reason = ANY (ARRAY[''rejected_permanent''::text, ''rejected_invariant''::text])))'),
   ('consumer_dead_letter','consumer_dead_letter_recovery_version_check','CHECK ((recovery_version > 0))'),
   ('consumer_dead_letter','consumer_dead_letter_tenant_id_message_id_consumer_group_key','UNIQUE (tenant_id, message_id, consumer_group)'),
-  ('recovery_operations','operation_shape','CHECK ((((outcome = ''replayed''::text) AND (target_kind = ''consumer''::text) AND (replay_message_id IS NOT NULL) AND (resolution IS NULL) AND (evidence_message_id IS NULL)) OR ((outcome = ''redriven''::text) AND (target_kind = ''outbox''::text) AND (replay_message_id IS NULL) AND (resolution IS NULL) AND (evidence_message_id IS NULL)) OR ((outcome = ''resolved''::text) AND (target_kind = ''outbox''::text) AND (replay_message_id IS NULL) AND (resolution IS NOT NULL) AND (((resolution = ''accepted_gap''::text) AND (evidence_message_id IS NULL)) OR ((resolution = ''compensated''::text) AND (evidence_message_id IS NOT NULL))))))'),
+ ('recovery_operations','operation_shape','CHECK ((((outcome = ''replayed''::text) AND (target_kind = ''consumer''::text) AND (replay_message_id IS NOT NULL) AND (resolution IS NULL) AND (evidence_message_id IS NULL)) OR ((outcome = ''redriven''::text) AND (target_kind = ''outbox''::text) AND (replay_message_id IS NULL) AND (resolution IS NULL) AND (evidence_message_id IS NULL)) OR ((outcome = ''resolved''::text) AND (target_kind = ''consumer_head''::text) AND (replay_message_id IS NULL) AND (resolution IS NOT NULL) AND (resolution = ''accepted_gap''::text) AND (evidence_message_id IS NULL)) OR ((outcome = ''resolved''::text) AND (target_kind = ''outbox''::text) AND (replay_message_id IS NULL) AND (resolution IS NOT NULL) AND (((resolution = ''accepted_gap''::text) AND (evidence_message_id IS NULL)) OR ((resolution = ''compensated''::text) AND (evidence_message_id IS NOT NULL))))))'),
   ('recovery_operations','recovery_operations_outcome_check','CHECK ((outcome = ANY (ARRAY[''replayed''::text, ''redriven''::text, ''resolved''::text])))'),
   ('recovery_operations','recovery_replay_identity','UNIQUE (tenant_id, replay_message_id)'),
  ('recovery_operations','recovery_operations_pkey','PRIMARY KEY (tenant_id, operation_id)'),
   ('recovery_operations','recovery_operations_request_digest_check','CHECK ((octet_length(request_digest) = 32))'),
   ('recovery_operations','recovery_operations_resolution_check','CHECK ((resolution = ANY (ARRAY[''accepted_gap''::text, ''compensated''::text])))'),
   ('recovery_operations','recovery_operations_result_version_check','CHECK ((result_version > 0))'),
-  ('recovery_operations','recovery_operations_target_kind_check','CHECK ((target_kind = ANY (ARRAY[''consumer''::text, ''outbox''::text])))')
+ ('recovery_operations','recovery_operations_target_kind_check','CHECK ((target_kind = ANY (ARRAY[''consumer''::text, ''outbox''::text, ''consumer_head''::text])))')
  ) e(relation,name,definition)
  LEFT JOIN pg_constraint c ON c.conrelid=to_regclass('rss_transactional_messaging.'||e.relation) AND c.conname=e.name
  WHERE (e.relation <> 'recovery_operations' OR $1) AND

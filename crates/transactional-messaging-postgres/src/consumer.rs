@@ -208,6 +208,7 @@ fn matches_message<P: AsRef<[u8]>>(
     intent: &ReceiptIntent,
 ) -> bool {
     intent.consumer() == &claim.identity
+        && intent.fingerprint() == claim.fingerprint
         && intent.fingerprint() == MessageFingerprint::of(message)
         && claim.identity.tenant_id() == message.metadata().tenant_id()
         && claim.identity.message_id() == message.id()
@@ -314,7 +315,7 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
     sqlx::query("SELECT 1 FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str())
                 .execute(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?;
-    let count = sqlx::query("UPDATE rss_transactional_messaging.inbox SET fingerprint=$5, disposition=$6 WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()")
+    let count = sqlx::query("UPDATE rss_transactional_messaging.inbox SET disposition=$6 WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND fingerprint=$5 AND disposition IS NULL AND lease_until>clock_timestamp()")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(&claim.token)
                 .bind(intent.fingerprint().as_bytes().as_slice()).bind(disposition.as_label())
                 .execute(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?.rows_affected();

@@ -3,7 +3,7 @@ use super::*;
 use futures::StreamExt;
 use rss_transactional_messaging::{
     error::MessagingErrorKind,
-    inbox::{ConsumerIdentity, IdempotencyDisposition, InboxStore},
+    inbox::{IdempotencyDisposition, InboxStore},
 };
 
 async fn project(p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<PgProjectionOutcome> {
@@ -114,18 +114,14 @@ async fn inbox_contention(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> an
     let id = "lease-contended";
     f.append(id, "orders").await?;
     let message = message(id, "orders")?;
-    let identity = ConsumerIdentity::new(
-        tenant(),
-        group()?,
-        message.id().clone(),
-        message.metadata().contract().clone(),
-    );
+    let meta = message.metadata();
+    let verified = verify_ingress(&Validator, group()?, &SubscriptionIdentity::new(meta.domain().clone(), meta.route().clone(), meta.contract().clone()), &message).map_err(|_|anyhow::anyhow!("fixture ingress"))?;
     let other = PgInboxStore::new(
         f.worker.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let IdempotencyDisposition::Acquired(held) = other
-        .claim(execution(tenant(), 1), &identity, deadline())
+        .claim(&verified, deadline())
         .await?
     else {
         anyhow::bail!("external consumer did not acquire Inbox")

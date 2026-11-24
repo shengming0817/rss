@@ -75,14 +75,7 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         let inbox = inbox.clone();
         contenders.spawn(async move {
             inbox
-                .claim(
-                    crate::execution(
-                        (binding(&message("concurrent-claim")).identity()).tenant_id(),
-                        1,
-                    ),
-                    binding(&message("concurrent-claim")).identity(),
-                    deadline(),
-                )
+                .claim(&binding(&message("concurrent-claim")), deadline())
                 .await
         });
     }
@@ -98,11 +91,7 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
     let binding = binding(&message("concurrent-claim"));
     assert!(matches!(
         inbox
-            .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline()
-            )
+            .claim(&binding, deadline())
             .await?,
         IdempotencyDisposition::Acquired(_)
     ));
@@ -145,11 +134,7 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
             )?,
         )?;
         let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
-            )
+            .claim(&binding, deadline())
             .await?
         else {
             panic!("new claim")
@@ -598,11 +583,7 @@ async fn tenant_isolation(
             )?,
         )?;
         let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(
-                crate::execution((receipt_binding.identity()).tenant_id(), 1),
-                receipt_binding.identity(),
-                deadline(),
-            )
+            .claim(&receipt_binding, deadline())
             .await?
         else {
             panic!("tenant claim")
@@ -730,11 +711,7 @@ async fn inbox_lock_expiry(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> any
         )?;
         let binding = binding(&message(id));
         let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
-            )
+            .claim(&binding, deadline())
             .await?
         else {
             panic!("new claim")

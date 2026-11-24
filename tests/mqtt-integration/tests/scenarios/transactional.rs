@@ -257,11 +257,7 @@ impl TransactionCase {
             .map_err(|_| anyhow::anyhow!("fixture ingress"))?;
         let IdempotencyDisposition::Acquired(holder) = self
             .inbox
-            .claim(
-                verified.execution(),
-                verified.identity(),
-                support::deadline(&*self.clock),
-            )
+            .claim(&verified, support::deadline(&*self.clock))
             .await?
         else {
             anyhow::bail!("missing owner");

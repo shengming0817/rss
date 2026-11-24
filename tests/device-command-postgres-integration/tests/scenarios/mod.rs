@@ -417,11 +417,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
     let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            budget()?,
-        )
+        .claim(&binding, budget()?)
         .await?
     else {
         anyhow::bail!("new claim missing")
@@ -462,11 +458,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     f.publish().await?;
     let _page = f.recover(s).await?;
     let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            budget()?,
-        )
+        .claim(&binding, budget()?)
         .await?
     else {
         anyhow::bail!("retry claim missing")
@@ -667,11 +659,7 @@ async fn verify_terminal(
     assert!(binding.validate_terminal(receipt).is_ok());
     assert!(matches!(
         inbox
-            .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                budget()?
-            )
+            .claim(&binding, budget()?)
             .await?,
         IdempotencyDisposition::Terminal(_)
     ));

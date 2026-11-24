@@ -163,26 +163,13 @@ async fn run() -> anyhow::Result<()> {
         rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let envelope = message("consumer");
-    let identity = rss_transactional_messaging::inbox::ConsumerIdentity::new(
-        tenant(),
-        rss_transactional_messaging::inbox::ConsumerGroup::parse("test")?,
-        envelope.id().clone(),
-        envelope.metadata().contract().clone(),
-    );
     use rss_transactional_messaging::inbox::{IdempotencyDisposition, InboxStore, LeaseStatus};
     let legacy_message = message("legacy-terminal");
-    let legacy_identity = rss_transactional_messaging::inbox::ConsumerIdentity::new(
-        tenant(),
-        rss_transactional_messaging::inbox::ConsumerGroup::parse("test")?,
-        legacy_message.id().clone(),
-        legacy_message.metadata().contract().clone(),
-    );
     assert!(
         matches!(
             inbox
                 .claim(
-                    crate::execution(legacy_identity.tenant_id(), 1),
-                    &legacy_identity,
+                    &consumer::consumer_binding(binding(1)?, &legacy_message)?,
                     deadline()
                 )
                 .await?,
@@ -192,8 +179,7 @@ async fn run() -> anyhow::Result<()> {
     );
     let old_inbox = match inbox
         .claim(
-            crate::execution(identity.tenant_id(), 1),
-            &identity,
+            &consumer::consumer_binding(binding(1)?, &envelope)?,
             deadline(),
         )
         .await?
@@ -377,8 +363,7 @@ async fn run() -> anyhow::Result<()> {
         matches!(
             next_inbox
                 .claim(
-                    crate::execution(identity.tenant_id(), 2),
-                    &identity,
+                    &consumer::consumer_binding(binding(2)?, &envelope)?,
                     deadline()
                 )
                 .await?,

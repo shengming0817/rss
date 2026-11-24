@@ -32,7 +32,7 @@ impl PgConsumerEffect<Vec<u8>> for Effect {
         Ok(TerminalDisposition::Succeeded)
     }
 }
-fn consumer_binding(
+pub(super) fn consumer_binding(
     execution: ExecutionBinding,
     message: &MessageEnvelope<Vec<u8>>,
 ) -> anyhow::Result<VerifiedConsumerBinding> {
@@ -72,7 +72,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let claim = match inbox
-        .claim(consumer.execution(), consumer.identity(), deadline())
+        .claim(&consumer, deadline())
         .await?
     {
         IdempotencyDisposition::Acquired(c) => c,
@@ -93,7 +93,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
     );
     assert!(matches!(
         inbox
-            .claim(consumer.execution(), consumer.identity(), deadline())
+            .claim(&consumer, deadline())
             .await?,
         IdempotencyDisposition::Terminal(_)
     ));
@@ -131,7 +131,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let claim = match inbox
-        .claim(identity.execution(), identity.identity(), deadline())
+        .claim(&identity, deadline())
         .await?
     {
         IdempotencyDisposition::Acquired(c) => c,

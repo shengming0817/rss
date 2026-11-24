@@ -160,33 +160,51 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "consumer")]
+use rss_transactional_messaging::{message::MessageEnvelope,transaction::{EnvelopeValidationFailure, IngressChallenge, IngressValidator, VerifiedIngress}};
+#[cfg(feature = "consumer")]
+struct Validator(rss_transactional_messaging::fence::ExecutionBinding);
+#[cfg(feature = "consumer")]
+impl IngressValidator<Vec<u8>> for Validator {
+    fn validate(
+        &self,
+        challenge: IngressChallenge<'_, Vec<u8>>,
+    ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
+        if challenge.message().metadata().tenant_id() != self.0.tenant() {
+            return Err(EnvelopeValidationFailure::MalformedIdentity);
+        }
+        if !challenge.subscription().accepts(challenge.message()) {
+            return Err(EnvelopeValidationFailure::UnsupportedContract);
+        }
+        Ok(challenge.verified(self.0))
+    }
+}
+
+#[cfg(feature = "consumer")]
 async fn consumer(clock: &FakeClock) -> anyhow::Result<()> {
     use rss_transactional_messaging::inbox::{
-        ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
+        ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
     };
     use rss_transactional_messaging_testkit::memory::MemoryInboxStore;
     let message = envelope()?;
-    let identity = ConsumerIdentity::new(
-        message.metadata().tenant_id(),
-        ConsumerGroup::parse("example-handler")?,
-        message.id().clone(),
-        message.metadata().contract().clone(),
-    );
+    let meta = message.metadata();
+    let verified = rss_transactional_messaging::transaction::verify_ingress(&Validator(binding()?), ConsumerGroup::parse("example-handler")?,
+        &rss_transactional_messaging::message::SubscriptionIdentity::new(meta.domain().clone(),meta.route().clone(),meta.contract().clone()),&message)
+        .map_err(|_|anyhow::anyhow!("example ingress"))?;
     let store = MemoryInboxStore::new();
     let deadline = OperationDeadline::from_cutoff(
         Deadline::from_timeout(clock, Duration::from_secs(5))?,
         clock,
     );
     let IdempotencyDisposition::Acquired(claim) =
-        store.claim(binding()?, &identity, deadline).await?
+        store.claim(&verified, deadline).await?
     else {
         anyhow::bail!("initial claim was not acquired")
     };
     assert!(matches!(
-        store.claim(binding()?, &identity, deadline).await?,
+        store.claim(&verified, deadline).await?,
         IdempotencyDisposition::InProgress
     ));
-    store.expire(&identity);
+    store.expire(verified.identity());
     assert_eq!(store.extend(&claim, deadline).await?, LeaseStatus::Lost);
     uncertain_consumer(clock, message).await?;
     Ok(())
@@ -203,8 +221,7 @@ async fn uncertain_consumer(
         observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
         policy::{ConsumerExecutionPolicy, ExecutionBudget, OperationDeadline, RetryPolicy},
         transaction::{
-            ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator,
-            ReceiptIntent, TransactionOutcome, VerifiedIngress,
+            ConsumerTx, ReceiptIntent, TransactionOutcome,
         },
         transport::Delivery,
     };
@@ -227,21 +244,6 @@ async fn uncertain_consumer(
             self.0.fetch_add(1, Ordering::SeqCst);
             // This custom port has no durable commit evidence and must not manufacture ACK authority.
             TransactionOutcome::commit_unknown()
-        }
-    }
-    struct Validator(rss_transactional_messaging::fence::ExecutionBinding);
-    impl IngressValidator<Vec<u8>> for Validator {
-        fn validate(
-            &self,
-            challenge: IngressChallenge<'_, Vec<u8>>,
-        ) -> Result<VerifiedIngress, EnvelopeValidationFailure> {
-            if challenge.message().metadata().tenant_id() != self.0.tenant() {
-                return Err(EnvelopeValidationFailure::MalformedIdentity);
-            }
-            if !challenge.subscription().accepts(challenge.message()) {
-                return Err(EnvelopeValidationFailure::UnsupportedContract);
-            }
-            Ok(challenge.verified(self.0))
         }
     }
     struct Observations;

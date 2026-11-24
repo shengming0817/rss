@@ -186,7 +186,7 @@ impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
 
     fn partition(&self) -> Option<&PartitionIdentity> {
         match &self.ingress {
-            Ingress::Verified(delivery, _) => delivery.message().metadata().partition(),
+            Ingress::Verified(_, binding) => binding.partition(),
             Ingress::Rejected(..) => None,
         }
     }
@@ -231,7 +231,7 @@ where
         };
     let claim = wait_for_claim(inbox, execution, &binding, deadlines.operation()).await;
     match claim {
-        Ok(busy @ (IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::InProgress)) => {
+        Ok(busy @ (IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::InProgress | IdempotencyDisposition::PartitionBlocked)) => {
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
@@ -240,10 +240,10 @@ where
                 execution.emitter,
             )
             .await?;
-            Ok(if matches!(busy, IdempotencyDisposition::CapacityBusy) {
-                ProcessingDisposition::CapacityBusy
-            } else {
-                ProcessingDisposition::InProgress
+            Ok(match busy {
+                IdempotencyDisposition::CapacityBusy => ProcessingDisposition::CapacityBusy,
+                IdempotencyDisposition::InProgress => ProcessingDisposition::InProgress,
+                _ => ProcessingDisposition::Deferred,
             })
         }
         Err(error) => {
@@ -327,7 +327,7 @@ where
     let mut capacity_wait = None;
     let result = loop {
         let claim = within(execution.timer, cutoff, |deadline| {
-            inbox.claim(binding.execution(), binding.identity(), deadline)
+            inbox.claim(binding, deadline)
         })
         .await
         .and_then(std::convert::identity);
@@ -341,6 +341,7 @@ where
             Ok(IdempotencyDisposition::InProgress) => execution
                 .emitter
                 .emit(TransactionalMessagingObservation::ConsumerClaimInProgress),
+            Ok(IdempotencyDisposition::PartitionBlocked) => {},
             _ => break claim,
         }
         let wake = cutoff.capped(execution.timer, interval);

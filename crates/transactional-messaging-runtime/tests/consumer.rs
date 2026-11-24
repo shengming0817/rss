@@ -435,8 +435,7 @@ impl InboxStore for ClaimErrorInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Err(MessagingError::new(
@@ -482,8 +481,7 @@ impl InboxStore for ExtendErrorInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
@@ -530,8 +528,7 @@ impl InboxStore for FakeInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let mut state = self.disposition.lock().expect("lock");
@@ -1382,8 +1379,7 @@ impl InboxStore for PendingInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         if self.stage == PendingInboxStage::Claim {
@@ -1922,8 +1918,7 @@ impl InboxStore for RenewingInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.claim
@@ -2212,8 +2207,7 @@ impl InboxStore for RenewalErrorAfterInitialInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
@@ -2353,8 +2347,7 @@ impl InboxStore for TransientThenAcquiredInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -2542,8 +2535,7 @@ impl InboxStore for BlockingClaimInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.started.fetch_add(1, Ordering::SeqCst);
@@ -3151,8 +3143,7 @@ impl InboxStore for UnlimitedInbox {
 
     async fn claim(
         &self,
-        _binding: rss_transactional_messaging::fence::ExecutionBinding,
-        _identity: &ConsumerIdentity,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
@@ -3652,13 +3643,11 @@ impl InboxStore for ScopedInbox {
     }
     async fn claim(
         &self,
-        binding: rss_transactional_messaging::fence::ExecutionBinding,
-        identity: &ConsumerIdentity,
+        verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Claim>, MessagingError> {
-        assert_eq!(binding.tenant(), identity.tenant_id());
-        self.0.lock().expect("scopes").push(binding);
-        UnlimitedInbox.claim(binding, identity, deadline).await
+        self.0.lock().expect("scopes").push(verified.execution());
+        UnlimitedInbox.claim(verified, deadline).await
     }
     async fn read_terminal(
         &self,

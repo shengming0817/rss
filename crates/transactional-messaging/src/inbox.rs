@@ -117,6 +117,8 @@ pub enum IdempotencyDisposition<C> {
     Acquired(C),
     /// Another live attempt owns the record; do not execute the handler.
     InProgress,
+    /// Another message holds this ordered partition, including an unresolved rejection.
+    PartitionBlocked,
     /// A durable terminal result exists; validate it against verified ingress before settlement.
     Terminal(TerminalReceipt),
 }
@@ -159,8 +161,7 @@ pub trait InboxStore: Send + Sync {
     /// identity.
     fn claim(
         &self,
-        binding: crate::fence::ExecutionBinding,
-        identity: &ConsumerIdentity,
+        verified: &crate::transaction::VerifiedConsumerBinding,
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<IdempotencyDisposition<Self::Claim>, MessagingError>> + Send;
 

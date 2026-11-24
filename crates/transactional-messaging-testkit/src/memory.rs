@@ -539,7 +539,7 @@ mod consumer {
     use rss_transactional_messaging::inbox::{
         ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
     };
-    use rss_transactional_messaging::message::MessageFingerprint;
+    use rss_transactional_messaging::message::{MessageFingerprint, PartitionIdentity};
     use rss_transactional_messaging::policy::OperationDeadline;
     use rss_transactional_messaging::transaction::{
         SettlementDecision, SettlementKind, TerminalDisposition, TerminalReceipt,
@@ -574,6 +574,7 @@ mod consumer {
     }
 
     struct InboxState {
+        heads: HashMap<(rss_transactional_messaging::inbox::ConsumerGroup, PartitionIdentity), (InboxKey, MessageFingerprint)>,
         records: HashMap<InboxKey, InboxRecord>,
         next_epoch: u64,
     }
@@ -582,6 +583,7 @@ mod consumer {
         fn default() -> Self {
             Self {
                 records: HashMap::new(),
+                heads: HashMap::new(),
                 next_epoch: 1,
             }
         }
@@ -618,11 +620,11 @@ mod consumer {
             disposition: TerminalDisposition,
         ) {
             let key = identity_key(&identity);
-            self.inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .records
-                .insert(
+            let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if disposition == TerminalDisposition::Succeeded {
+                state.heads.retain(|_,(head,_)| head != &key);
+            }
+            state.records.insert(
                     key,
                     InboxRecord::Terminal {
                         identity,
@@ -656,16 +658,10 @@ mod consumer {
 
         async fn claim(
             &self,
-            binding: rss_transactional_messaging::fence::ExecutionBinding,
-            identity: &ConsumerIdentity,
+            verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
             _deadline: OperationDeadline,
         ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-            if binding.tenant() != identity.tenant_id() {
-                return Err(MessagingError::new(
-                    MessagingErrorKind::OwnershipLost,
-                    std::io::Error::other("fixture execution tenant mismatch"),
-                ));
-            }
+            let identity = verified.identity();
             let key = identity_key(identity);
             let mut state = self
                 .inner
@@ -681,6 +677,16 @@ mod consumer {
                     TerminalReceipt::from_durable(identity.clone(), *fingerprint, *disposition),
                 )),
                 None => {
+                    if let Some(partition) = verified.partition() {
+                        let (head, digest) = state.heads.entry((identity.group().clone(), partition.clone()))
+                            .or_insert_with(|| (key.clone(), verified.fingerprint()));
+                        if *head != key {
+                            return Ok(IdempotencyDisposition::PartitionBlocked);
+                        }
+                        if *digest != verified.fingerprint() {
+                            return Err(MessagingError::new(MessagingErrorKind::Conflict, MemoryConsumerError));
+                        }
+                    }
                     let epoch = state.next_epoch;
                     state.next_epoch = state.next_epoch.saturating_add(1);
                     state

@@ -728,6 +728,7 @@ mod consumer {
 
     /// Exact consumer identity and fingerprint proven by one ingress validation.
     pub struct VerifiedConsumerBinding {
+        partition: Option<crate::message::PartitionIdentity>,
         execution: crate::fence::ExecutionBinding,
         identity: ConsumerIdentity,
         fingerprint: MessageFingerprint,
@@ -785,6 +786,16 @@ mod consumer {
     }
 
     impl VerifiedConsumerBinding {
+        /// Authored partition covered by ingress verification.
+        pub const fn partition(&self) -> Option<&crate::message::PartitionIdentity> {
+            self.partition.as_ref()
+        }
+
+        /// Authored fingerprint established before durable admission.
+        pub const fn fingerprint(&self) -> MessageFingerprint {
+            self.fingerprint
+        }
+
         /// Host-selected execution identity for this delivery, never refreshed after claiming.
         #[must_use]
         pub const fn execution(&self) -> crate::fence::ExecutionBinding {
@@ -861,6 +872,7 @@ mod consumer {
             });
         }
         Ok(VerifiedConsumerBinding {
+            partition: message.metadata().partition().cloned(),
             execution: verified.execution,
             identity: ConsumerIdentity::new(
                 verified.execution.tenant(),

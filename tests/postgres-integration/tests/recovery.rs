@@ -103,11 +103,7 @@ async fn capture(
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
     let claim = inbox
-        .claim(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            deadline(),
-        )
+        .claim(&binding, deadline())
         .await
         .context("capture inbox claim")?;
     let IdempotencyDisposition::Acquired(claim) = claim else {
@@ -257,17 +253,13 @@ async fn run() -> anyhow::Result<()> {
     assert!(
         matches!(
             inbox
-                .claim(
-                    crate::execution((b.identity()).tenant_id(), 1),
-                    b.identity(),
-                    deadline()
-                )
+                .claim(&b, deadline())
                 .await?,
             IdempotencyDisposition::Terminal(_)
         ),
         "committed rejection survives missing ACK"
     );
-    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE(recovery_version) ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE(status,recovery_version,lease_token,lease_until,retry_after) ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
+    sqlx::raw_sql("CREATE ROLE recovery_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT recovery_runtime TO recovery_operator; GRANT UPDATE(resolved_by) ON rss_transactional_messaging.inbox TO recovery_operator; GRANT UPDATE(recovery_version) ON rss_transactional_messaging.consumer_dead_letter TO recovery_operator; GRANT SELECT,INSERT ON rss_transactional_messaging.recovery_operations TO recovery_operator; GRANT UPDATE(status,recovery_version,lease_token,lease_until,retry_after) ON rss_transactional_messaging.outbox TO recovery_operator;").execute(&owner).await?;
     let operator_config = PgConfig::new(
         &params.host,
         params.port,
@@ -363,7 +355,7 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 async fn base_grants(owner: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO recovery_runtime; GRANT SELECT,DELETE,INSERT(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint,domain,partition_key),UPDATE(lease_token,lease_until,receive_count,disposition) ON rss_transactional_messaging.inbox TO recovery_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO recovery_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO recovery_runtime;").execute(owner).await?;
     Ok(())
 }
 #[allow(clippy::cognitive_complexity)] // reason: ordered real-database scenarios keep mutations adjacent to their durable assertions.
@@ -999,11 +991,7 @@ async fn capture_failures(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
             LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
         )?;
         let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
-            )
+            .claim(&binding, deadline())
             .await?
         else {
             anyhow::bail!("claim")
@@ -1313,11 +1301,7 @@ async fn replay_partition_race(
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(
-            crate::execution((verified.identity()).tenant_id(), 1),
-            verified.identity(),
-            deadline(),
-        )
+        .claim(&verified, deadline())
         .await?
     else {
         anyhow::bail!("replay source claim");
