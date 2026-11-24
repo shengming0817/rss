@@ -85,25 +85,29 @@ async fn count_writes(
     scope: &Scope,
     clock: &Clock,
     c: &Control<'_, Clock>,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<(i64, usize)> {
     // Rows in this isolated probe commit atomically with the update they count.
     sqlx::raw_sql("CREATE TABLE public.same_ticket(n int); GRANT INSERT ON public.same_ticket TO reconcile_owner;
         CREATE FUNCTION public.count_ticket() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.same_ticket VALUES(1); RETURN NULL; END $$;
         CREATE TRIGGER count_ticket AFTER UPDATE OF waiting_ticket ON rss_reconcile.target_resources FOR EACH ROW
         WHEN (OLD.waiting_ticket IS NOT DISTINCT FROM NEW.waiting_ticket) EXECUTE FUNCTION public.count_ticket()")
         .execute(&db.owner).await?;
-    load(store, scope, clock, c, WINDOW).await?;
+    let (counts, _) = load(store, scope, clock, c, WINDOW).await?;
     let count = sqlx::query_scalar("SELECT count(*) FROM public.same_ticket")
         .fetch_one(&db.owner)
         .await?;
     sqlx::raw_sql("DROP TRIGGER count_ticket ON rss_reconcile.target_resources; DROP FUNCTION public.count_ticket(); DROP TABLE public.same_ticket")
         .execute(&db.owner).await?;
-    Ok(count)
+    Ok((count, counts.calls))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit same-load PostgreSQL comparison on both revisions"]
 async fn fixed_load() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(180), measure()).await?
+}
+
+async fn measure() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let c = Control::new(&clock, Duration::from_secs(150), &cancel);
@@ -114,10 +118,10 @@ async fn fixed_load() -> anyhow::Result<()> {
         let scope = seed(&db, &store, &c).await?;
         load(&store, &scope, &clock, &c, WARM).await?;
         let (counts, elapsed) = load(&store, &scope, &clock, &c, WINDOW).await?;
-        let same = count_writes(&db, &store, &scope, &clock, &c).await?;
+        let (same, write_calls) = count_writes(&db, &store, &scope, &clock, &c).await?;
         let bounds = timing::sample(&db.pool, &scope, &clock).await?;
         println!(
-            "MEASURE round={round} calls={} empty={} claims={} elapsed_s={elapsed:.4} claims_s={:.2} same_ticket_updates={same} {bounds}",
+            "MEASURE round={round} calls={} empty={} claims={} elapsed_s={elapsed:.4} claims_s={:.2} same_ticket_updates={same} write_calls={write_calls} {bounds}",
             counts.calls,
             counts.empty,
             counts.claims,

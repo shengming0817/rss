@@ -98,14 +98,13 @@ pub(super) async fn sample(pool: &PgPool, scope: &Scope, clock: &Clock) -> anyho
         let mut conn = pool.acquire().await?;
         let mut samples = Vec::new();
         while clock.now() - start < WINDOW {
-            if let Some(bounds) = sample_once(&mut conn, scope).await? {
-                samples.push(bounds);
-            }
+            samples.push(sample_once(&mut conn, scope).await?);
         }
         Ok::<_, anyhow::Error>(samples)
     }))
     .await?;
-    let (mut lower, mut upper): (Vec<_>, Vec<_>) = lanes.into_iter().flatten().unzip();
+    let attempts: usize = lanes.iter().map(Vec::len).sum();
+    let (mut lower, mut upper): (Vec<_>, Vec<_>) = lanes.into_iter().flatten().flatten().unzip();
     let n = lower.len();
     anyhow::ensure!(n > 0, "no acquired scan rows");
     lower.sort_unstable();
@@ -113,7 +112,7 @@ pub(super) async fn sample(pool: &PgPool, scope: &Scope, clock: &Clock) -> anyho
     let p50 = (n * 50).div_ceil(100) - 1;
     let p95 = (n * 95).div_ceil(100) - 1;
     Ok(format!(
-        "lock_samples={n} p50_us={}..{} p95_us={}..{}",
+        "timing_calls={attempts} lock_samples={n} p50_us={}..{} p95_us={}..{}",
         lower[p50], upper[p50], lower[p95], upper[p95]
     ))
 }
