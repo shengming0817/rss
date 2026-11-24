@@ -102,3 +102,13 @@ independently. These prove library consumption, not product production acceptanc
 
 ref: restatedev/restate crates/worker-api/src/invoker/invocation_reader.rs@7fcc614c75fac74d051b68b118e87421e90467cc
 ref: launchbadge/sqlx sqlx-postgres/src/connection/stream.rs@v0.9.0
+
+The registration profile compares this checkout with the fixed pre-registry revision in one
+disposable PostgreSQL TLS fixture. Put PostgreSQL's `psql` and `pgbench` on PATH and run:
+
+```sh
+RSS_TEST_RUN_ID=saga-registration-profile cargo run --locked -p testkit --features containers --bin rss-test-launcher -- -- cargo test --locked -p saga-postgres-integration --test suite registration_measurements -- --exact --ignored --nocapture
+```
+
+It prints nested database plans and buffer counts for a sample registration, a two-transaction
+lock witness, and per-registration client latency under the same eight-client workload.

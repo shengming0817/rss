@@ -133,7 +133,11 @@ async fn triggers(conn: &mut PgConnection) -> Result<(), Error> {
 
 async fn constraints(conn: &mut PgConnection) -> Result<(), Error> {
     for (table, name, expression) in [
-        ("definitions", "saga_definition", "valid_definition(definition)"),
+        (
+            "definitions",
+            "saga_definition",
+            "valid_definition(definition)",
+        ),
         (
             "instances",
             "saga_history_instance",
@@ -155,8 +159,16 @@ async fn constraints(conn: &mut PgConnection) -> Result<(), Error> {
         }
     }
     for (table, name, definition) in [
-        ("definitions", "definitions_pkey", "PRIMARY KEY (tenant_id, contract, version)"),
-        ("instances", "instance_definition", "FOREIGN KEY (tenant_id, contract, version) REFERENCES rss_saga.definitions(tenant_id, contract, version)"),
+        (
+            "definitions",
+            "definitions_pkey",
+            "PRIMARY KEY (tenant_id, contract, version)",
+        ),
+        (
+            "instances",
+            "instance_definition",
+            "FOREIGN KEY (tenant_id, contract, version) REFERENCES rss_saga.definitions(tenant_id, contract, version)",
+        ),
         (
             "instances",
             "instances_pkey",

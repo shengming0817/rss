@@ -14,6 +14,8 @@ mod process;
 mod receipt_domain;
 #[path = "support/redis_effect.rs"]
 mod redis_effect;
+#[path = "support/registration.rs"]
+mod registration;
 use common::*;
 use rss_request_context::TenantId;
 use rss_saga::*;
@@ -62,6 +64,7 @@ async fn suite() -> anyhow::Result<()> {
     ));
     let store = PgStore::new(pool.clone(), &control).await?;
     let d = definition(&["one", "two", "three"])?;
+    registration::verify(&store, &pool, &owner, &control).await?;
     run_scenarios(&store, &owner, &pool, &fixture, &d, &control).await?;
     eprintln!("saga T2: history bounds");
     history::bounds(&store, &owner, &control).await?;
@@ -446,5 +449,50 @@ async fn history_measurements() -> anyhow::Result<()> {
     .await??;
     pool.close().await;
     owner.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "explicit paired registration profile; requires PostgreSQL psql and pgbench on PATH"]
+async fn registration_measurements() -> anyhow::Result<()> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt as _;
+    let network = testkit::bridge_network("saga-registration-profile").await?;
+    let fixture = testkit::postgres_tls(
+        testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: "saga-registration-profile",
+        },
+        testkit::PgTlsServerIdentity::MatchingHost,
+    )
+    .await?;
+    let (owner, pool) = provision(&fixture).await?;
+    pool.close().await;
+    owner.close().await;
+    let params = fixture.params();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut child = tokio::process::Command::new("python3")
+        .arg("tests/saga-postgres-integration/tests/support/registration_profile.py")
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let input = serde_json::to_vec(&serde_json::json!({
+        "host": params.host, "port": params.port, "db": params.database,
+        "user": params.username, "password": params.password, "ca": fixture.ca_pem(),
+        "definition": definition(&["one","two","three"])?, "capacity": history_capacity()?,
+    }))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing profile stdin"))?
+        .write_all(&input)
+        .await?;
+    anyhow::ensure!(
+        tokio::time::timeout(Duration::from_secs(600), child.wait())
+            .await??
+            .success(),
+        "registration profile failed"
+    );
     Ok(())
 }

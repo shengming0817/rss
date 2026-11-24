@@ -79,9 +79,11 @@ struct Definition<'a> {
 // This is deliberately not a general SQL parser: unknown migration syntax fails closed.
 fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
     let mut result = Vec::new();
-    for declaration in sql.split("CREATE ").skip(1).filter_map(|part| {
-        part.strip_prefix("FUNCTION ")
-    }) {
+    for declaration in sql
+        .split("CREATE ")
+        .skip(1)
+        .filter_map(|part| part.strip_prefix("FUNCTION "))
+    {
         let declaration = declaration.strip_prefix("rss_saga.").ok_or(())?;
         let (name, rest) = declaration.split_once('(').ok_or(())?;
         if name.is_empty()

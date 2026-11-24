@@ -48,6 +48,25 @@ pub(super) async fn drift(
             format!("GRANT {privilege} ON {object} TO saga_runtime"),
         ));
     }
+    for (label, change, restore) in [
+        (
+            "definition body writable",
+            "GRANT UPDATE(definition) ON rss_saga.definitions TO saga_runtime",
+            "REVOKE UPDATE(definition) ON rss_saga.definitions FROM saga_runtime",
+        ),
+        (
+            "nullable instance binding",
+            "ALTER TABLE rss_saga.instances ALTER COLUMN version DROP NOT NULL",
+            "ALTER TABLE rss_saga.instances ALTER COLUMN version SET NOT NULL",
+        ),
+        (
+            "missing definition reference",
+            "ALTER TABLE rss_saga.instances DROP CONSTRAINT instance_definition",
+            "ALTER TABLE rss_saga.instances ADD CONSTRAINT instance_definition FOREIGN KEY(tenant_id,contract,version) REFERENCES rss_saga.definitions",
+        ),
+    ] {
+        cases.push((label.into(), change.into(), restore.into()));
+    }
     history_cases(&mut cases);
     policy_cases(&mut cases);
     for table in ["definitions", "instances", "journal"] {
@@ -86,7 +105,11 @@ pub(super) async fn drift(
 type Case = (String, String, String);
 fn history_cases(cases: &mut Vec<Case>) {
     for (table, name, expr) in [
-        ("definitions", "saga_definition", "rss_saga.valid_definition(definition)"),
+        (
+            "definitions",
+            "saga_definition",
+            "rss_saga.valid_definition(definition)",
+        ),
         (
             "instances",
             "saga_history_instance",

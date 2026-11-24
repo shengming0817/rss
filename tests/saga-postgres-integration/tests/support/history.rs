@@ -63,16 +63,28 @@ async fn long_recovery(
     let read = read_budget()?;
     measurement::seed_entries(store, owner, s, &d, 400, read, control).await?;
     let lease = store.claim(s, Duration::from_secs(90_000), control).await?;
-    store.renew(&lease, Duration::from_secs(90_001), control).await?;
+    store
+        .renew(&lease, Duration::from_secs(90_001), control)
+        .await?;
     let tiny = ReadBudget::new(HistoryCapacity::new(10, 4096)?, PLAINTEXT_BYTES)?;
-    assert!(matches!(store.snapshot(&lease, tiny, control).await, Err(e) if e.kind() == ErrorKind::HistoryReadLimit));
+    assert!(
+        matches!(store.snapshot(&lease, tiny, control).await, Err(e) if e.kind() == ErrorKind::HistoryReadLimit)
+    );
     let snapshot = store.snapshot(&lease, read, control).await?;
     assert_eq!(snapshot.definition(), &d);
     assert_eq!(snapshot.revision(), 400);
     store.release(&lease, control).await?;
     verify_candidate_projection(store, &snapshot, s, control).await?;
-    let executor = Executor::new(store.clone(), protection()?, registry(d, Arc::new(Effects::default()), false)?, read);
-    assert_eq!(executor.run(s, 20, control).await?.head().status(), Status::Succeeded);
+    let executor = Executor::new(
+        store.clone(),
+        protection()?,
+        registry(d, Arc::new(Effects::default()), false)?,
+        read,
+    );
+    assert_eq!(
+        executor.run(s, 20, control).await?.head().status(),
+        Status::Succeeded
+    );
     Ok(())
 }
 
