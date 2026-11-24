@@ -250,6 +250,31 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
             .await,
     )?;
     f.publish().await?;
+    if !exact {
+        let later = CommandSpec::new(
+            s,
+            CommandId::parse("slow-confirm-z")?,
+            c,
+            StateDigest::from_bytes([7; 32]),
+            expires,
+        );
+        let msg = message("slow-confirm-z", s.tenant())?;
+        let store = f.store.clone();
+        committed(
+            f.runtime
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                    Box::pin(async move { store.queue(tx, later, msg).await })
+                })
+                .await,
+        )?;
+        f.publish().await?;
+        assert_eq!(
+            f.recover_exact("slow-confirm-z", s)
+                .await?
+                .map(|c| c.status()),
+            Some(Status::Published)
+        );
+    }
     let mut lock = f.owner.begin().await?;
     sqlx::query("LOCK TABLE rss_transactional_messaging.outbox IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
@@ -273,7 +298,10 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
         if exact {
             Ok::<_, anyhow::Error>(f.recover_exact(name, s).await?.map(|c| c.status()))
         } else {
-            Ok(f.recover(s).await?.commands.first().map(Command::status))
+            let page = f.recover(s).await?;
+            assert_eq!(page.commands.len(), 2);
+            assert!(page.commands.iter().all(|c| c.status() == Status::TimedOut));
+            Ok(page.commands.first().map(Command::status))
         }
     };
     let (recovered, released) = tokio::join!(recover, release);

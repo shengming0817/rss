@@ -50,12 +50,13 @@ async fn functions(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
     };
     let signatures: Vec<_> = definitions.iter().map(|d| d.signature.as_str()).collect();
     let returns: Vec<_> = definitions.iter().map(|d| d.returns).collect();
+    let languages: Vec<_> = definitions.iter().map(|d| d.language).collect();
     let rows = sqlx::query(
         r#"
-WITH expected AS (SELECT * FROM unnest($1::text[],$2::text[]) AS e(signature,result))
+WITH expected AS (SELECT * FROM unnest($1::text[],$2::text[],$3::text[]) AS e(signature,result,language))
 SELECT p.proname, p.prosrc, pg_get_function_identity_arguments(p.oid) AS arguments,
     p.proretset, p.prorettype=to_regtype(e.result) AS returns,
-    p.prosecdef AND p.prokind='f' AND l.lanname=CASE WHEN p.proname='save_page' THEN 'plpgsql' ELSE 'sql' END
+    p.prosecdef AND p.prokind='f' AND l.lanname=e.language
         AND NOT p.proisstrict AND p.provolatile='v' AND p.proparallel='u' AND NOT p.proleakproof
         AND NOT owner.rolsuper AND NOT owner.rolbypassrls AND p.proowner=n.nspowner
         AND p.proconfig=ARRAY['search_path=pg_catalog, rss_device_command']::text[] AS safe
@@ -67,6 +68,7 @@ WHERE n.nspname='rss_device_command'
     )
     .bind(signatures)
     .bind(returns)
+    .bind(languages)
     .fetch_all(conn)
     .await?;
     if rows.len() != definitions.len() {
@@ -97,6 +99,7 @@ struct Definition<'a> {
     signature: String,
     arguments: &'a str,
     returns: &'a str,
+    language: &'a str,
     setof: bool,
     body: &'a str,
 }
@@ -120,13 +123,7 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
         let (language, rest) = rest
             .split_once(" SECURITY DEFINER SET search_path=pg_catalog,rss_device_command AS $$")
             .ok_or(())?;
-        if language
-            != if name == "save_page" {
-                "plpgsql"
-            } else {
-                "sql"
-            }
-        {
+        if !matches!(language, "sql" | "plpgsql") {
             return Err(());
         }
         let (body, _) = rest.split_once("$$;").ok_or(())?;
@@ -152,6 +149,7 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
             signature: format!("rss_device_command.{name}({})", types?.join(",")),
             arguments,
             returns,
+            language,
             setof,
             body,
         });

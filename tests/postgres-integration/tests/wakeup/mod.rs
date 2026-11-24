@@ -156,11 +156,18 @@ async fn ready_snapshot(
         scoped,
         vec![
             event("wakeup.ready", tenant, "wakeup.scope", None),
+            event(
+                "wakeup.later",
+                tenant,
+                "wakeup.scope",
+                Some("ordered-later"),
+            ),
             event("wakeup.future", tenant, "wakeup.scope", None),
         ],
     )
     .await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()+interval '10 seconds' WHERE message_id='wakeup.future'").execute(owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()+interval '1 day' WHERE message_id='wakeup.later'").execute(owner).await?;
     let before: Vec<serde_json::Value> = sqlx::query_scalar("SELECT to_jsonb(o) FROM rss_transactional_messaging.outbox o WHERE domain='wakeup.scope' ORDER BY seq").fetch_all(owner).await?;
     let start = Timer::new().now();
     let wake = store

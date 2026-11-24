@@ -72,24 +72,23 @@ impl<R: Send> PgStore<R> {
         let mut changes = PageChanges::default();
         let mut commands = Vec::with_capacity(rows.len());
         for row in rows {
-            let (event, time) = if needs_confirmation(&row) {
+            let event = if needs_confirmation(&row) {
                 let published = facts.next().ok_or_else(|| error(Error::InvalidSnapshot))?;
-                (
-                    if published {
-                        Event::Published
-                    } else {
-                        Event::Expire
-                    },
-                    confirmed_at,
-                )
+                if published {
+                    Event::Published
+                } else {
+                    Event::Expire
+                }
             } else if current != row.command.spec().coordinate() {
-                (Event::Supersede, observed)
+                Event::Supersede
             } else {
-                (Event::Expire, observed)
+                Event::Expire
             };
             let mut command = row.command;
             let previous = command.version();
-            let outcome = command.transition(event, current, time).map_err(error)?;
+            let outcome = command
+                .transition(event, current, confirmed_at)
+                .map_err(error)?;
             if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
                 return Err(error(Error::InvalidSnapshot));
             }

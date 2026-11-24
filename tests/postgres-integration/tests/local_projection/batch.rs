@@ -276,12 +276,15 @@ pub(super) async fn history_and_policy(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     // Explain the installed candidate definition as the claim function's effective role. SQL
     // functions with SET search_path otherwise hide their inner plan behind Function Scan.
-    let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_candidates(uuid,text)'::regprocedure")
+    let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)'::regprocedure")
         .fetch_one(&f.owner).await?;
     let explain = format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
         body.replace("p_tenant", "$1::uuid")
             .replace("p_domain", "$2")
+            .replace("p_after", "NULL::timestamptz")
+            .replace("p_through", "statement_timestamp()")
+            .replace("p_take", "NULL::integer")
     );
     let mut connection = f.owner.acquire().await?;
     sqlx::query("SET ROLE rss_tmsg_relay")
@@ -504,7 +507,7 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
     index_admission(f).await?;
     for (signature, before, after) in [
         (
-            "rss_transactional_messaging.outbox_candidates(uuid,text)",
+            "rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)",
             "d.operation_id AS dr_operation",
             "NULL::uuid AS dr_operation",
         ),

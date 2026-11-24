@@ -698,6 +698,11 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
     }
     for (change, restore, expected) in [
         (
+            "ALTER FUNCTION rss_transactional_messaging.refresh_outbox_head() STABLE",
+            "ALTER FUNCTION rss_transactional_messaging.refresh_outbox_head() VOLATILE",
+            PgStorageContractFailure::Functions,
+        ),
+        (
             "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.decode_outbox_message(bytea) TO tmsg_runtime",
             "REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.decode_outbox_message(bytea) FROM tmsg_runtime",
             PgStorageContractFailure::Functions,

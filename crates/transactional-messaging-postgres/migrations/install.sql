@@ -52,6 +52,7 @@ CREATE TABLE rss_transactional_messaging.outbox (
  recovery_version bigint NOT NULL DEFAULT 1 CHECK (recovery_version > 0),
  claim_epoch bigint NOT NULL DEFAULT 0, claim_lineage bytea,
  partition_seq bigint,
+ CONSTRAINT outbox_publishing_lineage CHECK(status<>'publishing' OR claim_lineage IS NOT NULL),
  CONSTRAINT outbox_partition_sequence_shape CHECK((partition_key IS NULL)=(partition_seq IS NULL) AND (partition_seq IS NULL OR partition_seq > 0))
 );
 
@@ -156,6 +157,7 @@ CREATE TABLE rss_transactional_messaging.outbox_partitions (
  partition_key text COLLATE "C" NOT NULL,
  last_sequence bigint NOT NULL DEFAULT 0 CHECK(last_sequence >= 0),
  prepared_by xid8 NOT NULL,
+ declared boolean NOT NULL DEFAULT true,
  PRIMARY KEY(tenant_id, domain, partition_key)
 );
 
@@ -470,7 +472,7 @@ BEGIN
   FROM jsonb_array_elements(p_partitions) ORDER BY domain,partition_key LOOP
   INSERT INTO outbox_partitions(tenant_id,domain,partition_key,prepared_by)
    VALUES(t,r.domain,r.partition_key,x)
-   ON CONFLICT(tenant_id,domain,partition_key) DO UPDATE SET prepared_by=EXCLUDED.prepared_by;
+   ON CONFLICT(tenant_id,domain,partition_key) DO UPDATE SET prepared_by=EXCLUDED.prepared_by,declared=true;
  END LOOP;
 END $f$;
 
@@ -497,14 +499,14 @@ BEGIN
  id:=envelope->>'id'; domain_name:=envelope->>'domain'; partition_name:=envelope->>'partition';
  digest:=sha256(p_message);
  IF partition_name IS NOT NULL AND NOT EXISTS(SELECT 1 FROM outbox_partitions
-  WHERE tenant_id=t AND domain=domain_name AND partition_key=partition_name AND prepared_by=pg_current_xact_id()) THEN
+  WHERE tenant_id=t AND domain=domain_name AND partition_key=partition_name AND prepared_by=pg_current_xact_id() AND declared) THEN
   RAISE EXCEPTION 'partition was not declared by this transaction' USING ERRCODE='PZ002';
  END IF;
  SELECT o.fingerprint INTO persisted FROM outbox o WHERE o.tenant_id=t AND o.message_id=id;
  IF FOUND THEN RETURN CASE WHEN persisted=digest THEN 'already_present' ELSE 'conflict' END; END IF;
  IF partition_name IS NOT NULL THEN
   UPDATE outbox_partitions SET last_sequence=last_sequence+1
-   WHERE tenant_id=t AND domain=domain_name AND partition_key=partition_name AND prepared_by=pg_current_xact_id()
+   WHERE tenant_id=t AND domain=domain_name AND partition_key=partition_name AND prepared_by=pg_current_xact_id() AND declared
    RETURNING last_sequence INTO ordinal;
   SELECT NOT EXISTS(SELECT FROM outbox o WHERE o.tenant_id=t AND o.domain=domain_name
    AND o.partition_key=partition_name AND o.partition_head) INTO first_in_partition;
@@ -530,14 +532,20 @@ BEGIN
    OR (OLD.status IN ('published','resolved') AND NEW.status NOT IN ('published','resolved')))) THEN RETURN NULL; END IF;
  -- A writer has already locked its complete declared set in canonical order.
  -- Acquiring a source outside that set could wait on an oppositely ordered writer.
- IF EXISTS(SELECT FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND prepared_by=pg_current_xact_id())
+ IF EXISTS(SELECT FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND prepared_by=pg_current_xact_id() AND declared)
   AND NOT EXISTS(SELECT FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
-   AND partition_key=NEW.partition_key AND prepared_by=pg_current_xact_id()) THEN
+   AND partition_key=NEW.partition_key AND prepared_by=pg_current_xact_id() AND declared) THEN
   RAISE EXCEPTION 'source partition outside transaction declaration' USING ERRCODE='PZ002';
  END IF;
- -- A new tuple version also fences repeatable-read appenders holding an older snapshot.
- UPDATE outbox_partitions SET last_sequence=last_sequence WHERE tenant_id=NEW.tenant_id
-  AND domain=NEW.domain AND partition_key=NEW.partition_key;
+ -- The source row is already locked (including direct recovery UPDATE). Never wait
+ -- for a writer's allocator here: that writer may be waiting for this source.
+ PERFORM 1 FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
+  AND partition_key=NEW.partition_key FOR UPDATE NOWAIT;
+ -- Record implicit handoff without granting an append declaration. The new tuple
+ -- fences stale snapshots and prepare() rejects a later nonempty declaration.
+ UPDATE outbox_partitions SET declared=(prepared_by=pg_current_xact_id() AND declared),
+  prepared_by=pg_current_xact_id() WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
+  AND partition_key=NEW.partition_key;
  IF NOT FOUND THEN RAISE EXCEPTION 'partition allocator missing'; END IF;
  SELECT seq INTO next_seq FROM outbox WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
   AND partition_key=NEW.partition_key AND status NOT IN ('published','resolved')
@@ -554,10 +562,10 @@ CREATE TRIGGER refresh_outbox_head AFTER UPDATE OF status ON rss_transactional_m
  FOR EACH ROW
  EXECUTE FUNCTION rss_transactional_messaging.refresh_outbox_head();
 
-CREATE FUNCTION rss_transactional_messaging.outbox_candidates(p_tenant uuid,p_domain text)
+CREATE FUNCTION rss_transactional_messaging.outbox_candidates(p_tenant uuid,p_domain text,p_after timestamptz,p_through timestamptz,p_take integer)
 RETURNS TABLE(source_seq bigint,dr_operation uuid,eligible_at timestamptz)
 LANGUAGE sql STABLE AS $f$
- WITH current_dr AS MATERIALIZED (
+ WITH RECURSIVE current_dr AS MATERIALIZED (
   SELECT d.*,src.partition_key,src.partition_seq FROM rss_transactional_messaging.dr_plans p
   JOIN rss_transactional_messaging.dr_members d USING(tenant_id,operation_id)
   JOIN rss_transactional_messaging.outbox src ON src.seq=d.outbox_seq AND src.tenant_id=d.tenant_id
@@ -567,32 +575,57 @@ LANGUAGE sql STABLE AS $f$
  ), ordinary AS NOT MATERIALIZED (
   SELECT src.* FROM rss_transactional_messaging.outbox src
   WHERE src.tenant_id=p_tenant AND src.domain=p_domain AND (src.partition_head OR src.partition_key IS NULL)
-   AND NOT EXISTS(SELECT FROM current_dr d WHERE d.outbox_seq=src.seq
-    OR (d.partition_key=src.partition_key AND d.partition_seq<src.partition_seq))
- ), publishing AS NOT MATERIALIZED (
-  SELECT src.*,nullif(current_setting('rss.execution_epoch',true),'')::bigint AS epoch,
-   decode(current_setting('rss.storage_lineage',true),'hex') AS lineage
-  FROM ordinary src WHERE src.status='publishing'
+   AND (SELECT true FROM current_dr d WHERE d.outbox_seq=src.seq
+    OR (d.partition_key=src.partition_key AND d.partition_seq<src.partition_seq) LIMIT 1) IS NULL
+ ), leases AS NOT MATERIALIZED (
+  SELECT src.claim_epoch,src.claim_lineage FROM rss_transactional_messaging.outbox src
+  WHERE src.tenant_id=p_tenant AND src.domain=p_domain AND (src.partition_head OR src.partition_key IS NULL)
+   AND src.status='publishing'
+ ), generations(epoch,lineage) AS (
+  -- Seek distinct lease generations, even when a single generation has many leases.
+  (SELECT claim_epoch,claim_lineage FROM leases ORDER BY claim_epoch,claim_lineage LIMIT 1)
+  UNION ALL
+  SELECT next.* FROM generations previous CROSS JOIN LATERAL (
+   SELECT claim_epoch,claim_lineage FROM leases
+   WHERE (claim_epoch,claim_lineage)>(previous.epoch,previous.lineage)
+   ORDER BY claim_epoch,claim_lineage LIMIT 1
+  ) next
+ ), dr_heads AS (
+  SELECT d.outbox_seq,d.operation_id AS dr_operation,
+   greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END) AS eligible_at
+  FROM current_dr d WHERE d.status IN ('pending','publishing')
+  AND NOT EXISTS(SELECT FROM current_dr earlier WHERE earlier.partition_key=d.partition_key
+   AND earlier.partition_seq<d.partition_seq)
+  AND NOT EXISTS(SELECT FROM rss_transactional_messaging.outbox earlier WHERE earlier.tenant_id=p_tenant
+   AND earlier.domain=p_domain AND earlier.partition_key=d.partition_key AND earlier.partition_head
+   AND earlier.partition_seq<d.partition_seq)
  )
- SELECT seq,NULL::uuid,retry_after FROM ordinary WHERE status='pending'
+ -- Wakeup asks each time-ordered branch for one result. A claim takes every due
+ -- candidate into its lock-skipping cursor, so a locked first row cannot hide a sibling.
+ (SELECT seq AS source_seq,NULL::uuid AS dr_operation,retry_after AS eligible_at FROM ordinary
+  WHERE status='pending' AND (p_after IS NULL OR retry_after>p_after)
+   AND (p_through IS NULL OR retry_after<=p_through) ORDER BY retry_after LIMIT p_take)
  UNION ALL
- SELECT seq,NULL::uuid,greatest(retry_after,lease_until) FROM publishing
- WHERE claim_epoch=epoch AND claim_lineage=lineage
+ (SELECT seq,NULL::uuid,greatest(retry_after,lease_until) FROM ordinary
+  WHERE status='publishing' AND claim_epoch=nullif(current_setting('rss.execution_epoch',true),'')::bigint
+   AND claim_lineage=decode(current_setting('rss.storage_lineage',true),'hex')
+   AND (p_after IS NULL OR greatest(retry_after,lease_until)>p_after)
+   AND (p_through IS NULL OR greatest(retry_after,lease_until)<=p_through)
+  ORDER BY greatest(retry_after,lease_until) LIMIT p_take)
  UNION ALL
- SELECT seq,NULL::uuid,retry_after FROM publishing
- WHERE claim_epoch<>epoch OR claim_lineage IS DISTINCT FROM lineage
+ (SELECT stale.seq,NULL::uuid,stale.retry_after FROM generations g CROSS JOIN LATERAL (
+   SELECT seq,retry_after FROM ordinary WHERE status='publishing' AND claim_epoch=g.epoch
+    AND claim_lineage=g.lineage AND (p_after IS NULL OR retry_after>p_after)
+    AND (p_through IS NULL OR retry_after<=p_through) ORDER BY retry_after LIMIT p_take
+  ) stale WHERE (g.epoch,g.lineage) IS DISTINCT FROM
+   (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex'))
+  ORDER BY stale.retry_after LIMIT p_take)
  UNION ALL
- SELECT d.outbox_seq,d.operation_id AS dr_operation,
-  greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END)
- FROM current_dr d WHERE d.status IN ('pending','publishing')
- AND NOT EXISTS(SELECT FROM current_dr earlier WHERE earlier.partition_key=d.partition_key
-  AND earlier.partition_seq<d.partition_seq)
- AND NOT EXISTS(SELECT FROM rss_transactional_messaging.outbox earlier WHERE earlier.tenant_id=p_tenant
-  AND earlier.domain=p_domain AND earlier.partition_key=d.partition_key AND earlier.partition_head
-  AND earlier.partition_seq<d.partition_seq)
+ (SELECT outbox_seq,dr_operation,eligible_at FROM dr_heads WHERE (p_after IS NULL OR eligible_at>p_after)
+   AND (p_through IS NULL OR eligible_at<=p_through) ORDER BY eligible_at LIMIT p_take)
 $f$;
 
-ALTER FUNCTION rss_transactional_messaging.outbox_candidates(uuid,text) OWNER TO rss_tmsg_relay;
+ALTER FUNCTION rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer) OWNER TO rss_tmsg_relay;
 
 CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain text,p_limit integer,p_ttl_ms bigint)
 RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,payload bytea,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
@@ -601,8 +634,8 @@ DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(curren
  observed timestamptz;
  candidates NO SCROLL CURSOR FOR
   SELECT src AS source,c.dr_operation AS op
-  FROM outbox_candidates(p_tenant,p_domain) c JOIN outbox src ON src.seq=c.source_seq
-  WHERE c.eligible_at<=observed ORDER BY src.seq FOR UPDATE OF src SKIP LOCKED;
+  FROM outbox_candidates(p_tenant,p_domain,NULL,observed,NULL) c JOIN outbox src ON src.seq=c.source_seq
+  ORDER BY src.seq FOR UPDATE OF src SKIP LOCKED;
 BEGIN
  PERFORM check_execution();
  IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
@@ -649,9 +682,9 @@ BEGIN
   RAISE EXCEPTION 'invalid wakeup scope' USING ERRCODE='22023';
  END IF;
  observed:=clock_timestamp();
- RETURN QUERY SELECT EXISTS(SELECT FROM outbox_candidates(p_tenant,p_domain) c WHERE c.eligible_at<=observed),
+ RETURN QUERY SELECT EXISTS(SELECT FROM outbox_candidates(p_tenant,p_domain,NULL,observed,1) c),
   (SELECT floor(extract(epoch FROM (c.eligible_at-observed))*1000000)::bigint
-   FROM outbox_candidates(p_tenant,p_domain) c WHERE c.eligible_at>observed ORDER BY c.eligible_at LIMIT 1);
+   FROM outbox_candidates(p_tenant,p_domain,observed,NULL,1) c ORDER BY c.eligible_at LIMIT 1);
 END $f$;
 
 ALTER FUNCTION rss_transactional_messaging.next_outbox_wakeup(uuid,text) OWNER TO rss_tmsg_relay;

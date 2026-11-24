@@ -386,7 +386,7 @@ pub(super) async fn run(
             "PUBLIC",
         ),
         (
-            "rss_transactional_messaging.outbox_candidates(uuid,text)",
+            "rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)",
             "tmsg_runtime",
         ),
     ] {

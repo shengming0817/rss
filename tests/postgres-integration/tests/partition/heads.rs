@@ -15,21 +15,20 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
         let mut writer = sql_tx(raw, tenant).await?;
         sql_prepare(&mut writer, pairs).await?;
         sql_append(&mut writer, &tail).await?;
+        // The writer owns the allocator and may next need this source. A standalone
+        // handoff must release the source on contention, before either session waits.
         let mut relay = sql_tx(raw, tenant).await?;
-        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *relay)
-            .await?;
-        let settle = finish_claim(relay, tenant, claim, commit_settlement);
-        let release = async {
-            wait_lock(owner, pid).await?;
-            if commit_append {
-                writer.commit().await?;
-            } else {
-                writer.rollback().await?;
-            }
-            anyhow::Ok(())
-        };
-        tokio::try_join!(settle, release)?;
+        let error = settle(&mut relay, tenant, &claim)
+            .await
+            .expect_err("busy source allocator");
+        assert_eq!(code(&error).as_deref(), Some("55P03"));
+        relay.rollback().await?;
+        if commit_append {
+            writer.commit().await?;
+        } else {
+            writer.rollback().await?;
+        }
+        finish_claim(sql_tx(raw, tenant).await?, tenant, claim, commit_settlement).await?;
         let marked:Vec<String> = sqlx::query_scalar("SELECT message_id FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND partition_head")
             .bind(tenant.to_string()).bind(lane).fetch_all(owner).await?;
         assert_eq!(
@@ -40,6 +39,7 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
                 .collect::<Vec<_>>()
         );
     }
+    late_declaration(raw).await?;
     stale_snapshot(raw).await?;
     crossed_declarations(raw).await?;
     capacity(raw).await
@@ -71,14 +71,22 @@ async fn seed_claim(
     Ok(claim)
 }
 
+async fn settle(
+    tx: &mut PgConnection,
+    tenant: TenantId,
+    claim: &(i64, String, i64),
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,'published',NULL)")
+        .bind(tenant.to_string()).bind(claim.0).bind(&claim.1).bind(claim.2).fetch_one(tx).await
+}
+
 async fn finish_claim(
     mut tx: Transaction<'_, Postgres>,
     tenant: TenantId,
     claim: (i64, String, i64),
     commit: bool,
 ) -> anyhow::Result<()> {
-    let result:String = sqlx::query_scalar("SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,'published',NULL)")
-        .bind(tenant.to_string()).bind(claim.0).bind(claim.1).bind(claim.2).fetch_one(&mut *tx).await?;
+    let result = settle(&mut tx, tenant, &claim).await?;
     assert_eq!(result, "settled");
     if commit {
         tx.commit().await?;
@@ -101,6 +109,20 @@ async fn fixed_snapshot(
         .fetch_one(&mut *old).await?;
     assert!(first);
     Ok(old)
+}
+
+async fn late_declaration(raw: &PgPool) -> anyhow::Result<()> {
+    let head = ordered("implicit-first", "implicit", "a");
+    let tenant = head.metadata().tenant_id();
+    let claim = seed_claim(raw, &head).await?;
+    let mut relay = sql_tx(raw, tenant).await?;
+    assert_eq!(settle(&mut relay, tenant, &claim).await?, "settled");
+    let error = sql_prepare(&mut relay, serde_json::json!([["implicit", "b"]]))
+        .await
+        .expect_err("late declaration");
+    assert_eq!(code(&error).as_deref(), Some("PZ002"));
+    relay.rollback().await?;
+    finish_claim(sql_tx(raw, tenant).await?, tenant, claim, true).await
 }
 
 async fn stale_snapshot(raw: &PgPool) -> anyhow::Result<()> {

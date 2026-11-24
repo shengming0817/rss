@@ -13,7 +13,7 @@ columns(relation, name, type, nullable) AS (VALUES
  ('inbox','receive_count','bigint',false), ('inbox','fingerprint','bytea',true), ('inbox','disposition','text',true),
  ('outbox_partitions','tenant_id','uuid',false), ('outbox_partitions','domain','text',false),
  ('outbox_partitions','partition_key','text',false), ('outbox_partitions','last_sequence','bigint',false),
- ('outbox_partitions','prepared_by','xid8',false), ('outbox','partition_seq','bigint',true),
+ ('outbox_partitions','prepared_by','xid8',false), ('outbox_partitions','declared','boolean',false), ('outbox','partition_seq','bigint',true),
  ('outbox','partition_head','boolean',false), ('outbox','seq','bigint',false), ('outbox','tenant_id','uuid',false), ('outbox','message_id','text',false),
  ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false), ('outbox','payload','bytea',false),
  ('outbox','fingerprint','bytea',false), ('outbox','status','text',false), ('outbox','retry_count','integer',false),
@@ -42,6 +42,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('inbox', 'inbox_receipt_shape', 'CHECK ((((fingerprint IS NULL) AND (disposition IS NULL)) OR ((fingerprint IS NOT NULL) AND (octet_length(fingerprint) = 32) AND (disposition IS NOT NULL) AND (disposition = ANY (ARRAY[''succeeded''::text, ''rejected_permanent''::text, ''rejected_invariant''::text])))))'),
  ('inbox', 'inbox_receive_count_check', 'CHECK ((receive_count > 0))'),
  ('outbox', 'outbox_fingerprint_length', 'CHECK ((octet_length(fingerprint) = 32))'),
+ ('outbox', 'outbox_publishing_lineage', 'CHECK (((status <> ''publishing''::text) OR (claim_lineage IS NOT NULL)))'),
  ('outbox', 'outbox_lease_shape', 'CHECK (((status = ''publishing''::text) = ((lease_token IS NOT NULL) AND (lease_until IS NOT NULL))))'),
  ('outbox', 'outbox_recovery_version_check', 'CHECK ((recovery_version > 0))'),
  ('outbox_partitions', 'outbox_partitions_pkey', 'PRIMARY KEY (tenant_id, domain, partition_key)'),
@@ -57,7 +58,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('policy', 'policy_revision_check', 'CHECK ((revision = 1))'),
  ('policy', 'policy_safety_seconds_check', 'CHECK ((safety_seconds = 86400))')
 ), expected_defaults(relation, name, expression) AS (VALUES
- ('outbox_partitions','last_sequence','0'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
+ ('outbox_partitions','last_sequence','0'), ('outbox_partitions','declared','true'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
  ('outbox','retry_count','0'), ('outbox','retry_after','clock_timestamp()')
 ), head_indexes(name,keys,predicate,unique_head) AS (VALUES
  ('outbox_unfinished_partition',ARRAY['tenant_id','domain','partition_key','partition_seq'],'((partition_key IS NOT NULL) AND (status <> ALL (ARRAY[''published''::text, ''resolved''::text])))',false),
@@ -78,7 +79,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
   WHERE t.tgrelid='rss_transactional_messaging.outbox'::regclass AND t.tgname='refresh_outbox_head'
    AND t.tgenabled='O' AND t.tgtype=17 AND NOT t.tgisinternal AND t.tgqual IS NULL
    AND t.tgattr::text=(SELECT attnum::text FROM pg_attribute WHERE attrelid=t.tgrelid AND attname='status')
-   AND p.prosrc=$4::text
+   AND p.prosrc=$4::text AND p.provolatile='v' AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
    AND p.oid=to_regprocedure('rss_transactional_messaging.refresh_outbox_head()')
    AND p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
    AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
@@ -88,7 +89,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('functions', NOT EXISTS(SELECT FROM pg_proc p
   WHERE p.pronamespace='rss_transactional_messaging'::regnamespace AND p.proname='append_outbox'
   AND p.oid IS DISTINCT FROM to_regprocedure('rss_transactional_messaging.append_outbox(bytea,jsonb)'))),
- ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text)')
+ ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)')
    AND NOT p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
    AND p.proconfig IS NULL AND p.provolatile='s'
    AND NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_function_privilege(r.oid,p.oid,'EXECUTE'))
