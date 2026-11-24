@@ -373,6 +373,19 @@ async fn deadline_during_encoding_has_no_transaction_to_recover() -> anyhow::Res
             .collect::<anyhow::Result<_>>()?,
     )?;
     let request = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+    let mut occupied = Vec::new();
+    for _ in 0..f.pool.options().get_max_connections() {
+        occupied.push(f.pool.acquire().await?);
+    }
+    // Poll the write once with every slot borrowed. Entering the encoding loop
+    // would trip PreparationClock and finish this future before yielding.
+    calls.store(0, std::sync::atomic::Ordering::SeqCst);
+    tokio::select! {
+        biased;
+        result = store.write(&request, deadline()?) => anyhow::bail!("pool wait returned early: {result:?}"),
+        () = std::future::ready(()) => {}
+    }
+    drop(occupied);
     calls.store(0, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         store.write(&request, deadline()?).await.err(),

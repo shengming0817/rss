@@ -62,13 +62,21 @@ impl<C: Clock> Read<'_, C> {
         let end = buckets.last().ok_or(Error::Invariant)?.window.end();
         let mut prior = predecessor(c, spec, start, self.limits).await?;
         ensure_boundary(c, spec, start, prior.as_ref(), self.limits).await?;
-        let gaps = deletions(
-            c,
-            spec,
-            Interval::new(prior.as_ref().map_or(start, |p| p.input().observed_at), end)?,
-            self.limits,
-        )
-        .await?;
+        let mut gaps = deletions(c, spec, Interval::new(start, end)?, self.limits).await?;
+        if let Some(p) = &prior {
+            // The page bounds its own fences. Read the predecessor halo separately
+            // so unrelated later buckets cannot exhaust the first bucket's budget.
+            let mut prefix = deletions(
+                c,
+                spec,
+                Interval::new(p.input().observed_at, start)?,
+                self.limits,
+            )
+            .await?;
+            gaps.retain(|g| g.start() >= start);
+            prefix.extend(gaps);
+            gaps = prefix;
+        }
         let mut scan = scan::Scan::new(spec, Interval::new(start, end)?, self.available, None)?;
         let point_limit = self.limits.max_points.get() as usize;
         for bucket in buckets {
@@ -86,19 +94,23 @@ impl<C: Clock> Read<'_, C> {
             }
             let gap_start = builder.last_observed_at().unwrap_or(w.start());
             let gaps = &gaps[..gaps.partition_point(|g| g.start() < w.end())];
-            let gaps = &gaps[gaps
+            let gaps: Vec<_> = gaps
                 .iter()
-                .position(|g| g.end() > gap_start)
-                .unwrap_or(gaps.len())..];
+                .copied()
+                .filter(|g| g.end() > gap_start)
+                .collect();
+            if gaps.len() > point_limit {
+                return Err(Error::BudgetExceeded);
+            }
             while let Some(sample) = scan.next(c, w.end(), usize::MAX, self.limits).await? {
                 check(self.clock, self.deadline)?;
-                mask(&mut builder, gaps, sample.input().observed_at)?;
+                mask(&mut builder, &gaps, sample.input().observed_at)?;
                 if needs_predecessor(spec) {
                     prior = Some(sample.clone());
                 }
                 builder.push(sample, point_limit)?;
             }
-            mask(&mut builder, gaps, w.end())?;
+            mask(&mut builder, &gaps, w.end())?;
             if !page.push(self.q, builder.finish(point_limit)?, false, self.limits)? {
                 return Ok(false);
             }
