@@ -203,30 +203,7 @@ async fn scenario(
             .settle(claim, OutboxSettlement::Published(()), budget()?)
             .await?;
     }
-    // The product owns the candidate order and decides how to handle a missing slot.
-    let selected = store.clone();
-    let ids = [CommandId::parse("missing")?, CommandId::parse("example")?];
-    let recovered = committed(
-        runtime
-            .local_tx_with_context(
-                binding,
-                budget()?,
-                ExactCommandIds::new(&ids)?,
-                move |page, tx| Box::pin(async move { selected.recover_exact(tx, s, *page).await }),
-            )
-            .await,
-    )?;
-    anyhow::ensure!(
-        matches!(recovered.as_slice(), [None, Some(command)] if command.spec().id() == &ids[1] && command.status() == Status::Published),
-        "unexpected exact recovery page"
-    );
-    anyhow::ensure!(
-        load(runtime, binding, store.clone(), s, "example")
-            .await?
-            .status()
-            == Status::Published,
-        "publication not distinct"
-    );
+    recover_candidates(runtime, binding, store.clone(), s).await?;
     let received = report(
         runtime,
         binding,
@@ -274,6 +251,37 @@ async fn scenario(
     );
     Ok(())
 }
+async fn recover_candidates(
+    runtime: &PgRuntime,
+    binding: ExecutionBinding,
+    store: Arc<PgStore<()>>,
+    s: Scope,
+) -> anyhow::Result<()> {
+    // The product owns the candidate order and decides how to handle a missing slot.
+    let selected = store.clone();
+    let ids = [CommandId::parse("missing")?, CommandId::parse("example")?];
+    let recovered = committed(
+        runtime
+            .local_tx_with_context(
+                binding,
+                budget()?,
+                ExactCommandIds::new(&ids)?,
+                move |page, tx| Box::pin(async move { selected.recover_exact(tx, s, *page).await }),
+            )
+            .await,
+    )?;
+    anyhow::ensure!(
+        matches!(recovered.as_slice(), [None, Some(command)] if command.spec().id() == &ids[1] && command.status() == Status::Published),
+        "unexpected exact recovery page"
+    );
+    let durable = load(runtime, binding, store, s, "example").await?;
+    anyhow::ensure!(
+        recovered[1].as_ref() == Some(&durable),
+        "recovered command did not persist"
+    );
+    Ok(())
+}
+
 async fn handoff(
     runtime: &PgRuntime,
     binding: ExecutionBinding,

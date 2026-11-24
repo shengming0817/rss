@@ -83,6 +83,10 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
         f.recover_exact(&["exact-published"], foreign_scope).await?,
         [None]
     );
+    empty_page_admission(f, s, foreign_scope).await
+}
+
+async fn empty_page_admission(f: &Fixture, s: Scope, foreign_scope: Scope) -> anyhow::Result<()> {
     let empty = ExactCommandIds::new(&[])?;
     let store = f.store.clone();
     let attempt = f
@@ -105,7 +109,6 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
     assert!(f.recover_exact(&[], s).await?.is_empty());
     let (foreign, _) = f.controlled().await?;
     let store = foreign.store.clone();
-    let empty = ExactCommandIds::new(&[])?;
     assert!(
         committed(
             f.runtime

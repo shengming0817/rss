@@ -215,52 +215,22 @@ async fn partial_recovery(f: &Fixture, names: [&str; 2], exact: bool) -> anyhow:
         .await?;
     sqlx::query("UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1 WHERE tenant_id=$1::uuid AND command_id=$2 AND version=1")
         .bind(scope.tenant().to_string()).bind(names[1]).execute(&mut *competing).await?;
-    let recover = async {
-        let store = f.store.clone();
-        let ids = [CommandId::parse(names[0])?, CommandId::parse(names[1])?];
-        let page = ExactCommandIds::new(&ids)?;
-        let marker = spec("cas-marker", scope, current)?;
-        let dispatch = message("cas-marker", scope.tenant())?;
-        let result = f
-            .runtime
-            .local_tx_with_context(
-                crate::execution(scope.tenant(), 1),
-                budget()?,
-                page,
-                move |page, tx| {
-                    Box::pin(async move {
-                        store.queue(tx, marker, dispatch).await?;
-                        if exact {
-                            store.recover_exact(tx, scope, *page).await?;
-                        } else {
-                            let _page = store
-                                .recover(tx, scope, BatchLimit::default(), None)
-                                .await?;
-                        }
-                        Ok(())
-                    })
-                },
-            )
-            .await;
-        assert_eq!(
-            result.fold(
-                |_| None,
-                |_| None,
-                |_| None,
-                |_| None,
-                |_| None,
-                |e| Some(e.kind())
-            ),
-            Some(MessagingErrorKind::OwnershipLost)
-        );
-        anyhow::Ok(())
-    };
+    let recover = recover_conflicted_page(f, scope, current, names, exact);
     let release = async {
         wait_for_blocked(f, pid).await?;
         competing.commit().await?;
         anyhow::Ok(())
     };
     tokio::try_join!(recover, release)?;
+    assert_cas_rollback(f, scope, names, first).await
+}
+
+async fn assert_cas_rollback(
+    f: &Fixture,
+    scope: Scope,
+    names: [&str; 2],
+    first: Command,
+) -> anyhow::Result<()> {
     assert_eq!(f.load(names[0], scope).await?, Some(first));
     assert_eq!(
         f.load(names[1], scope)
@@ -271,6 +241,53 @@ async fn partial_recovery(f: &Fixture, names: [&str; 2], exact: bool) -> anyhow:
     assert_eq!(f.count("commands", "cas-marker").await?, 0);
     assert_eq!(f.count("outbox", "dispatch.cas-marker").await?, 0);
     Ok(())
+}
+
+async fn recover_conflicted_page(
+    f: &Fixture,
+    scope: Scope,
+    current: Coordinate,
+    names: [&str; 2],
+    exact: bool,
+) -> anyhow::Result<()> {
+    let store = f.store.clone();
+    let ids = [CommandId::parse(names[0])?, CommandId::parse(names[1])?];
+    let page = ExactCommandIds::new(&ids)?;
+    let marker = spec("cas-marker", scope, current)?;
+    let dispatch = message("cas-marker", scope.tenant())?;
+    let result = f
+        .runtime
+        .local_tx_with_context(
+            crate::execution(scope.tenant(), 1),
+            budget()?,
+            page,
+            move |page, tx| {
+                Box::pin(async move {
+                    store.queue(tx, marker, dispatch).await?;
+                    if exact {
+                        store.recover_exact(tx, scope, *page).await?;
+                    } else {
+                        let _page = store
+                            .recover(tx, scope, BatchLimit::default(), None)
+                            .await?;
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .await;
+    assert_eq!(
+        result.fold(
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |e| Some(e.kind())
+        ),
+        Some(MessagingErrorKind::OwnershipLost)
+    );
+    anyhow::Ok(())
 }
 
 async fn isolated_handoff(
