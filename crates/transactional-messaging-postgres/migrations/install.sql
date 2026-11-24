@@ -36,6 +36,7 @@ CREATE TABLE rss_transactional_messaging.outbox (
   message_id text NOT NULL,
   domain text COLLATE "C" NOT NULL,
   partition_key text COLLATE "C",
+  partition_head boolean NOT NULL DEFAULT false CHECK (NOT partition_head OR partition_key IS NOT NULL),
   envelope jsonb NOT NULL,
   fingerprint bytea NOT NULL,
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','publishing','published','dead_letter','resolved')),
@@ -177,7 +178,17 @@ CREATE INDEX outbox_partition_preparation ON rss_transactional_messaging.outbox_
 CREATE INDEX outbox_unfinished_partition ON rss_transactional_messaging.outbox(tenant_id,domain,partition_key,partition_seq)
  WHERE partition_key IS NOT NULL AND status NOT IN ('published','resolved');
 
-CREATE INDEX outbox_unpartitioned_candidates ON rss_transactional_messaging.outbox(tenant_id,domain,seq) WHERE partition_key IS NULL AND status IN ('pending','publishing');
+CREATE UNIQUE INDEX outbox_one_head ON rss_transactional_messaging.outbox(tenant_id,domain,partition_key)
+ WHERE partition_head;
+
+CREATE INDEX outbox_pending_due ON rss_transactional_messaging.outbox(tenant_id,domain,retry_after)
+ WHERE (partition_head OR partition_key IS NULL) AND status='pending';
+
+CREATE INDEX outbox_lease_due ON rss_transactional_messaging.outbox(tenant_id,domain,claim_epoch,claim_lineage,greatest(retry_after,lease_until))
+ WHERE (partition_head OR partition_key IS NULL) AND status='publishing';
+
+CREATE INDEX outbox_stale_retry ON rss_transactional_messaging.outbox(tenant_id,domain,claim_epoch,claim_lineage,retry_after)
+ WHERE (partition_head OR partition_key IS NULL) AND status='publishing';
 
 ALTER TABLE rss_transactional_messaging.inbox ENABLE ROW LEVEL SECURITY;
 
@@ -468,7 +479,7 @@ CREATE FUNCTION rss_transactional_messaging.append_outbox(p_message bytea,p_tran
 RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid;
- ordinal bigint; persisted bytea; digest bytea; envelope jsonb; id text; domain_name text; partition_name text;
+ first_in_partition boolean:=false; ordinal bigint; persisted bytea; digest bytea; envelope jsonb; id text; domain_name text; partition_name text;
 BEGIN
  PERFORM check_execution();
  IF p_message IS NULL OR jsonb_typeof(p_transport) IS DISTINCT FROM 'object'
@@ -494,9 +505,11 @@ BEGIN
   UPDATE outbox_partitions SET last_sequence=last_sequence+1
    WHERE tenant_id=t AND domain=domain_name AND partition_key=partition_name AND prepared_by=pg_current_xact_id()
    RETURNING last_sequence INTO ordinal;
+  SELECT NOT EXISTS(SELECT FROM outbox o WHERE o.tenant_id=t AND o.domain=domain_name
+   AND o.partition_key=partition_name AND o.partition_head) INTO first_in_partition;
  END IF;
- INSERT INTO outbox(tenant_id,message_id,domain,partition_key,partition_seq,envelope,fingerprint)
-  VALUES(t,id,domain_name,partition_name,ordinal,envelope,digest)
+ INSERT INTO outbox(tenant_id,message_id,domain,partition_key,partition_seq,partition_head,envelope,fingerprint)
+  VALUES(t,id,domain_name,partition_name,ordinal,first_in_partition,envelope,digest)
   ON CONFLICT(tenant_id,message_id) DO NOTHING RETURNING outbox.fingerprint INTO persisted;
  IF FOUND THEN RETURN 'inserted'; END IF;
  SELECT o.fingerprint INTO STRICT persisted FROM outbox o WHERE o.tenant_id=t AND o.message_id=id;
@@ -505,62 +518,68 @@ END $f$;
 
 ALTER FUNCTION rss_transactional_messaging.append_outbox(bytea,jsonb) OWNER TO rss_tmsg_relay;
 
--- Seek past the entire preceding partition, including its blocked/retrying tail.
--- ref: https://wiki.postgresql.org/wiki/Loose_indexscan#Selecting_Distinct_Values
+-- Both ordinary settlement and explicit recovery can release a partition. Serialize
+-- promotion against append, including an append racing the last head's completion.
+CREATE FUNCTION rss_transactional_messaging.refresh_outbox_head() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
+DECLARE next_seq bigint;
+BEGIN
+ PERFORM 1 FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
+  AND partition_key=NEW.partition_key FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'partition allocator missing'; END IF;
+ SELECT seq INTO next_seq FROM outbox WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
+  AND partition_key=NEW.partition_key AND status NOT IN ('published','resolved')
+  ORDER BY partition_seq LIMIT 1;
+ UPDATE outbox SET partition_head=false WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
+  AND partition_key=NEW.partition_key AND partition_head AND seq IS DISTINCT FROM next_seq;
+ UPDATE outbox SET partition_head=true WHERE seq=next_seq AND NOT partition_head;
+ RETURN NULL;
+END $f$;
+
+ALTER FUNCTION rss_transactional_messaging.refresh_outbox_head() OWNER TO rss_tmsg_relay;
+
+CREATE TRIGGER refresh_outbox_head AFTER UPDATE OF status ON rss_transactional_messaging.outbox
+ FOR EACH ROW WHEN (NEW.partition_key IS NOT NULL AND
+  ((OLD.partition_head AND NEW.status IN ('published','resolved') AND OLD.status NOT IN ('published','resolved'))
+   OR (OLD.status IN ('published','resolved') AND NEW.status NOT IN ('published','resolved'))))
+ EXECUTE FUNCTION rss_transactional_messaging.refresh_outbox_head();
+
 CREATE FUNCTION rss_transactional_messaging.outbox_candidates(p_tenant uuid,p_domain text)
 RETURNS TABLE(source_seq bigint,dr_operation uuid,eligible_at timestamptz)
 LANGUAGE sql STABLE AS $f$
- WITH RECURSIVE generation AS (
-  SELECT nullif(current_setting('rss.execution_epoch',true),'')::bigint AS epoch,
+ WITH current_dr AS MATERIALIZED (
+  SELECT d.*,src.partition_key,src.partition_seq FROM rss_transactional_messaging.dr_plans p
+  JOIN rss_transactional_messaging.dr_members d USING(tenant_id,operation_id)
+  JOIN rss_transactional_messaging.outbox src ON src.seq=d.outbox_seq AND src.tenant_id=d.tenant_id
+  WHERE p.tenant_id=p_tenant AND src.domain=p_domain AND d.status<>'completed'
+   AND p.epoch=nullif(current_setting('rss.execution_epoch',true),'')::bigint
+   AND p.lineage=decode(current_setting('rss.storage_lineage',true),'hex')
+ ), ordinary AS NOT MATERIALIZED (
+  SELECT src.* FROM rss_transactional_messaging.outbox src
+  WHERE src.tenant_id=p_tenant AND src.domain=p_domain AND (src.partition_head OR src.partition_key IS NULL)
+   AND NOT EXISTS(SELECT FROM current_dr d WHERE d.outbox_seq=src.seq
+    OR (d.partition_key=src.partition_key AND d.partition_seq<src.partition_seq))
+ ), publishing AS NOT MATERIALIZED (
+  SELECT src.*,nullif(current_setting('rss.execution_epoch',true),'')::bigint AS epoch,
    decode(current_setting('rss.storage_lineage',true),'hex') AS lineage
- ), current_dr AS MATERIALIZED (
-  SELECT d.*,src.partition_key,src.partition_seq FROM rss_transactional_messaging.dr_members d
-  JOIN rss_transactional_messaging.dr_plans p USING(tenant_id,operation_id)
-  JOIN rss_transactional_messaging.outbox src ON src.seq=d.outbox_seq
-  CROSS JOIN generation g
-  WHERE d.tenant_id=p_tenant AND src.tenant_id=p_tenant AND src.domain=p_domain
-   AND p.epoch=g.epoch AND p.lineage=g.lineage AND d.status<>'completed'
- ), ordinary_heads AS (
-  (SELECT src.seq,src.partition_key,src.partition_seq
-   FROM rss_transactional_messaging.outbox src
-   WHERE src.tenant_id=p_tenant AND src.domain=p_domain AND src.partition_key IS NOT NULL
-    AND src.status NOT IN ('published','resolved')
-   ORDER BY src.partition_key,src.partition_seq LIMIT 1)
-  UNION ALL
-  SELECT next_head.* FROM ordinary_heads previous
-  CROSS JOIN LATERAL (
-   SELECT src.seq,src.partition_key,src.partition_seq FROM rss_transactional_messaging.outbox src
-   WHERE src.tenant_id=p_tenant AND src.domain=p_domain AND src.partition_key>previous.partition_key
-    AND src.status NOT IN ('published','resolved')
-   ORDER BY src.partition_key,src.partition_seq LIMIT 1
-  ) next_head
- ), heads AS (
-  SELECT DISTINCT ON (partition_key) seq FROM (
-   SELECT * FROM ordinary_heads
-   UNION ALL
-   SELECT d.outbox_seq,d.partition_key,d.partition_seq FROM current_dr d WHERE d.partition_key IS NOT NULL
-  ) all_heads ORDER BY partition_key,partition_seq
- ), sources AS (
-  SELECT seq FROM heads
-  UNION ALL
-  SELECT src.seq FROM rss_transactional_messaging.outbox src
-  WHERE src.tenant_id=p_tenant AND src.domain=p_domain AND src.partition_key IS NULL
-   AND src.status IN ('pending','publishing')
-   AND NOT EXISTS(SELECT FROM current_dr d WHERE d.outbox_seq=src.seq)
-  UNION ALL
-  SELECT d.outbox_seq FROM current_dr d WHERE d.partition_key IS NULL
+  FROM ordinary src WHERE src.status='publishing'
  )
- SELECT src.seq AS source_seq,d.operation_id AS dr_operation,
-  CASE WHEN d.operation_id IS NOT NULL THEN
-   greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until ELSE '-infinity'::timestamptz END)
-  ELSE greatest(src.retry_after,CASE WHEN src.status='publishing' AND src.claim_epoch=g.epoch
-   AND src.claim_lineage IS NOT DISTINCT FROM g.lineage THEN src.lease_until ELSE '-infinity'::timestamptz END) END AS eligible_at
- -- Preserve per-head primary-key lookups even before table statistics catch up.
- FROM sources h CROSS JOIN LATERAL (
-  SELECT row.* FROM rss_transactional_messaging.outbox row WHERE row.seq=h.seq OFFSET 0
- ) src
- CROSS JOIN generation g LEFT JOIN current_dr d ON d.outbox_seq=src.seq
- WHERE (d.operation_id IS NULL AND src.status IN ('pending','publishing')) OR d.status IN ('pending','publishing')
+ SELECT seq,NULL::uuid,retry_after FROM ordinary WHERE status='pending'
+ UNION ALL
+ SELECT seq,NULL::uuid,greatest(retry_after,lease_until) FROM publishing
+ WHERE claim_epoch=epoch AND claim_lineage=lineage
+ UNION ALL
+ SELECT seq,NULL::uuid,retry_after FROM publishing
+ WHERE claim_epoch<>epoch OR claim_lineage IS DISTINCT FROM lineage
+ UNION ALL
+ SELECT d.outbox_seq,d.operation_id AS dr_operation,
+  greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END)
+ FROM current_dr d WHERE d.status IN ('pending','publishing')
+ AND NOT EXISTS(SELECT FROM current_dr earlier WHERE earlier.partition_key=d.partition_key
+  AND earlier.partition_seq<d.partition_seq)
+ AND NOT EXISTS(SELECT FROM rss_transactional_messaging.outbox earlier WHERE earlier.tenant_id=p_tenant
+  AND earlier.domain=p_domain AND earlier.partition_key=d.partition_key AND earlier.partition_head
+  AND earlier.partition_seq<d.partition_seq)
 $f$;
 
 ALTER FUNCTION rss_transactional_messaging.outbox_candidates(uuid,text) OWNER TO rss_tmsg_relay;
@@ -569,15 +588,17 @@ CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain 
 RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
+ observed timestamptz;
  candidates NO SCROLL CURSOR FOR
   SELECT src AS source,c.dr_operation AS op
   FROM outbox_candidates(p_tenant,p_domain) c JOIN outbox src ON src.seq=c.source_seq
-  WHERE c.eligible_at<=clock_timestamp() ORDER BY src.seq FOR UPDATE OF src SKIP LOCKED;
+  WHERE c.eligible_at<=observed ORDER BY src.seq FOR UPDATE OF src SKIP LOCKED;
 BEGIN
  PERFORM check_execution();
  IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
  -- FETCH NEXT avoids PL/pgSQL FOR's prefetch locks and never reopens an exhausted scan.
  -- ref: PostgreSQL REL_17_6 src/pl/plpgsql/src/pl_exec.c exec_stmt_fetch/exec_for_query.
+ observed:=clock_timestamp();
  OPEN candidates;
  LOOP
   EXIT WHEN used>=p_limit;
@@ -618,9 +639,9 @@ BEGIN
   RAISE EXCEPTION 'invalid wakeup scope' USING ERRCODE='22023';
  END IF;
  observed:=clock_timestamp();
- RETURN QUERY SELECT coalesce(bool_or(c.eligible_at<=observed),false),
-  floor(extract(epoch FROM (min(c.eligible_at) FILTER(WHERE c.eligible_at>observed)-observed))*1000000)::bigint
- FROM outbox_candidates(p_tenant,p_domain) c;
+ RETURN QUERY SELECT EXISTS(SELECT FROM outbox_candidates(p_tenant,p_domain) c WHERE c.eligible_at<=observed),
+  (SELECT floor(extract(epoch FROM (c.eligible_at-observed))*1000000)::bigint
+   FROM outbox_candidates(p_tenant,p_domain) c WHERE c.eligible_at>observed ORDER BY c.eligible_at LIMIT 1);
 END $f$;
 
 ALTER FUNCTION rss_transactional_messaging.next_outbox_wakeup(uuid,text) OWNER TO rss_tmsg_relay;

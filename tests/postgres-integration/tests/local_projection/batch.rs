@@ -479,7 +479,10 @@ async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
 async fn index_admission(f: &Fixture) -> anyhow::Result<()> {
     for name in [
         "outbox_unfinished_partition",
-        "outbox_unpartitioned_candidates",
+        "outbox_one_head",
+        "outbox_pending_due",
+        "outbox_lease_due",
+        "outbox_stale_retry",
     ] {
         let original:String=sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE schemaname='rss_transactional_messaging' AND indexname=$1").bind(name).fetch_one(&f.owner).await?;
         let drop = format!("DROP INDEX rss_transactional_messaging.{name}");

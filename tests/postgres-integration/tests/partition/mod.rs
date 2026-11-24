@@ -682,8 +682,8 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
             PgStorageContractFailure::Functions,
         ),
         (
-            "CREATE FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea) RETURNS text LANGUAGE sql AS 'SELECT NULL::text'",
-            "DROP FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)",
+            "CREATE FUNCTION rss_transactional_messaging.append_outbox(integer) RETURNS text LANGUAGE sql AS 'SELECT NULL::text'",
+            "DROP FUNCTION rss_transactional_messaging.append_outbox(integer)",
             PgStorageContractFailure::Functions,
         ),
         (
