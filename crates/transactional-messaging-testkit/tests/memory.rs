@@ -259,9 +259,7 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
         .next()
         .ok_or("expired claim")?;
     assert_eq!(
-        store
-            .extend(&claim, expired_deadline(&clock)?)
-            .await?,
+        store.extend(&claim, expired_deadline(&clock)?).await?,
         OutboxLeaseStatus::Lost
     );
     let error = match store

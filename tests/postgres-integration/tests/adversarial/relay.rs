@@ -1,4 +1,6 @@
 use super::*;
+mod fencing;
+mod probe;
 use rss_transactional_messaging::{
     message::*,
     observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
@@ -35,53 +37,49 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         ("expired-window", Some(-1_i64), "dead_letter", 0),
     ] {
         let id = format!("real-relay-{case}");
-        let template = message(&id);
-        let m = template.metadata();
-        let domain = MessagingDomain::parse(&id)?;
-        let envelope = MessageEnvelope::new(
-            template.id().clone(),
-            MessageMetadata::new(
-                AuthoredMessageMetadata::new(
-                    m.tenant_id(),
-                    m.occurred_at(),
-                    domain.clone(),
-                    m.route().clone(),
-                    m.contract().clone(),
-                ),
-                MessageMetadataExtensions::default(),
-            ),
-            vec![1],
-        );
-        let store = Arc::new(PgOutboxStore::<()>::new(runtime.clone(), domain, budget)?);
-        let append_store = store.clone();
-        let tenant = envelope.metadata().tenant_id();
-        runtime
-            .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
-                Box::pin(async move {
-                    append_store
-                        .append(tx, PendingMessage::new(envelope))
-                        .await
-                        .map_err(Into::into)
-                })
-            })
-            .await
-            .fold(Ok, Err, Err, Err, Err, Err)?;
+        let tenant = crate::fixture_tenant();
+        let store = seed(runtime.clone(), &id, tenant, budget).await?;
         if let Some(seconds) = window {
             sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+$2*interval '1 second' WHERE message_id=$1")
                 .bind(&id).bind(seconds).execute(owner).await?;
         }
-        let publisher = MemoryPublisher::new([PublishOutcome::Confirmed(())]);
-        let report = relay_once(
-            crate::execution(crate::fixture_tenant(), 1),
-            &*store,
-            &publisher,
-            &Timer::new(),
-            &Emitter,
-            std::num::NonZeroUsize::MIN,
-        )
-        .await?;
-        assert_eq!(report.claimed(), 1);
-        assert_eq!(publisher.message_ids().len(), broker_calls);
+        if case == "normal" {
+            probe::install(owner).await?;
+            let publisher = probe::PublisherProbe {
+                owner,
+                transactions: Default::default(),
+            };
+            let report = relay_once(
+                crate::execution(tenant, 1),
+                &*store,
+                &publisher,
+                &Timer::new(),
+                &Emitter,
+                std::num::NonZeroUsize::MIN,
+            )
+            .await?;
+            probe::remove(owner).await?;
+            let transactions = publisher.transactions.into_inner().expect("probe");
+            eprintln!(
+                "relay_prepare transactions={} xids={transactions:?}",
+                transactions.len()
+            );
+            assert_eq!(transactions.len(), 1, "preparation transactions");
+            assert_eq!(report.published(), 1);
+        } else {
+            let publisher = MemoryPublisher::new([PublishOutcome::Confirmed(())]);
+            let report = relay_once(
+                crate::execution(crate::fixture_tenant(), 1),
+                &*store,
+                &publisher,
+                &Timer::new(),
+                &Emitter,
+                std::num::NonZeroUsize::MIN,
+            )
+            .await?;
+            assert_eq!(report.claimed(), 1);
+            assert_eq!(publisher.message_ids().len(), broker_calls);
+        }
         let actual: String = sqlx::query_scalar(
             "SELECT status FROM rss_transactional_messaging.outbox WHERE message_id=$1",
         )
@@ -90,5 +88,44 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
         .await?;
         assert_eq!(actual, expected);
     }
-    Ok(())
+    fencing::run(runtime, owner, budget).await
+}
+
+async fn seed(
+    runtime: Arc<PgRuntime>,
+    id: &str,
+    tenant: rss_request_context::TenantId,
+    budget: DeliveryBudget,
+) -> anyhow::Result<Arc<PgOutboxStore<()>>> {
+    let template = message(id);
+    let m = template.metadata();
+    let domain = MessagingDomain::parse(id)?;
+    let envelope = MessageEnvelope::new(
+        template.id().clone(),
+        MessageMetadata::new(
+            AuthoredMessageMetadata::new(
+                tenant,
+                m.occurred_at(),
+                domain.clone(),
+                m.route().clone(),
+                m.contract().clone(),
+            ),
+            MessageMetadataExtensions::default(),
+        ),
+        vec![1],
+    );
+    let store = Arc::new(PgOutboxStore::<()>::new(runtime.clone(), domain, budget)?);
+    let append_store = store.clone();
+    runtime
+        .local_tx(crate::execution(tenant, 1), deadline(), move |tx| {
+            Box::pin(async move {
+                append_store
+                    .append(tx, PendingMessage::new(envelope))
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+        .await
+        .fold(Ok, Err, Err, Err, Err, Err)?;
+    Ok(store)
 }

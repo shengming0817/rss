@@ -2,9 +2,9 @@
 // reason: deterministic in-memory fixtures must fail loudly on poisoned locks or script drift.
 
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
+mod support;
 #[path = "relay/worker.rs"]
 mod worker;
-mod support;
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -188,7 +188,14 @@ fn partitioned_message(id: &str, partition: Option<&str>) -> PendingMessage<Vec<
                 .expect("schema"),
             ),
         ),
-        MessageMetadataExtensions::new(None, partition.map(|key| rss_transactional_messaging::message::PartitionKey::parse(key).expect("partition")), None, BTreeMap::new()),
+        MessageMetadataExtensions::new(
+            None,
+            partition.map(|key| {
+                rss_transactional_messaging::message::PartitionKey::parse(key).expect("partition")
+            }),
+            None,
+            BTreeMap::new(),
+        ),
     );
     PendingMessage::new(MessageEnvelope::new(
         MessageId::parse(id).expect("id"),
@@ -497,7 +504,13 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
         Arc::clone(&publisher),
         Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
-        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
+        RelayConfig::new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), cancellation.clone()));
@@ -532,7 +545,13 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
         Arc::new(ScriptedPublisher::new([])),
         Arc::new(FakeClock::new()),
         Arc::new(NoopEmitter),
-        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
+        RelayConfig::new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .expect("config"),
     );
     let (registration, status) = worker.into_registration(
         execution(fixture_tenant(), 1),
@@ -573,7 +592,13 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
         Arc::new(ScriptedPublisher::new([])),
         Arc::new(ScriptedTimer::new([1, 2])),
         Arc::new(NoopEmitter),
-        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
+        RelayConfig::new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), cancellation.clone()));
@@ -1069,7 +1094,13 @@ async fn directly_awaited_relay_accepts_borrowed_timer_and_stops_before_claim() 
         Arc::new(ScriptedPublisher::new([])),
         Arc::new(support::BorrowedTimer(&timer)),
         Arc::new(NoopEmitter),
-        RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, Duration::from_millis(100), Duration::from_millis(200)).expect("config"),
+        RelayConfig::new(
+            NonZeroUsize::MIN,
+            NonZeroUsize::MIN,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .expect("config"),
     );
     let cancellation = tokio_util::sync::CancellationToken::new();
     cancellation.cancel();

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use futures::stream::{self, FuturesUnordered, StreamExt as _};
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging::observability::{
     TransactionalMessagingDisposition, TransactionalMessagingEmitter,
     TransactionalMessagingObservation, TransactionalMessagingRelayPhase,
@@ -21,7 +22,6 @@ use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
     Publisher,
 };
-use rss_transactional_messaging::fence::ExecutionBinding;
 
 const MIN_SCAN_DELAY: Duration = Duration::from_millis(100);
 
@@ -50,24 +50,37 @@ impl RelayConfig {
         if idle_scan_interval.min(error_backoff) < MIN_SCAN_DELAY {
             return Err(RelayConfigError);
         }
-        Ok(Self { claim_limit, max_in_flight, idle_scan_interval, error_backoff })
+        Ok(Self {
+            claim_limit,
+            max_in_flight,
+            idle_scan_interval,
+            error_backoff,
+        })
     }
 
     /// Maximum number of durable claims per request.
     #[must_use]
-    pub const fn claim_limit(self) -> NonZeroUsize { self.claim_limit }
+    pub const fn claim_limit(self) -> NonZeroUsize {
+        self.claim_limit
+    }
 
     /// Maximum number of claims being prepared, published or settled.
     #[must_use]
-    pub const fn max_in_flight(self) -> NonZeroUsize { self.max_in_flight }
+    pub const fn max_in_flight(self) -> NonZeroUsize {
+        self.max_in_flight
+    }
 
     /// Time between empty scans in the absence of completed work.
     #[must_use]
-    pub const fn idle_scan_interval(self) -> Duration { self.idle_scan_interval }
+    pub const fn idle_scan_interval(self) -> Duration {
+        self.idle_scan_interval
+    }
 
     /// Minimum wait before a new scan after a recoverable infrastructure error.
     #[must_use]
-    pub const fn error_backoff(self) -> Duration { self.error_backoff }
+    pub const fn error_backoff(self) -> Duration {
+        self.error_backoff
+    }
 }
 
 /// Counts the closed outcomes produced by one bounded relay batch.
@@ -182,9 +195,15 @@ async fn claim_heads<P, S: OutboxRelayStore<P>>(
     {
         Ok(claims) if claims.len() <= limit.get() => claims,
         Ok(_) => {
-            let error = MessagingError::new(MessagingErrorKind::Invariant,
-                std::io::Error::other("outbox batch exceeds requested capacity"));
-            emit_runtime_failure(emitter, TransactionalMessagingRuntimePhase::RelayClaim, &error);
+            let error = MessagingError::new(
+                MessagingErrorKind::Invariant,
+                std::io::Error::other("outbox batch exceeds requested capacity"),
+            );
+            emit_runtime_failure(
+                emitter,
+                TransactionalMessagingRuntimePhase::RelayClaim,
+                &error,
+            );
             return Err(error);
         }
         Err(error) => {
@@ -429,12 +448,24 @@ where
                 match claims {
                     Ok(batch) if batch.is_empty() => {
                         if before == active.len() && matches!(admission, Admission::Ready) {
-                            admission = Admission::delay(clock, emitter, self.config.idle_scan_interval, Admission::Idle);
+                            admission = Admission::delay(
+                                clock,
+                                emitter,
+                                self.config.idle_scan_interval,
+                                Admission::Idle,
+                            );
                         }
                     }
                     Ok(batch) => {
                         for claim in batch {
-                            active.push(relay_claim(store, self.publisher.as_ref(), clock, budget, emitter, claim));
+                            active.push(relay_claim(
+                                store,
+                                self.publisher.as_ref(),
+                                clock,
+                                budget,
+                                emitter,
+                                claim,
+                            ));
                         }
                     }
                     Err(error) => admission.failed(error, &self.config, clock, emitter),
@@ -507,10 +538,15 @@ impl Admission {
         clock: &impl ExecutionTimer,
         emitter: &impl TransactionalMessagingEmitter,
     ) {
-        if matches!(self, Self::Stopped(_)) { return; }
+        if matches!(self, Self::Stopped(_)) {
+            return;
+        }
         *self = match error.kind() {
             MessagingErrorKind::Transient | MessagingErrorKind::DeadlineElapsed => {
-                tracing::warn!(error_kind = error.kind().as_label(), "relay admission will retry");
+                tracing::warn!(
+                    error_kind = error.kind().as_label(),
+                    "relay admission will retry"
+                );
                 Self::delay(clock, emitter, config.error_backoff, Self::Backoff)
             }
             _ => Self::Stopped(error),
