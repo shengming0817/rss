@@ -161,7 +161,10 @@ pub async fn drained(p: &KafkaPublisher) -> anyhow::Result<()> {
     Ok(())
 }
 pub fn assert_record(record: &OwnedMessage, id: &str) {
-    assert_eq!(record.payload(), Some([0u8, 255, 128].as_slice()));
+    assert_record_payload(record, id, &[0, 255, 128]);
+}
+pub fn assert_record_payload(record: &OwnedMessage, id: &str, payload: &[u8]) {
+    assert_eq!(record.payload(), Some(payload));
     assert_eq!(record.key(), Some(b"tenant:key".as_slice()));
     let headers: BTreeMap<_, _> = record
         .headers()

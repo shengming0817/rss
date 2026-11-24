@@ -9,34 +9,6 @@ pub(crate) struct Record {
     pub(crate) payload: Vec<u8>,
     pub(crate) headers: OwnedHeaders,
 }
-/// Header names form this adapter's wire representation; attributes cannot shadow them.
-fn headers(message: &MessageEnvelope<Vec<u8>>, mut emit: impl FnMut(&str, &str)) {
-    let m = message.metadata();
-    emit("messageId", message.id().as_str());
-    emit("tenantId", &m.tenant_id().to_string());
-    emit("domain", m.domain().as_str());
-    emit("route", m.route().as_str());
-    emit("contractId", m.contract().id().as_str());
-    emit("schemaVersion", &m.contract().version().to_string());
-    emit("schemaHash", m.contract().schema_digest().as_str());
-    emit("occurredAt", &m.occurred_at().unix_seconds().to_string());
-    if let Some(p) = m.partition() {
-        emit("partitionKey", p.key().as_str());
-    }
-    if let Some(v) = m.correlation() {
-        emit("correlation", v);
-    }
-    if let Some(v) = m.causation() {
-        emit("causationId", v.as_str());
-    }
-    if let Some(v) = message.transport_context().trace() {
-        emit("trace", v);
-    }
-    if let Some(v) = message.transport_context().tenant_authority() {
-        emit("tenantAuthority", v);
-    }
-    // Attributes are visited separately, avoiding an unbounded format! allocation during preflight.
-}
 impl Record {
     pub(crate) fn encode(message: &MessageEnvelope<Vec<u8>>, config: &PublishPlan) -> Option<Self> {
         if message.metadata().domain() != &config.domain {
@@ -48,47 +20,64 @@ impl Record {
             .len()
             .checked_add(message.payload().len())?
             .checked_add(key.map_or(0, str::len))?;
-        let mut valid = size <= config.limits.record_bytes;
-        let mut add = |name: &str, value: &str| {
-            // Include a conservative fixed per-header framing/allocation charge, even for empty values.
-            match size
-                .checked_add(name.len())
-                .and_then(|n| n.checked_add(value.len()))
-                .and_then(|n| n.checked_add(64))
-            {
-                Some(n) if n <= config.limits.record_bytes => size = n,
-                _ => valid = false,
-            }
-        };
-        headers(message, &mut add);
-        if !valid {
+        if size > config.limits.record_bytes {
             return None;
         }
-        for (k, v) in message.metadata().attributes() {
-            if k.contains('\0') {
-                return None;
-            }
+        let m = message.metadata();
+        let context = message.transport_context();
+        let tenant = m.tenant_id().to_string();
+        let version = m.contract().version().to_string();
+        let occurred = m.occurred_at().unix_seconds().to_string();
+        let required = [
+            ("messageId", message.id().as_str()),
+            ("tenantId", tenant.as_str()),
+            ("domain", m.domain().as_str()),
+            ("route", m.route().as_str()),
+            ("contractId", m.contract().id().as_str()),
+            ("schemaVersion", version.as_str()),
+            ("schemaHash", m.contract().schema_digest().as_str()),
+            ("occurredAt", occurred.as_str()),
+        ];
+        let optional = [
+            key.map(|v| ("partitionKey", v)),
+            m.correlation().map(|v| ("correlation", v)),
+            m.causation().map(|v| ("causationId", v.as_str())),
+            context.trace().map(|v| ("trace", v)),
+            context.tenant_authority().map(|v| ("tenantAuthority", v)),
+        ];
+        let headers = required.into_iter().chain(optional.into_iter().flatten());
+        let mut count = 0;
+        for (name, value) in headers.clone() {
             size = size
-                .checked_add(k.len())?
-                .checked_add(v.len())?
-                .checked_add(128 + "attribute.".len())?;
+                .checked_add(name.len())?
+                .checked_add(value.len())?
+                .checked_add(64)?;
             if size > config.limits.record_bytes {
                 return None;
             }
+            count += 1;
         }
-        let mut pairs = Vec::new();
-        headers(message, |k, v| pairs.push((k.to_owned(), v.to_owned())));
-        pairs.extend(
-            message
-                .metadata()
-                .attributes()
-                .map(|(k, v)| (format!("attribute.{k}"), v.to_owned())),
-        );
-        let mut wire = OwnedHeaders::new_with_capacity(pairs.len());
-        for (k, v) in &pairs {
+        for (name, value) in m.attributes() {
+            size = size
+                .checked_add(name.len())?
+                .checked_add(value.len())?
+                .checked_add(128 + "attribute.".len())?;
+            if size > config.limits.record_bytes || name.contains('\0') {
+                return None;
+            }
+            count += 1;
+        }
+        let mut wire = OwnedHeaders::new_with_capacity(count);
+        for (key, value) in headers {
             wire = wire.insert(Header {
-                key: k,
-                value: Some(v.as_str()),
+                key,
+                value: Some(value),
+            });
+        }
+        for (name, value) in m.attributes() {
+            wire = wire.insert(Header {
+                key: &format!("attribute.{name}"),
+                value: Some(value),
             });
         }
         Some(Self {

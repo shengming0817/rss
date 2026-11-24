@@ -1,7 +1,7 @@
 use super::support::*;
 use anyhow::Context;
 use rdkafka::{
-    ClientConfig,
+    ClientConfig, Message,
     admin::{AdminClient, AdminOptions, AlterConfig, ResourceSpecifier},
 };
 use rss_request_context::Clock;
@@ -17,17 +17,25 @@ async fn shared_kafka_resource_budget_and_broker_rejection() -> anyhow::Result<(
     tokio::time::timeout(Duration::from_secs(110), async {
         let fixture = testkit::shared_kafka_tls().await?;
         let baseline = resident_bytes()?;
-        let peak = measure_peak(async {
-            steady_load(&fixture).await?;
-            saturated_queue(&fixture).await
+        let (peak, receipt) = measure_peak(async {
+            let receipt = steady_load(&fixture).await?;
+            saturated_queue(&fixture).await?;
+            Ok(receipt)
         }).await?;
         emit(&format!("memory payload_bytes={PAYLOAD_BYTES} record_bytes={RECORD_BYTES} baseline_rss_bytes={baseline} sampled_peak_rss_bytes={peak} teardown_rss_bytes={} sample_interval_ms=25 scope=client_process_rust_and_native", resident_bytes()?))?;
+        let records = read_records(&fixture, "load-sample", 1).await?;
+        let record = &records[0];
+        assert_record_payload(record, "load-sample", &vec![42; PAYLOAD_BYTES]);
+        assert_eq!(
+            (record.topic(), record.partition(), record.offset()),
+            (receipt.topic(), receipt.partition(), receipt.offset())
+        );
         broker_rejection(&fixture).await
     }).await??;
     Ok(())
 }
 
-async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
+async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<KafkaPublishReceipt> {
     let timeouts = KafkaTimeouts::new(
         Duration::from_secs(15),
         Duration::from_secs(20),
@@ -46,29 +54,43 @@ async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
     let timer = Timer::new();
     let start = timer.now();
     let mut workers = tokio::task::JoinSet::new();
-    for _ in 0..32 {
+    let sample = Arc::new(MessageEnvelope::new(
+        rss_transactional_messaging::message::MessageId::parse("load-sample")?,
+        message.metadata().clone(),
+        message.payload().clone(),
+    ));
+    for worker in 0..32 {
+        let sample = sample.clone();
         let publisher = publisher.clone();
         let message = message.clone();
         workers.spawn(async move {
             let timer = Timer::new();
             let mut latencies = Vec::new();
-            for _ in 0..32 {
+            let mut sample_receipt = None;
+            for index in 0..32 {
+                let is_sample = worker == 0 && index == 0;
+                let input = if is_sample { &sample } else { &message };
                 let start = timer.now();
                 let outcome = publisher
-                    .publish(&message, deadline(Duration::from_secs(5))?)
+                    .publish(input, deadline(Duration::from_secs(5))?)
                     .await;
-                anyhow::ensure!(
-                    matches!(outcome, PublishOutcome::Confirmed(_)),
-                    "load publication was not confirmed"
-                );
+                let PublishOutcome::Confirmed(receipt) = outcome else {
+                    anyhow::bail!("load publication was not confirmed");
+                };
+                if is_sample {
+                    sample_receipt = Some(receipt);
+                }
                 latencies.push(timer.now().saturating_duration_since(start).as_micros());
             }
-            Ok::<_, anyhow::Error>(latencies)
+            Ok::<_, anyhow::Error>((latencies, sample_receipt))
         });
     }
     let mut latencies = Vec::new();
+    let mut receipt = None;
     while let Some(result) = workers.join_next().await {
-        latencies.extend(result??);
+        let (times, sample) = result??;
+        latencies.extend(times);
+        receipt = receipt.or(sample);
     }
     let elapsed = timer.now().saturating_duration_since(start).as_secs_f64();
     latencies.sort_unstable();
@@ -82,7 +104,8 @@ async fn steady_load(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
         latencies[511],
         latencies[972],
         latencies[1013]
-    ))
+    ))?;
+    receipt.context("missing sample receipt")
 }
 
 async fn saturated_queue(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
@@ -90,7 +113,7 @@ async fn saturated_queue(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
         64,
         1,
         RECORD_BYTES,
-        16_000_000,
+        32_000_000,
         KafkaTimeouts::low_latency(Duration::from_secs(10))?,
     )?;
     let (publisher, resource) =
@@ -122,16 +145,19 @@ async fn saturated_queue(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
         );
     }
     assert_eq!(publisher.pending_for_test(), 1);
-    let outcome = publisher
-        .publish(&message, deadline(Duration::from_secs(1))?)
-        .await;
-    // A failure with no ambiguity is definite non-publication.
-    assert!(!outcome.is_ambiguous());
-    let failure = outcome.failure().context("missing refusal")?;
-    assert_eq!(failure.kind(), PublishFailureKind::Transient);
-    assert_eq!(failure.stage(), PublishFailureStage::Admission);
+    for _ in 0..256 {
+        let outcome = publisher
+            .publish(&message, deadline(Duration::from_secs(1))?)
+            .await;
+        let PublishOutcome::DefinitelyNotPublished(failure) = outcome else {
+            anyhow::bail!("saturated admission must refuse before native send");
+        };
+        assert_eq!(failure.kind(), PublishFailureKind::Transient);
+        assert_eq!(failure.stage(), PublishFailureStage::Admission);
+        assert_eq!(failure.reason(), PublishFailureReason::TransportUnavailable);
+    }
     emit(&format!(
-        "saturated queued=64 in_flight=1 budget_bytes=16000000 queued_ambiguous=64 cancelled_pending=1 refused=1 full_queue_rss_bytes={}",
+        "saturated queued=64 in_flight=1 budget_bytes=32000000 queued_ambiguous=64 cancelled_pending=1 refused=256 full_queue_rss_bytes={}",
         resident_bytes()?
     ))?;
     let _ = release.send(());
@@ -192,15 +218,15 @@ async fn broker_rejection(f: &testkit::KafkaTlsFixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn measure_peak(
-    operation: impl Future<Output = anyhow::Result<()>>,
-) -> anyhow::Result<usize> {
+async fn measure_peak<T>(
+    operation: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<(usize, T)> {
     tokio::pin!(operation);
     let mut interval = tokio::time::interval(Duration::from_millis(25));
     let mut peak = resident_bytes()?;
     loop {
         tokio::select! {
-            result = &mut operation => { result?; return Ok(peak.max(resident_bytes()?)); }
+            result = &mut operation => return Ok((peak.max(resident_bytes()?), result?)),
             _ = interval.tick() => { peak = peak.max(resident_bytes()?); }
         }
     }

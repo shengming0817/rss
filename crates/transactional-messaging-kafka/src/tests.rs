@@ -1,8 +1,9 @@
 use super::*;
 use crate::{
-    engine::{self, Command, Shared},
+    engine::{self, Command, QueuedCommand, Shared},
     record::Record,
 };
+use anyhow::Context;
 use rdkafka::message::Headers;
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::TenantId;
@@ -183,10 +184,10 @@ fn deadline(duration: Duration) -> anyhow::Result<OperationDeadline> {
 fn isolated() -> anyhow::Result<(
     KafkaPublisher,
     KafkaPublisherResource,
-    mpsc::Receiver<Command>,
+    mpsc::Receiver<QueuedCommand>,
 )> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let shared = Arc::new(Shared::new(sender));
+    let (shared, receiver) = Shared::channel(1);
+    let shared = Arc::new(shared);
     Ok((
         publisher::KafkaPublisher::for_unit_test(
             shared.clone(),
@@ -202,7 +203,7 @@ async fn enqueue_is_not_confirmation_and_cancellation_keeps_owned_command() -> a
     let m = message()?;
     let outcome = p.publish(&m, deadline(Duration::from_millis(10))?).await;
     assert!(matches!(outcome, PublishOutcome::Ambiguous(_)));
-    let command = receiver.try_recv()?;
+    let command = receiver.try_recv()?.dequeue();
     assert!(command.reply.is_closed());
     assert_eq!(command.record.payload, m.payload().as_slice());
     drop(owner);
@@ -228,6 +229,117 @@ async fn full_queue_and_closed_owner_are_definite_and_shutdown_seals_unpolled() 
         PublishOutcome::DefinitelyNotPublished(_)
     ));
     drop(closing);
+    Ok(())
+}
+fn definite_refusal(
+    result: Result<tokio::sync::oneshot::Receiver<engine::Outcome>, engine::Outcome>,
+) -> anyhow::Result<PublishFailure> {
+    match result {
+        Err(PublishOutcome::DefinitelyNotPublished(failure)) => Ok(failure),
+        _ => anyhow::bail!("expected a definite pre-enqueue refusal"),
+    }
+}
+#[test]
+fn parallel_reservations_do_not_delay_sealing_or_hold_a_sender() -> anyhow::Result<()> {
+    let (shared, receiver) = Shared::channel(2);
+    let plan = config()?.into_parts().0;
+    let m = message()?;
+    let end = engine::now() + Duration::from_secs(5);
+    std::thread::scope(|scope| -> anyhow::Result<()> {
+        let (entered, encoding) = mpsc::channel();
+        let mut releases = Vec::new();
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let (release, wait) = mpsc::channel();
+            releases.push(release);
+            let entered = entered.clone();
+            let (shared, m, plan) = (&shared, &m, &plan);
+            workers.push(scope.spawn(move || {
+                shared.enqueue(end, || {
+                    entered.send(()).ok()?;
+                    wait.recv_timeout(Duration::from_secs(5)).ok()?;
+                    Record::encode(m, plan)
+                })
+            }));
+        }
+        for _ in 0..2 {
+            encoding.recv_timeout(Duration::from_secs(5))?;
+        }
+        let mut encode_calls = 0;
+        let refused = definite_refusal(shared.enqueue(end, || {
+            encode_calls += 1;
+            Record::encode(&m, &plan)
+        }))?;
+        assert_eq!(Some(refused), engine::unavailable().failure());
+        assert_eq!(encode_calls, 0);
+        shared.close(end);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        for release in releases {
+            release.send(())?;
+        }
+        for worker in workers {
+            let result = worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("encoder thread panicked"))?;
+            assert_eq!(
+                Some(definite_refusal(result)?),
+                engine::unavailable().failure()
+            );
+        }
+        // Both slots have returned. Only the closed semaphore can skip this encoder now.
+        let fresh_deadline = engine::now() + Duration::from_secs(5);
+        let refused = definite_refusal(shared.enqueue(fresh_deadline, || {
+            encode_calls += 1;
+            Record::encode(&m, &plan)
+        }))?;
+        assert_eq!(Some(refused), engine::unavailable().failure());
+        assert_eq!(encode_calls, 0);
+        Ok(())
+    })
+}
+
+#[test]
+fn abandoned_expired_and_dequeued_records_return_capacity() -> anyhow::Result<()> {
+    let (shared, queue) = Shared::channel(1);
+    let plan = config()?.into_parts().0;
+    let m = message()?;
+    let end = engine::now() + Duration::from_secs(5);
+    assert_eq!(
+        definite_refusal(shared.enqueue(end, || None))?.stage(),
+        PublishFailureStage::Encode
+    );
+    let cutoff = engine::now() + Duration::from_millis(100);
+    let mut encoded = false;
+    let expired = definite_refusal(shared.enqueue(cutoff, || {
+        let record = Record::encode(&m, &plan);
+        encoded = true;
+        std::thread::sleep(cutoff.saturating_duration_since(engine::now()));
+        record
+    }))?;
+    assert!(encoded);
+    assert_eq!(Some(expired), engine::expired().failure());
+    assert!(matches!(queue.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    let reply = shared
+        .enqueue(end, || Record::encode(&m, &plan))
+        .ok()
+        .context("expected capacity after expiry")?;
+    drop(reply);
+    let mut encode_calls = 0;
+    for _ in 0..128 {
+        // Even a cancelled caller's queued record still owns one slot.
+        let refused = definite_refusal(shared.enqueue(end, || {
+            encode_calls += 1;
+            Record::encode(&m, &plan)
+        }))?;
+        assert_eq!(Some(refused), engine::unavailable().failure());
+    }
+    assert_eq!(encode_calls, 0);
+    let command = queue.try_recv()?.dequeue();
+    assert!(command.reply.is_closed());
+    assert!(shared.enqueue(end, || Record::encode(&m, &plan)).is_ok());
     Ok(())
 }
 #[tokio::test]
@@ -259,8 +371,8 @@ async fn invalid_lifecycle_budget_is_not_a_record_limit_error() -> anyhow::Resul
 
 #[test]
 fn host_runtime_does_not_wait_for_detached_owner_completion() -> anyhow::Result<()> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let shared = Arc::new(Shared::new(sender));
+    let (shared, receiver) = Shared::channel(1);
+    let shared = Arc::new(shared);
     let (done, completion) = tokio::sync::oneshot::channel();
     let host = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -365,16 +477,25 @@ fn finite_limits_replace_policy_ceilings_and_check_aggregate_budget() -> anyhow:
             Err(KafkaError::InvalidLimits)
         ));
     }
-    for record in [1023usize, 1024, 1025] {
+    let channel_slot = std::mem::size_of::<(std::sync::atomic::AtomicUsize, QueuedCommand)>();
+    let largest_channel = isize::MAX as usize / channel_slot;
+    // Only validate the layouts; allocating even the representable neighbour is unnecessary.
+    assert!(KafkaLimits::new(largest_channel, 1, 1, usize::MAX, timeouts).is_ok());
+    assert!(matches!(
+        KafkaLimits::new(largest_channel + 1, 1, 1, usize::MAX, timeouts),
+        Err(KafkaError::InvalidLimits)
+    ));
+    for (queued, record) in [(1, 1023usize), (2, 1024), (64, 1025)] {
         let rounded_native = record.div_ceil(1024) * 1024;
-        let required = 4 * record
+        let required = (2 * queued + 1) * record
             + rounded_native
-            + 3 * std::mem::size_of::<Command>()
+            + queued * (channel_slot + std::mem::size_of::<QueuedCommand>())
+            + std::mem::size_of::<Command>()
             + engine::pending_entry_bytes();
-        assert!(KafkaLimits::new(1, 1, record, required, timeouts).is_ok());
-        assert!(KafkaLimits::new(1, 1, record, required - 1, timeouts).is_err());
+        assert!(KafkaLimits::new(queued, 1, record, required, timeouts).is_ok());
+        assert!(KafkaLimits::new(queued, 1, record, required - 1, timeouts).is_err());
         let mut c = config()?;
-        c.plan.limits = KafkaLimits::new(1, 1, record, required, timeouts)?;
+        c.plan.limits = KafkaLimits::new(queued, 1, record, required, timeouts)?;
         assert_eq!(
             c.client()
                 .create_native_config()?

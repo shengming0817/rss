@@ -126,7 +126,12 @@ impl KafkaLimits {
         timeouts: KafkaTimeouts,
     ) -> Result<Self, KafkaError> {
         let invalid = KafkaError::InvalidLimits;
-        if queued == 0 || in_flight == 0 || record_bytes == 0 || total_budget_bytes == 0 {
+        if queued == 0
+            || queued > tokio::sync::Semaphore::MAX_PERMITS
+            || in_flight == 0
+            || record_bytes == 0
+            || total_budget_bytes == 0
+        {
             return Err(invalid);
         }
         i32::try_from(in_flight).map_err(|_| invalid)?;
@@ -160,19 +165,26 @@ impl KafkaLimits {
         record: usize,
         native: usize,
     ) -> Option<usize> {
-        // One worker-owned command plus a candidate being encoded (including header pairs/copies).
+        // Every slot can be encoding simultaneously. The single worker owns its dequeued record.
         let records = queued
-            .checked_add(3)?
+            .checked_mul(2)?
+            .checked_add(1)?
             .checked_mul(record)?
             .checked_add(native)?;
-        let commands = queued
-            .checked_add(2)?
-            .checked_mul(std::mem::size_of::<crate::engine::Command>())?;
+        // Channel backing slots coexist with candidates on publishing threads.
+        // Rust 1.96 std::sync::mpmc::array::Slot<T> stores an atomic stamp beside each T.
+        // Layout::array checks both multiplication and the platform's single-allocation limit.
+        let channel = std::alloc::Layout::array::<(
+            std::sync::atomic::AtomicUsize,
+            crate::engine::QueuedCommand,
+        )>(queued)
+        .ok()?;
+        let candidates = queued.checked_mul(std::mem::size_of::<crate::engine::QueuedCommand>())?;
+        let commands = channel
+            .size()
+            .checked_add(candidates)?
+            .checked_add(std::mem::size_of::<crate::engine::Command>())?;
         let pending = in_flight.checked_mul(crate::engine::pending_entry_bytes())?;
-        // Rust channel allocation must also be representable independently of its record charge.
-        if commands > isize::MAX as usize {
-            return None;
-        }
         records.checked_add(commands)?.checked_add(pending)
     }
 }

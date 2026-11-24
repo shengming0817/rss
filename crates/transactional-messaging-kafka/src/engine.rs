@@ -18,7 +18,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, mpsc},
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 pub(crate) type Outcome = PublishOutcome<KafkaPublishReceipt>;
 type Reply = oneshot::Sender<Outcome>;
@@ -32,13 +32,24 @@ pub(crate) struct Command {
     pub(crate) deadline: Instant,
     pub(crate) reply: Reply,
 }
-pub(crate) struct Admission {
-    pub(crate) sender: Option<mpsc::SyncSender<Command>>,
-    pub(crate) close: Option<Instant>,
+pub(crate) struct QueuedCommand {
+    // Drop the record before returning its slot on rejected/abandoned commands.
+    command: Command,
+    _slot: OwnedSemaphorePermit,
+}
+impl QueuedCommand {
+    pub(crate) fn dequeue(self) -> Command {
+        self.command
+    }
+}
+struct Admission {
+    sender: Option<mpsc::SyncSender<QueuedCommand>>,
+    close: Option<Instant>,
     failed: bool,
 }
 pub(crate) struct Shared {
-    pub(crate) admission: Mutex<Admission>,
+    admission: Mutex<Admission>,
+    slots: Arc<Semaphore>,
     pending: Mutex<HashMap<usize, Reply>>,
     #[cfg(feature = "test-support")]
     pub(crate) gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
@@ -46,8 +57,10 @@ pub(crate) struct Shared {
     pub(crate) pre_send_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 impl Shared {
-    pub(crate) fn new(sender: mpsc::SyncSender<Command>) -> Self {
-        Self {
+    pub(crate) fn channel(capacity: usize) -> (Self, mpsc::Receiver<QueuedCommand>) {
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        let shared = Self {
+            slots: Arc::new(Semaphore::new(capacity)),
             admission: Mutex::new(Admission {
                 sender: Some(sender),
                 close: None,
@@ -58,18 +71,62 @@ impl Shared {
             gate: Mutex::new(None),
             #[cfg(feature = "test-support")]
             pre_send_gate: Mutex::new(None),
+        };
+        (shared, receiver)
+    }
+    pub(crate) fn enqueue(
+        &self,
+        deadline: Instant,
+        encode: impl FnOnce() -> Option<Record>,
+    ) -> Result<oneshot::Receiver<Outcome>, Outcome> {
+        let slot = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| unavailable())?;
+        if now() >= deadline {
+            return Err(expired());
         }
+        let record = encode().ok_or_else(|| {
+            PublishOutcome::DefinitelyNotPublished(failure(
+                Kind::Permanent,
+                Stage::Encode,
+                Reason::InvalidMessage,
+            ))
+        })?;
+        let (reply, receiver) = oneshot::channel();
+        let queued = QueuedCommand {
+            command: Command {
+                record,
+                deadline,
+                reply,
+            },
+            _slot: slot,
+        };
+        let sent = {
+            let state = lock(&self.admission);
+            let sender = state.sender.as_ref().ok_or_else(unavailable)?;
+            if now() >= deadline {
+                return Err(expired());
+            }
+            sender.try_send(queued)
+        };
+        // A disconnected receiver can return the entire record. Destroy it outside the lock.
+        sent.map_err(|_| unavailable())?;
+        Ok(receiver)
     }
     pub(crate) fn close(&self, deadline: Instant) {
-        let mut state = lock(&self.admission);
-        state.sender.take();
-        state.close = Some(state.close.map_or(deadline, |old| old.min(deadline)));
+        self.seal(deadline, false);
     }
     fn fail(&self) {
+        self.seal(now(), true);
+    }
+    fn seal(&self, deadline: Instant, failed: bool) {
         let mut state = lock(&self.admission);
-        state.failed = true;
+        self.slots.close();
         state.sender.take();
-        state.close = Some(now());
+        state.failed |= failed;
+        state.close = Some(state.close.map_or(deadline, |old| old.min(deadline)));
     }
     fn failed(&self) -> bool {
         lock(&self.admission).failed
@@ -210,7 +267,7 @@ pub(crate) fn run(
     native: rdkafka::ClientConfig,
     config: Arc<PublishPlan>,
     shared: Arc<Shared>,
-    receiver: mpsc::Receiver<Command>,
+    receiver: mpsc::Receiver<QueuedCommand>,
     startup: oneshot::Sender<Result<(), KafkaError>>,
 ) -> Result<(), KafkaError> {
     let _cleanup = Cleanup(shared.clone());
@@ -241,7 +298,7 @@ pub(crate) fn run(
 fn drive(
     producer: &BaseProducer<Context>,
     shared: &Shared,
-    receiver: &mpsc::Receiver<Command>,
+    receiver: &mpsc::Receiver<QueuedCommand>,
     config: &PublishPlan,
     token: &mut usize,
 ) -> Result<(), KafkaError> {
@@ -257,7 +314,7 @@ fn drive(
             return Err(KafkaError::DeadlineElapsed);
         }
         match receiver.recv_timeout(POLL) {
-            Ok(command) => send(producer, shared, command, config, token)?,
+            Ok(queued) => send(producer, shared, queued.dequeue(), config, token)?,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let end = shared.closing().unwrap_or_else(now);
@@ -280,9 +337,9 @@ fn observe_fatal(producer: &BaseProducer<Context>, shared: &Shared) {
             .error(ProviderError::Global(RDKafkaErrorCode::Fatal), "");
     }
 }
-fn reject_queued(receiver: &mpsc::Receiver<Command>) {
-    while let Ok(command) = receiver.try_recv() {
-        let _ = command.reply.send(unavailable());
+fn reject_queued(receiver: &mpsc::Receiver<QueuedCommand>) {
+    while let Ok(queued) = receiver.try_recv() {
+        let _ = queued.dequeue().reply.send(unavailable());
     }
 }
 fn send(
@@ -362,8 +419,8 @@ fn pause_gate(shared: &Shared, gate: &Mutex<Option<(oneshot::Sender<()>, oneshot
 
 #[cfg(test)]
 pub(crate) fn assert_cleanup_for_unit_test() {
-    let (sender, _receiver) = mpsc::sync_channel(1);
-    let shared = Arc::new(Shared::new(sender));
+    let (shared, _receiver) = Shared::channel(1);
+    let shared = Arc::new(shared);
     let (reply, mut receiver) = oneshot::channel();
     lock(&shared.pending).insert(1, reply);
     drop(Cleanup(shared.clone()));
@@ -418,8 +475,8 @@ fn typed_provider_diagnostics_preserve_auth_timeout_and_unknown() {
 #[cfg(test)]
 #[test]
 fn fatal_callback_seals_owner_and_finishes_pending_as_ambiguous() -> anyhow::Result<()> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let shared = Arc::new(Shared::new(sender));
+    let (shared, receiver) = Shared::channel(1);
+    let shared = Arc::new(shared);
     let (reply, mut result) = oneshot::channel();
     lock(&shared.pending).insert(1, reply);
     let plan = Arc::new(PublishPlan {
@@ -495,9 +552,9 @@ fn callback_logs_identify_client_and_domain_without_provider_text() -> anyhow::R
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
-    let (sender, _receiver) = mpsc::sync_channel(1);
+    let (shared, _receiver) = Shared::channel(1);
     let context = Context {
-        shared: Arc::new(Shared::new(sender)),
+        shared: Arc::new(shared),
         plan: Arc::new(PublishPlan {
             client_id: crate::KafkaClientId::parse("orders-writer")?,
             domain: rss_transactional_messaging::message::MessagingDomain::parse("events")?,
