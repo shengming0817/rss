@@ -26,6 +26,28 @@ async fn slow_page_releases_single_pg_connection_and_checks_lifecycle() -> anyho
     let auth = authority(TENANT)?;
     let q = Authorized::<Query>::verify(&auth, query(&d, QueryMode::History, 1)?)?;
     assert!(f.store.query(&q, None, deadline()?).await?.rows.is_empty());
+    let prototype = sample(&d, "empty", 1, 1)?;
+    let spec = SummarySpec::new(
+        prototype.input().stream.clone(),
+        prototype.input().series.clone(),
+        NonZeroU64::MIN,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let empty = Authorized::<AggregateQuery>::verify(
+        &auth,
+        AggregateQuery::new(
+            spec,
+            Interval::new(Timestamp::new(0)?, Timestamp::new(2)?)?,
+            QueryBudget {
+                max_points: NonZeroU32::MIN,
+                max_series: NonZeroU32::MIN,
+            },
+            AggregateOp::Count,
+        )?,
+    )?;
+    let empty_page = f.store.aggregate(&empty, None, deadline()?).await?;
+    assert!(empty_page.buckets.is_empty() && empty_page.next.is_none());
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.namespaces")
         .fetch_one(&f.admin)
         .await?;
@@ -250,5 +272,86 @@ async fn grouped_pages_apply_matched_fence_budget_and_reject_corrupt_samples() -
         store.query(&q, None, deadline()?).await,
         Err(Error::BudgetExceeded)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fine_retained_summaries_paginate_at_whole_bucket_boundaries() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-ref-budget").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch(
+        "fine",
+        vec![sample(&d, "a", 25, 1)?, sample(&d, "b", 125, 2)?],
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let spec = |width| {
+        SummarySpec::new(
+            b.stream().clone(),
+            b.samples()[0].input().series.clone(),
+            NonZeroU64::new(width).ok_or(Error::Invariant)?,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )
+    };
+    let range = Interval::new(Timestamp::new(0)?, Timestamp::new(200)?)?;
+    f.maintain(
+        "fine",
+        MaintenanceAction::Recompute {
+            spec: spec(50)?,
+            window: range,
+        },
+    )
+    .await?;
+    let selection = spec(50)?.selection();
+    f.maintain(
+        "cut",
+        MaintenanceAction::AdvanceCutoff {
+            selection: selection.clone(),
+            before: range.end(),
+        },
+    )
+    .await?;
+    f.maintain(
+        "prune",
+        MaintenanceAction::Prune {
+            selection,
+            raw_before: range.end(),
+            summaries_before: Timestamp::new(0)?,
+        },
+    )
+    .await?;
+    let mut caps = limits()?;
+    caps.max_points = NonZeroU32::new(2).ok_or(Error::Invariant)?;
+    let q = Authorized::<AggregateQuery>::verify(
+        &authority(TENANT)?,
+        AggregateQuery::new(
+            spec(100)?,
+            range,
+            QueryBudget {
+                max_points: caps.max_points,
+                max_series: NonZeroU32::MIN,
+            },
+            AggregateOp::Count,
+        )?,
+    )?;
+    let store = Fixture::connect_options(
+        &f.ch,
+        f.pool.clone(),
+        TENANT,
+        "ch_reader",
+        "ch_writer",
+        caps,
+    )
+    .await?;
+    let first = store.aggregate(&q, None, deadline()?).await?;
+    assert_eq!(first.buckets.len(), 1);
+    assert!(matches!(first.buckets[0].value, AggregateValue::Count(1)));
+    let second = store
+        .aggregate(&q, Some(&first.next.ok_or(Error::Invariant)?), deadline()?)
+        .await?;
+    assert_eq!(second.buckets.len(), 1);
+    assert!(matches!(second.buckets[0].value, AggregateValue::Count(1)));
+    assert!(second.next.is_none());
     Ok(())
 }

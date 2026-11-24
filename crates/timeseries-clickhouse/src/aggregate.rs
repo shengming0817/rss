@@ -10,6 +10,10 @@ use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::PgConnection;
 type SummaryRef = (i64, i64, String);
+pub(crate) struct References {
+    rows: Vec<SummaryRef>,
+    end: i64,
+}
 pub(crate) fn needs_prior(spec: &SummarySpec) -> bool {
     matches!(
         spec.series().definition().spec().metric,
@@ -192,9 +196,12 @@ impl<C: Clock> Operation<'_, C> {
         c: &mut PgConnection,
         q: &AggregateQuery,
         view: &View<Timestamp>,
-    ) -> Result<Vec<SummaryRef>, Error> {
+    ) -> Result<References, Error> {
         if !view.exists {
-            return Ok(Vec::new());
+            return Ok(References {
+                rows: Vec::new(),
+                end: q.query().window().start().micros(),
+            });
         }
         let scope = q.spec().stream().scope();
         let range = q.query().window();
@@ -212,12 +219,35 @@ impl<C: Clock> Operation<'_, C> {
             .micros()
             .saturating_add(i64::try_from(extra).unwrap_or(i64::MAX))
             .min(range.end().micros());
-        let refs=sqlx::query_as("SELECT lo,hi,object_id::text FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5 AND (dirty_from IS NULL OR dirty_from>$7) ORDER BY lo DESC,hi DESC LIMIT $6")
-            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(q.spec().semantics()?.as_bytes().as_slice()).bind(start.micros()).bind(end).bind(i64::from(self.limits.max_points.get())+1).bind(view.published).fetch_all(c).await.map_err(sql_error)?;
-        if refs.len() > self.limits.max_points.get() as usize {
-            return Err(Error::BudgetExceeded);
+        // Fetch whole buckets in chronological order. If the reference budget runs out
+        // partway through a later bucket, resume at that bucket with a fresh page budget.
+        let mut rows: Vec<SummaryRef> = sqlx::query_as(
+            "SELECT lo,hi,object_id::text FROM rss_ts_ch.summaries
+            WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5
+              AND (dirty_from IS NULL OR dirty_from>$7) AND lo/$8::bigint=(hi-1)/$8::bigint
+            ORDER BY lo,hi LIMIT $6",
+        )
+        .bind(scope.tenant().to_string())
+        .bind(scope.namespace().as_str())
+        .bind(q.spec().semantics()?.as_bytes().as_slice())
+        .bind(start.micros())
+        .bind(end)
+        .bind(i64::from(self.limits.max_points.get()) + 1)
+        .bind(view.published)
+        .bind(i64::try_from(q.resolution_micros().get()).map_err(|_| Error::NumericRange)?)
+        .fetch_all(c)
+        .await
+        .map_err(sql_error)?;
+        let mut end = end;
+        if let Some((lo, _, _)) = rows.get(self.limits.max_points.get() as usize) {
+            end = q.spec().bucket(Timestamp::new(*lo)?)?.start().micros();
+            if end <= start.micros() {
+                return Err(Error::BudgetExceeded);
+            }
+            rows.truncate(rows.partition_point(|row| row.0 < end));
         }
-        Ok(refs)
+        rows.reverse();
+        Ok(References { rows, end })
     }
     async fn cached(
         &self,
@@ -283,7 +313,7 @@ fn cost(bucket: &AggregateBucket) -> usize {
 }
 impl Request for AggregateQuery {
     type Position = Timestamp;
-    type Metadata = Vec<SummaryRef>;
+    type Metadata = References;
     type Page = AggregatePage;
     const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.aggregate.v2";
     const AGGREGATE: bool = true;
@@ -305,14 +335,14 @@ impl Request for AggregateQuery {
         store: &Operation<'_, C>,
         c: &mut PgConnection,
         view: &View<Timestamp>,
-    ) -> Result<Vec<SummaryRef>, Error> {
+    ) -> Result<References, Error> {
         store.references(c, self, view).await
     }
     async fn read<C: Clock>(
         &self,
         store: &Operation<'_, C>,
         view: View<Timestamp>,
-        refs: Vec<SummaryRef>,
+        refs: References,
         deadline: Deadline,
     ) -> Result<(AggregatePage, Option<Timestamp>), Error> {
         let q = self;
@@ -325,13 +355,13 @@ impl Request for AggregateQuery {
         let mut continuous = true;
         let published = view.published;
         while view.exists
-            && at < q.query().window().end()
+            && at.micros() < refs.end
             && used < (q.query().budget().max_points.get() as usize)
         {
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
             let cached = store
-                .cached(&refs, q.spec().stream().scope(), window, deadline)
+                .cached(&refs.rows, q.spec().stream().scope(), window, deadline)
                 .await?;
             let is_cached = cached.is_some();
             let value = match cached {

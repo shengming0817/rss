@@ -16,6 +16,14 @@ async fn only_the_exact_complete_revision_can_publish_after_merge() -> anyhow::R
             "INSERT INTO rss_ts_ch.raw SELECT * FROM rss_ts_ch.raw WHERE sample_id='duplicate' SETTINGS insert_deduplicate=0",
         ),
         (
+            "body",
+            "ALTER TABLE rss_ts_ch.raw UPDATE payload='{}' WHERE sample_id='body' SETTINGS mutations_sync=2",
+        ),
+        (
+            "selector",
+            "ALTER TABLE rss_ts_ch.raw UPDATE subject='different' WHERE sample_id='selector' SETTINGS mutations_sync=2",
+        ),
+        (
             "missing",
             "ALTER TABLE rss_ts_ch.raw DELETE WHERE sample_id='missing' SETTINGS mutations_sync=2",
         ),

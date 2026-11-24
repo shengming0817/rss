@@ -60,6 +60,21 @@ enum Admission {
     Verified,
     Prepared(Prepared),
 }
+#[derive(clickhouse::Row, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectionProof {
+    series: String,
+    source: String,
+    generation: String,
+    observed_at: i64,
+    sequence: u64,
+    sample_id: String,
+    digest: String,
+    received_at: i64,
+    subject: String,
+    resource: String,
+    metric_key: String,
+    payload_hash: String,
+}
 struct Prepared {
     rows: Vec<Raw>,
     revision: i64,
@@ -202,23 +217,35 @@ impl<C: Clock> Operation<'_, C> {
     ) -> Result<(), Error> {
         // These columns complete the raw sorting key after the fixed tenant, namespace and
         // revision. Only exact retries collapse; a conflicting digest or receipt survives merges.
-        let mut rows=self.ch_query(&self.reader,"SELECT DISTINCT series,source,generation,observed_at,sequence,sample_id,digest,received_at FROM rss_ts_ch.raw WHERE tenant=? AND namespace=? AND revision=? LIMIT ?",deadline)?
-            .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).bind(p.rows.len() as u64+1)
-            .fetch_all::<(String,String,String,i64,u64,String,String,i64)>().await.map_err(|e|projection::provider_error("projection-verification",e))?;
+        use sha2::{Digest, Sha256};
+        let sql="SELECT DISTINCT series,source,generation,observed_at,sequence,sample_id,digest,received_at,
+                    subject,resource,metric_key,lower(hex(SHA256(payload))) AS payload_hash
+                 FROM rss_ts_ch.raw WHERE tenant=? AND namespace=? AND revision=? LIMIT ?";
+        let mut rows = self
+            .ch_query(&self.reader, sql, deadline)?
+            .bind(self.tenant.to_string())
+            .bind(b.stream().scope().namespace().as_str())
+            .bind(p.revision)
+            .bind(p.rows.len() as u64 + 1)
+            .fetch_all::<ProjectionProof>()
+            .await
+            .map_err(|e| projection::provider_error("projection-verification", e))?;
         let mut expected = p
             .rows
             .iter()
-            .map(|r| {
-                (
-                    r.series.clone(),
-                    r.source.clone(),
-                    r.generation.clone(),
-                    r.observed_at,
-                    r.sequence,
-                    r.sample_id.clone(),
-                    r.digest.clone(),
-                    r.received_at,
-                )
+            .map(|r| ProjectionProof {
+                series: r.series.clone(),
+                source: r.source.clone(),
+                generation: r.generation.clone(),
+                observed_at: r.observed_at,
+                sequence: r.sequence,
+                sample_id: r.sample_id.clone(),
+                digest: r.digest.clone(),
+                received_at: r.received_at,
+                subject: r.subject.clone(),
+                resource: r.resource.clone(),
+                metric_key: r.metric_key.clone(),
+                payload_hash: projection::hex(&Sha256::digest(r.payload.as_bytes())),
             })
             .collect::<Vec<_>>();
         rows.sort_unstable();

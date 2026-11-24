@@ -226,7 +226,9 @@ async fn shared_budget_and_retirement_drain_complete_write() -> anyhow::Result<(
 async fn cancelled_close_stays_closed_and_can_finish_draining() -> anyhow::Result<()> {
     let mut f = Fixture::new("ch-close").await?;
     let proxy = transport::Proxy::new(&f.ch).await?;
-    f.store = proxy.store(f.pool.clone()).await?;
+    let mut caps = limits()?;
+    caps.max_in_flight = NonZeroU32::MIN;
+    f.store = proxy.store_with_limits(f.pool.clone(), caps).await?;
     let a = definition(TENANT)?;
     register(&f.store, &a).await?;
     let q = read_request(&a, 10)?;
@@ -237,6 +239,14 @@ async fn cancelled_close_stays_closed_and_can_finish_draining() -> anyhow::Resul
         result = &mut writing => anyhow::bail!("write completed before response gate: {}", result.is_ok()),
         ready = proxy.wait_held() => ready?,
     }
+    // The slot limit is one even though there are spare weighted units.
+    assert!(matches!(
+        f.store.query(&q, None, short()?).await,
+        Err(Error::Deadline)
+    ));
+    let waiting = f.store.query(&q, None, deadline()?);
+    tokio::pin!(waiting);
+    tokio::select! {biased; _=&mut waiting=>anyhow::bail!("request passed occupied slot"), ()=std::future::ready(())=>{}}
     assert!(
         tokio::time::timeout(Duration::from_millis(20), f.store.owner.close(deadline()?))
             .await
@@ -246,6 +256,7 @@ async fn cancelled_close_stays_closed_and_can_finish_draining() -> anyhow::Resul
         f.store.owner.close(short()?).await,
         Err(Error::Deadline)
     ));
+    assert!(matches!(waiting.await, Err(Error::Unavailable)));
     assert!(!f.pool.is_closed());
     assert!(matches!(
         f.store.query(&q, None, deadline()?).await,
