@@ -13,9 +13,11 @@ pub use model::{
     SourceScope,
 };
 pub use observation::{ConfirmedProgress, ObservationStatus, RunObservation};
-pub use ports::{AtLeastOnce, Execution, ExternalCheckpoint, ExternalTarget, Source};
+pub use ports::{
+    AtLeastOnce, BatchExecution, Execution, ExternalCheckpoint, ExternalTarget, Source,
+};
 pub(crate) use runner::validate_next;
-pub use runner::{Report, Run, RunLimit, Stop, run};
+pub use runner::{Report, Run, RunLimit, Stop, run, run_batched};
 
 mod error;
 pub use error::{Diagnostic, Error, Phase};

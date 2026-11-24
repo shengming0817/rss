@@ -1,6 +1,6 @@
 # rss-projection-postgres
 
-PostgreSQL 16+ committed-order journals and atomic projection execution. In one event transaction the
+PostgreSQL 16+ committed-order journals and atomic projection execution. With `run_batched`, each page commits in one transaction. A business rejection rolls back the whole page. With `run`, each event commits separately. In either case the
 adapter locks the checkpoint, validates the worker epoch and definition identity, applies trusted read-model SQL, records
 fact identity and advances the checkpoint. An old worker is fenced **before** the effect.
 

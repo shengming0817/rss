@@ -4,9 +4,9 @@ use crate::{
     transaction::map_sql,
 };
 use rss_projection::{
-    ApplyOutcome, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event, Execution,
-    ExternalCheckpoint, GenerationStart, Position, ProjectionScope, ReceiptQuery, ReceiptStatus,
-    ReplayBound, Timer,
+    ApplyOutcome, BatchExecution, BatchLimit, Checkpoint, Control, DefinitionIdentity, Error,
+    ErrorKind, Event, Execution, ExternalCheckpoint, GenerationStart, Position, ProjectionScope,
+    ReceiptQuery, ReceiptStatus, ReplayBound, Timer,
 };
 use sqlx::Row;
 use std::{future::Future, sync::Arc};
@@ -261,28 +261,73 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
         let event = event.clone();
         self.store
             .controlled_tx(self.scope().source(), control, move |tx| {
+                Box::pin(async move { stage(tx, &claim, effect.as_ref(), expected, &event).await })
+            })
+            .await
+    }
+}
+impl<H: PgEffect + 'static> BatchExecution for PgProjection<H> {
+    async fn execute_batch<T: Timer>(
+        &self,
+        mut expected: Option<Position>,
+        events: Vec<Event>,
+        control: &Control<'_, T>,
+    ) -> Result<Vec<ApplyOutcome>, Error> {
+        BatchLimit::new(
+            u32::try_from(events.len()).map_err(|_| Error::new(ErrorKind::InvalidInput))?,
+        )?;
+        let mut previous = expected;
+        for event in &events {
+            if event.source() != self.scope().source() {
+                return Err(Error::new(ErrorKind::ScopeMismatch));
+            }
+            if previous.is_some_and(|p| event.position() <= p) {
+                return Err(Error::new(ErrorKind::OutOfOrder));
+            }
+            previous = Some(event.position());
+        }
+        let claim = self.claim.clone();
+        let effect = self.effect.clone();
+        self.store
+            .controlled_tx(self.scope().source(), control, move |tx| {
                 Box::pin(async move {
-                    let duplicate = lock(tx, &claim, expected, &event).await?;
-                    tx.check()?;
-                    let outcome = if duplicate {
-                        ApplyOutcome::Duplicate
-                    } else {
-                        match effect
-                            .apply(tx, &claim.scope, &event)
-                            .await
-                            .map_err(|error| error.0)?
-                        {
-                            PgEffectOutcome::Applied => ApplyOutcome::Applied,
-                            PgEffectOutcome::Filtered => ApplyOutcome::Filtered,
-                        }
-                    };
-                    tx.check()?;
-                    finish(tx, &claim, expected, &event).await?;
-                    Ok(outcome)
+                    let mut outcomes = Vec::with_capacity(events.len());
+                    for event in events {
+                        outcomes.push(stage(tx, &claim, effect.as_ref(), expected, &event).await?);
+                        expected = Some(event.position());
+                    }
+                    Ok(outcomes)
                 })
             })
             .await
     }
+}
+
+async fn stage<H: PgEffect>(
+    tx: &mut PgTransaction<'_>,
+    claim: &PgClaim,
+    effect: &H,
+    expected: Option<Position>,
+    event: &Event,
+) -> Result<ApplyOutcome, Error> {
+    tx.check()?;
+    let duplicate = lock(tx, claim, expected, event).await?;
+    tx.check()?;
+    let outcome = if duplicate {
+        ApplyOutcome::Duplicate
+    } else {
+        match effect
+            .apply(tx, &claim.scope, event)
+            .await
+            .map_err(|error| error.0)?
+        {
+            PgEffectOutcome::Applied => ApplyOutcome::Applied,
+            PgEffectOutcome::Filtered => ApplyOutcome::Filtered,
+        }
+    };
+    tx.check()?;
+    finish(tx, claim, expected, event).await?;
+    Ok(outcome)
 }
 /// PostgreSQL checkpoint session for a remote target. This type does not claim atomic effects.
 pub struct PgCheckpoint {

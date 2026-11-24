@@ -1,4 +1,4 @@
-use crate::{PgOperationError, PgStore, PgTransaction, transaction::map_sql};
+use crate::{PgOperation, PgOperationError, PgStore, PgTransaction, transaction::map_sql};
 use futures::future::BoxFuture;
 use rss_reconcile::{
     Claim, ClaimBatch, Completion, Control, DurableStore, Error, ErrorKind, ReconcileStep,
@@ -70,23 +70,24 @@ impl PgStore {
                 -> BoxFuture<'c, Result<crate::ProtectedStep<R>, PgOperationError>>
             + Send,
     {
-        self.context_tx(
-            claim.target.scope(),
-            control,
-            (Key::from(claim), context, Some(operation)),
-            |state, tx| {
-                Box::pin(async move {
-                    lock(tx.connection, &state.0).await?;
-                    let operation = state
-                        .2
-                        .take()
-                        .ok_or_else(|| Error::new(ErrorKind::Invariant))?;
-                    let value = operation(&mut state.1, tx).await.map_err(Error::from)?;
-                    complete_step(tx.connection, &state.0, value).await
-                })
-            },
-        )
-        .await
+        self.with_permit(())?
+            .context_tx(
+                claim.target.scope(),
+                control,
+                (Key::from(claim), context, Some(operation)),
+                |state, tx| {
+                    Box::pin(async move {
+                        lock(tx.connection, &state.0).await?;
+                        let operation = state
+                            .2
+                            .take()
+                            .ok_or_else(|| Error::new(ErrorKind::Invariant))?;
+                        let value = operation(&mut state.1, tx).await.map_err(Error::from)?;
+                        complete_step(tx.connection, &state.0, value).await
+                    })
+                },
+            )
+            .await
     }
     /// Atomically register explicit resources and work with trusted application SQL.
     pub async fn wake_with<T: Timer, R: Send, C: Send, F>(
@@ -104,7 +105,8 @@ impl PgStore {
             ) -> BoxFuture<'c, Result<R, PgOperationError>>
             + Send,
     {
-        self.schedule_with(target, resources, true, control, context, operation)
+        self.with_permit(())?
+            .schedule_with(target, resources, true, control, context, operation)
             .await
     }
 
@@ -124,16 +126,19 @@ impl PgStore {
             ) -> BoxFuture<'c, Result<R, PgOperationError>>
             + Send,
     {
-        self.schedule_with(target, resources, false, control, context, operation)
+        self.with_permit(())?
+            .schedule_with(target, resources, false, control, context, operation)
             .await
     }
+}
 
+impl<P: Send + 'static> PgOperation<'_, P> {
     #[allow(
         clippy::too_many_arguments,
         reason = "private shared wake/bind transaction implementation"
     )]
     async fn schedule_with<T: Timer, R: Send, C: Send, F>(
-        &self,
+        self,
         target: &Target,
         resources: &ResourceSet,
         waking: bool,
@@ -166,34 +171,34 @@ impl PgStore {
         )
         .await
     }
-}
 
-impl DurableStore for PgStore {
-    type Claim = PgClaim;
-    async fn wake<T: Timer>(
-        &self,
+    /// Wake a target under this admission.
+    pub async fn wake<T: Timer>(
+        self,
         target: &Target,
         resources: &ResourceSet,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.wake_with(target, resources, control, (), |_, _| {
+        self.schedule_with(target, resources, true, control, (), |_, _| {
             Box::pin(async { Ok(()) })
         })
         .await
     }
-    async fn bind_resources<T: Timer>(
-        &self,
+    /// Bind resources under this admission.
+    pub async fn bind_resources<T: Timer>(
+        self,
         target: &Target,
         resources: &ResourceSet,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.bind_with(target, resources, control, (), |_, _| {
+        self.schedule_with(target, resources, false, control, (), |_, _| {
             Box::pin(async { Ok(()) })
         })
         .await
     }
-    async fn claim_due<T: Timer>(
-        &self,
+    /// Claim due targets under this admission.
+    pub async fn claim_due<T: Timer>(
+        self,
         scope: &Scope,
         limit: usize,
         scan_budget: u32,
@@ -214,8 +219,9 @@ impl DurableStore for PgStore {
             decode_batch(&scope, rows)
         })).await
     }
-    async fn renew<T: Timer>(
-        &self,
+    /// Renew the fenced claim under this admission.
+    pub async fn renew<T: Timer>(
+        self,
         claim: &PgClaim,
         lease: Duration,
         control: &Control<'_, T>,
@@ -235,8 +241,9 @@ impl DurableStore for PgStore {
         })
         .await
     }
-    async fn finish<T: Timer>(
-        &self,
+    /// Settle the fenced claim under this admission.
+    pub async fn finish<T: Timer>(
+        self,
         claim: &PgClaim,
         completion: Completion,
         control: &Control<'_, T>,
@@ -268,8 +275,9 @@ impl DurableStore for PgStore {
         })
         .await
     }
-    async fn release<T: Timer>(
-        &self,
+    /// Release the fenced claim under this admission.
+    pub async fn release<T: Timer>(
+        self,
         claim: &PgClaim,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
@@ -284,6 +292,65 @@ impl DurableStore for PgStore {
             })
         })
         .await
+    }
+}
+
+impl DurableStore for PgStore {
+    type Claim = PgClaim;
+    async fn wake<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.with_permit(())?.wake(target, resources, control).await
+    }
+    async fn bind_resources<T: Timer>(
+        &self,
+        target: &Target,
+        resources: &ResourceSet,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.with_permit(())?
+            .bind_resources(target, resources, control)
+            .await
+    }
+    async fn claim_due<T: Timer>(
+        &self,
+        scope: &Scope,
+        limit: usize,
+        scan_budget: u32,
+        lease: Duration,
+        control: &Control<'_, T>,
+    ) -> Result<ClaimBatch<PgClaim>, Error> {
+        self.with_permit(())?
+            .claim_due(scope, limit, scan_budget, lease, control)
+            .await
+    }
+    async fn renew<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        lease: Duration,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.with_permit(())?.renew(claim, lease, control).await
+    }
+    async fn finish<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        completion: Completion,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.with_permit(())?
+            .finish(claim, completion, control)
+            .await
+    }
+    async fn release<T: Timer>(
+        &self,
+        claim: &PgClaim,
+        control: &Control<'_, T>,
+    ) -> Result<(), Error> {
+        self.with_permit(())?.release(claim, control).await
     }
 }
 /// Owned private SQL arguments; never a public second claim identity.

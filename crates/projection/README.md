@@ -25,7 +25,10 @@ let limit = RunLimit::new(BatchLimit::new(100)?, 10_000)?;
 - `Execution` represents a provider-bound generation/session and exposes its verified
   `DefinitionIdentity`. Providers must bind this identity before granting authority and verify
   it on checkpoint reads and writes, before effects. `run` loads its checkpoint, reads
-  bounded batches and settles each event. No task is spawned and no implicit retry/takeover occurs.
+  bounded pages and settles each event. Explicit `run_batched` requires a
+  `BatchExecution` and settles each eligible page atomically. A failed page leaves the
+  report at the last acknowledged settlement. Both calls publish the same observation
+  type and honor the same replay and run budgets. No task is spawned and no implicit retry/takeover occurs.
 - `Control` uses a required caller-injected monotonic `Timer`, absolute deadline and cancellation
   token. Every Source high-water/read, Execution checkpoint/execute and ExternalCheckpoint
   load/advance receives that same Control. Implementations enforce it through waiting, decoding

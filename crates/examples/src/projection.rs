@@ -98,7 +98,7 @@ async fn replay_snapshot(
         store.takeover(&replay, &DEFINITION, control).await?,
         Counter,
     )?;
-    let replayed = rss_projection::run(store, &worker, control, limits)
+    let replayed = rss_projection::run_batched(store, &worker, control, limits)
         .await
         .into_result()?;
     anyhow::ensure!(replayed.applied == 2, "replay did not apply both facts");

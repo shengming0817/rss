@@ -7,7 +7,23 @@ use rss_request_context::TenantId;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, pool::PoolConnection};
 #[cfg(feature = "integration")]
 use std::sync::Arc;
-use std::time::Duration;
+use std::{future::Future, time::Duration};
+use tokio::runtime::Handle;
+use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
+
+/// One database operation with a host-owned admission permit. Consumed by the
+/// selected operation; dropping an unused handle returns its permit.
+#[must_use = "use the admitted operation or drop it to release its permit"]
+pub struct PgOperation<'a, P> {
+    store: &'a PgStore,
+    admission: Admission<P>,
+}
+
+struct Admission<P> {
+    // Field order: release host capacity before declaring the operation drained.
+    _permit: P,
+    _tracked: TaskTrackerToken,
+}
 
 /// Component storage handle. The caller configures transport/TLS on the supplied pool.
 /// Closing this handle closes that pool and all of its clones.
@@ -15,6 +31,7 @@ use std::time::Duration;
 pub struct PgStore {
     pub(crate) pool: PgPool,
     identity: Identity,
+    operations: TaskTracker,
     #[cfg(feature = "integration")]
     pub(crate) fault: Arc<std::sync::atomic::AtomicU8>,
 }
@@ -26,18 +43,37 @@ impl PgStore {
         Ok(Self {
             pool,
             identity,
+            operations: TaskTracker::new(),
 
             #[cfg(feature = "integration")]
             fault: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         })
     }
+    /// Hand off an already acquired permit. The host owns scheduling policy.
+    /// A closed pool rejects the handoff and immediately releases the permit.
+    pub fn with_permit<P: Send + 'static>(&self, permit: P) -> Result<PgOperation<'_, P>, Error> {
+        let admission = Admission {
+            _permit: permit,
+            _tracked: self.operations.token(),
+        };
+        if self.pool.is_closed() {
+            return Err(map_sql(sqlx::Error::PoolClosed));
+        }
+        Ok(PgOperation {
+            store: self,
+            admission,
+        })
+    }
+
     /// Close admission immediately, then drain within the supplied cancellation/deadline.
     /// An interrupted drain leaves the pool closed; outstanding borrowers still own their work.
     pub async fn close<T: Timer>(&self, control: &Control<'_, T>) -> CloseOutcome {
         let drain = self.pool.close(); // SQLx marks closed synchronously before returning its future.
+        self.operations.close();
         match control
             .run(async {
                 drain.await;
+                self.operations.wait().await;
                 Ok(())
             })
             .await
@@ -59,6 +95,30 @@ impl PgStore {
         F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, PgOperationError>>
             + Send,
     {
+        self.with_permit(())?
+            .local_tx(scope, control, operation)
+            .await
+    }
+    /// Inject one settlement fault into the next transaction on this handle and its clones.
+    #[cfg(feature = "integration")]
+    pub fn inject_next_fault(&self, fault: PgFault) {
+        self.fault
+            .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl<P: Send + 'static> PgOperation<'_, P> {
+    /// Execute trusted application SQL and component writes in one tenant-bound transaction.
+    /// Only an acknowledged commit returns Ok. Callback errors roll back the entire transaction.
+    pub async fn local_tx<T: Timer, R: Send, F>(
+        self,
+        scope: &Scope,
+        control: &Control<'_, T>,
+        operation: F,
+    ) -> Result<R, Error>
+    where
+        F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, PgOperationError>>
+            + Send,
+    {
         control.check()?;
         control
             .run(
@@ -71,7 +131,7 @@ impl PgStore {
     }
 
     pub(crate) async fn controlled_tx<T: Timer, R: Send, F>(
-        &self,
+        self,
         scope: &Scope,
         control: &Control<'_, T>,
 
@@ -91,7 +151,7 @@ impl PgStore {
             .map_err(Error::uncertain)
     }
     pub(crate) async fn context_tx<T: Timer, R: Send, C: Send, F>(
-        &self,
+        self,
         scope: &Scope,
         control: &Control<'_, T>,
         context: C,
@@ -108,7 +168,7 @@ impl PgStore {
             .map_err(Error::uncertain)
     }
     pub(crate) async fn transact<R: Send, E: Into<Error> + Send, C: Send, F>(
-        &self,
+        self,
         tenant: TenantId,
         timeout: Duration,
 
@@ -119,15 +179,23 @@ impl PgStore {
         F: for<'c> FnOnce(&'c mut C, &'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, E>>
             + Send,
     {
+        let connection = self.store.pool.acquire().await.map_err(map_sql)?;
         let mut lease = Lease {
-            connection: self.pool.acquire().await.map_err(map_sql)?,
-            quarantine: true,
+            live: Some((connection, self.admission)),
+            runtime: Handle::current(),
         };
-        let mut tx = lease.connection.begin().await.map_err(map_sql)?;
+        let (connection, _) = lease
+            .live
+            .as_mut()
+            .ok_or(Error::new(ErrorKind::Invariant))?;
+        let mut tx = connection.begin().await.map_err(map_sql)?;
         #[cfg(feature = "integration")]
-        let fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
+        let fault = self
+            .store
+            .fault
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
         let result = async {
-            setup(&mut tx, tenant, timeout, &self.identity).await?;
+            setup(&mut tx, tenant, timeout, &self.store.identity).await?;
             operation(
                 &mut context,
                 &mut PgTransaction {
@@ -152,7 +220,7 @@ impl PgStore {
                 if fault == PgFault::CommitUnknownAfterAck as u8 {
                     return Err(Error::new(ErrorKind::CommitUnknown));
                 }
-                lease.quarantine = false;
+                lease.recycle();
                 Ok(value)
             }
             Err(error) => {
@@ -163,18 +231,15 @@ impl PgStore {
                 if fault == PgFault::RollbackFailedAfterAck as u8 {
                     return Err(Error::new(ErrorKind::RollbackFailed));
                 }
-                lease.quarantine = error.kind() == ErrorKind::StorageContract;
+                if error.kind() != ErrorKind::StorageContract {
+                    lease.recycle();
+                }
                 Err(error)
             }
         }
     }
-    /// Inject one settlement fault into the next transaction on this handle and its clones.
-    #[cfg(feature = "integration")]
-    pub fn inject_next_fault(&self, fault: PgFault) {
-        self.fault
-            .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
-    }
 }
+
 /// Integration-only settlement faults; never enabled by default.
 #[cfg(feature = "integration")]
 #[derive(Debug, Clone, Copy)]
@@ -187,14 +252,42 @@ pub enum PgFault {
     /// Rollback completes but its acknowledgment is hidden.
     RollbackFailedAfterAck = 3,
 }
-struct Lease {
-    connection: PoolConnection<Postgres>,
-    quarantine: bool,
+// ref: sqlx-core 0.9.0 pool/connection.rs. return_to_pool eagerly takes
+// the live connection; dropping its future releases that exact pool slot.
+struct Lease<P> {
+    live: Option<(PoolConnection<Postgres>, Admission<P>)>,
+    runtime: Handle,
 }
-impl Drop for Lease {
+struct Returning<F, P> {
+    // If the runtime discards an unpolled task, release the floating connection first.
+    work: F,
+    admission: Admission<P>,
+}
+impl<F: Future, P> Returning<F, P> {
+    async fn finish(self) {
+        self.work.await;
+        drop(self.admission);
+    }
+}
+impl<P: Send + 'static> Lease<P> {
+    fn recycle(mut self) {
+        if let Some((mut connection, admission)) = self.live.take() {
+            let returning = Returning {
+                work: tokio::time::timeout(Duration::from_secs(5), connection.return_to_pool()),
+                admission,
+            };
+            self.runtime.spawn(returning.finish());
+        }
+    }
+}
+impl<P> Drop for Lease<P> {
     fn drop(&mut self) {
-        if self.quarantine {
-            self.connection.close_on_drop();
+        if let Some((connection, admission)) = self.live.take() {
+            let _entered = self.runtime.enter();
+            // Unsettled or cancelled: retire the socket synchronously. Never
+            // enqueue an uncertain connection for an untracked background return.
+            drop(connection.detach());
+            drop(admission);
         }
     }
 }

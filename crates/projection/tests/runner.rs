@@ -551,3 +551,66 @@ mod observation;
 
 #[path = "runner/budget.rs"]
 mod budget;
+
+impl BatchExecution for Memory {
+    async fn execute_batch<T: Timer>(
+        &self,
+        expected: Option<Position>,
+        events: Vec<Event>,
+        control: &Control<'_, T>,
+    ) -> Result<Vec<ApplyOutcome>, Error> {
+        control.check()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::new(ErrorKind::Unavailable))?;
+        if state.position != expected {
+            return Err(Error::new(ErrorKind::Fenced));
+        }
+        state.position = events.last().map(Event::position);
+        self.applied.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![ApplyOutcome::Filtered; events.len()])
+    }
+}
+
+#[tokio::test]
+async fn atomic_page_honors_exact_replay_end_and_event_budget() -> anyhow::Result<()> {
+    let s = scope()?;
+    let source = Journal(vec![event(&s, 0)?, event(&s, 1)?, event(&s, 3)?]);
+    let clock = Clock(AtomicU64::new(0));
+    let token = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(5), &token);
+    for (end, budget, stop, filtered, calls) in [
+        (Some(1), 10, Stop::CaughtUp, 2, 1),
+        (
+            Some(2),
+            10,
+            Stop::Failed(Error::new(ErrorKind::SourceContract)),
+            0,
+            0,
+        ),
+        (None, 10, Stop::CaughtUp, 0, 0),
+        (Some(3), 1, Stop::EventLimit, 1, 1),
+    ] {
+        let exec = Memory::new(
+            s.clone(),
+            ReplayBound::Through(end.map(Position::new).transpose()?),
+        );
+        let report = run_batched(
+            &source,
+            &exec,
+            &c,
+            RunLimit::new(BatchLimit::new(3)?, budget)?,
+        )
+        .await;
+        assert_eq!(
+            (
+                report.stop,
+                report.filtered,
+                exec.applied.load(Ordering::SeqCst)
+            ),
+            (stop, filtered, calls)
+        );
+    }
+    Ok(())
+}
