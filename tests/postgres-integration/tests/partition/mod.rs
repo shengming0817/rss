@@ -171,8 +171,7 @@ pub(super) async fn run(
     raw: &PgPool,
     config: PgConfig,
 ) -> anyhow::Result<()> {
-    Box::pin(heads::handoff(raw, owner)).await?;
-    Box::pin(confirmed_settlement::run(runtime.clone(), raw, owner)).await?;
+    Box::pin(heads::handoff(runtime.clone(), raw, owner)).await?;
     Box::pin(sql_digest_integrity(raw)).await?;
     Box::pin(wire_contract::run(runtime.clone(), raw)).await?;
     Box::pin(sql_protocol(raw)).await?;

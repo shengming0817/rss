@@ -1,7 +1,11 @@
 //! Ordinary head ownership across two independent transactions.
 use super::*;
 
-pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> {
+pub(super) async fn handoff(
+    runtime: Arc<PgRuntime>,
+    raw: &PgPool,
+    owner: &PgPool,
+) -> anyhow::Result<()> {
     for (lane, commit_append, commit_settlement, expected) in [
         ("head-commit", true, true, Some("next")),
         ("head-rollback", true, false, Some("first")),
@@ -13,7 +17,8 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
     late_declaration(raw).await?;
     stale_snapshot(raw).await?;
     crossed_declarations(raw).await?;
-    capacity(raw).await
+    capacity(raw).await?;
+    Box::pin(super::confirmed_settlement::run(runtime, raw, owner)).await
 }
 
 async fn concurrent_handoff(
