@@ -984,20 +984,30 @@ async fn far_counter_predecessor_controls_cached_reset_flags() -> anyhow::Result
     let sp = ordered_spec(&current, CoveragePolicy::ObservedOnly, NonZeroU64::new(10))?;
     f.write(&batch("counter", vec![prior, current])?).await?;
     let range = window(100, 110)?;
-    for (name, reset) in [("initial", true), ("deleted", false), ("restored", true)] {
-        let action = match name {
-            "deleted" => Some(MaintenanceAction::Delete {
-                selection: sp.selection(),
-                window: window(50, 51)?,
-                restore_until: Timestamp::new(i64::MAX)?,
-            }),
-            "restored" => Some(MaintenanceAction::Restore {
-                selection: sp.selection(),
-                window: window(50, 51)?,
-                deletion_fence: id("deleted")?,
-            }),
-            _ => None,
-        };
+    for (name, reset, change) in [
+        ("initial", true, None),
+        ("cut-gap", false, Some((60, None))),
+        ("restore-gap", true, Some((60, Some("cut-gap")))),
+        ("deleted", false, Some((50, None))),
+        ("restored", true, Some((50, Some("deleted")))),
+    ] {
+        let action = change
+            .map(|(at, fence)| -> anyhow::Result<_> {
+                let window = window(at, at + 1)?;
+                Ok(match fence {
+                    Some(fence) => MaintenanceAction::Restore {
+                        selection: sp.selection(),
+                        window,
+                        deletion_fence: id(fence)?,
+                    },
+                    None => MaintenanceAction::Delete {
+                        selection: sp.selection(),
+                        window,
+                        restore_until: Timestamp::new(i64::MAX)?,
+                    },
+                })
+            })
+            .transpose()?;
         if let Some(action) = action {
             complete(&f.store, plan(name, action, 1)?).await?;
         }
@@ -1078,7 +1088,7 @@ async fn unrelated_fences_keep_pruned_counter_summary_readable() -> anyhow::Resu
     };
     let d = Definition::new(definition)?;
     f.register(&d).await?;
-    let samples = [21, 25, 50]
+    let samples = [21, 25, 50, 105, 107, 120]
         .into_iter()
         .map(|at| {
             ordered_sample(
@@ -1096,21 +1106,22 @@ async fn unrelated_fences_keep_pruned_counter_summary_readable() -> anyhow::Resu
         NonZeroU64::new(10),
     )?;
     f.write(&batch("initial", samples)?).await?;
-    let range = window(20, 30)?;
-    complete(
-        &f.store,
-        plan(
-            "fold",
-            MaintenanceAction::Recompute {
-                spec: spec.clone(),
-                window: range,
-            },
-            1,
-        )?,
-    )
-    .await?;
-    let expected = ordered_read(&f.store, spec.clone(), range, AggregateOp::Increase).await?;
-    let frontier = Timestamp::new(60)?;
+    let cases = [(window(20, 30)?, 4), (window(100, 110)?, 2)];
+    for (range, _) in cases {
+        complete(
+            &f.store,
+            plan(
+                &format!("fold-{}", range.start().micros()),
+                MaintenanceAction::Recompute {
+                    spec: spec.clone(),
+                    window: range,
+                },
+                1,
+            )?,
+        )
+        .await?;
+    }
+    let frontier = Timestamp::new(130)?;
     complete(
         &f.store,
         plan(
@@ -1137,35 +1148,41 @@ async fn unrelated_fences_keep_pruned_counter_summary_readable() -> anyhow::Resu
     )
     .await?;
     assert_eq!(f.count().await?, 1);
-    let empty = window(1, 2)?;
-    for (name, action) in [
-        (
-            "delete-empty",
-            MaintenanceAction::Delete {
-                selection: spec.selection(),
-                window: empty,
-                restore_until: Timestamp::new(i64::MAX)?,
-            },
-        ),
-        (
-            "restore-empty",
-            MaintenanceAction::Restore {
-                selection: spec.selection(),
-                window: empty,
-                deletion_fence: id("delete-empty")?,
-            },
-        ),
-    ] {
-        complete(&f.store, plan(name, action, 1)?).await?;
-        let p = ordered_read(&f.store, spec.clone(), range, AggregateOp::Increase).await?;
-        assert_eq!(p.refreshed_through, Some(range.end()));
-        assert!(matches!(
-            p.buckets[0].value,
-            AggregateValue::Sum(Sum::U128(4))
-        ));
-        assert_eq!(p.buckets[0].completeness, expected.buckets[0].completeness);
-        assert_eq!(p.buckets[0].covered_micros, 4);
-        assert_eq!(p.buckets[0].valid_samples, 2);
+    for empty in [window(1, 2)?, window(60, 61)?] {
+        let deletion = format!("delete-{}", empty.start().micros());
+        for (name, action) in [
+            (
+                deletion.clone(),
+                MaintenanceAction::Delete {
+                    selection: spec.selection(),
+                    window: empty,
+                    restore_until: Timestamp::new(i64::MAX)?,
+                },
+            ),
+            (
+                format!("restore-{}", empty.start().micros()),
+                MaintenanceAction::Restore {
+                    selection: spec.selection(),
+                    window: empty,
+                    deletion_fence: id(&deletion)?,
+                },
+            ),
+        ] {
+            complete(&f.store, plan(&name, action, 1)?).await?;
+            for (range, increase) in cases {
+                let p = ordered_read(&f.store, spec.clone(), range, AggregateOp::Increase).await?;
+                assert_eq!(p.refreshed_through, Some(range.end()));
+                assert!(
+                    matches!(p.buckets[0].value,AggregateValue::Sum(Sum::U128(x)) if x==u128::from(increase))
+                );
+                assert_eq!(
+                    p.buckets[0].completeness,
+                    std::collections::BTreeSet::from([Completeness::Gaps])
+                );
+                assert_eq!(p.buckets[0].covered_micros, increase);
+                assert_eq!(p.buckets[0].valid_samples, 2);
+            }
+        }
     }
     Ok(())
 }

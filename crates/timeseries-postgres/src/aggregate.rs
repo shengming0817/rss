@@ -16,7 +16,7 @@ pub(crate) async fn store(
     c: &mut PgConnection,
     spec: &SummarySpec,
     summary: &Summary,
-    predecessor_at: Option<Timestamp>,
+    predecessor: Option<(Timestamp, bool)>,
     limits: &Limits,
 ) -> Result<(), Error> {
     let data = bytes(summary)?;
@@ -26,9 +26,10 @@ pub(crate) async fn store(
     let start = summary.window.start().micros();
     // A new or restored observation can supply a missing predecessor. Once an
     // anchor exists, observations strictly before it cannot replace it.
+    let predecessor_at = predecessor.map(|(at, _)| at);
     let impact_start =
         predecessor_at.map_or_else(|| dependency_start(spec, start), Timestamp::micros);
-    sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+    sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
         .bind(spec.stream().scope().tenant().to_string())
         .bind(spec.stream().scope().namespace().as_str())
         .bind(spec.binding()?.as_bytes().as_slice())
@@ -43,6 +44,7 @@ pub(crate) async fn store(
         .bind(summary.window.end().micros())
         .bind(impact_start)
         .bind(predecessor_at.map(Timestamp::micros))
+        .bind(predecessor.is_some_and(|(_,sensitive)| sensitive))
         .bind(data)
         .execute(c)
         .await

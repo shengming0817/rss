@@ -116,12 +116,12 @@ pub(super) async fn step(
             &gaps,
             bucket.end(),
         )?;
-        let summary = fold
-            .builder
-            .take()
-            .ok_or(Error::Invariant)?
-            .finish(limits.max_points.get() as usize)?;
-        crate::aggregate::store(c, spec, &summary, fold.predecessor_at, limits).await?;
+        let builder = fold.builder.take().ok_or(Error::Invariant)?;
+        let predecessor = fold
+            .predecessor_at
+            .map(|at| (at, builder.predecessor_gap_sensitive()));
+        let summary = builder.finish(limits.max_points.get() as usize)?;
+        crate::aggregate::store(c, spec, &summary, predecessor, limits).await?;
         fold.at = bucket.end();
         fold.last = None;
         if fold.at == window.end() {

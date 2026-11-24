@@ -4,7 +4,7 @@ use rss_timeseries::Error;
 use sqlx::{Connection, PgConnection, PgPool, Row};
 
 // Fixed PostgreSQL 17 common schema fingerprint, populated from the canonical T2 catalog.
-const COMMON_CATALOG: &str = "a7ddb0d9f5957050029c4b8b1a327751";
+const COMMON_CATALOG: &str = "c58c78885d960d2ca8241e2f6903cd82";
 pub(crate) async fn validate(
     pool: &PgPool,
     profile: &StorageProfile,

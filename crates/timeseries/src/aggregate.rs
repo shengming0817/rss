@@ -302,6 +302,7 @@ pub struct SummaryBuilder {
     summary: Summary,
     previous: Option<Sample>,
     pending: Option<Sample>,
+    counter_boundary: Option<ordered::CounterBoundary>,
 }
 impl SummaryBuilder {
     pub fn new(spec: SummarySpec, window: Interval) -> Result<Self, Error> {
@@ -334,16 +335,32 @@ impl SummaryBuilder {
             summary,
             previous: None,
             pending: None,
+            counter_boundary: None,
         })
     }
     pub fn push(&mut self, sample: Sample, max_items: usize) -> Result<(), Error> {
         if !self.spec.selection().matches(&sample) {
             return Err(Error::InvalidInput);
         }
+        if let Some(p) = &self.pending
+            && !sample.latest_cmp(p)?.is_gt()
+        {
+            return Err(Error::Conflict);
+        }
+        if sample.input().observed_at < self.summary.window.start()
+            && matches!(
+                self.spec.series().definition().spec().metric,
+                Metric::Counter {
+                    temporality: Temporality::Cumulative,
+                    ..
+                }
+            )
+        {
+            self.counter_boundary = Some(ordered::CounterBoundary::new(&sample)?);
+        } else if let Some(boundary) = &mut self.counter_boundary {
+            boundary.observe(&sample, self.spec.max_gap().ok_or(Error::Invariant)?.get())?;
+        }
         if let Some(p) = &self.pending {
-            if !sample.latest_cmp(p)?.is_gt() {
-                return Err(Error::Conflict);
-            }
             let ordered = matches!(
                 self.spec.series().definition().spec().metric,
                 Metric::Counter {
@@ -438,6 +455,13 @@ impl SummaryBuilder {
         self.previous = None;
         self.summary.defects.insert(Completeness::Gaps);
         Ok(())
+    }
+    /// Whether a cut between the selected predecessor and the bucket can change
+    /// its sufficient statistics. Replacing that observation is a separate change.
+    pub fn predecessor_gap_sensitive(&self) -> bool {
+        self.counter_boundary
+            .as_ref()
+            .is_none_or(ordered::CounterBoundary::sensitive)
     }
     pub fn last_observed_at(&self) -> Option<Timestamp> {
         self.pending
