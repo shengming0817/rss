@@ -5,7 +5,8 @@ use hyper::{Request, Response, body::Incoming, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use rss_request_context::{Deadline, ExecutionTimer};
 use rss_transactional_messaging::policy::within;
-use std::{collections::HashSet, net::SocketAddr};
+use std::{collections::HashSet, net::SocketAddr, pin::Pin, task::{Context, Waker, Poll}};
+use hyper::body::Body as _;
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
@@ -43,7 +44,7 @@ impl Connection {
                 if peer != *address || !target.network.permits(peer.ip()) {
                     return Err(());
                 }
-                let tls = TlsConnector::from(target.trust.0.clone())
+                let tls = TlsConnector::from(target.trust.config.clone())
                     .connect(name.clone(), stream).await.map_err(|_| ())?;
                 let (sender, driver) = http1::Builder::new()
                     .max_headers(limits.headers)
@@ -61,6 +62,43 @@ impl Connection {
             }
         }
         Err(())
+    }
+
+    // Poll before checkout to let Hyper notice idle EOF or unsolicited bytes.
+    pub(crate) fn ready_now(&mut self) -> bool {
+        let mut cx = Context::from_waker(Waker::noop());
+        Pin::new(&mut self.driver).poll(&mut cx).is_pending() && self.sender.is_ready()
+    }
+
+    // Only use frames already available. Reception of final headers decides the outcome.
+    pub(crate) fn finish_response(&mut self, body: &mut Incoming) -> bool {
+        const MAX_BYTES: usize = 8192;
+        const MAX_FRAMES: usize = 16;
+        let mut bytes = 0;
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..MAX_FRAMES {
+            if body.is_end_stream() {
+                return self.ready_now();
+            }
+            let mut frame = Pin::new(&mut *body).poll_frame(&mut cx);
+            if frame.is_pending() {
+                if Pin::new(&mut self.driver).poll(&mut cx).is_ready() {
+                    return false;
+                }
+                frame = Pin::new(&mut *body).poll_frame(&mut cx);
+            }
+            match frame {
+                Poll::Ready(Some(Ok(frame))) => {
+                    bytes += frame.data_ref().map_or(0, Bytes::len);
+                    if bytes > MAX_BYTES {
+                        return false;
+                    }
+                }
+                Poll::Ready(None) => return self.ready_now(),
+                _ => return false,
+            }
+        }
+        body.is_end_stream() && self.ready_now()
     }
 
     /// A completed driver must never be polled again, even if headers were delivered.

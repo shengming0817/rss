@@ -1,5 +1,6 @@
 use crate::{Error, Publication, SigningKeys, Target};
 use ipnet::IpNet;
+use sha2::{Digest as _, Sha256};
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
 use std::{
@@ -65,12 +66,17 @@ impl Limits {
 }
 /// Host-selected certificate authorities. There is no custom verifier or insecure mode.
 #[derive(Clone)]
-pub struct TrustRoots(pub(crate) Arc<rustls::ClientConfig>);
+pub struct TrustRoots {
+    pub(crate) config: Arc<rustls::ClientConfig>,
+    pub(crate) identity: [u8; 32],
+}
 impl TrustRoots {
     /// Build an exclusive trust store from DER CA certificates, including private CAs.
     pub fn from_der(certificates: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, Error> {
         let mut roots = rustls::RootCertStore::empty();
+        let mut digests = Vec::<[u8; 32]>::new();
         for cert in certificates {
+            digests.push(Sha256::digest(&cert).into());
             roots.add(cert.into()).map_err(|_| Error::Config)?;
         }
         if roots.is_empty() {
@@ -85,7 +91,10 @@ impl TrustRoots {
         .with_no_client_auth();
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         config.enable_early_data = false;
-        Ok(Self(Arc::new(config)))
+        digests.sort_unstable();
+        digests.dedup();
+        let identity = Sha256::digest(digests.as_flattened()).into();
+        Ok(Self { config: Arc::new(config), identity })
     }
 }
 /// Explicit address snapshot and network allowlist supplied by the host.

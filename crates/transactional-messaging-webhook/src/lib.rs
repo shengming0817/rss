@@ -5,6 +5,7 @@
 mod binding;
 mod config;
 mod connection;
+mod pool;
 mod publisher;
 mod signature;
 
@@ -12,6 +13,7 @@ pub use binding::{Publication, Target, TargetId, TargetVersion, pending_message}
 pub use config::{
     AuthorizationFailure, AuthorizedTarget, IdlePoolLimits, Limits, NetworkAccess, TargetAuthorizer, TrustRoots,
 };
+pub use pool::CloseError;
 pub use publisher::{WebhookPublishReceipt, WebhookPublisher};
 pub use signature::{SigningKey, SigningKeys, WallClock};
 
