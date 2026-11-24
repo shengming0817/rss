@@ -615,7 +615,10 @@ async fn mixed_batch_only_invalidates_new_points_in_their_exact_series() -> anyh
     assert_eq!((mixed.new_samples(), mixed.replayed_samples()), (3, 1));
     let all_old = confirmed(f.write(&batch("all-old", points)?).await?)?;
     assert_eq!((all_old.new_samples(), all_old.replayed_samples()), (0, 4));
-    let dirty: Vec<(String,i64)> = sqlx::query_as("SELECT convert_from(spec,'UTF8')::jsonb#>>'{series,definition,key}',lo FROM rss_timeseries.summaries WHERE dirty ORDER BY 1,2").fetch_all(&f.admin).await?;
+    let dirty: Vec<(String, i64)> =
+        sqlx::query_as("SELECT key,lo FROM rss_timeseries.summaries WHERE dirty ORDER BY 1,2")
+            .fetch_all(&f.admin)
+            .await?;
     assert_eq!(
         dirty,
         vec![

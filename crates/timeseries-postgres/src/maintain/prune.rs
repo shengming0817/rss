@@ -118,7 +118,7 @@ pub(super) async fn step(
         return Ok(Step::Blocked(MaintenanceBlock::DirtySummary));
     }
     let count: i32 = sqlx::query_scalar(
-        "SELECT rss_timeseries.prune_rows($1::text::uuid,$2,$3::text::jsonb,$4,$5,$6)",
+        "SELECT rss_timeseries.prune_rows($1::text::uuid,$2,$3::text::jsonb,$4,$5,$6,$7)",
     )
     .bind(r.scope().tenant().to_string())
     .bind(r.scope().namespace().as_str())
@@ -126,6 +126,7 @@ pub(super) async fn step(
     .bind(raw_limit)
     .bind(summaries_before.micros())
     .bind(r.budget().rows.get() as i32)
+    .bind(crate::lifecycle::selected_digest(selection)?)
     .fetch_one(c)
     .await
     .map_err(sql_error)?;
@@ -184,7 +185,7 @@ pub(super) async fn reclaim(
     if receipt_guarantee(c, s, i64::MAX, now).await? {
         return Ok(Step::Blocked(MaintenanceBlock::ReplayGuarantee));
     }
-    let retained:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4) OR EXISTS(SELECT FROM rss_timeseries.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND convert_from(spec,'UTF8')::jsonb#>>'{stream,source}'=$3 AND convert_from(spec,'UTF8')::jsonb#>>'{stream,generation}'=$4)").bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
+    let retained:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4) OR EXISTS(SELECT FROM rss_timeseries.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4)").bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
     if retained {
         return Ok(Step::Blocked(MaintenanceBlock::RetainedData));
     }

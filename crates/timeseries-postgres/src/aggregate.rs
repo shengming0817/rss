@@ -101,14 +101,32 @@ pub(crate) async fn store(
     if data.len() > limits.max_bytes.get() as usize {
         return Err(Error::BudgetExceeded);
     }
-    sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8)")
+    let start = summary.window.start().micros();
+    let unbounded = matches!(
+        spec.series().definition().spec().metric,
+        Metric::Bool | Metric::State { .. }
+    ) && spec.coverage() == CoveragePolicy::ObservedOnly;
+    let lower = if unbounded {
+        0
+    } else {
+        start
+            .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
+            .max(0)
+    };
+    sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
         .bind(spec.stream().scope().tenant().to_string())
         .bind(spec.stream().scope().namespace().as_str())
         .bind(spec.binding()?.as_bytes().as_slice())
         .bind(spec.semantics()?.as_bytes().as_slice())
-        .bind(bytes(spec)?)
-        .bind(summary.window.start().micros())
+        .bind(spec.stream().source().as_str())
+        .bind(spec.stream().generation().as_str())
+        .bind(spec.series().digest()?.as_bytes().as_slice())
+        .bind(spec.series().subject().as_str())
+        .bind(spec.series().resource().as_str())
+        .bind(spec.series().definition().spec().key.as_str())
+        .bind(start)
         .bind(summary.window.end().micros())
+        .bind(lower)
         .bind(data)
         .execute(c)
         .await

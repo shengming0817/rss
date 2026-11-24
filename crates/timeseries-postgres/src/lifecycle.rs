@@ -152,6 +152,12 @@ pub(crate) async fn availability(
     }
     Ok(Availability { excluded })
 }
+pub(crate) fn selected_digest(selection: &Selection) -> Result<Option<[u8; 32]>, Error> {
+    match selection {
+        Selection::Exact { series, .. } => Ok(Some(*series.digest()?.as_bytes())),
+        Selection::Resource { .. } => Ok(None),
+    }
+}
 pub(crate) async fn put_fence(
     c: &mut PgConnection,
     r: &MaintenanceRequest,
@@ -161,7 +167,7 @@ pub(crate) async fn put_fence(
     until: Option<i64>,
 ) -> Result<(), Error> {
     sqlx::query(
-        "SELECT rss_timeseries.put_fence($1::text::uuid,$2,$3,$4,$5::text::jsonb,$6,$7,$8)",
+        "SELECT rss_timeseries.put_fence($1::text::uuid,$2,$3,$4,$5::text::jsonb,$6,$7,$8,$9)",
     )
     .bind(r.scope().tenant().to_string())
     .bind(r.scope().namespace().as_str())
@@ -171,6 +177,7 @@ pub(crate) async fn put_fence(
     .bind(window.start().micros())
     .bind(window.end().micros())
     .bind(until)
+    .bind(selected_digest(selection)?)
     .execute(c)
     .await
     .map_err(sql_error)?;
