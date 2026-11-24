@@ -160,9 +160,8 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "consumer")]
-use rss_transactional_messaging::{
-    message::MessageEnvelope,
-    transaction::{EnvelopeValidationFailure, IngressChallenge, IngressValidator, VerifiedIngress},
+use rss_transactional_messaging::transaction::{
+    EnvelopeValidationFailure, IngressChallenge, IngressValidator, VerifiedIngress,
 };
 #[cfg(feature = "consumer")]
 struct Validator(rss_transactional_messaging::fence::ExecutionBinding);

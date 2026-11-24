@@ -1278,7 +1278,7 @@ async fn replay_partition_race(
     store: Arc<PgRecoveryStore<Key>>,
     owner: &sqlx::PgPool,
 ) -> anyhow::Result<()> {
-    let template = message("partition-replay-source");
+    let template = support::message("partition-replay-source");
     let m = template.metadata();
     let source = MessageEnvelope::new(
         template.id().clone(),

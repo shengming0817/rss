@@ -1,7 +1,7 @@
 //! Real PostgreSQL drivers for the four canonical, provider-neutral conformance suites.
 mod consumer;
 mod outbox;
-use super::{Effect, Timer, Validator, binding, deadline, message};
+use super::{Effect, Timer, Validator, binding, binding_for_group, deadline, message};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     inbox::*,
