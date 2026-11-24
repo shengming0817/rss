@@ -95,6 +95,7 @@ CREATE TABLE rss_ts_ch.summaries (
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );
+CREATE INDEX page_summary_refs ON rss_ts_ch.summaries(tenant_id,namespace,semantics,lo,hi);
 CREATE INDEX clean_series_summaries ON rss_ts_ch.summaries(tenant_id,namespace,source,generation,series,hi) WHERE dirty_from IS NULL;
 CREATE TABLE rss_ts_ch.ranges (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, spec_digest bytea NOT NULL,

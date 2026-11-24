@@ -173,7 +173,7 @@ impl<C: Clock> Operation<'_, C> {
             literal(id)
         );
         let rows = self
-            .ch_query(&self.reader, &sql, deadline)?
+            .ch_query(self.reader.query_raw(&sql), deadline)?
             .fetch_all::<SummaryRow>()
             .await
             .map_err(|_| Error::Unavailable)?;

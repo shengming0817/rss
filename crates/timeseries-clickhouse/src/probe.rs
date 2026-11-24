@@ -171,7 +171,7 @@ async fn catalog(ch: &Connections) -> Result<(), Error> {
             "raw",
             "ReplacingMergeTree",
             "intDiv(observed_at,2592000000000)",
-            "tenant,namespace,series,source,generation,observed_at,sequence,sample_id,revision,digest,received_at",
+            "tenant,namespace,series,source,generation,observed_at,sequence,sample_id,revision,digest,received_at,subject,resource,metric_key,SHA256(payload)",
         ),
         (
             "summaries",

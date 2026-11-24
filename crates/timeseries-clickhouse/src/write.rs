@@ -222,7 +222,7 @@ impl<C: Clock> Operation<'_, C> {
                     subject,resource,metric_key,lower(hex(SHA256(payload))) AS payload_hash
                  FROM rss_ts_ch.raw WHERE tenant=? AND namespace=? AND revision=? LIMIT ?";
         let mut rows = self
-            .ch_query(&self.reader, sql, deadline)?
+            .ch_query(self.reader.query(sql), deadline)?
             .bind(self.tenant.to_string())
             .bind(b.stream().scope().namespace().as_str())
             .bind(p.revision)

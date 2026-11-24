@@ -33,7 +33,7 @@ pub(crate) trait Request {
     ) -> Result<(Self::Page, Option<Self::Position>), Error>;
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Version {
     published: i64,
     fence: i64,
@@ -60,7 +60,8 @@ impl Version {
 }
 #[derive(Serialize, Deserialize)]
 struct Cursor<P> {
-    version: Version,
+    ceiling: Option<i64>,
+    state: [u8; 32],
     position: P,
 }
 
@@ -81,6 +82,15 @@ impl<C: Clock> Operation<'_, C> {
         let binding = request.binding()?;
         let domain = R::DOMAIN;
         let aggregate = R::AGGREGATE;
+        let state_tag = |v: Version| {
+            self.material.key.page_state(
+                domain,
+                binding,
+                self.instance,
+                v.fence,
+                aggregate.then_some((v.published, v.summaries)),
+            )
+        };
         if q.budget().max_points > self.limits.max_points
             || q.budget().max_series > self.limits.max_series
         {
@@ -106,10 +116,17 @@ impl<C: Clock> Operation<'_, C> {
                         self.instance,
                         time,
                     )?;
-                    if !current.is_some_and(|v| cursor.version.agrees(v, aggregate)) {
+                    let mut version = current.ok_or(Error::HistoryExpired)?;
+                    if state_tag(version)? != cursor.state {
                         return Err(Error::HistoryExpired);
                     }
-                    (cursor.version, Some(cursor.position), expires)
+                    if let Some(ceiling) = cursor.ceiling {
+                        if ceiling > version.published {
+                            return Err(Error::HistoryExpired);
+                        }
+                        version.published = ceiling;
+                    }
+                    (version, Some(cursor.position), expires)
                 } else {
                     (
                         current.unwrap_or_default(),
@@ -145,7 +162,11 @@ impl<C: Clock> Operation<'_, C> {
                             binding,
                             self.instance,
                             expires,
-                            &Cursor { version, position },
+                            &Cursor {
+                                ceiling: (!aggregate).then_some(version.published),
+                                state: state_tag(version)?,
+                                position,
+                            },
                         )
                     })
                     .transpose()?;
@@ -156,5 +177,49 @@ impl<C: Clock> Operation<'_, C> {
             }
         }
         Err(Error::Unavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CursorKey;
+    #[test]
+    fn cursor_carries_only_the_ceiling_position_and_bound_state_tag() -> Result<(), Error> {
+        let key = CursorKey::new([17; 32]);
+        let binding = Digest::from_bytes([3; 32]);
+        let state = key.page_state(Query::DOMAIN, binding, "instance", 7524, None)?;
+        let token = key.seal(
+            Query::DOMAIN,
+            binding,
+            "instance",
+            100,
+            &Cursor {
+                ceiling: Some(6),
+                position: 12,
+                state,
+            },
+        )?;
+        let (_, body) =
+            key.open::<serde_json::Value>(Query::DOMAIN, &token, binding, "instance", 0)?;
+        assert_eq!(
+            body,
+            serde_json::json!({"ceiling":6,"position":12,"state":state})
+        );
+        assert_ne!(
+            state,
+            key.page_state(
+                Query::DOMAIN,
+                Digest::from_bytes([4; 32]),
+                "instance",
+                7524,
+                None
+            )?
+        );
+        assert_ne!(
+            state,
+            key.page_state(Query::DOMAIN, binding, "instance", 7525, None)?
+        );
+        Ok(())
     }
 }

@@ -101,7 +101,7 @@ impl<C: Clock> Operation<'_, C> {
         deadline: Deadline,
     ) -> Result<Vec<ObservedSample>, Error> {
         let mut cursor = self
-            .ch_query(&self.reader, sql, deadline)?
+            .ch_query(self.reader.query_raw(sql), deadline)?
             .fetch::<Raw>()
             .map_err(|_| Error::Unavailable)?;
         let mut size = 0usize;
@@ -184,7 +184,7 @@ impl Request for Query {
                 u64::from(groups) + 1
             );
             let keys = store
-                .ch_query(&store.reader, &sql, deadline)?
+                .ch_query(store.reader.query_raw(&sql), deadline)?
                 .fetch_all::<(String, String, String)>()
                 .await
                 .map_err(|_| Error::Unavailable)?;

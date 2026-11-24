@@ -121,9 +121,9 @@ pub(super) async fn step<C: Clock>(
             )
             .await?;
         }
-        sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE tenant_id=$1::text::uuid AND namespace=$2")
+        let revoked=sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE tenant_id=$1::text::uuid AND namespace=$2 AND allowed")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).execute(&mut *c).await.map_err(sql_error)?;
-        if limit == 0 {
+        if limit == 0 || revoked.rows_affected() > 0 {
             control::bump(c, r.scope()).await?;
         }
         state.cleanup = Some(Cleanup {
@@ -194,8 +194,9 @@ async fn delete<C: Clock>(
 ) -> Result<(), Error> {
     store
         .ch_query(
-            &store.resources.ch.maintenance,
-            &format!("ALTER TABLE rss_ts_ch.{table} DELETE WHERE {predicate}"),
+            store.resources.ch.maintenance.query_raw(&format!(
+                "ALTER TABLE rss_ts_ch.{table} DELETE WHERE {predicate}"
+            )),
             deadline,
         )?
         .with_setting("mutations_sync", "1")
@@ -204,8 +205,9 @@ async fn delete<C: Clock>(
         .map_err(|_| Error::Unavailable)?;
     let count = store
         .ch_query(
-            &store.resources.ch.maintenance,
-            &format!("SELECT count() FROM rss_ts_ch.{table} WHERE {predicate}"),
+            store.resources.ch.maintenance.query_raw(&format!(
+                "SELECT count() FROM rss_ts_ch.{table} WHERE {predicate}"
+            )),
             deadline,
         )?
         .fetch_all::<u64>()
@@ -295,11 +297,10 @@ async fn prune_summaries<C: Clock>(
     );
     let orphans = store
         .ch_query(
-            &store.resources.ch.maintenance,
-            &format!(
+            store.resources.ch.maintenance.query_raw(&format!(
                 "SELECT object_id FROM rss_ts_ch.summaries FINAL WHERE {base} LIMIT {}",
                 r.budget().rows.get()
-            ),
+            )),
             deadline,
         )?
         .fetch_all::<String>()

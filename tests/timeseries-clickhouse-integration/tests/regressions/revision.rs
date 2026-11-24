@@ -17,11 +17,11 @@ async fn only_the_exact_complete_revision_can_publish_after_merge() -> anyhow::R
         ),
         (
             "body",
-            "ALTER TABLE rss_ts_ch.raw UPDATE payload='{}' WHERE sample_id='body' SETTINGS mutations_sync=2",
+            "INSERT INTO rss_ts_ch.raw SELECT * REPLACE ('{}' AS payload) FROM default.original_body",
         ),
         (
             "selector",
-            "ALTER TABLE rss_ts_ch.raw UPDATE subject='different' WHERE sample_id='selector' SETTINGS mutations_sync=2",
+            "INSERT INTO rss_ts_ch.raw SELECT * REPLACE ('different' AS subject) FROM default.original_selector",
         ),
         (
             "missing",
@@ -48,7 +48,14 @@ async fn only_the_exact_complete_revision_can_publish_after_merge() -> anyhow::R
         let write = store.write(&request, deadline()?);
         tokio::pin!(write);
         tokio::select! { _=&mut write=>anyhow::bail!("INSERT missed gate"), ready=proxy.wait_held()=>ready?, }
+        let late_correct = matches!(name, "body" | "selector");
+        if late_correct {
+            f.ch.sql(&format!("CREATE TABLE default.original_{name} ENGINE=Memory AS SELECT * FROM rss_ts_ch.raw WHERE sample_id='{name}'")).await?;
+        }
         f.ch.sql(change).await?;
+        if late_correct {
+            f.ch.sql(&format!("INSERT INTO rss_ts_ch.raw SELECT * FROM default.original_{name} SETTINGS insert_deduplicate=0")).await?;
+        }
         f.ch.sql("OPTIMIZE TABLE rss_ts_ch.raw FINAL").await?;
         proxy.release();
         let result = write.await?;

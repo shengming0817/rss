@@ -180,6 +180,25 @@ async fn aggregate_cursor_observes_publication_and_reference_changes() -> anyhow
         f.store.aggregate(&q, Some(&cursor), deadline()?).await,
         Err(Error::HistoryExpired)
     ));
+    let uncached = during_select(
+        &proxy,
+        store.aggregate(&q, None, deadline()?),
+        f.maintain(
+            "unlink",
+            MaintenanceAction::Prune {
+                selection: q.request().spec().selection(),
+                raw_before: Timestamp::new(0)?,
+                summaries_before: Timestamp::new(100)?,
+            },
+        ),
+    )
+    .await??;
+    assert!(matches!(
+        uncached.buckets[0].value,
+        AggregateValue::Count(1)
+    ));
+    assert_eq!(uncached.refreshed_through, None);
+    assert!(page.refreshed_through.is_some());
     Ok(())
 }
 
@@ -189,14 +208,18 @@ async fn grouped_pages_apply_matched_fence_budget_and_reject_corrupt_samples() -
     let f = Fixture::new("ch-group-page").await?;
     let d = definition(TENANT)?;
     f.register(&d).await?;
-    let b = batch(
-        "base",
-        vec![
-            sample(&d, "one", 1, 1)?,
-            sample(&d, "two", 2, 2)?,
-            sample(&d, "three", 3, 3)?,
-        ],
-    )?;
+    let samples = ["one", "two", "three"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| -> anyhow::Result<Sample> {
+            let mut input = sample(&d, name, i as i64 + 1, i as u64 + 1)?
+                .input()
+                .clone();
+            input.stream = Stream::new(d.spec().scope.clone(), id("a?fields")?, id("gen??")?);
+            Ok(Sample::new(input)?)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let b = batch("base", samples)?;
     confirmed(f.write(&b).await?)?;
     confirmed(f.write(&stream_batch(&d, "z", "four", 4)?).await?)?;
     let range = Interval::new(Timestamp::new(0)?, Timestamp::new(10)?)?;
@@ -252,9 +275,18 @@ async fn grouped_pages_apply_matched_fence_budget_and_reject_corrupt_samples() -
         anyhow::ensure!(ids.len() < 4);
     }
     assert_eq!(ids, vec![id("one")?, id("two")?, id("three")?, id("four")?]);
-    f.ch.sql("ALTER TABLE rss_ts_ch.raw UPDATE payload='{}' WHERE sample_id='one' SETTINGS mutations_sync=2").await?;
+    // The second page has room for a lookahead point but the following group is outside its budget.
+    f.ch.sql("INSERT INTO rss_ts_ch.raw SELECT * REPLACE ('{}' AS payload) FROM rss_ts_ch.raw WHERE sample_id='four'").await?;
+    let first = store.query(&q, None, deadline()?).await?;
+    let second = store
+        .query(&q, Some(&first.next.ok_or(Error::Invariant)?), deadline()?)
+        .await?;
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0].sample.input().id, id("three")?);
     assert!(matches!(
-        store.query(&q, None, deadline()?).await,
+        store
+            .query(&q, Some(&second.next.ok_or(Error::Invariant)?), deadline()?)
+            .await,
         Err(Error::Invariant)
     ));
     for name in ["match1", "match2"] {
@@ -353,5 +385,73 @@ async fn fine_retained_summaries_paginate_at_whole_bucket_boundaries() -> anyhow
     assert_eq!(second.buckets.len(), 1);
     assert!(matches!(second.buckets[0].value, AggregateValue::Count(1)));
     assert!(second.next.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn covered_prune_does_not_strand_an_unrelated_summary_attempt() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-covered-prune").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let a = stream_batch(&d, "discard", "old", 1)?;
+    let b = stream_batch(&d, "retain", "keep", 2)?;
+    confirmed(f.write(&a).await?)?;
+    confirmed(f.write(&b).await?)?;
+    let selection = Selection::Exact {
+        stream: a.stream().clone(),
+        series: a.samples()[0].input().series.clone(),
+    };
+    let before = Timestamp::new(10)?;
+    f.maintain(
+        "cut",
+        MaintenanceAction::AdvanceCutoff {
+            selection: selection.clone(),
+            before,
+        },
+    )
+    .await?;
+    let prune = MaintenanceAction::Prune {
+        selection,
+        raw_before: before,
+        summaries_before: Timestamp::new(0)?,
+    };
+    f.maintain("first", prune.clone()).await?;
+    let spec = SummarySpec::new(
+        b.stream().clone(),
+        b.samples()[0].input().series.clone(),
+        NonZeroU64::new(10).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let recompute = MaintenanceAction::Recompute {
+        spec,
+        window: Interval::new(Timestamp::new(0)?, before)?,
+    };
+    let request = Authorized::<MaintenanceRequest>::verify(
+        &authority(TENANT)?,
+        MaintenanceRequest::new(
+            id("summary")?,
+            recompute.clone(),
+            MaintenanceBudget {
+                rows: NonZeroU32::new(2).ok_or(Error::Invariant)?,
+                buckets: NonZeroU32::MIN,
+            },
+        )?,
+    )?;
+    assert!(matches!(
+        confirmed(f.store.step(&request, None, deadline()?).await?)?,
+        MaintenanceProgress::More { .. }
+    ));
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT FROM rss_ts_ch.attempts WHERE allowed AND target='summaries')",
+    )
+    .fetch_one(&f.admin)
+    .await?;
+    assert!(active);
+    f.maintain("covered", prune).await?;
+    assert!(matches!(
+        f.maintain("summary", recompute).await?,
+        MaintenanceProgress::Complete { .. }
+    ));
     Ok(())
 }

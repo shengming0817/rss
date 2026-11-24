@@ -108,16 +108,13 @@ pub(crate) async fn permit(
 impl<C: Clock> Operation<'_, C> {
     pub(crate) fn ch_query(
         &self,
-        client: &clickhouse::Client,
-        sql: &str,
+        query: clickhouse::query::Query,
         deadline: Deadline,
     ) -> Result<clickhouse::query::Query, Error> {
         let remaining = deadline
             .remaining(self.clock.now())
             .ok_or(Error::Deadline)?;
-        Ok(self
-            .limits
-            .query(client.query(sql), self.threads, remaining))
+        Ok(self.limits.query(query, self.threads, remaining))
     }
     pub(crate) async fn insert<T: Serialize>(
         &self,
@@ -207,14 +204,15 @@ impl<C: Clock> Operation<'_, C> {
         // KILL on an already finished query can return no result header at all.
         // Consume its complete HTTP response, then independently verify termination;
         // a successful HTTP status or a sent cancellation alone is not sufficient.
-        self.ch_query(&self.resources.ch.maintenance, &sql, deadline)?
+        self.ch_query(self.resources.ch.maintenance.query_raw(&sql), deadline)?
             .execute()
             .await
             .map_err(|e| provider_error("drain-kill", e))?;
         let remaining = self
             .ch_query(
-                &self.resources.ch.maintenance,
-                &format!("SELECT count() FROM system.processes WHERE query_id IN ({ids})"),
+                self.resources.ch.maintenance.query_raw(&format!(
+                    "SELECT count() FROM system.processes WHERE query_id IN ({ids})"
+                )),
                 deadline,
             )?
             .fetch_all::<u64>()
