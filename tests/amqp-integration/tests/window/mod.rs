@@ -389,11 +389,39 @@ async fn drain_after_failed_head(
     finish.notify_one();
     task.await??;
     shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
-    assert_eq!(
-        topology::ready_depth(&url, route.as_str()).await?,
-        if matches!(head, Head::Reject) { 1 } else { 2 },
-        "independent delivery ACKed while the ordered head and successor remain"
-    );
+    verify_redelivered_head(&url, &route, head).await?;
     shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
+    Ok(())
+}
+
+async fn verify_redelivered_head(
+    url: &str,
+    route: &MessageRoute,
+    head: Head,
+) -> anyhow::Result<()> {
+    let expected: &[&str] = match head {
+        Head::Reject => &["next"],
+        Head::Retry | Head::Unknown | Head::Fenced => &["next", "retry-head"],
+    };
+    assert_eq!(
+        topology::ready_depth(url, route.as_str()).await? as usize,
+        expected.len()
+    );
+    let (replacement, resource) = prepared_subscriber(url, route, "recovery", false).await?;
+    let sub = subscription_for(&envelope(route, "template"), route);
+    let mut stream = replacement.deliveries(&sub, NonZeroU16::MIN).await?;
+    let mut recovered = Vec::new();
+    for _ in expected {
+        let item = next_valid_delivery(&mut stream).await?;
+        recovered.push(item.message().id().as_str().to_owned());
+        consume_live_delivery(item, "window-recovery", &sub, committed, &NoopEmitter).await?;
+    }
+    recovered.sort();
+    assert_eq!(
+        recovered, expected,
+        "independently committed delivery must stay acknowledged"
+    );
+    drop(stream);
+    shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
 }
