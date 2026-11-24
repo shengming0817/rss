@@ -68,11 +68,12 @@ uses the enclosing transaction's original deadline. Cancellation drops that tran
 and invokes its owner's isolation policy; it does not prove rollback. No thread, timer task or
 infinite retry loop is spawned. Uncertain settlement requires exact durable readback first.
 
-Consumers that already own durable command candidates use `recover_exact` with one scope and ID.
-It applies the same recovery rules without inspecting unrelated commands. A terminal snapshot is
-unchanged; an absent ID returns `None`, which does not prove a consumer's business work succeeded.
-Invalid scopes and cross-device identities are rejected. Consumers bound their own candidate pages
-and advance checkpoints only with the enclosing transaction's confirmed commit.
+Consumers that own durable candidates pass one scope and an `ExactCommandIds` page to
+`recover_exact`. The page borrows up to 1024 distinct IDs. Each requested ID occupies one
+result slot in order, including unchanged terminal snapshots and `None` for missing tenant-local
+IDs. A command on another device rejects the page. Empty pages still verify the transaction
+and authority. Consumers decide how to handle missing commands and advance their checkpoint
+only after the enclosing transaction commits.
 
 ## Extraction
 

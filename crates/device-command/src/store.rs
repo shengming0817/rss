@@ -2,13 +2,15 @@
 use crate::{Command, CommandId, CommandSpec, Coordinate, DeviceReport, Outcome, Scope};
 use rss_transactional_messaging::outbox::PendingMessage;
 
+const MAX_BATCH_SIZE: u16 = 1024;
+
 /// At most 1024 records per page; time is bounded by the enclosing transaction.
 #[derive(Debug, Clone, Copy)]
 pub struct BatchLimit(u16);
 impl BatchLimit {
     /// Reject zero or unbounded work.
     pub fn new(value: u16) -> Result<Self, crate::Error> {
-        if value == 0 || value > 1024 {
+        if value == 0 || value > MAX_BATCH_SIZE {
             return Err(crate::Error::InvalidValue);
         }
         Ok(Self(value))
@@ -21,6 +23,26 @@ impl BatchLimit {
 impl Default for BatchLimit {
     fn default() -> Self {
         Self(64)
+    }
+}
+/// A caller-selected page of at most 1024 distinct command identities, in request order.
+#[derive(Debug, Clone, Copy)]
+pub struct ExactCommandIds<'a>(&'a [CommandId]);
+impl<'a> ExactCommandIds<'a> {
+    /// Accept empty pages and reject oversized pages or repeated identities.
+    pub fn new(ids: &'a [CommandId]) -> Result<Self, crate::Error> {
+        if ids.len() > usize::from(MAX_BATCH_SIZE) {
+            return Err(crate::Error::InvalidValue);
+        }
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        if !ids.iter().all(|id| seen.insert(id)) {
+            return Err(crate::Error::InvalidValue);
+        }
+        Ok(Self(ids))
+    }
+    /// Borrow all validated identities in their original order.
+    pub const fn as_slice(self) -> &'a [CommandId] {
+        self.0
     }
 }
 /// Staged recovery output. `after` is valid only after the enclosing commit is acknowledged.
@@ -109,16 +131,16 @@ pub trait Store: Send + Sync {
         limit: BatchLimit,
         after: Option<&CommandId>,
     ) -> impl Future<Output = Result<RecoveryPage, Self::Error>> + Send;
-    /// Recover one durable identity under its current authority, without inspecting other commands.
+    /// Recover a caller-selected page in the admitted scope and original transaction.
     ///
-    /// Applies the same expiry, supersession and publication rules as [`Self::recover`]. A terminal
-    /// command returns its unchanged snapshot. An absent identity in an admitted scope returns
-    /// `None`; a tenant/runtime mismatch, another device's identity or missing authority is rejected.
-    /// The result is staged in the caller's transaction and does not prove a confirmed commit.
+    /// The result has one slot per requested ID, in request order. Terminal commands retain
+    /// their exact snapshots; an absent tenant-local ID yields None. Another device's ID
+    /// rejects the whole page. Runtime, tenant and authority checks also apply to empty pages.
+    /// The caller owns candidate selection and advances its checkpoint only after commit.
     fn recover_exact(
         &self,
         tx: &mut Self::Transaction<'_>,
         scope: Scope,
-        id: &CommandId,
-    ) -> impl Future<Output = Result<Option<Command>, Self::Error>> + Send;
+        ids: ExactCommandIds<'_>,
+    ) -> impl Future<Output = Result<Vec<Option<Command>>, Self::Error>> + Send;
 }

@@ -255,7 +255,11 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     };
     let recover = async {
         if exact {
-            Ok::<_, anyhow::Error>(f.recover_exact(name, s).await?.map(|c| c.status()))
+            let page = f.recover_exact(&["slow-confirm-other", name], s).await?;
+            assert!(
+                matches!(page.as_slice(), [Some(a), Some(b)] if a.status() == Status::TimedOut && b.status() == Status::TimedOut)
+            );
+            Ok::<_, anyhow::Error>(Some(Status::TimedOut))
         } else {
             let page = f.recover(s).await?;
             assert_eq!(page.commands.len(), 2);
@@ -278,22 +282,28 @@ async fn prepare_waiting_page(
     exact: bool,
 ) -> anyhow::Result<()> {
     queue_expiring(f, s, c, name, expires).await?;
-    if !exact {
-        queue_expiring(f, s, c, "slow-confirm-z", expires).await?;
-    }
+    queue_expiring(
+        f,
+        s,
+        c,
+        if exact {
+            "slow-confirm-other"
+        } else {
+            "slow-confirm-z"
+        },
+        expires,
+    )
+    .await?;
     f.publish().await?;
     if !exact {
-        assert_eq!(
-            f.recover_exact("slow-confirm-z", s)
-                .await?
-                .map(|c| c.status()),
-            Some(Status::Published)
+        assert!(
+            matches!(f.recover_exact(&["slow-confirm-z"], s).await?.as_slice(), [Some(c)] if c.status() == Status::Published)
         );
     }
     Ok(())
 }
 
-async fn queue_expiring(
+pub(super) async fn queue_expiring(
     f: &Fixture,
     s: Scope,
     coordinate: Coordinate,
