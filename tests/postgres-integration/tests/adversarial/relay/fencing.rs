@@ -83,87 +83,131 @@ pub(super) async fn run(
     owner: &sqlx::PgPool,
     budget: DeliveryBudget,
 ) -> anyhow::Result<()> {
-    for race in [Race::Expired, Race::Takeover, Race::Unknown, Race::Epoch] {
-        let id = format!("real-relay-{race:?}").to_lowercase();
-        let tenant = if race == Race::Epoch {
-            let tenant =
-                rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000003251")?;
-            sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
-                .bind(tenant.to_string())
-                .execute(owner)
-                .await?;
-            tenant
-        } else {
-            crate::fixture_tenant()
-        };
-        let store = seed(runtime.clone(), &id, tenant, budget).await?;
+    let epoch_tenant =
+        rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000003251")?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.tenant_epoch VALUES($1::uuid,1)")
+        .bind(epoch_tenant.to_string())
+        .execute(owner)
+        .await?;
+    // The owner connection can force lease expiry only in its configured fixture tenant.
+    let owner_tenant = crate::fixture_tenant();
+    for (race, tenant) in [
+        (Race::Expired, owner_tenant),
+        (Race::Takeover, owner_tenant),
+        (Race::Unknown, owner_tenant),
+        (Race::Epoch, epoch_tenant),
+    ] {
         let binding = crate::execution(tenant, 1);
-        let claim = |binding| store.claim_partition_heads(binding, NonZeroUsize::MIN, deadline());
-        let acquired = claim(binding).await?;
+        let id = format!("real-relay-{race:?}").to_lowercase();
+        let store = seed(runtime.clone(), &id, tenant, budget).await?;
+        let acquired = store
+            .claim_partition_heads(binding, NonZeroUsize::MIN, deadline())
+            .await?;
         assert_eq!(acquired.len(), 1);
         let initial = facts(owner, &id).await?;
-        let mut successor = None;
-        match race {
-            Race::Expired => expire(owner, &id).await?,
-            Race::Takeover => {
-                expire(owner, &id).await?;
-                successor = claim(binding).await?.into_iter().next();
-                assert!(successor.is_some());
-            }
-            Race::Epoch => {
-                sqlx::query("UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid")
-                    .bind(tenant.to_string()).execute(owner).await?;
-            }
-            Race::Unknown => {
-                runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck)
-            }
-        }
-        let before = facts(owner, &id).await?;
-        let publisher = MemoryPublisher::new([]);
-        let prepared = Claimed {
+        let successor = race.inject(&runtime, owner, &store, binding, &id).await?;
+        let reply = Claimed {
             store: &store,
             reply: Mutex::new(Some(acquired)),
         };
+        race.check_preparation(owner, &id, &initial, reply, binding)
+            .await?;
+        let current_binding = crate::execution(tenant, if race == Race::Epoch { 2 } else { 1 });
+        verify_reclaim(&store, current_binding, owner, &id, initial, successor).await?;
+    }
+    Ok(())
+}
+
+impl Race {
+    async fn inject(
+        self,
+        runtime: &PgRuntime,
+        owner: &sqlx::PgPool,
+        store: &Store,
+        binding: ExecutionBinding,
+        id: &str,
+    ) -> anyhow::Result<Option<PgOutboxClaim>> {
+        match self {
+            Self::Expired => expire(owner, id).await?,
+            Self::Takeover => {
+                expire(owner, id).await?;
+                let claim = store
+                    .claim_partition_heads(binding, NonZeroUsize::MIN, deadline())
+                    .await?;
+                return Ok(Some(claim.into_iter().next().expect("takeover")));
+            }
+            Self::Epoch => {
+                sqlx::query("UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid")
+                    .bind(binding.tenant().to_string()).execute(owner).await?;
+            }
+            Self::Unknown => {
+                runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck)
+            }
+        }
+        Ok(None)
+    }
+
+    async fn check_preparation(
+        self,
+        owner: &sqlx::PgPool,
+        id: &str,
+        initial: &Facts,
+        reply: Claimed<'_>,
+        binding: ExecutionBinding,
+    ) -> anyhow::Result<()> {
+        let before = facts(owner, id).await?;
+        let publisher = MemoryPublisher::new([]);
         let result = relay_once(
             binding,
-            &prepared,
+            &reply,
             &publisher,
             &Timer::new(),
             &Emitter,
             NonZeroUsize::MIN,
         )
         .await;
-        let after = facts(owner, &id).await?;
+        let after = facts(owner, id).await?;
         assert!(publisher.message_ids().is_empty());
-        if race == Race::Unknown {
+        if self == Self::Unknown {
             assert_eq!(
                 result.expect_err("lost commit ACK").kind(),
                 MessagingErrorKind::Transient
             );
             assert_eq!(after.token, initial.token);
             assert!(after.lease > initial.lease);
-            expire(owner, &id).await?;
+            expire(owner, id).await?;
         } else {
             assert_eq!(result?.fenced(), 1);
             assert_eq!(after, before);
         }
         assert_eq!(after.window, initial.window);
-        let current_binding = crate::execution(tenant, if race == Race::Epoch { 2 } else { 1 });
-        let current = match successor {
-            Some(claim) => claim,
-            None => claim(current_binding)
-                .await?
-                .into_iter()
-                .next()
-                .expect("same-ID reclaim"),
-        };
-        assert_eq!(Store::message(&current).message_id().as_str(), id);
-        let current_facts = facts(owner, &id).await?;
-        assert_ne!(current_facts.token, initial.token);
-        assert_eq!(current_facts.window, initial.window);
-        store
-            .settle(current, OutboxSettlement::Published(()), deadline())
-            .await?;
+        Ok(())
     }
+}
+
+async fn verify_reclaim(
+    store: &Store,
+    binding: ExecutionBinding,
+    owner: &sqlx::PgPool,
+    id: &str,
+    initial: Facts,
+    successor: Option<PgOutboxClaim>,
+) -> anyhow::Result<()> {
+    let current = match successor {
+        Some(claim) => claim,
+        None => store
+            .claim_partition_heads(binding, NonZeroUsize::MIN, deadline())
+            .await?
+            .into_iter()
+            .next()
+            .expect("same-ID reclaim"),
+    };
+    assert_eq!(Store::message(&current).message_id().as_str(), id);
+    let current_facts = facts(owner, id).await?;
+    assert_ne!(current_facts.token, initial.token);
+    assert_eq!(current_facts.window, initial.window);
+    store
+        .settle(current, OutboxSettlement::Published(()), deadline())
+        .await?;
     Ok(())
 }

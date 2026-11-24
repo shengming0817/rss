@@ -3,7 +3,7 @@ use super::*;
 use rss_transactional_messaging::transport::Publisher;
 use std::sync::Mutex;
 
-pub(super) async fn install(owner: &sqlx::PgPool) -> anyhow::Result<()> {
+async fn install(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::raw_sql(r"
         CREATE TABLE public.relay_lease_trace(seq bigint, xid xid8);
         GRANT INSERT ON public.relay_lease_trace TO tmsg_runtime,rss_tmsg_relay;
@@ -22,7 +22,7 @@ pub(super) async fn install(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) async fn remove(owner: &sqlx::PgPool) -> anyhow::Result<()> {
+async fn remove(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::raw_sql(r"
         DROP FUNCTION rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid);
         ALTER FUNCTION rss_transactional_messaging.fixture_original_outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid)
@@ -32,9 +32,9 @@ pub(super) async fn remove(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) struct PublisherProbe<'a> {
-    pub owner: &'a sqlx::PgPool,
-    pub transactions: Mutex<Vec<String>>,
+struct PublisherProbe<'a> {
+    owner: &'a sqlx::PgPool,
+    transactions: Mutex<Vec<String>>,
 }
 
 impl Publisher<Vec<u8>> for PublisherProbe<'_> {
@@ -49,4 +49,30 @@ impl Publisher<Vec<u8>> for PublisherProbe<'_> {
         *self.transactions.lock().expect("fixture observation") = transactions;
         PublishOutcome::Confirmed(())
     }
+}
+
+pub(super) async fn measure(owner: &sqlx::PgPool, store: &PgOutboxStore<()>) -> anyhow::Result<()> {
+    install(owner).await?;
+    let publisher = PublisherProbe {
+        owner,
+        transactions: Default::default(),
+    };
+    let report = relay_once(
+        crate::execution(crate::fixture_tenant(), 1),
+        store,
+        &publisher,
+        &Timer::new(),
+        &Emitter,
+        std::num::NonZeroUsize::MIN,
+    )
+    .await?;
+    remove(owner).await?;
+    let transactions = publisher.transactions.into_inner().expect("probe");
+    eprintln!(
+        "relay_prepare transactions={} xids={transactions:?}",
+        transactions.len()
+    );
+    assert_eq!(transactions.len(), 1, "preparation transactions");
+    assert_eq!(report.published(), 1);
+    Ok(())
 }

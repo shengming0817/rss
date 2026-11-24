@@ -44,28 +44,7 @@ pub(super) async fn run(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow
                 .bind(&id).bind(seconds).execute(owner).await?;
         }
         if case == "normal" {
-            probe::install(owner).await?;
-            let publisher = probe::PublisherProbe {
-                owner,
-                transactions: Default::default(),
-            };
-            let report = relay_once(
-                crate::execution(tenant, 1),
-                &*store,
-                &publisher,
-                &Timer::new(),
-                &Emitter,
-                std::num::NonZeroUsize::MIN,
-            )
-            .await?;
-            probe::remove(owner).await?;
-            let transactions = publisher.transactions.into_inner().expect("probe");
-            eprintln!(
-                "relay_prepare transactions={} xids={transactions:?}",
-                transactions.len()
-            );
-            assert_eq!(transactions.len(), 1, "preparation transactions");
-            assert_eq!(report.published(), 1);
+            probe::measure(owner, &store).await?;
         } else {
             let publisher = MemoryPublisher::new([PublishOutcome::Confirmed(())]);
             let report = relay_once(

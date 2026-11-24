@@ -224,6 +224,8 @@ async fn claim_heads<P, S: OutboxRelayStore<P>>(
     Ok(claims)
 }
 
+type ClaimOutcome = Result<Option<OutboxDisposition>, MessagingError>;
+
 async fn relay_claim<P, S, U, C, E>(
     store: &S,
     publisher: &U,
@@ -231,7 +233,7 @@ async fn relay_claim<P, S, U, C, E>(
     budget: DeliveryBudget,
     emitter: &E,
     claim: S::Claim,
-) -> Result<Option<OutboxDisposition>, MessagingError>
+) -> ClaimOutcome
 where
     P: Sync,
     S: OutboxRelayStore<P>,
@@ -420,24 +422,31 @@ where
         binding: rss_transactional_messaging::fence::ExecutionBinding,
         token: tokio_util::sync::CancellationToken,
     ) -> Result<(), MessagingError> {
-        let clock = self.clock.as_ref();
-        let emitter = self.emitter.as_ref();
-        let store = self.store.as_ref();
         if token.is_cancelled() {
             return Ok(());
         }
-        for delay in [self.config.idle_scan_interval, self.config.error_backoff] {
-            absolute_deadline(clock, delay, emitter)?;
-        }
+        let longest_delay = self
+            .config
+            .idle_scan_interval
+            .max(self.config.error_backoff);
+        absolute_deadline(self.clock.as_ref(), longest_delay, self.emitter.as_ref())?;
+        self.drive(binding, &token).await
+    }
+
+    async fn drive(
+        &self,
+        binding: ExecutionBinding,
+        token: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), MessagingError> {
+        let clock = self.clock.as_ref();
+        let emitter = self.emitter.as_ref();
+        let store = self.store.as_ref();
         let budget = store.delivery_budget();
         let mut active = FuturesUnordered::new();
         let mut admission = Admission::Ready;
 
         while !token.is_cancelled() && !matches!(admission, Admission::Stopped(_)) {
-            let free = self.config.max_in_flight.get() - active.len();
-            if let Some(limit) = NonZeroUsize::new(free.min(self.config.claim_limit.get()))
-                && matches!(admission, Admission::Ready)
-            {
+            if let Some(limit) = admission.capacity(self.config, active.len()) {
                 // Start ready work before a synchronous store can fill the whole window.
                 if let Some(Some(result)) = active.next().now_or_never() {
                     admission.completed(result, &self.config, clock, emitter);
@@ -446,44 +455,19 @@ where
                 if token.is_cancelled() {
                     break;
                 }
-                // A claim can already be durable while its reply is pending. Finish this
-                // one request even if cancellation or a fatal settlement stops admission.
-                let scan = claim_heads(binding, store, clock, budget, emitter, limit);
-                tokio::pin!(scan);
-                let before = active.len();
-                let claims = loop {
-                    tokio::select! {
-                        biased;
-                        result = &mut scan => break result,
-                        Some(result) = active.next(), if !active.is_empty() => {
-                            admission.completed(result, &self.config, clock, emitter);
-                        }
-                    }
-                };
-                match claims {
-                    Ok(batch) if batch.is_empty() => {
-                        if before == active.len() && matches!(admission, Admission::Ready) {
-                            admission = Admission::delay(
-                                clock,
-                                emitter,
-                                self.config.idle_scan_interval,
-                                Admission::Idle,
-                            );
-                        }
-                    }
-                    Ok(batch) => {
-                        for claim in batch {
-                            active.push(relay_claim(
-                                store,
-                                self.publisher.as_ref(),
-                                clock,
-                                budget,
-                                emitter,
-                                claim,
-                            ));
-                        }
-                    }
-                    Err(error) => admission.failed(error, &self.config, clock, emitter),
+                let request = claim_heads(binding, store, clock, budget, emitter, limit);
+                let batch = admission
+                    .scan(request, &mut active, &self.config, clock, emitter)
+                    .await;
+                for claim in batch.into_iter().flatten() {
+                    active.push(relay_claim(
+                        store,
+                        self.publisher.as_ref(),
+                        clock,
+                        budget,
+                        emitter,
+                        claim,
+                    ));
                 }
                 // Ready in-memory providers must also share the caller's executor.
                 tokio::task::yield_now().await;
@@ -498,13 +482,9 @@ where
                 () = admission.wait(clock) => admission = Admission::Ready,
             }
         }
-        while let Some(result) = active.next().await {
-            admission.completed(result, &self.config, clock, emitter);
-        }
-        match admission {
-            Admission::Stopped(error) => Err(error),
-            _ => Ok(()),
-        }
+        admission
+            .drain(&mut active, &self.config, clock, emitter)
+            .await
     }
 }
 
@@ -516,6 +496,66 @@ enum Admission {
 }
 
 impl Admission {
+    fn capacity(&self, config: RelayConfig, in_flight: usize) -> Option<NonZeroUsize> {
+        match self {
+            Self::Ready => NonZeroUsize::new(
+                (config.max_in_flight.get() - in_flight).min(config.claim_limit.get()),
+            ),
+            _ => None,
+        }
+    }
+
+    // A claim can already be durable while its reply is pending. Finish the one
+    // request even if cancellation or a fatal settlement stops future admission.
+    async fn scan<T, F: Future<Output = ClaimOutcome>>(
+        &mut self,
+        request: impl Future<Output = Result<OutboxClaimBatch<T>, MessagingError>>,
+        active: &mut FuturesUnordered<F>,
+        config: &RelayConfig,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+    ) -> Option<OutboxClaimBatch<T>> {
+        tokio::pin!(request);
+        let before = active.len();
+        let claims = loop {
+            tokio::select! {
+                biased;
+                result = &mut request => break result,
+                Some(result) = active.next(), if !active.is_empty() => {
+                    self.completed(result, config, clock, emitter);
+                }
+            }
+        };
+        match claims {
+            Ok(batch) => {
+                if batch.is_empty() && active.len() == before && matches!(self, Self::Ready) {
+                    *self = Self::delay(clock, emitter, config.idle_scan_interval, Self::Idle);
+                }
+                Some(batch)
+            }
+            Err(error) => {
+                self.failed(error, config, clock, emitter);
+                None
+            }
+        }
+    }
+
+    async fn drain<F: Future<Output = ClaimOutcome>>(
+        mut self,
+        active: &mut FuturesUnordered<F>,
+        config: &RelayConfig,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+    ) -> Result<(), MessagingError> {
+        while let Some(result) = active.next().await {
+            self.completed(result, config, clock, emitter);
+        }
+        match self {
+            Admission::Stopped(error) => Err(error),
+            _ => Ok(()),
+        }
+    }
+
     fn delay(
         clock: &impl ExecutionTimer,
         emitter: &impl TransactionalMessagingEmitter,
@@ -534,7 +574,7 @@ impl Admission {
 
     fn completed(
         &mut self,
-        result: Result<Option<OutboxDisposition>, MessagingError>,
+        result: ClaimOutcome,
         config: &RelayConfig,
         clock: &impl ExecutionTimer,
         emitter: &impl TransactionalMessagingEmitter,

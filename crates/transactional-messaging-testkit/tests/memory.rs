@@ -693,6 +693,7 @@ async fn outbox_old_attempt_cannot_change_successor_or_terminal() -> TestResult 
             store
                 .settle(old.clone(), OutboxSettlement::Retry, deadline(&clock)?)
                 .await?;
+            store.clock().advance(Duration::from_secs(1))?;
         } else {
             store.fence_claims();
         }
