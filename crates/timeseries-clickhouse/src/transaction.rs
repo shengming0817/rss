@@ -95,12 +95,7 @@ impl<C: Clock> Operation<'_, C> {
             result => result,
         }
     }
-    pub(crate) async fn begin(
-        &self,
-        scope: &Scope,
-        exclusive: bool,
-        deadline: Deadline,
-    ) -> Result<Session, Error> {
+    pub(crate) async fn session(&self, scope: &Scope, deadline: Deadline, begin: &'static str) -> Result<Session, Error> {
         self.scope(scope)?;
         let mut s = Session {
             connection: self.resources.pool.acquire().await.map_err(sql_error)?,
@@ -108,7 +103,7 @@ impl<C: Clock> Operation<'_, C> {
             published: 0,
             revision: 0,
         };
-        sqlx::query("BEGIN")
+        sqlx::query(begin)
             .execute(s.connection())
             .await
             .map_err(sql_error)?;
@@ -119,6 +114,15 @@ impl<C: Clock> Operation<'_, C> {
             .clamp(1, i32::MAX as u128);
         sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")
             .bind(self.tenant.to_string()).bind(format!("{ms}ms")).execute(s.connection()).await.map_err(sql_error)?;
+        Ok(s)
+    }
+    pub(crate) async fn begin(
+        &self,
+        scope: &Scope,
+        exclusive: bool,
+        deadline: Deadline,
+    ) -> Result<Session, Error> {
+        let mut s = self.session(scope, deadline, "BEGIN").await?;
         sqlx::query("INSERT INTO rss_ts_ch.namespaces(tenant_id,namespace) VALUES($1::text::uuid,$2) ON CONFLICT DO NOTHING")
             .bind(self.tenant.to_string()).bind(scope.namespace().as_str()).execute(s.connection()).await.map_err(sql_error)?;
         let sql = if exclusive {

@@ -23,7 +23,7 @@ async fn safe_limit<C: Clock>(
         return Err(Error::Invariant);
     };
     let (raw_before, summaries_before) = (*raw_before, *summaries_before);
-    let fences = control::fences(c, r.scope(), store.limits.max_points.get()).await?;
+    let fences = control::fences(c, r.scope(), store.limits.max_fences.get()).await?;
     if raw_before.micros() > 0
         && !fences.iter().any(|f| {
             f.kind == "cutoff" && control::covers(&f.selection, sel) && f.window.end() >= raw_before
@@ -117,7 +117,7 @@ pub(super) async fn step<C: Clock>(
                 sel,
                 Interval::new(Timestamp::new(0)?, Timestamp::new(limit)?)?,
                 None,
-                store.limits.max_points.get(),
+                store.limits.max_fences.get(),
             )
             .await?;
         }
@@ -166,9 +166,9 @@ pub(super) async fn step<C: Clock>(
             .map(|v| {
                 format!(
                     "({},{},{})",
-                    literal(&v.source),
-                    literal(&v.generation),
-                    literal(&v.sample_id)
+                    literal(v.sample.input().stream.source().as_str()),
+                    literal(v.sample.input().stream.generation().as_str()),
+                    literal(v.sample.input().id.as_str())
                 )
             })
             .collect::<Vec<_>>()
@@ -263,6 +263,7 @@ async fn prune_summaries<C: Clock>(
     if !ids.is_empty() {
         sqlx::query("DELETE FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND object_id::text=ANY($3)")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(&ids).execute(&mut *c).await.map_err(sql_error)?;
+        control::summary_changed(c,r.scope()).await?;
         cleanup.pending_summaries = ids.clone();
         return Ok(Step::More(
             u32::try_from(ids.len()).map_err(|_| Error::Invariant)?,
@@ -353,7 +354,7 @@ pub(super) async fn reclaim<C: Clock>(
     {
         return Ok(Step::Blocked(MaintenanceBlock::RetainedData));
     }
-    let fs = control::fences(c, scope, store.limits.max_points.get()).await?;
+    let fs = control::fences(c, scope, store.limits.max_fences.get()).await?;
     if fs
         .iter()
         .any(|f| f.kind == "delete" && !f.restored && f.until.is_some_and(|u| u > time))

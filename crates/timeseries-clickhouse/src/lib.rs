@@ -10,6 +10,7 @@ mod definition;
 mod install;
 mod lifecycle;
 mod maintain;
+mod page;
 mod probe;
 mod projection;
 mod read;

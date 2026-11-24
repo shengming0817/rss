@@ -37,10 +37,10 @@ pub(crate) async fn installation(
             .await
             .map_err(sql_error)?
             .ok_or(Error::Invariant)?;
-    if version != 2 {
+    if version != 3 {
         return Err(Error::Unsupported);
     }
-    // Read the v2-only allocation input with the runtime login after checking the version.
+    // Read the allocation input with the runtime login after checking the version.
     sqlx::query_scalar::<_, i32>(
         "SELECT max_pending_batches FROM rss_ts_ch.installation WHERE singleton",
     )

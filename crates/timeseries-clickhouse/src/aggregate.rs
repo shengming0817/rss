@@ -3,12 +3,13 @@ use crate::{
     control::{self, Fence},
     projection::{SummaryRow, literal},
     read::{selection, visible},
-    transaction::{bytes, decode, now, sql_error},
+    page::{Request, View},
+    transaction::{bytes, decode, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
-use sqlx::{PgConnection, Row};
-const DOMAIN: &[u8] = b"rss.timeseries.clickhouse.aggregate.v1";
+use sqlx::PgConnection;
+type SummaryRef = (i64,i64,String);
 pub(crate) fn needs_prior(spec: &SummarySpec) -> bool {
     matches!(
         spec.series().definition().spec().metric,
@@ -65,7 +66,7 @@ impl<C: Clock> Operation<'_, C> {
                 deadline,
             )
             .await?;
-        rows.first().map(|r| r.sample()).transpose()
+        Ok(rows.into_iter().next().map(|row| row.sample))
     }
     pub(crate) async fn builder(
         &self,
@@ -148,7 +149,7 @@ impl<C: Clock> Operation<'_, C> {
             return Err(Error::BudgetExceeded);
         }
         for row in rows {
-            let sample = row.sample()?;
+            let sample = row.sample;
             mask(&mut builder, fences, spec, sample.input().observed_at)?;
             builder.push(sample, self.limits.max_points.get() as usize)?;
         }
@@ -186,20 +187,21 @@ impl<C: Clock> Operation<'_, C> {
         }
         Ok(value)
     }
-    async fn cached(
-        &self,
-        c: &mut PgConnection,
-        published: i64,
-        spec: &SummarySpec,
-        window: Interval,
-        deadline: Deadline,
-    ) -> Result<Option<Summary>, Error> {
-        let scope = spec.stream().scope();
-        let refs=sqlx::query("SELECT object_id::text,lo,hi FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5 AND (dirty_from IS NULL OR dirty_from>$7) ORDER BY lo DESC,hi DESC LIMIT $6")
-            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(spec.semantics()?.as_bytes().as_slice()).bind(window.start().micros()).bind(window.end().micros()).bind(i64::from(self.limits.max_points.get())+1).bind(published).fetch_all(c).await.map_err(sql_error)?;
-        if refs.len() > self.limits.max_points.get() as usize {
-            return Err(Error::BudgetExceeded);
-        }
+    async fn references(&self,c:&mut PgConnection,q:&AggregateQuery,view:&View<Timestamp>)->Result<Vec<SummaryRef>,Error>{
+        if !view.exists {return Ok(Vec::new());}
+        let scope=q.spec().stream().scope();
+        let range=q.query().window();
+        let start=view.position.unwrap_or(range.start());
+        if start<range.start() || start>=range.end() { return Err(Error::InvalidCursor); }
+        // Each bucket costs at least one point, including the partial first bucket.
+        let extra=u64::from(q.query().budget().max_points.get()-1).saturating_mul(q.resolution_micros().get());
+        let end=q.spec().bucket(start)?.end().micros().saturating_add(i64::try_from(extra).unwrap_or(i64::MAX)).min(range.end().micros());
+        let refs=sqlx::query_as("SELECT lo,hi,object_id::text FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5 AND (dirty_from IS NULL OR dirty_from>$7) ORDER BY lo DESC,hi DESC LIMIT $6")
+            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(q.spec().semantics()?.as_bytes().as_slice()).bind(start.micros()).bind(end).bind(i64::from(self.limits.max_points.get())+1).bind(view.published).fetch_all(c).await.map_err(sql_error)?;
+        if refs.len()>self.limits.max_points.get() as usize { return Err(Error::BudgetExceeded); }
+        Ok(refs)
+    }
+    async fn cached(&self, refs:&[SummaryRef],scope:&Scope,window:Interval,deadline:Deadline)->Result<Option<Summary>,Error>{
         // The bounded reference graph is acyclic (hi > lo). Solve coverage backwards
         // before reading values, so a long dead-end bucket cannot hide a valid shorter chain.
         let mut path = std::collections::BTreeMap::new();
@@ -207,15 +209,15 @@ impl<C: Clock> Operation<'_, C> {
             window.end().micros(),
             (window.end().micros(), String::new()),
         );
-        for r in refs {
-            let lo: i64 = r.try_get("lo").map_err(sql_error)?;
-            let hi: i64 = r.try_get("hi").map_err(sql_error)?;
+        let first=refs.partition_point(|r|r.0>=window.end().micros());
+        for (lo,hi,id) in refs[first..].iter().take_while(|r|r.0>=window.start().micros()) {
+            let (lo,hi)=(*lo,*hi);
             if hi <= lo {
                 return Err(Error::Invariant);
             }
             if path.contains_key(&hi) {
                 path.entry(lo)
-                    .or_insert((hi, r.try_get::<String, _>("object_id").map_err(sql_error)?));
+                    .or_insert((hi, id.clone()));
             }
         }
         let mut at = window.start().micros();
@@ -259,50 +261,26 @@ pub(crate) async fn read<C: Clock>(
     after: Option<&Continuation>,
     deadline: Deadline,
 ) -> Result<AggregatePage, Error> {
-    if q.query().budget().max_points > store.limits.max_points
-        || q.query().budget().max_series > store.limits.max_series
-    {
-        return Err(Error::BudgetExceeded);
-    }
-    let mut tx = store
-        .begin(q.spec().stream().scope(), false, deadline)
-        .await?;
-    let result = async {
-        let time = now(tx.connection()).await?;
-        let (expires, mut at) = match after {
-            Some(t) => store.material.key.open::<Timestamp>(
-                DOMAIN,
-                t,
-                q.binding()?,
-                store.instance,
-                time,
-            )?,
-            None => (
-                time.checked_add(store.limits.cursor_micros.get() as i64)
-                    .ok_or(Error::NumericRange)?,
-                q.query().window().start(),
-            ),
-        };
-        if at < q.query().window().start() || at >= q.query().window().end() {
-            return Err(Error::InvalidCursor);
-        }
-        let fences = control::fences(
-            tx.connection(),
-            q.spec().stream().scope(),
-            store.limits.max_points.get(),
-        )
-        .await?;
+    let (mut page,next)=store.page(Request::Aggregate(q),after,deadline,
+        async |c,view|store.references(c,q,view).await,
+        async |view,refs|aggregate_page(store,q,view,refs,deadline).await).await?;
+    page.next=next;
+    Ok(page)
+}
+async fn aggregate_page<C:Clock>(store:&Operation<'_,C>,q:&AggregateQuery,view:View<Timestamp>,refs:Vec<SummaryRef>,deadline:Deadline)->Result<(AggregatePage,Option<Timestamp>),Error>{
+        let mut at=view.position.unwrap_or(q.query().window().start());
+        let fences=view.fences;
         let mut buckets = Vec::new();
         let mut used = 0usize;
         let mut size = 0usize;
         let mut refreshed = None;
         let mut continuous = true;
-        let published = tx.published;
-        while at < q.query().window().end() {
+        let published = view.published;
+        while view.exists && at < q.query().window().end() && used<(q.query().budget().max_points.get() as usize) {
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
             let cached = store
-                .cached(tx.connection(), published, q.spec(), window, deadline)
+                .cached(&refs, q.spec().stream().scope(), window, deadline)
                 .await?;
             let is_cached = cached.is_some();
             let value = match cached {
@@ -334,24 +312,12 @@ pub(crate) async fn read<C: Clock>(
                 refreshed = Some(end);
             }
         }
-        let next = if at < q.query().window().end() {
-            Some(
-                store
-                    .material
-                    .key
-                    .seal(DOMAIN, q.binding()?, store.instance, expires, &at)?,
-            )
-        } else {
-            None
-        };
-        Ok(AggregatePage {
+        let position=(view.exists && at < q.query().window().end()).then_some(at);
+        Ok((AggregatePage {
             buckets,
             availability: control::availability(q.query(), &fences)?,
             resolution_micros: q.resolution_micros(),
             refreshed_through: refreshed,
-            next,
-        })
-    }
-    .await;
-    tx.read(result).await
+            next:None,
+        },position))
 }

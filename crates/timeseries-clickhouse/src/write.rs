@@ -161,7 +161,7 @@ impl<C: Clock> Operation<'_, C> {
         if closed {
             return Err(Error::HistoryExpired);
         }
-        let fences = control::fences(c, scope, self.limits.max_points.get()).await?;
+        let fences = control::fences(c, scope, self.limits.max_fences.get()).await?;
         let received = now(c).await?;
         let rows = admission::admit(
             c,

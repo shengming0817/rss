@@ -20,7 +20,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 pub(crate) fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
-#[derive(Clone, Serialize, Deserialize, clickhouse::Row)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, clickhouse::Row)]
 pub(crate) struct Raw {
     pub tenant: String,
     pub namespace: String,
@@ -62,7 +62,7 @@ impl Raw {
     pub fn sample(&self) -> Result<Sample, Error> {
         let s: Sample = crate::transaction::decode(self.payload.as_bytes())?;
         let expected = Self::new(&s, self.received_at, self.revision)?;
-        if bytes(&expected)? != bytes(self)? {
+        if &expected != self {
             return Err(Error::Invariant);
         }
         Ok(s)
