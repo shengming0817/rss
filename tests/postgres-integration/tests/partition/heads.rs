@@ -2,21 +2,16 @@
 use super::*;
 
 pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> {
-    for (lane, commit_append, commit_settlement) in [
-        ("head-commit", true, true),
-        ("head-rollback", true, false),
-        ("append-rollback", false, true),
+    for (lane, commit_append, commit_settlement, expected) in [
+        ("head-commit", true, true, Some("next")),
+        ("head-rollback", true, false, Some("first")),
+        ("append-rollback", false, true, None),
     ] {
         let head = ordered(&format!("{lane}-first"), lane, "partition");
         let tail = ordered(&format!("{lane}-next"), lane, "partition");
         let tenant = head.metadata().tenant_id();
         let pairs = serde_json::json!([[lane, "partition"]]);
-        let mut seed = sql_tx(raw, tenant).await?;
-        sql_prepare(&mut seed, pairs.clone()).await?;
-        sql_append(&mut seed, &head).await?;
-        let (seq,token,until): (i64,String,i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,1,60000)")
-            .bind(tenant.to_string()).bind(lane).fetch_one(&mut *seed).await?;
-        seed.commit().await?;
+        let claim = seed_claim(raw, &head).await?;
         let mut writer = sql_tx(raw, tenant).await?;
         sql_prepare(&mut writer, pairs).await?;
         sql_append(&mut writer, &tail).await?;
@@ -24,17 +19,7 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *relay)
             .await?;
-        let settle = async {
-            let result:String = sqlx::query_scalar("SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,'published',NULL)")
-                .bind(tenant.to_string()).bind(seq).bind(token).bind(until).fetch_one(&mut *relay).await?;
-            assert_eq!(result, "settled");
-            if commit_settlement {
-                relay.commit().await?;
-            } else {
-                relay.rollback().await?;
-            }
-            anyhow::Ok(())
-        };
+        let settle = finish_claim(relay, tenant, claim, commit_settlement);
         let release = async {
             wait_lock(owner, pid).await?;
             if commit_append {
@@ -47,18 +32,11 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
         tokio::try_join!(settle, release)?;
         let marked:Vec<String> = sqlx::query_scalar("SELECT message_id FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND domain=$2 AND partition_head")
             .bind(tenant.to_string()).bind(lane).fetch_all(owner).await?;
-        let expected = if !commit_settlement {
-            Some(head.id())
-        } else if commit_append {
-            Some(tail.id())
-        } else {
-            None
-        };
         assert_eq!(
             marked,
             expected
                 .into_iter()
-                .map(MessageId::as_str)
+                .map(|suffix| format!("{lane}-{suffix}"))
                 .collect::<Vec<_>>()
         );
     }
@@ -67,29 +45,72 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
     capacity(raw).await
 }
 
-async fn stale_snapshot(raw: &PgPool) -> anyhow::Result<()> {
-    let head = ordered("repeatable-first", "repeatable", "p");
-    let next = ordered("repeatable-next", "repeatable", "p");
+async fn seed_claim(
+    raw: &PgPool,
+    head: &MessageEnvelope<Vec<u8>>,
+) -> anyhow::Result<(i64, String, i64)> {
     let tenant = head.metadata().tenant_id();
-    let pairs = serde_json::json!([["repeatable", "p"]]);
+    let partition = head.metadata().partition().expect("ordered test message");
+    let domain = head.metadata().domain().as_str();
     let mut seed = sql_tx(raw, tenant).await?;
-    sql_prepare(&mut seed, pairs.clone()).await?;
-    sql_append(&mut seed, &head).await?;
+    sql_prepare(
+        &mut seed,
+        serde_json::json!([[domain, partition.key().as_str()]]),
+    )
+    .await?;
+    sql_append(&mut seed, head).await?;
+    let claim = sqlx::query_as(
+        "SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint
+        FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,1,60000)",
+    )
+    .bind(tenant.to_string())
+    .bind(domain)
+    .fetch_one(&mut *seed)
+    .await?;
     seed.commit().await?;
+    Ok(claim)
+}
 
+async fn finish_claim(
+    mut tx: Transaction<'_, Postgres>,
+    tenant: TenantId,
+    claim: (i64, String, i64),
+    commit: bool,
+) -> anyhow::Result<()> {
+    let result:String = sqlx::query_scalar("SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,'published',NULL)")
+        .bind(tenant.to_string()).bind(claim.0).bind(claim.1).bind(claim.2).fetch_one(&mut *tx).await?;
+    assert_eq!(result, "settled");
+    if commit {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(())
+}
+
+async fn fixed_snapshot(
+    raw: &PgPool,
+    tenant: TenantId,
+) -> anyhow::Result<Transaction<'static, Postgres>> {
     let mut old = raw.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(&mut *old)
         .await?;
     sql_scope(&mut old, tenant).await?;
-    let first: bool = sqlx::query_scalar("SELECT partition_head FROM rss_transactional_messaging.outbox WHERE message_id='repeatable-first'")
+    let first:bool = sqlx::query_scalar("SELECT partition_head FROM rss_transactional_messaging.outbox WHERE message_id='repeatable-first'")
         .fetch_one(&mut *old).await?;
     assert!(first);
-    let mut relay = sql_tx(raw, tenant).await?;
-    let settled: String = sqlx::query_scalar("SELECT rss_transactional_messaging.settle_outbox(tenant_id,seq,lease_token,(extract(epoch FROM lease_until)*1000000)::bigint,'published',NULL) FROM rss_transactional_messaging.claim_outbox($1::uuid,'repeatable',1,60000)")
-        .bind(tenant.to_string()).fetch_one(&mut *relay).await?;
-    assert_eq!(settled, "settled");
-    relay.commit().await?;
+    Ok(old)
+}
+
+async fn stale_snapshot(raw: &PgPool) -> anyhow::Result<()> {
+    let head = ordered("repeatable-first", "repeatable", "p");
+    let next = ordered("repeatable-next", "repeatable", "p");
+    let tenant = head.metadata().tenant_id();
+    let pairs = serde_json::json!([["repeatable", "p"]]);
+    let claim = seed_claim(raw, &head).await?;
+    let mut old = fixed_snapshot(raw, tenant).await?;
+    finish_claim(sql_tx(raw, tenant).await?, tenant, claim, true).await?;
     let error = sql_prepare(&mut old, pairs.clone())
         .await
         .expect_err("stale allocator snapshot");

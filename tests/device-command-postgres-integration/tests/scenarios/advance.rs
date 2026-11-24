@@ -212,7 +212,7 @@ async fn partial_recovery(f: &Fixture) -> anyhow::Result<()> {
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *competing)
         .await?;
-    sqlx::query("UPDATE rss_device_command.commands SET version=version+1 WHERE tenant_id=$1::uuid AND command_id='cas-page-z'")
+    sqlx::query("UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1 WHERE tenant_id=$1::uuid AND command_id='cas-page-z' AND version=1")
         .bind(scope.tenant().to_string()).execute(&mut *competing).await?;
     let recover = async {
         let store = f.store.clone();
@@ -246,7 +246,7 @@ async fn partial_recovery(f: &Fixture) -> anyhow::Result<()> {
         f.load("cas-page-z", scope)
             .await?
             .map(|c| (c.version(), c.status())),
-        Some((2, Status::Queued))
+        Some((2, Status::Published))
     );
     Ok(())
 }

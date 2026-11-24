@@ -503,6 +503,12 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
     )
     .fetch_one(owner)
     .await?;
+    // Preserve a valid allocator when presenting an intentionally incorrect partition
+    // to the decoder. The envelope and its fingerprint still agree with each other.
+    sqlx::query("SELECT rss_transactional_messaging.prepare_outbox_partitions($1)")
+        .bind(serde_json::json!([["integration", "projection-other"]]))
+        .execute(owner)
+        .await?;
     for (mutation, domain) in [
         (
             "tenant_id='f47ac10b-58cc-4372-a567-0e02b2c3d480'::uuid",
@@ -541,7 +547,7 @@ async fn projection_mismatch(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> a
             )
             .await
             .is_ok();
-        sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published', tenant_id='f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid, message_id='outbox-roundtrip', domain='integration', partition_key=NULL, partition_seq=NULL, lease_token=NULL, lease_until=NULL WHERE seq=$1").bind(seq).execute(owner).await?;
+        sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published', tenant_id='f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid, message_id='outbox-roundtrip', domain='integration', partition_key=NULL, partition_seq=NULL, partition_head=false, lease_token=NULL, lease_until=NULL WHERE seq=$1").bind(seq).execute(owner).await?;
         assert!(
             !accepted,
             "mismatched relation projection must not become a claim: {mutation}"

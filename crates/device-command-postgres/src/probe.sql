@@ -36,7 +36,7 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
  (2,'relations',
     (SELECT bool_and(relkind='r' AND relpersistence='p' AND relowner=(SELECT nspowner FROM namespace)) FROM rels)
     AND EXISTS(SELECT FROM pg_index i WHERE i.indexrelid=to_regclass('rss_device_command.command_active_page')
-        AND i.indrelid='rss_device_command.commands'::regclass AND i.indisvalid AND i.indisready
+        AND i.indrelid=to_regclass('rss_device_command.commands') AND i.indisvalid AND i.indisready
         AND pg_get_expr(i.indpred,i.indrelid)='(terminal_at IS NULL)'
         AND pg_get_indexdef(i.indexrelid,1,true)='tenant_id' AND pg_get_indexdef(i.indexrelid,2,true)='device_id'
         AND pg_get_indexdef(i.indexrelid,3,true)='command_id'
