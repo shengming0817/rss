@@ -209,6 +209,14 @@ async fn reject_while_waiting(
     successor: &MessageEnvelope<Vec<u8>>,
     protected: bool,
 ) -> anyhow::Result<()> {
+    // Admit both messages before either business snapshot. A concurrent Inbox INSERT may
+    // legitimately abort the first transaction under SERIALIZABLE with SQLSTATE 40001.
+    let verified = binding(successor)?;
+    let contender = inbox(first)?;
+    let IdempotencyDisposition::Acquired(next) = contender.claim(&verified, deadline()).await?
+    else {
+        anyhow::bail!("successor claim")
+    };
     let (entered, mut started) = tokio::sync::mpsc::channel(1);
     let release = Arc::new(tokio::sync::Notify::new());
     let effect = HeldReject {
@@ -237,7 +245,7 @@ async fn reject_while_waiting(
         };
         anyhow::ensure!(
             status == TransactionalMessagingTransactionStatus::Committed,
-            "reject commit {status:?}"
+            "reject commit {status:?}, protected={protected}"
         );
         anyhow::Ok(())
     };
@@ -250,14 +258,14 @@ async fn reject_while_waiting(
             release.notify_one();
             anyhow::Ok(())
         };
-        let (delivery, ()) = tokio::try_join!(deliver(first, successor.clone(), &count), witness)?;
+        let transaction = PgConsumerTx::receipt_only(first.clone(), &count);
+        let attempt = transaction.execute(&next, successor, verified.receipt_intent(), deadline());
+        let (outcome, ()) = tokio::try_join!(async { anyhow::Ok(attempt.await) }, witness)?;
         assert_eq!(
-            delivery,
-            (
-                ProcessingDisposition::PartitionBlocked,
-                vec![SettlementKind::Requeue]
-            )
+            outcome.status(),
+            TransactionalMessagingTransactionStatus::PartitionBlocked
         );
+        contender.release(next, deadline()).await?;
         assert_eq!(count.0.load(Ordering::SeqCst), 0);
         anyhow::Ok(())
     };
