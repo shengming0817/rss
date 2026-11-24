@@ -102,20 +102,22 @@ END $$;
 
 CREATE FUNCTION rss_reconcile.lock_resources(t uuid,r text,e text,extra text[],nonblocking boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS $$
-DECLARE key text;
+DECLARE required_keys text[]; locked_count bigint;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
- FOR key IN SELECT resource FROM rss_reconcile.target_resources WHERE tenant_id=t AND reconciler=r AND entity=e
-  UNION SELECT resource FROM rss_reconcile.resources WHERE tenant_id=t AND owner_reconciler=r AND owner_entity=e
-  UNION SELECT unnest(extra) ORDER BY 1
- LOOP
-  IF nonblocking THEN
-   PERFORM FROM rss_reconcile.resources WHERE tenant_id=t AND resource=key FOR UPDATE NOWAIT;
-  ELSE
-   PERFORM FROM rss_reconcile.resources WHERE tenant_id=t AND resource=key FOR UPDATE;
-  END IF;
-  IF NOT FOUND THEN RAISE EXCEPTION 'missing reconcile resource' USING ERRCODE='P1005'; END IF;
- END LOOP;
+ required_keys:=ARRAY(
+  SELECT resource FROM rss_reconcile.target_resources WHERE tenant_id=t AND reconciler=r AND entity=e
+  UNION SELECT resource FROM rss_reconcile.resources WHERE tenant_id=t AND owner_reconciler=r AND owner_entity=e AND owner_token IS NOT NULL
+  UNION SELECT unnest(extra)
+ );
+ IF cardinality(required_keys)=0 THEN RETURN; END IF;
+ IF nonblocking THEN
+  PERFORM FROM rss_reconcile.resources WHERE tenant_id=t AND resource=ANY(required_keys) ORDER BY resource FOR UPDATE NOWAIT;
+ ELSE
+  PERFORM FROM rss_reconcile.resources WHERE tenant_id=t AND resource=ANY(required_keys) ORDER BY resource FOR UPDATE;
+ END IF;
+ GET DIAGNOSTICS locked_count = ROW_COUNT;
+ IF locked_count<>cardinality(required_keys) THEN RAISE EXCEPTION 'missing reconcile resource' USING ERRCODE='P1005'; END IF;
 END $$;
 
 CREATE FUNCTION rss_reconcile.bind_resources(t uuid,r text,e text,keys text[]) RETURNS void
@@ -182,7 +184,7 @@ END $$;
 CREATE FUNCTION rss_reconcile.claim_due(t uuid,r text,n integer,scan_budget integer,ttl bigint)
 RETURNS TABLE(claims rss_reconcile.targets[],more boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS $$
-DECLARE scan rss_reconcile.scans; candidate record; row rss_reconcile.targets; at_time timestamptz; key text; head bigint; blocked boolean;
+DECLARE scan rss_reconcile.scans; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -205,23 +207,27 @@ BEGIN
    at_time:=clock_timestamp();
    IF row.queue_ticket IS DISTINCT FROM candidate.queue_ticket OR row.next_run>at_time OR row.next_run IS NULL OR row.lease_until>at_time THEN CONTINUE; END IF;
    PERFORM rss_reconcile.lock_resources(t,r,row.entity,'{}'::text[],true);
-   UPDATE rss_reconcile.target_resources SET waiting_ticket=row.queue_ticket WHERE tenant_id=t AND reconciler=r AND entity=row.entity;
-   blocked:=false;
-   FOR key IN SELECT resource FROM rss_reconcile.target_resources WHERE tenant_id=t AND reconciler=r AND entity=row.entity ORDER BY resource LOOP
-    SELECT waiting_ticket INTO head FROM rss_reconcile.target_resources WHERE tenant_id=t AND resource=key AND waiting_ticket IS NOT NULL ORDER BY waiting_ticket LIMIT 1;
-    IF head<>row.queue_ticket OR EXISTS(
-     SELECT FROM rss_reconcile.resources o JOIN rss_reconcile.targets holder ON (holder.tenant_id,holder.reconciler,holder.entity)=(o.tenant_id,o.owner_reconciler,o.owner_entity)
-     WHERE o.tenant_id=t AND o.resource=key AND holder.token=o.owner_token AND holder.epoch=o.owner_epoch AND holder.lease_until>clock_timestamp()
-    ) THEN blocked:=true; EXIT; END IF;
-   END LOOP;
-   IF blocked THEN CONTINUE; END IF;
+   -- With all resource rows locked, only another older waiter or a live owner can block us.
+   SELECT CASE WHEN EXISTS(
+    SELECT FROM rss_reconcile.target_resources d
+    WHERE d.tenant_id=t AND d.reconciler=r AND d.entity=row.entity AND (
+     EXISTS(SELECT FROM rss_reconcile.target_resources w WHERE w.tenant_id=d.tenant_id AND w.resource=d.resource
+      AND w.waiting_ticket<row.queue_ticket AND (w.reconciler,w.entity)<>(d.reconciler,d.entity))
+     OR EXISTS(SELECT FROM rss_reconcile.resources o JOIN rss_reconcile.targets holder
+      ON (holder.tenant_id,holder.reconciler,holder.entity)=(o.tenant_id,o.owner_reconciler,o.owner_entity)
+      WHERE o.tenant_id=d.tenant_id AND o.resource=d.resource AND holder.token=o.owner_token
+       AND holder.epoch=o.owner_epoch AND holder.lease_until>clock_timestamp())
+    )
+   ) THEN row.queue_ticket END INTO desired_ticket;
+   UPDATE rss_reconcile.target_resources SET waiting_ticket=desired_ticket
+    WHERE tenant_id=t AND reconciler=r AND entity=row.entity AND waiting_ticket IS DISTINCT FROM desired_ticket;
+   IF desired_ticket IS NOT NULL THEN CONTINUE; END IF;
    UPDATE rss_reconcile.resources SET owner_reconciler=NULL,owner_entity=NULL,owner_token=NULL,owner_epoch=NULL
     WHERE tenant_id=t AND owner_reconciler=r AND owner_entity=row.entity AND owner_token=row.token AND owner_epoch=row.epoch;
    UPDATE rss_reconcile.targets SET token=gen_random_uuid(),epoch=epoch+1,lease_until=clock_timestamp()+(ttl::text||' milliseconds')::interval,result='running'
     WHERE tenant_id=t AND reconciler=r AND entity=row.entity RETURNING * INTO row;
    UPDATE rss_reconcile.resources o SET owner_reconciler=r,owner_entity=row.entity,owner_token=row.token,owner_epoch=row.epoch
     FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r AND d.entity=row.entity AND (o.tenant_id,o.resource)=(d.tenant_id,d.resource);
-   UPDATE rss_reconcile.target_resources SET waiting_ticket=NULL WHERE tenant_id=t AND reconciler=r AND entity=row.entity;
    claims:=array_append(claims,row);
   EXCEPTION WHEN lock_not_available THEN NULL; -- An unacquired candidate consumes no execution slot.
   END;
@@ -258,7 +264,7 @@ BEGIN
  next_time:=CASE WHEN newer THEN least(row.next_run,at_time) WHEN outcome IN ('converged','suspended') THEN NULL ELSE at_time+(delay::text||' milliseconds')::interval END;
  UPDATE rss_reconcile.resources SET owner_reconciler=NULL,owner_entity=NULL,owner_token=NULL,owner_epoch=NULL
   WHERE tenant_id=t AND owner_reconciler=r AND owner_entity=e AND owner_token=k AND owner_epoch=g;
- UPDATE rss_reconcile.target_resources SET waiting_ticket=NULL WHERE tenant_id=t AND reconciler=r AND entity=e;
+ UPDATE rss_reconcile.target_resources SET waiting_ticket=NULL WHERE tenant_id=t AND reconciler=r AND entity=e AND waiting_ticket IS NOT NULL;
  UPDATE rss_reconcile.targets SET token=NULL,lease_until=NULL,next_run=next_time,
   failures=CASE WHEN newer OR outcome='deferred' THEN row.failures ELSE f END,
   result=CASE WHEN newer OR outcome='deferred' THEN 'pending' ELSE outcome END,

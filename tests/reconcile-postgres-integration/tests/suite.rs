@@ -1,4 +1,5 @@
 mod examples;
+mod measure;
 mod messaging;
 mod process;
 mod scenarios;
@@ -67,29 +68,95 @@ async fn count(owner: &PgPool, id: &str) -> anyhow::Result<i64> {
     .fetch_one(owner)
     .await?)
 }
+struct Database {
+    pool: PgPool,
+    owner: PgPool,
+    options: PgConnectOptions,
+    // Struct fields drop in order, including when a test exits early or times out.
+    fixture: testkit::PgTlsFixture,
+    _network: testkit::BridgeNetwork,
+}
+impl Database {
+    async fn new(control: &Control<'_, Clock>) -> anyhow::Result<Self> {
+        let network = testkit::bridge_network("reconcile-pg").await?;
+        let fixture = testkit::postgres_tls(
+            testkit::NetworkAttachment {
+                network: network.name(),
+                dns_name: "reconcile-pg",
+            },
+            testkit::PgTlsServerIdentity::MatchingHost,
+        )
+        .await?;
+        let params = fixture.params();
+        let base = PgConnectOptions::new()
+            .host(&params.host)
+            .port(params.port)
+            .database(&params.database)
+            .ssl_mode(PgSslMode::VerifyFull)
+            .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec());
+        let owner = PgPoolOptions::new()
+            .max_connections(5)
+            .connect_with(
+                base.clone()
+                    .username(&params.username)
+                    .options([
+                        ("rss.tenant_id", "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+                        ("rss.storage_target", "01010101010101010101010101010101"),
+                        ("rss.storage_lineage", "02020202020202020202020202020202"),
+                        ("rss.execution_epoch", "1"),
+                    ])
+                    .password(&params.password),
+            )
+            .await?;
+        sqlx::raw_sql("CREATE ROLE reconcile_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE reconcile_runtime LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE rss_test TO reconcile_owner;").execute(&owner).await?;
+        let options = base.username("reconcile_runtime").password("fixture-only");
+        let pool = PgPoolOptions::new()
+            .max_connections(6)
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_with(options.clone())
+            .await?;
+        assert!(
+            matches!(PgStore::new(pool.clone(),control).await,Err(e) if e.kind()==ErrorKind::StorageContract)
+        );
+        let mut migration = owner.acquire().await?;
+        sqlx::raw_sql("SET ROLE reconcile_owner")
+            .execute(&mut *migration)
+            .await?;
+        sqlx::raw_sql(MIGRATION_SQL)
+            .execute(&mut *migration)
+            .await?;
+        sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_reconcile TO reconcile_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_reconcile TO reconcile_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_reconcile TO reconcile_runtime;").execute(&mut *migration).await?;
+        drop(migration);
+        Ok(Self {
+            pool,
+            owner,
+            options,
+            fixture,
+            _network: network,
+        })
+    }
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconcile_postgres_suite() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(240),async {
-        let network=testkit::bridge_network("reconcile-pg").await?;
-        let fixture=testkit::postgres_tls(testkit::NetworkAttachment{network:network.name(),dns_name:"reconcile-pg"},testkit::PgTlsServerIdentity::MatchingHost).await?;
-        let params=fixture.params();let base=PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database).ssl_mode(PgSslMode::VerifyFull).ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec());
-        let owner=PgPoolOptions::new().max_connections(5).connect_with(base.clone().username(&params.username).options([("rss.tenant_id","f47ac10b-58cc-4372-a567-0e02b2c3d479"),("rss.storage_target","01010101010101010101010101010101"),("rss.storage_lineage","02020202020202020202020202020202"),("rss.execution_epoch","1")]).password(&params.password)).await?;
-        sqlx::raw_sql("CREATE ROLE reconcile_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE reconcile_runtime LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE rss_test TO reconcile_owner; CREATE TABLE public.reconcile_targets(legacy boolean);").execute(&owner).await?;
-        let options=base.username("reconcile_runtime").password("fixture-only");let pool=PgPoolOptions::new().max_connections(6).acquire_timeout(Duration::from_secs(2)).connect_with(options.clone()).await?;
-        let clock=Clock::new();let cancel=CancellationToken::new();let control=Control::new(&clock,Duration::from_secs(210),&cancel);
-        assert!(matches!(PgStore::new(pool.clone(),&control).await,Err(e) if e.kind()==ErrorKind::StorageContract));
-        let mut migration=owner.acquire().await?;sqlx::raw_sql("SET ROLE reconcile_owner").execute(&mut *migration).await?;
-        sqlx::raw_sql(MIGRATION_SQL).execute(&mut *migration).await?;
-        sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_reconcile TO reconcile_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_reconcile TO reconcile_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_reconcile TO reconcile_runtime;").execute(&mut *migration).await?;drop(migration);
-        sqlx::raw_sql("CREATE TABLE public.effects(tenant_id uuid NOT NULL,id text NOT NULL,n bigint NOT NULL,PRIMARY KEY(tenant_id,id)); ALTER TABLE public.effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT,UPDATE ON public.effects TO reconcile_runtime;").execute(&owner).await?;
-        let absent:Option<String>=sqlx::query_scalar("SELECT to_regnamespace('rss_transactional_messaging')::text").fetch_one(&owner).await?;assert!(absent.is_none());
-        assert!(matches!(PgStore::new(owner.clone(),&control).await,Err(e) if e.kind()==ErrorKind::StorageContract));
-        let store=PgStore::new(pool.clone(),&control).await?;
-        scenarios::run(&store,&pool,&owner,&control).await?;
-        process::run(&store,&owner,&fixture,&control).await?;
-        transport::run(&owner,options.clone(),&control).await?;
-        Box::pin(messaging::run(&store,&owner,&fixture,&control)).await?;
-        assert_eq!(store.close(&control).await,CloseOutcome::Drained);owner.close().await;drop(fixture);drop(network);Ok::<(),anyhow::Error>(())
+    tokio::time::timeout(Duration::from_secs(240), async {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(210), &cancel);
+        let db = Database::new(&control).await?;
+        sqlx::raw_sql("CREATE TABLE public.effects(tenant_id uuid NOT NULL,id text NOT NULL,n bigint NOT NULL,PRIMARY KEY(tenant_id,id)); ALTER TABLE public.effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT,UPDATE ON public.effects TO reconcile_runtime;")
+            .execute(&db.owner).await?;
+        let absent: Option<String> = sqlx::query_scalar("SELECT to_regnamespace('rss_transactional_messaging')::text")
+            .fetch_one(&db.owner).await?;
+        assert!(absent.is_none());
+        assert!(matches!(PgStore::new(db.owner.clone(), &control).await, Err(e) if e.kind() == ErrorKind::StorageContract));
+        let store = PgStore::new(db.pool.clone(), &control).await?;
+        scenarios::run(&store, &db.pool, &db.owner, &control).await?;
+        process::run(&store, &db.owner, &db.fixture, &control).await?;
+        transport::run(&db.owner, db.options.clone(), &control).await?;
+        Box::pin(messaging::run(&store, &db.owner, &db.fixture, &control)).await?;
+        assert_eq!(store.close(&control).await, CloseOutcome::Drained);
+        db.owner.close().await;
+        Ok::<(), anyhow::Error>(())
     }).await??;
     Ok(())
 }
