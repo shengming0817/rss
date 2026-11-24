@@ -111,7 +111,8 @@ impl SubscriptionClose {
         Some(SettlementPermit(Arc::clone(&self.admission)))
     }
 
-    pub(super) fn seal(&self) {
+    /// Stop issuing permits and report how many admitted handles remain.
+    pub(super) fn seal(&self) -> usize {
         let mut state = self
             .admission
             .state
@@ -121,6 +122,7 @@ impl SubscriptionClose {
         if state.active == 0 {
             self.admission.drained.cancel();
         }
+        state.active
     }
 
     pub(super) async fn drained(&self) {

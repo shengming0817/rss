@@ -109,6 +109,7 @@ stage/reason labels and generation, never endpoint coordinates or provider error
   constructor budget covers lock acquisition, connection setup and installation; shutdown seals
   installation. Existing streams terminate on connection loss and the runtime resubscribes.
   Permission/configuration failures are permanent; topology conflicts remain conflicts.
+- Abandon seals the subscription. With other issued handles it waits for admission to stop; the channel owner closes after those handles drain. A sole handle can await the close receipt directly.
 - Each subscription uses its own channel, an explicit nonzero prefetch matching the worker window, and manual ACK/NACK. Its move-only
   settlement stays bound to the original channel. `Requeue` uses NACK with requeue; `Reject`
   uses NACK without requeue. Abandon, failed settlement and dropped unsettled receipts retire

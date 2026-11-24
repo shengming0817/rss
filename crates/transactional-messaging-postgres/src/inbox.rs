@@ -19,11 +19,32 @@ use std::{sync::Arc, time::Duration};
 /// fn duplicate(claim: PgInboxClaim) { let replay = claim.clone(); }
 /// ```
 pub struct PgInboxClaim {
+    // The first effect takes this worker's already-admitted slot. Only a confirmed
+    // retryable outcome may return it to the same claim for another attempt.
+    slot: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     pub(crate) identity: ConsumerIdentity,
     pub(crate) token: String,
     pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
 }
 impl PgInboxClaim {
+    pub(crate) fn take_slot(
+        &self,
+        runtime: &PgRuntime,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .filter(|slot| runtime.owns_slot(slot))
+    }
+
+    pub(crate) fn return_slot(&self, slot: tokio::sync::OwnedSemaphorePermit) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(slot);
+    }
+
     pub(crate) fn matches(&self, runtime: &PgRuntime) -> bool {
         self.binding.storage() == runtime.storage
             && self.binding.tenant() == self.identity.tenant_id()
@@ -113,7 +134,7 @@ impl PgInboxStore {
         binding: rss_transactional_messaging::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
-        access: PoolAccess,
+        access: PoolAccess<'_>,
     ) -> Result<IdempotencyDisposition<PgInboxClaim>, MessagingError> {
         if binding.tenant() != identity.tenant_id() {
             return Err(PgError::lost().port());
@@ -143,6 +164,7 @@ impl PgInboxStore {
                                 .await?;
                             if let Some(row) = row {
                                 return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
+                                    slot: std::sync::Mutex::new(None),
                                     binding: *tx.binding(),
                                     identity,
                                     token: row.try_get("token")?,
@@ -228,8 +250,13 @@ impl InboxStore for PgInboxStore {
         let Some(permit) = self.runtime.try_claim_slot().map_err(PgError::port)? else {
             return Ok(IdempotencyDisposition::CapacityBusy);
         };
-        self.claim_with_access(binding, identity, deadline, PoolAccess::Admitted(permit))
-            .await
+        let outcome = self
+            .claim_with_access(binding, identity, deadline, PoolAccess::Reserved(&permit))
+            .await?;
+        if let IdempotencyDisposition::Acquired(claim) = &outcome {
+            claim.return_slot(permit);
+        }
+        Ok(outcome)
     }
     async fn read_terminal(
         &self,
@@ -317,7 +344,12 @@ impl InboxStore for PgInboxStore {
         if !claim.matches(&self.runtime) {
             return Err(PgError::lost().port());
         }
-        settled(self.runtime.local_tx(claim.binding, deadline, move |tx| Box::pin(async move {
+        let slot = claim.take_slot(&self.runtime);
+        let access = slot
+            .as_ref()
+            .map_or(PoolAccess::Ordinary, PoolAccess::Reserved);
+        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
+        settled(self.runtime.transaction_with_access(claim.binding, cutoff, (), true, access, #[cfg(feature="integration")] None, move |_,tx| Box::pin(async move {
             lock_identity(tx, &claim.identity).await?;
             let count = sqlx::query("DELETE FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(claim.token)

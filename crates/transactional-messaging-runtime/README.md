@@ -51,8 +51,8 @@ completion; one subscription serializes verified tenant/domain/partition keys th
 A rejected terminal head retires that subscription before starting queued successors. Durable
 cross-subscription consumer ordering requires a separate recovery contract.
 Queued and busy deliveries count toward the same window and keep their original deadlines.
-A live claim or unstarted capacity wait keeps the handle unacknowledged and retries at the Inbox
-lease interval until the operation cutoff. Graceful cancellation seals admission before draining.
+A live claim or unstarted capacity wait keeps the handle unacknowledged and rechecks at one quarter of the operation budget, clamped to 1–250 ms, until the original cutoff.
+The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.
 The same loop
 runs on an application's Tokio host or through the optional RSS lifecycle bridge.
 

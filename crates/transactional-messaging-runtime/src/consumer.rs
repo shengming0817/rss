@@ -229,104 +229,9 @@ where
                 });
             }
         };
-    loop {
-        let claim = within(execution.timer, deadlines.operation(), |deadline| {
-            inbox.claim(binding.execution(), binding.identity(), deadline)
-        })
-        .await
-        .and_then(std::convert::identity);
-        let busy = match claim {
-            Ok(IdempotencyDisposition::InProgress) => {
-                execution
-                    .emitter
-                    .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
-                ProcessingDisposition::InProgress
-            }
-            Ok(IdempotencyDisposition::CapacityBusy) => {
-                execution
-                    .emitter
-                    .emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
-                ProcessingDisposition::CapacityBusy
-            }
-
-            Err(error) => {
-                emit_runtime_failure(
-                    execution.emitter,
-                    TransactionalMessagingRuntimePhase::ConsumerClaim,
-                    &error,
-                );
-                return Err(abandon_after_error(
-                    settlement,
-                    deadlines.settlement(),
-                    execution.timer,
-                    execution.emitter,
-                    error,
-                )
-                .await);
-            }
-            Ok(IdempotencyDisposition::Terminal(receipt)) => {
-                return match binding.validate_terminal(receipt) {
-                    Ok(terminal) => {
-                        let disposition = terminal.disposition();
-                        settle_observed(
-                            settlement,
-                            terminal.into_decision(),
-                            deadlines.settlement(),
-                            execution.timer,
-                            execution.emitter,
-                        )
-                        .await?;
-                        Ok(ProcessingDisposition::Duplicate(disposition))
-                    }
-                    Err(rejection) => {
-                        let failure = rejection.reason();
-                        execution.emitter.emit(
-                            TransactionalMessagingObservation::ConsumerIngressRejected {
-                                reason: failure,
-                            },
-                        );
-                        settle_observed(
-                            settlement,
-                            rejection.into_decision(),
-                            deadlines.settlement(),
-                            execution.timer,
-                            execution.emitter,
-                        )
-                        .await?;
-                        Ok(ProcessingDisposition::Rejected(failure))
-                    }
-                };
-            }
-            Ok(IdempotencyDisposition::Acquired(claim)) => {
-                return process_acquired(
-                    inbox,
-                    transaction,
-                    execution,
-                    AcquiredDelivery {
-                        message,
-                        settlement,
-                        claim,
-                        binding,
-                        deadlines,
-                    },
-                )
-                .await;
-            }
-        };
-        let wake = deadlines
-            .operation()
-            .capped(execution.timer, inbox.lease_policy().interval());
-        let slept = within(execution.timer, deadlines.operation(), |_| {
-            execution.timer.sleep_until(wake)
-        })
-        .await;
-        if slept.is_err()
-            || deadlines
-                .operation()
-                .remaining(execution.timer.now())
-                .unwrap_or_default()
-                .is_zero()
-        {
+    let claim = wait_for_claim(inbox, execution, &binding, deadlines.operation()).await;
+    match claim {
+        Ok(busy @ (IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::InProgress)) => {
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
@@ -335,9 +240,131 @@ where
                 execution.emitter,
             )
             .await?;
-            return Ok(busy);
+            Ok(if matches!(busy, IdempotencyDisposition::CapacityBusy) {
+                ProcessingDisposition::CapacityBusy
+            } else {
+                ProcessingDisposition::InProgress
+            })
+        }
+        Err(error) => {
+            emit_runtime_failure(
+                execution.emitter,
+                TransactionalMessagingRuntimePhase::ConsumerClaim,
+                &error,
+            );
+            Err(abandon_after_error(
+                settlement,
+                deadlines.settlement(),
+                execution.timer,
+                execution.emitter,
+                error,
+            )
+            .await)
+        }
+        Ok(IdempotencyDisposition::Terminal(receipt)) => match binding.validate_terminal(receipt) {
+            Ok(terminal) => {
+                let disposition = terminal.disposition();
+                settle_observed(
+                    settlement,
+                    terminal.into_decision(),
+                    deadlines.settlement(),
+                    execution.timer,
+                    execution.emitter,
+                )
+                .await?;
+                Ok(ProcessingDisposition::Duplicate(disposition))
+            }
+            Err(rejection) => {
+                let failure = rejection.reason();
+                execution.emitter.emit(
+                    TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure },
+                );
+                settle_observed(
+                    settlement,
+                    rejection.into_decision(),
+                    deadlines.settlement(),
+                    execution.timer,
+                    execution.emitter,
+                )
+                .await?;
+                Ok(ProcessingDisposition::Rejected(failure))
+            }
+        },
+        Ok(IdempotencyDisposition::Acquired(claim)) => {
+            process_acquired(
+                inbox,
+                transaction,
+                execution,
+                AcquiredDelivery {
+                    message,
+                    settlement,
+                    claim,
+                    binding,
+                    deadlines,
+                },
+            )
+            .await
         }
     }
+}
+
+// Recheck busy admission on its own clock. A long lease interval can exceed the
+// entire operation budget; recomputing a fraction of remaining time would spin near expiry.
+async fn wait_for_claim<I, V, R, E>(
+    inbox: &I,
+    execution: &ConsumerExecution<'_, V, R, E>,
+    binding: &VerifiedConsumerBinding,
+    cutoff: Deadline,
+) -> Result<IdempotencyDisposition<I::Claim>, MessagingError>
+where
+    I: InboxStore,
+    R: ExecutionTimer,
+    E: TransactionalMessagingEmitter,
+{
+    let budget = execution.policy.budget();
+    let interval = ((budget.total() - budget.settlement_reserve()) / 4)
+        .clamp(Duration::from_millis(1), Duration::from_millis(250));
+    let mut capacity_wait = None;
+    let result = loop {
+        let claim = within(execution.timer, cutoff, |deadline| {
+            inbox.claim(binding.execution(), binding.identity(), deadline)
+        })
+        .await
+        .and_then(std::convert::identity);
+        match &claim {
+            Ok(IdempotencyDisposition::CapacityBusy) => {
+                capacity_wait.get_or_insert_with(|| execution.timer.now());
+                execution
+                    .emitter
+                    .emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
+            }
+            Ok(IdempotencyDisposition::InProgress) => execution
+                .emitter
+                .emit(TransactionalMessagingObservation::ConsumerClaimInProgress),
+            _ => break claim,
+        }
+        let wake = cutoff.capped(execution.timer, interval);
+        if within(execution.timer, cutoff, |_| {
+            execution.timer.sleep_until(wake)
+        })
+        .await
+        .is_err()
+            || cutoff
+                .remaining(execution.timer.now())
+                .unwrap_or_default()
+                .is_zero()
+        {
+            break claim;
+        }
+    };
+    if let Some(start) = capacity_wait {
+        execution
+            .emitter
+            .emit(TransactionalMessagingObservation::ConsumerCapacityWait {
+                duration: execution.timer.now().saturating_duration_since(start),
+            });
+    }
+    result
 }
 
 struct AcquiredDelivery<P, S, C> {

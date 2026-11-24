@@ -134,9 +134,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             return Err(PgError::InvalidLeaseDuration);
         }
         let runtime = capture.runtime.clone();
-        if runtime.pool.options().get_max_connections() < 2 {
-            return Err(PgError::invariant());
-        }
+        let inbox = PgInboxStore::new(runtime.clone(), renewal)?;
         let cutoff = Deadline::from_timeout(&runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
         let valid = within(&runtime.timer, cutoff, |_| async {
@@ -151,7 +149,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         }
         Ok(Self {
             outbox: PgOutboxStore::new(runtime.clone(), domain.clone(), delivery)?,
-            inbox: PgInboxStore::new(runtime.clone(), renewal)?,
+            inbox,
             runtime,
             capture,
             effect,
@@ -355,6 +353,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let injection = self.take_projection_fault()?;
         let outcome = crate::consumer::execute_transaction(
             &self.runtime,
+            crate::transaction::PoolAccess::Ordinary,
             &effect,
             &self.capture,
             &claim,

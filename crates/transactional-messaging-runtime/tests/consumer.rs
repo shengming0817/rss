@@ -534,16 +534,22 @@ impl InboxStore for FakeInbox {
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-        self.disposition
-            .lock()
-            .expect("lock")
-            .take()
-            .ok_or_else(|| {
-                MessagingError::new(
-                    MessagingErrorKind::Invariant,
-                    std::io::Error::other("claim reused"),
-                )
-            })
+        let mut state = self.disposition.lock().expect("lock");
+        match *state {
+            Some(IdempotencyDisposition::CapacityBusy) => {
+                return Ok(IdempotencyDisposition::CapacityBusy);
+            }
+            Some(IdempotencyDisposition::InProgress) => {
+                return Ok(IdempotencyDisposition::InProgress);
+            }
+            _ => {}
+        }
+        state.take().ok_or_else(|| {
+            MessagingError::new(
+                MessagingErrorKind::Invariant,
+                std::io::Error::other("claim reused"),
+            )
+        })
     }
 
     async fn read_terminal(
@@ -3835,4 +3841,64 @@ async fn busy_claims_retain_one_delivery_until_the_operation_cutoff() {
         assert_eq!(recorder.abandon_count(), 0);
         assert_eq!(tx.calls.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_budget_reclaims_released_capacity_on_the_original_delivery() {
+    let msg = envelope(|_| {});
+    let sub = subscription(&msg);
+    let timer = RealtimeClock::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = RecordingEmitter(events.clone());
+    let execution = ConsumerExecution::new(
+        ConsumerGroup::parse("capacity").expect("group"),
+        &TrustedIngress,
+        &sub,
+        &timer,
+        consumer_policy(),
+        &emitter,
+    );
+    let inbox = FakeInbox {
+        disposition: Mutex::new(Some(IdempotencyDisposition::CapacityBusy)),
+        lease: LeaseStatus::Held {
+            remaining: Duration::from_secs(30),
+        },
+    };
+    let tx = FakeTx {
+        calls: Arc::new(AtomicUsize::new(0)),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let recorder = RecordingSettlement::new();
+    let attempt = consume_once(
+        &inbox,
+        &tx,
+        &execution,
+        Delivery::new(msg, recorder.clone()),
+    );
+    tokio::pin!(attempt);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut attempt)
+            .await
+            .is_err()
+    );
+    *inbox.disposition.lock().expect("disposition") = Some(IdempotencyDisposition::Acquired(Claim));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(251), attempt)
+            .await
+            .expect("recheck")
+            .expect("consume"),
+        ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
+    );
+    assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
+    let durations: Vec<_> = events
+        .lock()
+        .expect("events")
+        .iter()
+        .filter_map(|e| match e {
+            TransactionalMessagingObservation::ConsumerCapacityWait { duration } => Some(*duration),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(durations.len(), 1);
+    assert!((Duration::from_secs(1)..=Duration::from_millis(1251)).contains(&durations[0]));
 }

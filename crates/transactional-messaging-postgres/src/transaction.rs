@@ -588,7 +588,7 @@ impl PgRuntime {
         cutoff: Deadline,
         mut context: C,
         lock: bool,
-        access: PoolAccess,
+        access: PoolAccess<'_>,
         #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
         operation: F,
     ) -> LocalTxAttempt<T, PgError>
@@ -721,6 +721,10 @@ impl PgRuntime {
             .map_err(|_| sqlx::Error::PoolClosed)
     }
 
+    pub(crate) fn owns_slot(&self, permit: &OwnedSemaphorePermit) -> bool {
+        Arc::ptr_eq(permit.semaphore(), &self.ordinary_slots)
+    }
+
     pub(crate) fn try_claim_slot(&self) -> Result<Option<OwnedSemaphorePermit>, PgError> {
         match self.ordinary_slots.clone().try_acquire_owned() {
             Ok(permit) => Ok(Some(permit)),
@@ -731,11 +735,14 @@ impl PgRuntime {
     pub(crate) async fn acquire(&self) -> Result<ConnectionLease, sqlx::Error> {
         self.acquire_with(PoolAccess::Ordinary).await
     }
-    async fn acquire_with(&self, access: PoolAccess) -> Result<ConnectionLease, sqlx::Error> {
+    async fn acquire_with(&self, access: PoolAccess<'_>) -> Result<ConnectionLease, sqlx::Error> {
         let start = self.timer.now();
         let permit = match access {
             PoolAccess::Ordinary => Some(self.ordinary_slot().await?),
-            PoolAccess::Admitted(permit) => Some(permit),
+            PoolAccess::Reserved(permit) if self.owns_slot(permit) => None,
+            PoolAccess::Reserved(_) => {
+                return Err(sqlx::Error::Protocol("wrong connection reservation".into()));
+            }
             PoolAccess::Renewal => None,
         };
         let admitted = self.timer.now();
@@ -763,7 +770,7 @@ impl PgRuntime {
 
     pub(crate) async fn acquire_for_transaction(
         &self,
-        access: PoolAccess,
+        access: PoolAccess<'_>,
         #[cfg(feature = "integration")] injection: Option<TransactionInjection>,
     ) -> Result<ConnectionLease, sqlx::Error> {
         #[cfg(feature = "integration")]
@@ -1030,9 +1037,9 @@ pub(crate) struct TransactionInjection {
     pub(crate) before_acquire: BoxFuture<'static, ()>,
 }
 
-pub(crate) enum PoolAccess {
+pub(crate) enum PoolAccess<'a> {
     Ordinary,
-    Admitted(OwnedSemaphorePermit),
+    Reserved(&'a OwnedSemaphorePermit),
     Renewal,
 }
 

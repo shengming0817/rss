@@ -16,6 +16,8 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 Consumer-capable runtimes share one pool across workers and reserve one connection for
 Inbox and local-projection renewal. Constructing an Inbox requires at least two connections.
 Before claim SQL, occupied ordinary capacity is reported separately from a live durable claim.
+An acquired claim holds its same-pool slot through handoff to the effect. Direct callers must drive
+or release their claims; dropping a claim returns its local capacity and leaves durable lease expiry authoritative.
 
 ## Installation and privileges
 

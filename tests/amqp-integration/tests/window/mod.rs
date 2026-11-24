@@ -69,8 +69,9 @@ pub(super) async fn run(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> {
     for window in [NonZeroU16::MIN, NonZeroU16::new(2).expect("two")] {
         drain_window(rabbit, window).await?;
     }
-    drain_after_failed_head(rabbit, false).await?;
-    drain_after_failed_head(rabbit, true).await?;
+    for head in [Head::Retry, Head::Reject, Head::Unknown, Head::Fenced] {
+        drain_after_failed_head(rabbit, head).await?;
+    }
     busy_redelivery(rabbit).await
 }
 
@@ -139,12 +140,7 @@ async fn drain_window(rabbit: &testkit::RabbitFixture, window: NonZeroU16) -> an
     );
     assert_active_window(window, &mut started, &mut admitted).await;
     token.cancel();
-    testkit::await_try(TIMEOUT, async || {
-        Ok::<_, anyhow::Error>(
-            (rabbit.broker_consumer_count(vhost, route.as_str()).await? == 0).then_some(()),
-        )
-    })
-    .await?;
+    await_cancelled(rabbit, vhost, &route).await?;
     release.notify_one();
     task.await??;
     if window.get() == 2 {
@@ -159,6 +155,19 @@ async fn drain_window(rabbit: &testkit::RabbitFixture, window: NonZeroU16) -> an
     shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
     shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;
     Ok(())
+}
+
+async fn await_cancelled(
+    rabbit: &testkit::RabbitFixture,
+    vhost: &str,
+    route: &MessageRoute,
+) -> anyhow::Result<()> {
+    testkit::await_try(TIMEOUT, async || {
+        Ok::<_, anyhow::Error>(
+            (rabbit.broker_consumer_count(vhost, route.as_str()).await? == 0).then_some(()),
+        )
+    })
+    .await
 }
 
 async fn assert_active_window(
@@ -280,8 +289,16 @@ async fn claim_original(
     Ok(holder)
 }
 
+#[derive(Clone, Copy)]
+enum Head {
+    Retry,
+    Reject,
+    Unknown,
+    Fenced,
+}
+
 struct DuringRetirement {
-    reject: bool,
+    head: Head,
     requeue: Arc<Notify>,
     finish: Arc<Notify>,
 }
@@ -298,12 +315,14 @@ impl ConsumerTx<Vec<u8>> for DuringRetirement {
         match msg.id().as_str() {
             "retry-head" => {
                 self.requeue.notified().await;
-                if self.reject {
-                    return rejected(receipt);
+                match self.head {
+                    Head::Retry => TransactionOutcome::rolled_back(
+                        rss_transactional_messaging::transaction::FailureClass::Infrastructure,
+                    ),
+                    Head::Reject => rejected(receipt),
+                    Head::Unknown => TransactionOutcome::commit_unknown(),
+                    Head::Fenced => TransactionOutcome::fenced(),
                 }
-                TransactionOutcome::rolled_back(
-                    rss_transactional_messaging::transaction::FailureClass::Infrastructure,
-                )
             }
             id => {
                 assert_eq!(
@@ -316,27 +335,9 @@ impl ConsumerTx<Vec<u8>> for DuringRetirement {
         }
     }
 }
-struct Requeued(Arc<Notify>);
-impl TransactionalMessagingEmitter for Requeued {
-    fn emit(&self, event: TransactionalMessagingObservation) {
-        use rss_transactional_messaging::observability::{
-            TransactionalMessagingDisposition, TransactionalMessagingIoOutcome,
-        };
-        if matches!(
-            event,
-            TransactionalMessagingObservation::ConsumerSettlement {
-                action: TransactionalMessagingDisposition::Requeue
-                    | TransactionalMessagingDisposition::Reject,
-                outcome: TransactionalMessagingIoOutcome::Ok
-            }
-        ) {
-            self.0.notify_one();
-        }
-    }
-}
 async fn drain_after_failed_head(
     rabbit: &testkit::RabbitFixture,
-    reject: bool,
+    head: Head,
 ) -> anyhow::Result<()> {
     let Broker {
         url,
@@ -349,7 +350,6 @@ async fn drain_after_failed_head(
     let subscription = subscription_for(&envelope(&route, "template"), &route);
     let requeue = Arc::new(Notify::new());
     let finish = Arc::new(Notify::new());
-    let requeued = Arc::new(Notify::new());
     let (observed, mut admitted) = mpsc::unbounded_channel();
     let stop = CancellationToken::new();
     let worker = ConsumerWorker::new(
@@ -357,7 +357,7 @@ async fn drain_after_failed_head(
         Arc::new(sub),
         Arc::new(LiveInbox),
         Arc::new(DuringRetirement {
-            reject,
+            head,
             requeue: requeue.clone(),
             finish: finish.clone(),
         }),
@@ -366,7 +366,7 @@ async fn drain_after_failed_head(
         subscription,
         Arc::new(TokioClock::new()),
         consumer_policy(),
-        Arc::new(Requeued(requeued.clone())),
+        Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
     );
     let task = tokio::spawn(worker.run(stop.clone()));
@@ -382,15 +382,16 @@ async fn drain_after_failed_head(
         ));
         assert_eq!(admitted.recv().await.as_deref(), Some(id));
     }
-    stop.cancel();
     requeue.notify_one();
-    requeued.notified().await;
+    let vhost = url.rsplit('/').next().expect("vhost");
+    await_cancelled(rabbit, vhost, &route).await?;
+    stop.cancel();
     finish.notify_one();
     task.await??;
     shutdown_bounded(resource.shutdown(Duration::from_secs(5))).await?;
     assert_eq!(
         topology::ready_depth(&url, route.as_str()).await?,
-        if reject { 1 } else { 2 },
+        if matches!(head, Head::Reject) { 1 } else { 2 },
         "independent delivery ACKed while the ordered head and successor remain"
     );
     shutdown_bounded(publisher_resource.shutdown(Duration::from_secs(5))).await?;

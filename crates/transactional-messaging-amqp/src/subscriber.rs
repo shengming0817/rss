@@ -509,8 +509,8 @@ async fn run_subscription_close(
     rpc.cancel_requested.cancel();
     rpc.closing.seal();
     stop_subscription_admission(rpc, channel, consumer_tag, resource).await;
-    // Normal stream cancellation preserves admitted settlement authority. Abandonment or
-    // resource shutdown retires it; every path still awaits the same channel-close receipt.
+    // Local retirement preserves sibling authority. Explicit shutdown and transport failure
+    // may force the shared channel closed. All paths use one close receipt.
     await_settlement_retirement(rpc, shutdown).await;
     let result = rpc.closing.drive().await;
     ShutdownFailures::report_subscription_close(resource, &result);
@@ -665,20 +665,31 @@ impl DeliverySettlement for AmqpSettlement {
     }
 
     async fn abandon(self, deadline: OperationDeadline) -> Result<(), MessagingError> {
-        let closing = self.subscription_rpc.closing.clone();
-        closing.requested.cancel();
+        let rpc = Arc::clone(&self.subscription_rpc);
+        rpc.cancel_requested.cancel();
+        let active = rpc.closing.seal();
         drop(self);
-        tokio::time::timeout(deadline.timeout(), closing.wait())
-            .await
-            .map_err(|error| MessagingError::new(MessagingErrorKind::DeadlineElapsed, error))?
-            .map_err(|error| MessagingError::new(MessagingErrorKind::Transient, error))
+        tokio::time::timeout(deadline.timeout(), async {
+            // Other admitted handles can be queued behind this delivery. Waiting here for
+            // their retirement would prevent the worker from seeing this outcome and draining.
+            rpc.admission_stopped.cancelled().await;
+            if active == 1 || rpc.closing.requested.is_cancelled() {
+                rpc.closing
+                    .wait()
+                    .await
+                    .map_err(|error| MessagingError::new(MessagingErrorKind::Transient, error))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| MessagingError::new(MessagingErrorKind::DeadlineElapsed, error))?
     }
 }
 
 impl Drop for AmqpSettlement {
     fn drop(&mut self) {
         if !self.settled {
-            self.subscription_rpc.closing.requested.cancel();
+            self.subscription_rpc.cancel_requested.cancel();
         }
     }
 }

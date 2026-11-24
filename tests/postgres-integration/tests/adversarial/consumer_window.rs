@@ -45,6 +45,29 @@ impl TransactionalMessagingEmitter for Sink {
         }
     }
 }
+struct BeforeEffect {
+    tx: PgConsumerTx<GateEffect>,
+    claimed: Arc<Notify>,
+    start: Arc<Notify>,
+}
+impl ConsumerTx<Vec<u8>> for BeforeEffect {
+    type Claim = PgInboxClaim;
+    type CommitProof = <PgConsumerTx<GateEffect> as ConsumerTx<Vec<u8>>>::CommitProof;
+    async fn execute(
+        &self,
+        claim: &PgInboxClaim,
+        msg: &MessageEnvelope<Vec<u8>>,
+        intent: ReceiptIntent,
+        deadline: OperationDeadline,
+    ) -> TransactionOutcome<Self::CommitProof> {
+        if msg.id().as_str() == "window-held" {
+            self.claimed.notify_one();
+            self.start.notified().await;
+        }
+        self.tx.execute(claim, msg, intent, deadline).await
+    }
+}
+
 pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let runtime = Arc::new(
         PgRuntime::connect(
@@ -59,6 +82,8 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         LeaseRenewalPolicy::from_ttl(Duration::from_millis(900))?,
     )?);
     let token = CancellationToken::new();
+    let claimed = Arc::new(Notify::new());
+    let start = Arc::new(Notify::new());
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let busy = Arc::new(Notify::new());
@@ -90,7 +115,11 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
             NonZeroU16::MIN,
             Arc::new(source),
             inbox.clone(),
-            Arc::new(PgConsumerTx::receipt_only(runtime.clone(), effect)),
+            Arc::new(BeforeEffect {
+                tx: PgConsumerTx::receipt_only(runtime.clone(), effect),
+                claimed: claimed.clone(),
+                start: start.clone(),
+            }),
             ConsumerGroup::parse("window")?,
             Arc::new(Validator),
             sub,
@@ -101,9 +130,13 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         );
         tasks.push(tokio::spawn(worker.run(token.clone())));
         if id == "window-held" {
-            entered.notified().await;
+            claimed.notified().await;
         }
     }
+    // The first Worker has a durable claim but has not requested its effect connection.
+    tokio::time::timeout(Duration::from_secs(2), busy.notified()).await?;
+    start.notify_one();
+    entered.notified().await;
     verify_renewal_under_saturation(owner, &busy).await?;
     release.notify_one();
     testkit::await_try(Duration::from_secs(4), async || {
