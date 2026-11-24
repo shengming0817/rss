@@ -39,6 +39,9 @@ pub(super) async fn mutate<K: Aead + Send + Sync>(
                 }
                 let receipt = match request.action() {
                     Action::Replay(id) => replay(tx, *key, request, id).await?,
+                    Action::Resolve(Resolution::AcceptedGap) if let Target::ConsumerHead(head) = request.target() => {
+                        resolve_consumer_head(tx, request, head).await?
+                    },
                     Action::Redrive | Action::Resolve(_) => transition(tx, request).await?,
                 };
                 write_receipt(tx, &receipt).await?;
@@ -181,6 +184,21 @@ fn capture_context(
         MessageFingerprint::from_bytes(digest),
     ))
 }
+async fn resolve_consumer_head(
+    tx: &mut PgTransaction<'_>, request: &Mutation, head: &rss_transactional_messaging_recovery::ConsumerHead,
+) -> Result<Receipt, PgError> {
+    // An Inbox rejection has just one transition, from blocked (1) to resolved (2).
+    if request.version().get() != 1 { return Err(Error::Conflict.into()); }
+    let result = sqlx::query("UPDATE rss_transactional_messaging.inbox SET resolved_by=$7::uuid
+        WHERE tenant_id=$1::uuid AND consumer_group=$2 AND domain=$3 AND partition_key=$4
+        AND message_id=$5 AND fingerprint=$6 AND disposition IN ('rejected_permanent','rejected_invariant') AND resolved_by IS NULL")
+        .bind(request.tenant().to_string()).bind(head.group.as_str()).bind(head.domain.as_str())
+        .bind(head.partition.as_str()).bind(head.message.as_str()).bind(head.fingerprint.as_bytes().as_slice())
+        .bind(request.operation().to_string()).execute(&mut *tx.connection).await?;
+    if result.rows_affected() != 1 { return Err(Error::Conflict.into()); }
+    Ok(Receipt { request: request.clone(), outcome: Outcome::Resolved, version: Version::new(2)? })
+}
+
 async fn transition(tx: &mut PgTransaction<'_>, request: &Mutation) -> Result<Receipt, PgError> {
     let Target::Outbox(id) = request.target() else {
         return Err(Error::Invalid.into());

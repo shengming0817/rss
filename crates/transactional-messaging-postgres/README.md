@@ -32,7 +32,7 @@ file. Pin the adapter version in the external migrator (`rss-transactional-messa
 "=0.1.0"`) so its SQL and runtime come from the same release. The constant does not execute DDL.
 
 The runtime login must not own the schema/tables, be superuser, have BYPASSRLS, or belong to the
-relay role. Grant it schema USAGE; policy SELECT; Inbox SELECT/INSERT/UPDATE/DELETE; Outbox
+relay role. Grant it schema USAGE; policy SELECT; Inbox privileges as installed by `grant_consumer`; Outbox
 SELECT; and EXECUTE on `check_execution`, the three relay functions, `next_outbox_wakeup(uuid,text)`, `prepare_outbox_partitions(jsonb)`
 and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or sequence privilege. Grant no schema
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
@@ -309,7 +309,11 @@ Capture occurs only after verified ingress and rollback of a rejected business e
 transaction as the terminal Inbox receipt. Protection/storage failure prevents terminal commit.
 Configure an `rss-data-protection::Aead` implementation with external key ownership; no default key
 or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
-An existing terminal Inbox receipt with no saved payload is not retroactively replayable.
+For ordinary ordered input, the first verified claim occupies its tenant/group/domain/partition in
+the Inbox. Lease loss or release permits the same message and fingerprint to resume. A business
+rejection blocks other messages until authorized gap acceptance, including in receipt-only mode.
+A replay uses a new ID and also waits. The protected capsule is optional for resolution.
+Local projections use their source Outbox head.
 
 Create the opaque operator store with `PgRecoveryStore::connect(config, timer, storage, protector)` after
 provisioning its privileges. Each query, mutation and receipt read supplies its own explicit
@@ -354,7 +358,7 @@ shadowing. The startup probe rejects unsafe paths, including drift of the intern
 Current recovery probes require nullable HOT capsule content and reject the previous broad UPDATE
 permission. External migrators must revoke UPDATE on `consumer_dead_letter` from the recovery
 operator (including inherited grants), then grant only UPDATE(recovery_version) on that table.
-The complete additional maintenance grants are UPDATE(status,recovery_version,lease_token,lease_until,retry_after)
+The complete additional maintenance grants are UPDATE(resolved_by) on Inbox, UPDATE(status,recovery_version,lease_token,lease_until,retry_after)
 on `outbox` and SELECT/INSERT on `recovery_operations`, together with base read/execute permissions.
 Table-wide Outbox UPDATE, ordering-field UPDATE, INSERT and sequence privileges are rejected. No old-schema runtime mode exists.
 

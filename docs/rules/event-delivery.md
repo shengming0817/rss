@@ -54,7 +54,8 @@
 ## Ordering
 
 - 需要顺序的 contract 必须声明 typed partition key；consumer 同 partition 串行，不同 partition 可并发。
-- DLQ 未 resolution 的 head 阻塞同 partition successor；不得因 retry、restart 或 rebalance 越过。
+- 普通有序 Consumer 以首次验证并成功领取的消息为队首，按租户、组、域与分区键隔离。业务拒绝阻塞后继，直到 recovery 对精确队首授权接受缺口；重投、重启、接管和新 ID replay 均保留原拒绝事实。
+- 源端尚未送达的前驱没有普通 ingress 顺序证据。同库投影继续使用源 Outbox 的持久队首。
 - 顺序保证不等于 exactly-once，也不替代业务 fencing。
 
 ## Dead letter

@@ -1,9 +1,9 @@
 use super::map_attempt;
 use crate::{PgError, PgRuntime};
-use rss_transactional_messaging::message::MessageId;
+use rss_transactional_messaging::{inbox::ConsumerGroup, message::{MessageId, MessagingDomain, PartitionKey}};
 use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging_recovery::{
-    ConsumerDetails, DeadLetterId, Details, Eligibility, Entry, Error, OutboxDetails, Page, Query,
+    ConsumerDetails, ConsumerHead, OperationId, DeadLetterId, Details, Eligibility, Entry, Error, OutboxDetails, Page, Query,
     Source, Target, Version,
 };
 use sqlx::Row;
@@ -19,6 +19,12 @@ pub(super) async fn query(
     }
     let result = runtime.local_tx_with_context(binding, deadline, request, |request, tx| Box::pin(async move {
         let sql = match request.source() {
+            Source::ConsumerHead => "SELECT *, CASE WHEN resolved_by IS NULL THEN 1 ELSE 2 END::bigint AS recovery_version
+                FROM (SELECT message_id || '/' || consumer_group AS key, message_id, consumer_group, domain,partition_key,fingerprint,disposition AS reason,resolved_by::text
+                FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND partition_key IS NOT NULL AND disposition IN ('rejected_permanent','rejected_invariant')
+                AND (resolved_by IS NULL OR $3::text IS NOT NULL)) AS heads
+                WHERE ($2::text IS NULL OR key COLLATE \"C\" > $2) AND ($3::text IS NULL OR key COLLATE \"C\"=$3)
+                ORDER BY key COLLATE \"C\" LIMIT $4",
             Source::Consumer => "SELECT capsule IS NOT NULL AS hot_available, id::text AS key, message_id, recovery_version, false AS resolved, consumer_group,contract,contract_version,schema_digest,reason,(extract(epoch FROM created_at)*1000000)::bigint AS captured_at, (SELECT count(*) FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed') AS replay_count, (SELECT replay_message_id FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed' ORDER BY created_at DESC,operation_id DESC LIMIT 1) AS last_replay FROM rss_transactional_messaging.consumer_dead_letter d WHERE tenant_id=$1::uuid AND ($2::text IS NULL OR id::text COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR id::text=$3) ORDER BY id::text COLLATE \"C\" LIMIT $4",
             Source::Outbox => "SELECT message_id AS key, message_id, recovery_version, status='resolved' AS resolved, envelope::text,payload,fingerprint,(extract(epoch FROM automatic_retry_deadline)*1000000)::bigint AS deadline, automatic_retry_deadline<=clock_timestamp() AS expired FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND status IN ('dead_letter','resolved') AND ($2::text IS NULL OR message_id COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR message_id=$3) ORDER BY message_id COLLATE \"C\" LIMIT $4",
         };
@@ -29,6 +35,13 @@ pub(super) async fn query(
         for row in rows.into_iter().take(usize::from(request.limit())) {
             let key: String = row.try_get("key")?;
             let target = match request.source() {
+                Source::ConsumerHead => {
+                    let target = Target::ConsumerHead(head(&row)?);
+                    if request.target().is_some_and(|expected| *expected != target) {
+                        return Err(Error::NotFound.into());
+                    }
+                    target
+                }
                 Source::Consumer => Target::DeadLetter(DeadLetterId::parse(&key)?),
                 Source::Outbox => Target::Outbox(MessageId::parse(&key).map_err(|_| Error::Invalid)?),
             };
@@ -42,19 +55,36 @@ pub(super) async fn query(
     map_attempt(result).fold(Ok, Err, Err, Err, Err, Err)
 }
 
+fn reject_kind(row: &sqlx::postgres::PgRow) -> Result<rss_transactional_messaging::transaction::RejectKind,PgError> {
+    use rss_transactional_messaging::transaction::TerminalDisposition;
+    match crate::inbox::disposition(row.try_get("reason")?)? {
+        TerminalDisposition::Rejected(reason) => Ok(reason),
+        TerminalDisposition::Succeeded => Err(Error::StorageContract.into()),
+    }
+}
+
+fn head(row: &sqlx::postgres::PgRow) -> Result<ConsumerHead, PgError> {
+    Ok(ConsumerHead {
+        message: MessageId::parse(row.try_get("message_id")?).map_err(|_| Error::StorageContract)?,
+        group: ConsumerGroup::parse(row.try_get("consumer_group")?).map_err(|_| Error::StorageContract)?,
+        domain: MessagingDomain::parse(row.try_get("domain")?).map_err(|_| Error::StorageContract)?,
+        partition: PartitionKey::parse(row.try_get("partition_key")?).map_err(|_| Error::StorageContract)?,
+        fingerprint: crate::inbox::fingerprint(row.try_get("fingerprint")?)?,
+    })
+}
+
 fn details(row: &sqlx::postgres::PgRow, request: &Query) -> Result<Details, PgError> {
     use rss_transactional_messaging::{
         inbox::ConsumerGroup,
         message::{ContractIdentity, MessageFingerprint},
-        transaction::RejectKind,
     };
     match request.source() {
+        Source::ConsumerHead => Ok(Details::ConsumerHead {
+            reason: reject_kind(row)?,
+            resolved_by: row.try_get::<Option<&str>, _>("resolved_by")?.map(OperationId::parse).transpose()?,
+        }),
         Source::Consumer => {
-            let reason = match row.try_get::<&str, _>("reason")? {
-                "rejected_permanent" => RejectKind::Permanent,
-                "rejected_invariant" => RejectKind::Invariant,
-                _ => return Err(Error::StorageContract.into()),
-            };
+            let reason = reject_kind(row)?;
             let contract = ContractIdentity::new(
                 rss_contract::ContractId::parse(&row.try_get::<String, _>("contract")?)
                     .map_err(|_| Error::StorageContract)?,
