@@ -1,5 +1,6 @@
 use super::*;
 use crate::pg_settlement::{LOSE_COMMIT, Proxy};
+use std::future::IntoFuture;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[derive(Default)]
@@ -81,6 +82,7 @@ pub(crate) async fn verify(
 ) -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE TABLE public.batch_steps(ordinal bigint GENERATED ALWAYS AS IDENTITY, tenant_id uuid NOT NULL,source_id text NOT NULL,projection_id text NOT NULL,generation text NOT NULL,position bigint NOT NULL,xid xid8 NOT NULL); GRANT INSERT ON public.batch_steps TO projection_runtime").execute(owner).await?;
     atomic(store, owner, c).await?;
+    interrupted_page(store, owner, c).await?;
     lost_ack(store, owner, fixture, c).await?;
     comparison(store, owner, c).await
 }
@@ -326,4 +328,45 @@ fn report_samples(samples: [Vec<Duration>; 2], n: i64, b: u32) {
             n as f64 / p50.as_secs_f64()
         );
     }
+}
+
+async fn interrupted_page(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let s = generation(&scope("batch-stop", TENANT)?, "stopped")?;
+    for (i, body) in ["one", "two", "three", "pause"].into_iter().enumerate() {
+        append(store, &s, &format!("e{i}"), body.as_bytes(), c).await?;
+    }
+    let recorder = Arc::new(Recorder::default());
+    let exec = worker(store, &s, ReplayBound::Live, recorder.clone(), c).await?;
+    let limits = RunLimit::new(BatchLimit::new(2)?, 8)?;
+    let clock = Clock::new();
+    let stop = CancellationToken::new();
+    let interrupted = Control::new(&clock, Duration::from_secs(10), &stop);
+    let run = run_batched(store, &exec, &interrupted, limits);
+    let observation = run.observation();
+    let cancel = async {
+        recorder.paused.cancelled().await;
+        assert_eq!(snapshot(owner, &s).await?, (Some(1), 2, vec![0, 1], 1));
+        stop.cancel();
+        Ok::<_, anyhow::Error>(())
+    };
+    let (report, checked) = tokio::join!(run.into_future(), cancel);
+    checked?;
+    assert_eq!(
+        (report.position, report.applied),
+        (Some(Position::new(1)?), 2)
+    );
+    assert!(matches!(&report.stop,Stop::Failed(e) if e.kind()==ErrorKind::CommitUnknown));
+    assert_eq!(observation.read(), ObservationStatus::Stopped(report));
+    recorder.resume.cancel();
+    let recovered = run_batched(store, &exec, c, limits).await.into_result()?;
+    assert_eq!((recovered.stop, recovered.applied), (Stop::CaughtUp, 2));
+    assert_eq!(
+        snapshot(owner, &s).await?,
+        (Some(3), 4, vec![0, 1, 2, 3], 2)
+    );
+    Ok(())
 }

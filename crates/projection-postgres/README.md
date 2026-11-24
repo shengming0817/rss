@@ -181,16 +181,12 @@ Call `store.close(&control)` after cancelling and joining workers. Admission clo
 `CloseOutcome` distinguishes a drained pool from cancellation/deadline with outstanding borrowers.
 All adopted connections must use the same dedicated runtime login without `SET ROLE` masking.
 
-## Definition declaration and API replacement
+## Definition declaration
 
 The application mapping owns its definition value. The counter example declares a stable fingerprint
 beside its effect; initialization, replay and restart reuse it. The library does not compute or prove
 SQL/binary identity. Change the generation when changing the mapping; change the source when
 rebuilding the input stream, even if payload encoding stays the same.
-
-Revision 3 replaces the old Rust initialization/takeover signatures and adds session identity
-accessors and the external-target definition parameter. Update consumers together with the schema;
-there are no old overloads, aliases, defaults or compatibility features.
 
 ref: serverlesstechnology/cqrs persistence/postgres-es/src/view_repository.rs (version CAS;
 this adapter retains effect, receipt and checkpoint in its own single transaction)

@@ -70,7 +70,7 @@ impl PgStore {
                 -> BoxFuture<'c, Result<crate::ProtectedStep<R>, PgOperationError>>
             + Send,
     {
-        self.with_permit(())?
+        self.operation()
             .protect(claim, control, context, operation)
             .await
     }
@@ -90,7 +90,7 @@ impl PgStore {
             ) -> BoxFuture<'c, Result<R, PgOperationError>>
             + Send,
     {
-        self.with_permit(())?
+        self.operation()
             .wake_with(target, resources, control, context, operation)
             .await
     }
@@ -111,7 +111,7 @@ impl PgStore {
             ) -> BoxFuture<'c, Result<R, PgOperationError>>
             + Send,
     {
-        self.with_permit(())?
+        self.operation()
             .bind_with(target, resources, control, context, operation)
             .await
     }
@@ -362,7 +362,7 @@ impl DurableStore for PgStore {
         resources: &ResourceSet,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.with_permit(())?.wake(target, resources, control).await
+        self.operation().wake(target, resources, control).await
     }
     async fn bind_resources<T: Timer>(
         &self,
@@ -370,7 +370,7 @@ impl DurableStore for PgStore {
         resources: &ResourceSet,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.with_permit(())?
+        self.operation()
             .bind_resources(target, resources, control)
             .await
     }
@@ -382,7 +382,7 @@ impl DurableStore for PgStore {
         lease: Duration,
         control: &Control<'_, T>,
     ) -> Result<ClaimBatch<PgClaim>, Error> {
-        self.with_permit(())?
+        self.operation()
             .claim_due(scope, limit, scan_budget, lease, control)
             .await
     }
@@ -392,7 +392,7 @@ impl DurableStore for PgStore {
         lease: Duration,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.with_permit(())?.renew(claim, lease, control).await
+        self.operation().renew(claim, lease, control).await
     }
     async fn finish<T: Timer>(
         &self,
@@ -400,16 +400,14 @@ impl DurableStore for PgStore {
         completion: Completion,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.with_permit(())?
-            .finish(claim, completion, control)
-            .await
+        self.operation().finish(claim, completion, control).await
     }
     async fn release<T: Timer>(
         &self,
         claim: &PgClaim,
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
-        self.with_permit(())?.release(claim, control).await
+        self.operation().release(claim, control).await
     }
 }
 /// Owned private SQL arguments; never a public second claim identity.

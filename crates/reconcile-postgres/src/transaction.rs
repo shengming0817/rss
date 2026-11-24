@@ -5,8 +5,7 @@ use futures::future::BoxFuture;
 use rss_reconcile::{Control, Error, ErrorKind, Scope, Timer};
 use rss_request_context::TenantId;
 use sqlx::{Connection, PgConnection, PgPool, Postgres, pool::PoolConnection};
-#[cfg(feature = "integration")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::{future::Future, time::Duration};
 use tokio::runtime::Handle;
 use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
@@ -22,7 +21,7 @@ pub struct PgOperation<'a, P> {
 struct Admission<P> {
     // Field order: release host capacity before declaring the operation drained.
     _permit: P,
-    _tracked: TaskTrackerToken,
+    _tracked: Option<TaskTrackerToken>,
 }
 
 /// Component storage handle. The caller configures transport/TLS on the supplied pool.
@@ -31,7 +30,7 @@ struct Admission<P> {
 pub struct PgStore {
     pub(crate) pool: PgPool,
     identity: Identity,
-    operations: TaskTracker,
+    operations: Arc<Mutex<TaskTracker>>,
     #[cfg(feature = "integration")]
     pub(crate) fault: Arc<std::sync::atomic::AtomicU8>,
 }
@@ -43,7 +42,7 @@ impl PgStore {
         Ok(Self {
             pool,
             identity,
-            operations: TaskTracker::new(),
+            operations: Arc::new(Mutex::new(TaskTracker::new())),
 
             #[cfg(feature = "integration")]
             fault: Arc::new(std::sync::atomic::AtomicU8::new(0)),
@@ -52,28 +51,49 @@ impl PgStore {
     /// Hand off an already acquired permit. The host owns scheduling policy.
     /// A closed pool rejects the handoff and immediately releases the permit.
     pub fn with_permit<P: Send + 'static>(&self, permit: P) -> Result<PgOperation<'_, P>, Error> {
-        let admission = Admission {
-            _permit: permit,
-            _tracked: self.operations.token(),
+        let tracked = {
+            let tracker = self.operations.lock().unwrap_or_else(|e| e.into_inner());
+            if tracker.is_closed() || self.pool.is_closed() {
+                return Err(map_sql(sqlx::Error::PoolClosed));
+            }
+            tracker.token()
         };
-        if self.pool.is_closed() {
-            return Err(map_sql(sqlx::Error::PoolClosed));
-        }
         Ok(PgOperation {
             store: self,
-            admission,
+            admission: Admission {
+                _permit: permit,
+                _tracked: Some(tracked),
+            },
         })
     }
 
+    // Calls without a host permit proceed through their original control and
+    // argument checks. SQLx itself tracks their borrowed connection for close.
+    pub(crate) fn operation(&self) -> PgOperation<'_, ()> {
+        PgOperation {
+            store: self,
+            admission: Admission {
+                _permit: (),
+                _tracked: None,
+            },
+        }
+    }
+
     /// Close admission immediately, then drain within the supplied cancellation/deadline.
+    /// Drained covers the shared SQLx pool, plus permits handed to this store
+    /// or a clone. Independently constructed stores drain their own permits.
     /// An interrupted drain leaves the pool closed; outstanding borrowers still own their work.
     pub async fn close<T: Timer>(&self, control: &Control<'_, T>) -> CloseOutcome {
         let drain = self.pool.close(); // SQLx marks closed synchronously before returning its future.
-        self.operations.close();
+        let tracker = {
+            let tracker = self.operations.lock().unwrap_or_else(|e| e.into_inner());
+            tracker.close();
+            tracker.clone()
+        };
         match control
             .run(async {
                 drain.await;
-                self.operations.wait().await;
+                tracker.wait().await;
                 Ok(())
             })
             .await
@@ -95,9 +115,7 @@ impl PgStore {
         F: for<'c> FnOnce(&'c mut PgTransaction<'_>) -> BoxFuture<'c, Result<R, PgOperationError>>
             + Send,
     {
-        self.with_permit(())?
-            .local_tx(scope, control, operation)
-            .await
+        self.operation().local_tx(scope, control, operation).await
     }
     /// Inject one settlement fault into the next transaction on this handle and its clones.
     #[cfg(feature = "integration")]
