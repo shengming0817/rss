@@ -7,6 +7,7 @@ struct Recorder {
     paused: CancellationToken,
     resume: CancellationToken,
     reject: AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
     lose: Option<Arc<AtomicU8>>,
 }
 struct Writer(Arc<Recorder>);
@@ -17,6 +18,7 @@ impl PgEffect for Writer {
         scope: &ProjectionScope,
         event: &Event,
     ) -> Result<PgEffectOutcome, PgOperationError> {
+        self.0.calls.fetch_add(1, Ordering::SeqCst);
         if event.payload() == b"filter" {
             return Ok(PgEffectOutcome::Filtered);
         }
@@ -84,6 +86,24 @@ pub(crate) async fn verify(
 }
 async fn atomic(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     let s = generation(&scope("batch-mixed", TENANT)?, "mixed")?;
+    let replay = generation(&s, "bounded")?;
+    let witness = Arc::new(Recorder::default());
+    let bounded = worker(
+        store,
+        &replay,
+        ReplayBound::Through(Some(Position::new(1)?)),
+        witness.clone(),
+        c,
+    )
+    .await?;
+    let over = vec![
+        event(&replay, 0, "first", b"one")?,
+        event(&replay, 2, "overflow", b"two")?,
+    ];
+    assert!(
+        matches!(bounded.execute_batch(None,over,c).await,Err(e) if e.kind()==ErrorKind::OutOfOrder)
+    );
+    assert_eq!(witness.calls.load(Ordering::SeqCst), 0);
     let peer = generation(&scope("batch-peer", OTHER)?, "peer")?;
     let recorder = Arc::new(Recorder::default());
     recorder.reject.store(true, Ordering::SeqCst);

@@ -39,6 +39,7 @@ pub(crate) async fn verify(db: &Database, c: &Control<'_, Clock>) -> anyhow::Res
         .ssl_mode(PgSslMode::Disable);
     let pool = PgPoolOptions::new()
         .max_connections(2)
+        .min_connections(1)
         .acquire_timeout(Duration::from_millis(600))
         .connect_with(options)
         .await?;
@@ -73,12 +74,17 @@ pub(crate) async fn verify(db: &Database, c: &Control<'_, Clock>) -> anyhow::Res
     assert_ne!(a1, peer_pid);
     assert_eq!((epoch, extended), (claim.epoch(), true));
     assert!(futures::poll!(&mut a2).is_pending());
-    proxy.gate.release.cancel();
-    let permit = tokio::time::timeout(Duration::from_secs(2), a2).await??;
-    store
+    // Occupy the other healthy connection so A2 must use the slot retired
+    // by the watchdog. Keep the real return response held throughout.
+    let healthy = pool.acquire().await?;
+    let permit = tokio::time::timeout(Duration::from_secs(8), a2).await??;
+    let replacement = store
         .with_permit(permit)?
         .local_tx(a.scope(), c, |tx| Box::pin(pid(tx)))
         .await?;
+    assert_ne!(replacement, a1);
+    proxy.gate.release.cancel();
+    drop(healthy);
     failures(&store, &pool, a.scope(), c, &tenant_a, &drops).await?;
     assert_eq!(store.close(c).await, CloseOutcome::Drained);
     assert_eq!(drops.load(Ordering::SeqCst), 8);

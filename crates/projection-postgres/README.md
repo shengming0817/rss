@@ -60,8 +60,8 @@ it does not authenticate a caller that already holds database credentials.
 
 The schema contains only source allocators, events, generation/checkpoint state and fact receipts.
 It does not contain product read models or settings. Revision 4 binds each generation to one 32-byte definition and accepts
-source/projection names up to 255 bytes. Install the current schema in an empty database
-using the dedicated schema owner. Runtime admission verifies its identity and permissions.
+source/projection names up to 255 bytes. Install as the dedicated schema owner in a database where `rss_projection` is absent.
+Run the script outside an enclosing transaction: it owns its BEGIN and COMMIT. Runtime admission verifies its identity and permissions.
 
 ## API and recovery
 

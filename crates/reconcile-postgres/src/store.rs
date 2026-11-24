@@ -71,22 +71,7 @@ impl PgStore {
             + Send,
     {
         self.with_permit(())?
-            .context_tx(
-                claim.target.scope(),
-                control,
-                (Key::from(claim), context, Some(operation)),
-                |state, tx| {
-                    Box::pin(async move {
-                        lock(tx.connection, &state.0).await?;
-                        let operation = state
-                            .2
-                            .take()
-                            .ok_or_else(|| Error::new(ErrorKind::Invariant))?;
-                        let value = operation(&mut state.1, tx).await.map_err(Error::from)?;
-                        complete_step(tx.connection, &state.0, value).await
-                    })
-                },
-            )
+            .protect(claim, control, context, operation)
             .await
     }
     /// Atomically register explicit resources and work with trusted application SQL.
@@ -106,7 +91,7 @@ impl PgStore {
             + Send,
     {
         self.with_permit(())?
-            .schedule_with(target, resources, true, control, context, operation)
+            .wake_with(target, resources, control, context, operation)
             .await
     }
 
@@ -127,12 +112,86 @@ impl PgStore {
             + Send,
     {
         self.with_permit(())?
-            .schedule_with(target, resources, false, control, context, operation)
+            .bind_with(target, resources, control, context, operation)
             .await
     }
 }
 
 impl<P: Send + 'static> PgOperation<'_, P> {
+    /// Atomically protect database effects and schedule another observation. Context may
+    /// borrow application fields; callback and context are reborrowed for this transaction.
+    pub async fn protect<T: Timer, R: Send, C: Send, F>(
+        self,
+        claim: &PgClaim,
+        control: &Control<'_, T>,
+        context: C,
+        operation: F,
+    ) -> Result<ReconcileStep<R>, Error>
+    where
+        F: for<'c> FnOnce(
+                &'c mut C,
+                &'c mut PgTransaction<'_>,
+            )
+                -> BoxFuture<'c, Result<crate::ProtectedStep<R>, PgOperationError>>
+            + Send,
+    {
+        self.context_tx(
+            claim.target.scope(),
+            control,
+            (Key::from(claim), context, Some(operation)),
+            |state, tx| {
+                Box::pin(async move {
+                    lock(tx.connection, &state.0).await?;
+                    let operation = state
+                        .2
+                        .take()
+                        .ok_or_else(|| Error::new(ErrorKind::Invariant))?;
+                    let value = operation(&mut state.1, tx).await.map_err(Error::from)?;
+                    complete_step(tx.connection, &state.0, value).await
+                })
+            },
+        )
+        .await
+    }
+    /// Atomically register explicit resources and work with trusted application SQL.
+    pub async fn wake_with<T: Timer, R: Send, C: Send, F>(
+        self,
+        target: &Target,
+        resources: &ResourceSet,
+        control: &Control<'_, T>,
+        context: C,
+        operation: F,
+    ) -> Result<R, Error>
+    where
+        F: for<'c> FnOnce(
+                &'c mut C,
+                &'c mut PgTransaction<'_>,
+            ) -> BoxFuture<'c, Result<R, PgOperationError>>
+            + Send,
+    {
+        self.schedule_with(target, resources, true, control, context, operation)
+            .await
+    }
+
+    /// Bind/rebind in the business transaction without resetting failures or the due time.
+    pub async fn bind_with<T: Timer, R: Send, C: Send, F>(
+        self,
+        target: &Target,
+        resources: &ResourceSet,
+        control: &Control<'_, T>,
+        context: C,
+        operation: F,
+    ) -> Result<R, Error>
+    where
+        F: for<'c> FnOnce(
+                &'c mut C,
+                &'c mut PgTransaction<'_>,
+            ) -> BoxFuture<'c, Result<R, PgOperationError>>
+            + Send,
+    {
+        self.schedule_with(target, resources, false, control, context, operation)
+            .await
+    }
     #[allow(
         clippy::too_many_arguments,
         reason = "private shared wake/bind transaction implementation"

@@ -197,19 +197,44 @@ impl PgStore {
         control: &Control<'_, T>,
     ) -> Result<Checkpoint, Error> {
         let source = claim.scope.source().clone();
-        self.controlled_read(&source, control, move |tx| Box::pin(async move {
-            let s = &claim.scope;
-            let row = sqlx::query("SELECT position,replay,end_position,definition_identity FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id=$2 AND projection_id=$3 AND generation=$4 AND epoch=$5 AND worker_token=$6::uuid")
+        self.controlled_read(&source, control, move |tx| {
+            Box::pin(async move { load_checkpoint(tx, &claim).await })
+        })
+        .await
+    }
+}
+
+async fn load_checkpoint(tx: &mut PgTransaction<'_>, claim: &PgClaim) -> Result<Checkpoint, Error> {
+    let s = &claim.scope;
+    let row = sqlx::query("SELECT position,replay,end_position,definition_identity FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id=$2 AND projection_id=$3 AND generation=$4 AND epoch=$5 AND worker_token=$6::uuid")
                 .bind(s.source().tenant().to_string()).bind(s.source().source()).bind(s.projection()).bind(s.generation()).bind(claim.epoch).bind(claim.token.to_string())
                 .fetch_optional(&mut *tx.connection).await.map_err(map_sql)?.ok_or(Error::new(ErrorKind::Fenced))?;
-            if row.try_get::<Vec<u8>,_>("definition_identity").map_err(map_sql)?.as_slice() != claim.definition.as_bytes() {
-                return Err(Error::new(ErrorKind::Conflict));
-            }
-            let position = row.try_get::<Option<i64>,_>("position").map_err(map_sql)?.map(decode_position).transpose()?;
-            let end = row.try_get::<Option<i64>,_>("end_position").map_err(map_sql)?.map(decode_position).transpose()?;
-            Ok::<_, Error>(Checkpoint { position, bound: if row.try_get::<bool,_>("replay").map_err(map_sql)? { ReplayBound::Through(end) } else { ReplayBound::Live } })
-        })).await
+    if row
+        .try_get::<Vec<u8>, _>("definition_identity")
+        .map_err(map_sql)?
+        .as_slice()
+        != claim.definition.as_bytes()
+    {
+        return Err(Error::new(ErrorKind::Conflict));
     }
+    let position = row
+        .try_get::<Option<i64>, _>("position")
+        .map_err(map_sql)?
+        .map(decode_position)
+        .transpose()?;
+    let end = row
+        .try_get::<Option<i64>, _>("end_position")
+        .map_err(map_sql)?
+        .map(decode_position)
+        .transpose()?;
+    Ok::<_, Error>(Checkpoint {
+        position,
+        bound: if row.try_get::<bool, _>("replay").map_err(map_sql)? {
+            ReplayBound::Through(end)
+        } else {
+            ReplayBound::Live
+        },
+    })
 }
 /// Application decision before transaction settlement. Duplicate is deliberately absent:
 /// only the adapter's locked receipt lookup may classify an already committed fact.
@@ -223,7 +248,8 @@ pub enum PgEffectOutcome {
 /// Trusted application read-model writer. Include tenant and generation in application keys.
 /// A successful result means only that SQL was staged; the adapter still owns settlement.
 pub trait PgEffect: Send + Sync {
-    /// Apply within the borrowed transaction. Returning Err rolls back the entire event.
+    /// Apply within the borrowed transaction. An error rolls back the settlement: one event in `run`,
+    /// or the entire page (including earlier successful callbacks) in `run_batched`.
     fn apply(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -291,6 +317,17 @@ impl<H: PgEffect + 'static> BatchExecution for PgProjection<H> {
         self.store
             .controlled_tx(self.scope().source(), control, move |tx| {
                 Box::pin(async move {
+                    // Replay bounds are immutable for this generation. The first stage
+                    // locks the row and rechecks its epoch and cursor before any effect.
+                    let checkpoint = load_checkpoint(tx, &claim).await?;
+                    if checkpoint.position != expected {
+                        return Err(Error::new(ErrorKind::Fenced));
+                    }
+                    if let ReplayBound::Through(end) = checkpoint.bound
+                        && previous > end
+                    {
+                        return Err(Error::new(ErrorKind::OutOfOrder));
+                    }
                     let mut outcomes = Vec::with_capacity(events.len());
                     for event in events {
                         outcomes.push(stage(tx, &claim, effect.as_ref(), expected, &event).await?);
