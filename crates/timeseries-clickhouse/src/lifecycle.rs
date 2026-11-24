@@ -11,7 +11,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::{RwLock, RwLockReadGuard, Semaphore, SemaphorePermit};
+use crate::capacity::{Capacity, Permit};
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 /// Sole owner of one admitted installation's PG pool and HTTPS transport.
 /// The supplied pool is adopted, including any host-retained clones. Keep this
@@ -39,7 +40,7 @@ pub(crate) struct Shared<C> {
     limits: Limits,
     instance: String,
     closed: AtomicBool,
-    capacity: Semaphore,
+    capacity: Capacity,
     resources: RwLock<Option<Resources>>,
 }
 pub(crate) struct Resources {
@@ -58,7 +59,7 @@ pub(crate) struct Operation<'a, C> {
     pub(crate) material: RwLockReadGuard<'a, Material>,
     pub(crate) resources: RwLockReadGuard<'a, Resources>,
     pub(crate) threads: NonZeroU32,
-    _capacity: SemaphorePermit<'a>,
+    _capacity: Permit<'a>,
     pub(crate) clock: &'a C,
     pub(crate) limits: &'a Limits,
     pub(crate) instance: &'a str,
@@ -90,7 +91,6 @@ impl<C: Clock> ChOwner<C> {
         if limits.replay_micros.get() > i64::MAX as u64
             || limits.cursor_micros.get() > i64::MAX as u64
             || limits.query_threads > limits.operation_permits
-            || limits.operation_permits.get() as usize > Semaphore::MAX_PERMITS
         {
             return Err(Error::InvalidInput);
         }
@@ -99,7 +99,7 @@ impl<C: Clock> ChOwner<C> {
         Ok(Self {
             inner: Arc::new(Shared {
                 clock: Arc::new(clock),
-                capacity: Semaphore::new(limits.operation_permits.get() as usize),
+                capacity: Capacity::new(limits.max_in_flight.get(), limits.operation_permits.get()),
                 limits,
                 instance,
                 closed: AtomicBool::new(false),
@@ -188,13 +188,11 @@ impl<C> Shared<C> {
     async fn enter(
         &self,
         weight: NonZeroU32,
-    ) -> Result<(SemaphorePermit<'_>, RwLockReadGuard<'_, Resources>), Error> {
+    ) -> Result<(Permit<'_>, RwLockReadGuard<'_, Resources>), Error> {
         self.open()?;
         let capacity = self
             .capacity
-            .acquire_many(weight.get())
-            .await
-            .map_err(|_| Error::Unavailable)?;
+            .acquire(weight.get()).await?;
         let resources = self.resources.read().await;
         self.open()?;
         let resources =

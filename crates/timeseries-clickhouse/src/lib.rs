@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 mod aggregate;
+mod capacity;
 mod config;
 mod control;
 mod control_probe;
