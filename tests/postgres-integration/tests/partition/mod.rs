@@ -1,4 +1,5 @@
 //! INVARIANT: OUTBOX-PARTITION-ORDER-01 — public Rust and independent SQL callers.
+mod heads;
 mod wire_contract;
 use super::{Timer, binding, deadline, fence_fixture, message, outbox_budget};
 use rss_request_context::TenantId;
@@ -164,6 +165,7 @@ pub(super) async fn run(
     raw: &PgPool,
     config: PgConfig,
 ) -> anyhow::Result<()> {
+    Box::pin(heads::handoff(raw, owner)).await?;
     Box::pin(sql_digest_integrity(raw)).await?;
     Box::pin(wire_contract::run(runtime.clone(), raw)).await?;
     Box::pin(sql_protocol(raw)).await?;

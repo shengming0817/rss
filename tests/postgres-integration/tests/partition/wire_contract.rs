@@ -14,8 +14,29 @@ async fn append(
 }
 
 pub(super) async fn run(runtime: Arc<PgRuntime>, raw: &PgPool) -> anyhow::Result<()> {
+    payload_sizes(raw).await?;
     rejects(raw).await?;
     complete_message(runtime, raw).await
+}
+
+async fn payload_sizes(raw: &PgPool) -> anyhow::Result<()> {
+    let template = ordered("payload-sizes", "wire-bytes", "ordered");
+    for size in [0, 1, 2047, 2048, 2049] {
+        let body: Vec<u8> = (0u8..=255).cycle().take(size).collect();
+        let item = MessageEnvelope::new(
+            template.id().clone(),
+            template.metadata().clone(),
+            body.clone(),
+        );
+        let mut tx = sql_tx(raw, item.metadata().tenant_id()).await?;
+        sql_prepare(&mut tx, serde_json::json!([["wire-bytes", "ordered"]])).await?;
+        assert_eq!(sql_append(&mut tx, &item).await?, "inserted");
+        let stored:Vec<u8> = sqlx::query_scalar("SELECT payload FROM rss_transactional_messaging.claim_outbox($1::uuid,'wire-bytes',1,60000)")
+            .bind(item.metadata().tenant_id().to_string()).fetch_one(&mut *tx).await?;
+        assert_eq!(stored, body);
+        tx.rollback().await?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::cognitive_complexity)] // reason: one table of malformed SQL inputs keeps every rejection adjacent to its rollback.

@@ -81,8 +81,7 @@ fn details(row: &sqlx::postgres::PgRow, request: &Query) -> Result<Details, PgEr
             }))
         }
         Source::Outbox => {
-            let envelope =
-                crate::envelope::Envelope::decode(row)?;
+            let envelope = crate::envelope::Envelope::decode(row)?;
             let fingerprint: Vec<u8> = row.try_get("fingerprint")?;
             if envelope.metadata().tenant_id() != request.tenant()
                 || envelope.id().as_str() != row.try_get::<&str, _>("message_id")?

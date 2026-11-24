@@ -28,7 +28,8 @@ pub(crate) struct Envelope {
 }
 impl Envelope {
     pub(crate) fn decode(row: &PgRow) -> Result<MessageEnvelope<Vec<u8>>, PgError> {
-        let value: Self = serde_json::from_str(row.try_get("envelope")?).map_err(|_| PgError::invariant())?;
+        let value: Self =
+            serde_json::from_str(row.try_get("envelope")?).map_err(|_| PgError::invariant())?;
         let invalid = |_| PgError::invariant();
         let contract = ContractIdentity::new(
             ContractId::parse(&value.contract).map_err(invalid)?,

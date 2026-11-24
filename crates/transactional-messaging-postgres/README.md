@@ -38,6 +38,7 @@ tenant and configured domain. Hosts query other tenants separately when composin
 DR state. The deadline uses the injected runtime clock and is anchored before database I/O, so the
 query cannot extend the wait. Due work may be locked or claimed concurrently: bound immediate rescans
 and retain a recovery scan. These hints do not claim, settle, prove delivery or grant tenant access.
+The fresh schema stores message metadata in `envelope` and the complete payload in `payload bytea`, including after settlement.
 The external migrator grants `next_outbox_wakeup(uuid,text)` to relay/consumer roles; private
 `outbox_candidates(uuid,text)` remains accessible only to the relay function owner.
 
