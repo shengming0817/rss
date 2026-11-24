@@ -5,11 +5,29 @@ use rss_transactional_messaging::policy::OperationDeadline;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
+
+/// Publisher-wide bounds for idle HTTPS connections.
+#[derive(Clone, Copy, Debug)]
+pub struct IdlePoolLimits {
+    pub(crate) max_idle: usize,
+    pub(crate) timeout: Duration,
+}
+impl IdlePoolLimits {
+    /// Both the connection count and the idle retention time must be positive.
+    pub fn new(max_idle: usize, timeout: Duration) -> Result<Self, Error> {
+        if max_idle == 0 || timeout.is_zero() {
+            return Err(Error::Config);
+        }
+        Ok(Self { max_idle, timeout })
+    }
+}
 
 /// Bounded publication resources. All limits must be explicitly chosen by the host.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    pub(crate) pool: Option<IdlePoolLimits>,
     pub(crate) concurrent: usize,
     pub(crate) body_bytes: usize,
     pub(crate) addresses: usize,
@@ -24,6 +42,7 @@ impl Limits {
         addresses: usize,
         headers: usize,
         header_bytes: usize,
+        pool: Option<IdlePoolLimits>,
     ) -> Result<Self, Error> {
         if concurrent == 0
             || concurrent > tokio::sync::Semaphore::MAX_PERMITS
@@ -35,6 +54,7 @@ impl Limits {
             return Err(Error::Config);
         }
         Ok(Self {
+            pool,
             concurrent,
             body_bytes,
             addresses,

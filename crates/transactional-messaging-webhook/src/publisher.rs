@@ -1,10 +1,10 @@
 use crate::{
     AuthorizationFailure, AuthorizedTarget, Limits, Publication, TargetAuthorizer, WallClock,
 };
+use crate::connection::Connection;
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::{Request, client::conn::http1};
-use hyper_util::rt::TokioIo;
+use hyper::Request;
 use rss_request_context::{Deadline, ExecutionTimer};
 use rss_transactional_messaging::{
     message::MessageEnvelope,
@@ -14,8 +14,7 @@ use rss_transactional_messaging::{
         PublishFailureStage as Stage, PublishOutcome, Publisher,
     },
 };
-use tokio::{net::TcpStream, sync::Semaphore};
-use tokio_rustls::TlsConnector;
+use tokio::sync::Semaphore;
 
 /// Move-only evidence of HTTP acceptance; cannot be constructed or deserialized by consumers.
 /// It does not prove business processing, uniqueness or durable receiver storage.
@@ -125,23 +124,8 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
         {
             return definite(Kind::Permanent, Stage::Admission, Reason::InvalidMessage);
         }
-        let Ok(tls) = connect(&target).await else {
-            return definite(
-                Kind::Transient,
-                Stage::Admission,
-                Reason::TransportUnavailable,
-            );
-        };
-        let mut builder = http1::Builder::new();
-        builder
-            .max_headers(self.limits.headers)
-            .max_buf_size(self.limits.header_bytes);
-        let Ok((mut sender, connection)) = builder.handshake(TokioIo::new(tls)).await else {
-            return definite(
-                Kind::Transient,
-                Stage::Admission,
-                Reason::TransportUnavailable,
-            );
+        let Ok(mut connection) = Connection::connect(&target, self.limits, &self.timer, cutoff).await else {
+            return definite(Kind::Transient, Stage::Admission, Reason::TransportUnavailable);
         };
         let seconds = self.wall_clock.unix_seconds();
         if seconds < 0 {
@@ -159,16 +143,8 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
             return definite(Kind::Transient, Stage::Admission, Reason::DeadlineElapsed);
         }
         *sending = true;
-        let request = sender.send_request(request);
-        tokio::pin!(connection, request);
-        // Drive both futures locally; cancellation drops the entire IO owner, never a JoinHandle.
-        let result = tokio::select! {
-            biased;
-            response = &mut request => response,
-            _ = &mut connection => request.await,
-        };
-        match result {
-            Ok(response) if response.status().is_success() => {
+        match connection.send(request).await {
+            Ok((response, _)) if response.status().is_success() => {
                 PublishOutcome::Confirmed(WebhookPublishReceipt {
                     status: response.status().as_u16(),
                 })
@@ -203,32 +179,6 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
             .body(Full::new(Bytes::copy_from_slice(message.payload())))
             .map_err(|_| crate::Error::Binding)
     }
-}
-async fn connect(
-    target: &AuthorizedTarget,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ()> {
-    let mut stream = None;
-    for address in &target.network.addresses {
-        if let Ok(connected) = TcpStream::connect(address).await {
-            let peer = connected.peer_addr().map_err(|_| ())?;
-            if peer != *address || !target.network.permits(peer.ip()) {
-                return Err(());
-            }
-            stream = Some(connected);
-            break;
-        }
-    }
-    let name = match target.url.host().ok_or(())? {
-        url::Host::Domain(name) => {
-            rustls::pki_types::ServerName::try_from(name.to_owned()).map_err(|_| ())?
-        }
-        url::Host::Ipv4(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
-        url::Host::Ipv6(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
-    };
-    TlsConnector::from(target.trust.0.clone())
-        .connect(name, stream.ok_or(())?)
-        .await
-        .map_err(|_| ())
 }
 fn definite(kind: Kind, stage: Stage, reason: Reason) -> PublishOutcome<WebhookPublishReceipt> {
     PublishOutcome::DefinitelyNotPublished(PublishFailure::new(kind, stage, reason))

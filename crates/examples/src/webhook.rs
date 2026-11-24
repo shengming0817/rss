@@ -101,7 +101,7 @@ pub fn target() -> anyhow::Result<Target> {
     ))
 }
 pub fn limits() -> anyhow::Result<Limits> {
-    Ok(Limits::new(2, 65536, 4, 32, 8192)?)
+    Ok(Limits::new(2, 65536, 4, 32, 8192, Some(IdlePoolLimits::new(2, Duration::from_secs(30))?))?)
 }
 pub fn budget() -> anyhow::Result<DeliveryBudget> {
     Ok(DeliveryBudget::new(
