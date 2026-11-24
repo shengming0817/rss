@@ -67,8 +67,7 @@ CREATE TABLE rss_timeseries.summaries (
  lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo AND lo>=0),
  impact int8range NOT NULL CHECK(NOT isempty(impact) AND NOT lower_inf(impact) AND NOT upper_inf(impact)
                                 AND lower(impact) BETWEEN 0 AND lo AND upper(impact)=hi),
- -- Before a Gauge's first visible observation a deletion cannot interrupt the fold.
- -- For ordered metrics the boundary is the actual predecessor, or the bucket start.
+ -- Earliest observation used by the fold (possibly a predecessor), or hi for an empty fold.
  delete_from bigint NOT NULL CHECK(delete_from BETWEEN lower(impact) AND hi),
  gap_sensitive boolean NOT NULL CHECK(NOT gap_sensitive OR delete_from<lo),
  dirty boolean NOT NULL DEFAULT false, data bytea NOT NULL,

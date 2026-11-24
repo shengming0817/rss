@@ -73,17 +73,9 @@ pub(super) async fn step(
         let mut builder = SummaryBuilder::new(spec.clone(), bucket)?;
         let prior = crate::aggregate::predecessor(c, spec, fold.at, limits).await?;
         crate::aggregate::ensure_boundary(c, spec, fold.at, prior.as_ref(), limits).await?;
-        fold.delete_from = match &prior {
-            Some(p) => p.input().observed_at,
-            None if matches!(
-                spec.series().definition().spec().metric,
-                Metric::Gauge { .. }
-            ) =>
-            {
-                bucket.end()
-            }
-            None => bucket.start(),
-        };
+        fold.delete_from = prior
+            .as_ref()
+            .map_or(bucket.end(), |p| p.input().observed_at);
         if let Some(prior) = prior {
             builder.push(prior, limits.max_points.get() as usize)?;
         }
