@@ -366,10 +366,10 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         #[cfg(feature = "recovery")]
         let started = self.writer.runtime.timer.now();
         let batch = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
-                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
+                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, payload, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
                     .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
                 rows.into_iter().map(|row| {
-                    let message = PendingMessage::new(Envelope::decode(&row.try_get::<String,_>("envelope")?)?);
+                    let message = PendingMessage::new(Envelope::decode(&row)?);
                     if message.fingerprint() != fingerprint(row.try_get("fingerprint")?)? { return Err(PgError::invariant()); }
                     let envelope = message.envelope();
                     if row.try_get::<String,_>("tenant_id")? != envelope.metadata().tenant_id().to_string()

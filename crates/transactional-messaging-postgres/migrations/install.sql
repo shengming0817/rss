@@ -38,6 +38,7 @@ CREATE TABLE rss_transactional_messaging.outbox (
   partition_key text COLLATE "C",
   partition_head boolean NOT NULL DEFAULT false CHECK (NOT partition_head OR partition_key IS NOT NULL),
   envelope jsonb NOT NULL,
+  payload bytea NOT NULL,
   fingerprint bytea NOT NULL,
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','publishing','published','dead_letter','resolved')),
   retry_count integer NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
@@ -301,7 +302,7 @@ END $f$;
 ALTER FUNCTION rss_transactional_messaging.read_outbox_frame(bytea,integer,integer) OWNER TO rss_tmsg_relay;
 
 CREATE FUNCTION rss_transactional_messaging.decode_outbox_message(data bytea)
-RETURNS jsonb
+RETURNS TABLE(metadata jsonb,payload bytea)
 LANGUAGE plpgsql IMMUTABLE STRICT SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE pos integer:=0; v bytea; result jsonb:='{}'; flag bytea; key text; prior_key text;
  attrs jsonb:='{}'; count bigint; number bigint; tag integer; name text; value text;
@@ -373,7 +374,7 @@ BEGIN
  END LOOP;
  SELECT * INTO v,pos FROM read_outbox_frame(data,pos,18);
  IF pos<>octet_length(data) THEN RAISE EXCEPTION 'trailing message frames' USING ERRCODE='22023'; END IF;
- result:=result||jsonb_build_object('attributes',attrs,'payload',COALESCE((SELECT jsonb_agg(get_byte(v,i) ORDER BY i) FROM generate_series(0,octet_length(v)-1) i),'[]'::jsonb));
+ result:=result||jsonb_build_object('attributes',attrs);
  -- Apply the same primitive shapes as the core before creating the private durable projection.
  FOREACH name IN ARRAY ARRAY['id','domain','route','causation'] LOOP
   value:=result->>name;
@@ -396,7 +397,7 @@ BEGIN
  IF (result->>'schema' COLLATE "C") !~ '^sha256:[0-9a-f]{64}$' THEN
   RAISE EXCEPTION 'invalid schema digest' USING ERRCODE='22023';
  END IF;
- RETURN result;
+ RETURN QUERY SELECT result,v;
 EXCEPTION WHEN character_not_in_repertoire OR untranslatable_character THEN
  RAISE EXCEPTION 'message text is not PostgreSQL UTF8 text' USING ERRCODE='22023';
 END $f$;
@@ -479,7 +480,7 @@ CREATE FUNCTION rss_transactional_messaging.append_outbox(p_message bytea,p_tran
 RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid;
- first_in_partition boolean:=false; ordinal bigint; persisted bytea; digest bytea; envelope jsonb; id text; domain_name text; partition_name text;
+ first_in_partition boolean:=false; ordinal bigint; persisted bytea; digest bytea; envelope jsonb; body bytea; id text; domain_name text; partition_name text;
 BEGIN
  PERFORM check_execution();
  IF p_message IS NULL OR jsonb_typeof(p_transport) IS DISTINCT FROM 'object'
@@ -489,7 +490,7 @@ BEGIN
   OR jsonb_typeof(p_transport->'tenant_authority') NOT IN ('string','null') THEN
   RAISE EXCEPTION 'invalid message input' USING ERRCODE='22023';
  END IF;
- envelope:=decode_outbox_message(p_message)||p_transport;
+ SELECT m.metadata||p_transport,m.payload INTO STRICT envelope,body FROM decode_outbox_message(p_message) m;
  IF (envelope->>'tenant')::uuid IS DISTINCT FROM t THEN
   RAISE EXCEPTION 'message tenant mismatch' USING ERRCODE='22023';
  END IF;
@@ -508,8 +509,8 @@ BEGIN
   SELECT NOT EXISTS(SELECT FROM outbox o WHERE o.tenant_id=t AND o.domain=domain_name
    AND o.partition_key=partition_name AND o.partition_head) INTO first_in_partition;
  END IF;
- INSERT INTO outbox(tenant_id,message_id,domain,partition_key,partition_seq,partition_head,envelope,fingerprint)
-  VALUES(t,id,domain_name,partition_name,ordinal,first_in_partition,envelope,digest)
+ INSERT INTO outbox(tenant_id,message_id,domain,partition_key,partition_seq,partition_head,envelope,payload,fingerprint)
+  VALUES(t,id,domain_name,partition_name,ordinal,first_in_partition,envelope,body,digest)
   ON CONFLICT(tenant_id,message_id) DO NOTHING RETURNING outbox.fingerprint INTO persisted;
  IF FOUND THEN RETURN 'inserted'; END IF;
  SELECT o.fingerprint INTO STRICT persisted FROM outbox o WHERE o.tenant_id=t AND o.message_id=id;
@@ -585,7 +586,7 @@ $f$;
 ALTER FUNCTION rss_transactional_messaging.outbox_candidates(uuid,text) OWNER TO rss_tmsg_relay;
 
 CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain text,p_limit integer,p_ttl_ms bigint)
-RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
+RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,payload bytea,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
  observed timestamptz;
@@ -620,7 +621,7 @@ BEGIN
   END IF;
   used:=used+1;
   n:=clock_timestamp();
-  RETURN QUERY SELECT o.seq,o.tenant_id,o.message_id,o.domain,o.partition_key,o.lease_token,o.lease_until,o.envelope,o.fingerprint,r.op,
+  RETURN QUERY SELECT o.seq,o.tenant_id,o.message_id,o.domain,o.partition_key,o.lease_token,o.lease_until,o.envelope,o.payload,o.fingerprint,r.op,
    greatest(0,(extract(epoch FROM o.lease_until-n)*1000000)::bigint),
    greatest(0,(extract(epoch FROM o.automatic_retry_deadline-n)*1000000)::bigint);
  END LOOP;

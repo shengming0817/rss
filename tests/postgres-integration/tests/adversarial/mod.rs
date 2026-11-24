@@ -296,7 +296,7 @@ pub(super) async fn run(
         !accepted,
         "indirect SET ROLE into BYPASSRLS must fail connect"
     );
-    sqlx::query("INSERT INTO rss_transactional_messaging.outbox(tenant_id,message_id,domain,envelope,fingerprint) SELECT tenant_id,'ttl-bound','ttl-bound',envelope,fingerprint FROM rss_transactional_messaging.outbox LIMIT 1").execute(owner).await?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.outbox(tenant_id,message_id,domain,envelope,payload,fingerprint) SELECT tenant_id,'ttl-bound','ttl-bound',envelope,payload,fingerprint FROM rss_transactional_messaging.outbox LIMIT 1").execute(owner).await?;
     let mut raw = raw_runtime.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target',$2,true),set_config('rss.storage_lineage',$3,true),set_config('rss.execution_epoch','1',true)").bind("f47ac10b-58cc-4372-a567-0e02b2c3d479").bind("01010101010101010101010101010101").bind("02020202020202020202020202020202").execute(&mut *raw).await?;
     sqlx::query("SAVEPOINT invalid_claim")

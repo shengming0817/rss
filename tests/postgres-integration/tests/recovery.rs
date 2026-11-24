@@ -441,14 +441,11 @@ async fn replay_scenarios(
             .await,
     )?;
     assert_eq!(receipt.version, second.version);
-    let row=sqlx::query("SELECT envelope,fingerprint FROM rss_transactional_messaging.outbox WHERE message_id='replay-1'").fetch_one(owner).await?;
+    let row=sqlx::query("SELECT envelope,payload,fingerprint FROM rss_transactional_messaging.outbox WHERE message_id='replay-1'").fetch_one(owner).await?;
     let envelope: serde_json::Value = row.try_get("envelope")?;
     assert!(envelope["tenant_authority"].is_null());
     assert!(envelope["trace"].is_null());
-    assert_eq!(
-        envelope["payload"],
-        serde_json::json!(b"secret-body".to_vec())
-    );
+    assert_eq!(row.try_get::<Vec<u8>, _>("payload")?, b"secret-body");
     let duplicate = request(
         entry.target.clone(),
         receipt.version,

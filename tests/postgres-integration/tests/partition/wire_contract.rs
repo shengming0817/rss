@@ -141,7 +141,7 @@ async fn complete_message(runtime: Arc<PgRuntime>, raw: &PgPool) -> anyhow::Resu
         .await?,
         "already_present"
     );
-    let (digest,envelope):(Vec<u8>,serde_json::Value)=sqlx::query_as("SELECT fingerprint,envelope FROM rss_transactional_messaging.outbox WHERE message_id='wire-complete'").fetch_one(&mut *tx).await?;
+    let (digest,envelope,payload):(Vec<u8>,serde_json::Value,Vec<u8>)=sqlx::query_as("SELECT fingerprint,envelope,payload FROM rss_transactional_messaging.outbox WHERE message_id='wire-complete'").fetch_one(&mut *tx).await?;
     assert_eq!(digest, MessageFingerprint::of(&item).as_bytes());
     let vector: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -165,7 +165,8 @@ async fn complete_message(runtime: Arc<PgRuntime>, raw: &PgPool) -> anyhow::Resu
         envelope["attributes"],
         serde_json::json!({"a":"","é":"世界"})
     );
-    assert_eq!(envelope["payload"], serde_json::json!([0, 127, 128, 255]));
+    assert!(envelope.get("payload").is_none());
+    assert_eq!(payload, [0, 127, 128, 255]);
     assert_eq!(envelope["version"], "v4294967295");
     tx.commit().await?;
     let store = PgOutboxStore::<()>::new(

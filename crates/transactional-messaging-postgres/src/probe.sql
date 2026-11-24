@@ -15,7 +15,7 @@ columns(relation, name, type, nullable) AS (VALUES
  ('outbox_partitions','partition_key','text',false), ('outbox_partitions','last_sequence','bigint',false),
  ('outbox_partitions','prepared_by','xid8',false), ('outbox','partition_seq','bigint',true),
  ('outbox','partition_head','boolean',false), ('outbox','seq','bigint',false), ('outbox','tenant_id','uuid',false), ('outbox','message_id','text',false),
- ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false),
+ ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false), ('outbox','payload','bytea',false),
  ('outbox','fingerprint','bytea',false), ('outbox','status','text',false), ('outbox','retry_count','integer',false),
  ('outbox','retry_after','timestamp with time zone',false), ('outbox','lease_token','uuid',true),
  ('outbox','lease_until','timestamp with time zone',true), ('outbox','automatic_retry_deadline','timestamp with time zone',true), ('outbox','recovery_version','bigint',false)),
@@ -82,7 +82,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
    AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
    AND NOT has_function_privilege(current_user,p.oid,'EXECUTE'))),
  ('functions', pg_get_function_result(to_regprocedure('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'))
-   IS NOT DISTINCT FROM 'TABLE(seq bigint, tenant_id uuid, message_id text, domain text, partition_key text, lease_token uuid, lease_until timestamp with time zone, envelope jsonb, fingerprint bytea, dr_operation uuid, remaining_us bigint, delivery_us bigint)'),
+   IS NOT DISTINCT FROM 'TABLE(seq bigint, tenant_id uuid, message_id text, domain text, partition_key text, lease_token uuid, lease_until timestamp with time zone, envelope jsonb, payload bytea, fingerprint bytea, dr_operation uuid, remaining_us bigint, delivery_us bigint)'),
  ('functions', NOT EXISTS(SELECT FROM pg_proc p
   WHERE p.pronamespace='rss_transactional_messaging'::regnamespace AND p.proname='append_outbox'
   AND p.oid IS DISTINCT FROM to_regprocedure('rss_transactional_messaging.append_outbox(bytea,jsonb)'))),
@@ -94,7 +94,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
 
  ('functions', NOT EXISTS (SELECT 1 FROM (VALUES
   ('rss_transactional_messaging.read_outbox_frame(bytea,integer,integer)','record'::regtype,true),
-  ('rss_transactional_messaging.decode_outbox_message(bytea)','jsonb'::regtype,false)) f(signature,result,retset)
+  ('rss_transactional_messaging.decode_outbox_message(bytea)','record'::regtype,true)) f(signature,result,retset)
   LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
   WHERE p.oid IS NULL OR p.prorettype<>f.result OR p.proretset<>f.retset OR p.provolatile<>'i' OR p.prosecdef
    OR p.proowner<>(SELECT oid FROM relay_role)

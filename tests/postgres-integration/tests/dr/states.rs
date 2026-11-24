@@ -84,7 +84,7 @@ async fn invalid_facts(owner: &sqlx::PgPool, store: &PgDrStore) -> anyhow::Resul
         assert!(store.receipt(&p, deadline()).await?.is_none());
     }
     // Persist a fixture copy outside a pooled session's temporary namespace.
-    fixture_sql(owner,3,"CREATE TABLE public.dr_original AS SELECT envelope,fingerprint,automatic_retry_deadline FROM rss_transactional_messaging.outbox WHERE message_id='published'; UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 second' WHERE message_id='published'").await?;
+    fixture_sql(owner,3,"CREATE TABLE public.dr_original AS SELECT envelope,payload,fingerprint,automatic_retry_deadline FROM rss_transactional_messaging.outbox WHERE message_id='published'; UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 second' WHERE message_id='published'").await?;
     assert!(store.apply(&reference, deadline()).await.fold(
         |_| false,
         |_| false,
@@ -258,7 +258,7 @@ pub async fn run(
     outbox6
         .settle(claim, OutboxSettlement::Published(()), deadline())
         .await?;
-    let unchanged:bool=sqlx::query_scalar("SELECT o.status='published' AND o.envelope=r.envelope AND o.fingerprint=r.fingerprint AND o.automatic_retry_deadline=r.automatic_retry_deadline FROM rss_transactional_messaging.outbox o CROSS JOIN public.dr_original r WHERE o.message_id='published'").fetch_one(owner).await?;
+    let unchanged:bool=sqlx::query_scalar("SELECT o.status='published' AND o.envelope=r.envelope AND o.payload=r.payload AND o.fingerprint=r.fingerprint AND o.automatic_retry_deadline=r.automatic_retry_deadline FROM rss_transactional_messaging.outbox o CROSS JOIN public.dr_original r WHERE o.message_id='published'").fetch_one(owner).await?;
     assert!(unchanged);
     r4.close().await;
     store3.close().await;
