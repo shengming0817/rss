@@ -25,7 +25,10 @@ pub const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 pub enum Mode {
     Reply(Vec<u8>),
     KeepAlive(Vec<u8>),
-    ReleaseHeaders(Arc<tokio::sync::Notify>),
+    ReleaseHeaders {
+        send: Arc<tokio::sync::Notify>,
+        disconnect: Option<Arc<tokio::sync::Notify>>,
+    },
     DropResponse,
     StallHeaders,
     StallTls,
@@ -236,9 +239,17 @@ impl Server {
         mode: Mode,
     ) -> anyhow::Result<bool> {
         let (bytes, keep_alive) = match mode {
-            Mode::ReleaseHeaders(release) => {
-                release.notified().await;
-                (b"HTTP/1.1 204 No Content\r\n\r\n".to_vec(), true)
+            Mode::ReleaseHeaders { send, disconnect } => {
+                send.notified().await;
+                stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await?;
+                stream.flush().await?;
+                if let Some(disconnect) = disconnect {
+                    disconnect.notified().await;
+                    stream.shutdown().await?;
+                    self.closed.fetch_add(1, Ordering::SeqCst);
+                    return Ok(false);
+                }
+                return Ok(true);
             }
             Mode::KeepAlive(bytes) => (bytes, true),
             Mode::Reply(bytes) => (bytes, false),

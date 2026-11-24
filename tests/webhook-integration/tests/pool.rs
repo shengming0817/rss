@@ -289,7 +289,7 @@ async fn response_boundary_controls_reuse_independently_of_receipt() -> anyhow::
         ),
         (b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nx", 1, true),
         (
-            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\nConnection: keep-alive\r\n\r\n",
             2,
             true,
         ),
@@ -390,7 +390,11 @@ async fn close_rejects_admission_and_can_resume_wait_after_timeout() -> anyhow::
 #[tokio::test]
 async fn admitted_publish_completes_while_close_drains() -> anyhow::Result<()> {
     let release = Arc::new(tokio::sync::Notify::new());
-    let mut receiver = Receiver::new(Mode::ReleaseHeaders(release.clone())).await?;
+    let mut receiver = Receiver::new(Mode::ReleaseHeaders {
+        send: release.clone(),
+        disconnect: None,
+    })
+    .await?;
     let publisher = Arc::new(receiver.publisher()?);
     let task = {
         let publisher = publisher.clone();
@@ -436,5 +440,74 @@ async fn runtime_cancellation_releases_idle_sockets_without_another_publish() ->
     receiver.received().await?;
     wait_count(&receiver.closed, 1).await?;
     assert_eq!(publisher.close(cutoff()?).await, Err(CloseError::Cleanup));
+    receiver.stop().await
+}
+
+#[tokio::test]
+async fn reused_connection_with_lost_confirmation_does_not_resend() -> anyhow::Result<()> {
+    let mut primary = Receiver::new(Mode::KeepAlive(EMPTY.to_vec())).await?;
+    let mut backup = Receiver::on(
+        TcpListener::bind(("::1", primary.endpoint.address.port())).await?,
+        response(204),
+    )
+    .await?;
+    let auth = Authorization::new(&primary.endpoint);
+    {
+        let mut policy = auth.policy.lock().await;
+        policy.addresses.push(backup.endpoint.address);
+        policy.roots.push(backup.endpoint.ca.clone());
+    }
+    let publisher = WebhookPublisher::new(auth.clone(), Timer, Timer, enabled()?);
+    accepted(&publisher, &message("warm")?).await?;
+    let warm = primary.received().await?;
+    *primary.mode.lock().await = Mode::DropResponse;
+    assert!(
+        publisher
+            .publish(message("lost-on-reuse")?.envelope(), deadline())
+            .await
+            .is_ambiguous()
+    );
+    let lost = primary.received().await?;
+    assert_eq!(lost.headers["webhook-id"], "lost-on-reuse");
+    assert_eq!(lost.connection, warm.connection);
+    assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(primary.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(primary.handshakes.load(Ordering::SeqCst), 1);
+    assert_eq!(backup.connections.load(Ordering::SeqCst), 0);
+    primary.assert_no_request()?;
+    backup.assert_no_request()?;
+    publisher.close(cutoff()?).await?;
+    primary.stop().await?;
+    backup.stop().await
+}
+
+#[tokio::test]
+async fn checkout_skips_closed_socket_and_reuses_older_match() -> anyhow::Result<()> {
+    let headers = Arc::new(tokio::sync::Notify::new());
+    let disconnect = Arc::new(tokio::sync::Notify::new());
+    let mut receiver = Receiver::new(Mode::ReleaseHeaders {
+        send: headers.clone(),
+        disconnect: Some(disconnect.clone()),
+    })
+    .await?;
+    let publisher = Arc::new(receiver.publisher()?);
+    let held = {
+        let publisher = publisher.clone();
+        tokio::spawn(async move { accepted(&*publisher, &message("held")?).await })
+    };
+    let first = receiver.received().await?.connection;
+    *receiver.mode.lock().await = Mode::KeepAlive(EMPTY.to_vec());
+    accepted(&*publisher, &message("older-idle")?).await?;
+    let healthy = receiver.received().await?.connection;
+    assert_ne!(first, healthy);
+    headers.notify_one();
+    held.await??;
+    // The held connection is now the newest idle entry. Close it at the peer.
+    disconnect.notify_one();
+    wait_count(&receiver.closed, 1).await?;
+    accepted(&*publisher, &message("reuse-healthy")?).await?;
+    assert_eq!(receiver.received().await?.connection, healthy);
+    assert_eq!(receiver.handshakes.load(Ordering::SeqCst), 2);
+    publisher.close(cutoff()?).await?;
     receiver.stop().await
 }

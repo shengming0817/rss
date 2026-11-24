@@ -94,7 +94,7 @@ impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> WebhookPubl
         cutoff: Deadline,
         sending: &mut bool,
     ) -> PublishOutcome<WebhookPublishReceipt> {
-        let Some(_permit) = self.connections.admit() else {
+        let Some(admission) = self.connections.admit() else {
             return definite(
                 Kind::Transient,
                 Stage::Admission,
@@ -133,11 +133,8 @@ impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> WebhookPubl
         {
             return definite(Kind::Permanent, Stage::Admission, Reason::InvalidMessage);
         }
-        let reuse = self
-            .limits
-            .pool
-            .map(|limits| (limits, Identity::of(&target)));
-        let cached = reuse.as_ref().and_then(|(_, identity)| {
+        let reuse = self.limits.pool.map(|_| Identity::of(&target));
+        let cached = reuse.as_ref().and_then(|identity| {
             self.connections
                 .checkout(identity, &target, self.timer.as_ref())
         });
@@ -178,12 +175,11 @@ impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> WebhookPubl
                 let receipt = WebhookPublishReceipt {
                     status: response.status().as_u16(),
                 };
-                if let Some((limits, identity)) = reuse
+                if let Some(identity) = reuse
                     && driver_live
                     && connection.finish_response(response.body_mut())
                 {
-                    self.connections
-                        .put(connection, identity, limits, &self.timer);
+                    admission.put(connection, identity, &self.timer);
                 }
                 PublishOutcome::Confirmed(receipt)
             }

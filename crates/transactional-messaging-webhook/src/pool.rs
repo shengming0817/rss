@@ -1,10 +1,10 @@
-use crate::{AuthorizedTarget, IdlePoolLimits, Limits, Target, connection::Connection};
+use crate::{AuthorizedTarget, Limits, Target, connection::Connection};
 use rss_request_context::{Deadline, ExecutionTimer, TenantId};
 use rss_transactional_messaging::policy::within;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 use tokio::{
     sync::{Mutex as AsyncMutex, Notify},
@@ -132,14 +132,14 @@ impl Drop for IdleOwner {
     }
 }
 
-pub(crate) struct Admission<'a>(&'a Shared);
+pub(crate) struct Admission<'a>(&'a Connections);
 
 impl Drop for Admission<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.state();
+        let mut state = self.0.shared.state();
         state.active -= 1;
         if state.closed && state.active == 0 {
-            self.0.drained.notify_waiters();
+            self.0.shared.drained.notify_waiters();
         }
     }
 }
@@ -148,7 +148,7 @@ type Cleaner = AsyncMutex<Result<Option<JoinHandle<()>>, CloseError>>;
 
 pub(crate) struct Connections {
     shared: Arc<Shared>,
-    cleaner: OnceLock<Cleaner>,
+    cleaner: Mutex<Option<Arc<Cleaner>>>,
     limits: Limits,
 }
 
@@ -156,7 +156,7 @@ impl Connections {
     pub(crate) fn new(limits: Limits) -> Self {
         Self {
             shared: Arc::default(),
-            cleaner: OnceLock::new(),
+            cleaner: Mutex::default(),
             limits,
         }
     }
@@ -167,7 +167,7 @@ impl Connections {
             return None;
         }
         state.active += 1;
-        Some(Admission(&self.shared))
+        Some(Admission(self))
     }
 
     pub(crate) fn checkout(
@@ -176,52 +176,30 @@ impl Connections {
         target: &AuthorizedTarget,
         timer: &impl ExecutionTimer,
     ) -> Option<Connection> {
-        let mut state = self.shared.state();
-        let now = timer.now();
-        let index = state.idle.iter().rposition(|entry| {
-            let peer = entry.connection.peer;
-            !entry.expires.is_expired(now)
-                && &entry.identity == identity
-                && target.network.addresses.contains(&peer)
-                && target.network.permits(peer.ip())
-        })?;
-        let mut entry = state.idle.remove(index)?;
-        drop(state);
-        entry.connection.ready_now().then_some(entry.connection)
+        // Bound the search even if concurrent borrowers keep returning other entries.
+        let candidates = self.shared.state().idle.len();
+        for _ in 0..candidates {
+            let mut entry = {
+                let mut state = self.shared.state();
+                let now = timer.now();
+                let index = state.idle.iter().rposition(|entry| {
+                    let peer = entry.connection.peer;
+                    !entry.expires.is_expired(now)
+                        && &entry.identity == identity
+                        && target.network.addresses.contains(&peer)
+                        && target.network.permits(peer.ip())
+                })?;
+                state.idle.remove(index)?
+            };
+            if entry.connection.ready_now() {
+                return Some(entry.connection);
+            }
+        }
+        None
     }
 
-    pub(crate) fn put<T: ExecutionTimer + 'static>(
-        &self,
-        connection: Connection,
-        identity: Identity,
-        limits: IdlePoolLimits,
-        timer: &Arc<T>,
-    ) {
-        // Every caller holds an admission until put returns: close joins the cleaner
-        // after draining admissions. Never hold the state lock across task creation.
-        self.cleaner.get_or_init(|| {
-            let owner = IdleOwner(self.shared.clone());
-            AsyncMutex::new(Ok(Some(tokio::spawn(owner.run(timer.clone())))))
-        });
-        let mut state = self.shared.state();
-        if state.closed || state.cleaner_stopped {
-            return;
-        }
-        let Ok(expires) = Deadline::from_timeout(timer.as_ref(), limits.timeout) else {
-            return;
-        };
-        if state.idle.len() == limits.max_idle {
-            state.idle.pop_front();
-        }
-        let wake = state.idle.is_empty();
-        state.idle.push_back(Idle {
-            connection,
-            identity,
-            expires,
-        });
-        if wake {
-            self.shared.wake_cleaner.notify_one();
-        }
+    fn cleaner(&self) -> MutexGuard<'_, Option<Arc<Cleaner>>> {
+        self.cleaner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(crate) async fn close(
@@ -229,10 +207,14 @@ impl Connections {
         timer: &impl ExecutionTimer,
         deadline: Deadline,
     ) -> Result<(), CloseError> {
-        self.shared.stop();
+        let cleaner = {
+            let cleaner = self.cleaner();
+            self.shared.stop();
+            cleaner.clone()
+        };
         within(timer, deadline, |_| async {
             self.shared.wait_drained().await;
-            if let Some(cleaner) = self.cleaner.get() {
+            if let Some(cleaner) = cleaner {
                 let mut slot = cleaner.lock().await;
                 if let Some(task) = slot.as_mut().map_err(|error| *error)? {
                     *slot = task.await.map(|()| None).map_err(|_| CloseError::Cleanup);
@@ -249,10 +231,54 @@ impl Connections {
 impl Drop for Connections {
     fn drop(&mut self) {
         self.shared.stop();
-        if let Some(cleaner) = self.cleaner.get_mut()
-            && let Ok(Some(handle)) = cleaner.get_mut()
+        if let Some(cleaner) = self.cleaner().as_ref()
+            && let Ok(slot) = cleaner.try_lock()
+            && let Ok(Some(handle)) = &*slot
         {
             handle.abort();
+        }
+    }
+}
+
+impl Admission<'_> {
+    pub(crate) fn put<T: ExecutionTimer + 'static>(
+        &self,
+        connection: Connection,
+        identity: Identity,
+        timer: &Arc<T>,
+    ) {
+        let pool = self.0;
+        let Some(limits) = pool.limits.pool else {
+            return;
+        };
+        // Serialize first task startup with close. The task's Drop guard only uses the
+        // state mutex, which is released before spawning (including on a stopped runtime).
+        let mut cleaner = pool.cleaner();
+        let mut state = pool.shared.state();
+        if state.closed || state.cleaner_stopped {
+            return;
+        }
+        let Ok(expires) = Deadline::from_timeout(timer.as_ref(), limits.timeout) else {
+            return;
+        };
+        if state.idle.len() == limits.max_idle {
+            state.idle.pop_front();
+        }
+        let wake = state.idle.is_empty();
+        state.idle.push_back(Idle {
+            connection,
+            identity,
+            expires,
+        });
+        drop(state);
+        cleaner.get_or_insert_with(|| {
+            let owner = IdleOwner(pool.shared.clone());
+            Arc::new(AsyncMutex::new(Ok(Some(tokio::spawn(
+                owner.run(timer.clone()),
+            )))))
+        });
+        if wake {
+            pool.shared.wake_cleaner.notify_one();
         }
     }
 }
