@@ -602,6 +602,19 @@ fn authorization_receipt_and_maintenance_do_not_invent_guarantees() -> TestResul
 #[test]
 fn canonical_v1_golden_and_duplicate_dimensions() -> TestResult {
     let b = batch(vec![gauge(1)?])?;
+    const SAMPLE: &str = r#"{"stream":{"scope":{"tenant":"11111111-1111-4111-8111-111111111111","namespace":"telemetry"},"source":"collector","generation":"boot-1"},"series":{"definition":{"scope":{"tenant":"11111111-1111-4111-8111-111111111111","namespace":"telemetry"},"key":"custom.measurement","version":1,"unit":"1","metric":{"kind":"gauge","number":"u64"},"dimensions":{"allowed":["core"],"required":[],"maxCount":1,"maxValueBytes":16,"maxTotalBytes":64}},"subject":"subject","resource":"resource","dimensions":{}},"id":"sample-1","sequence":1,"observedAt":1,"interval":{"start":0,"end":1},"reading":{"quality":"valid","value":{"type":"number","value":{"type":"u64","value":18446744073709551615}}}}"#;
+    let encoded = b.encode()?;
+    let expected = format!(
+        r#"{{"stream":{{"scope":{{"tenant":"11111111-1111-4111-8111-111111111111","namespace":"telemetry"}},"source":"collector","generation":"boot-1"}},"id":"batch-1","samples":[{SAMPLE}]}}"#
+    );
+    assert_eq!(encoded, expected.as_bytes());
+    assert_eq!(
+        b.samples()[0].digest()?.as_bytes(),
+        &[
+            167, 243, 161, 4, 73, 64, 253, 166, 50, 105, 33, 69, 51, 124, 171, 41, 190, 224, 146,
+            90, 95, 123, 12, 81, 164, 123, 87, 0, 128, 147, 50, 61
+        ]
+    );
     assert_eq!(
         b.digest()?.as_bytes(),
         &[
@@ -772,5 +785,53 @@ fn maintenance_binding_includes_distinct_row_and_bucket_budgets() -> TestResult 
     )?;
     assert_ne!(a.binding()?, b.binding()?);
     assert_ne!(a.binding()?, c.binding()?);
+    Ok(())
+}
+
+#[test]
+fn exact_batch_protocol_limits() -> TestResult {
+    let base = gauge(1)?;
+    let mut samples = Vec::new();
+    for index in 0..Batch::MAX_SAMPLES {
+        let mut input = base.input().clone();
+        input.id = id(&format!("sample-{index}"))?;
+        samples.push(Sample::new(input)?);
+    }
+    let bytes = batch(samples.clone())?.encode()?.len();
+    let mut extra = base.input().clone();
+    extra.id = id("extra")?;
+    samples.push(Sample::new(extra)?);
+    assert_eq!(
+        Batch::new(stream()?, id("batch-1")?, samples.clone()),
+        Err(Error::BudgetExceeded)
+    );
+    samples.pop();
+
+    // A quote consumes two JSON bytes, allowing the whole envelope to reach
+    // the byte ceiling while each producer ID remains within 256 UTF-8 bytes.
+    let mut remaining = Batch::MAX_BYTES - bytes;
+    for item in &mut samples {
+        let mut input = item.input().clone();
+        let extra = remaining.min(480);
+        let name = format!(
+            "{}{}{}",
+            input.id.as_str(),
+            "\"".repeat(extra / 2),
+            "x".repeat(extra % 2)
+        );
+        input.id = id(&name)?;
+        *item = Sample::new(input)?;
+        remaining -= extra;
+        if remaining == 0 {
+            break;
+        }
+    }
+    assert_eq!(remaining, 0);
+    let b = batch(samples.clone())?;
+    assert_eq!(b.encode()?.len(), Batch::MAX_BYTES);
+    assert_eq!(
+        Batch::new(stream()?, id("batch-11")?, samples),
+        Err(Error::BudgetExceeded)
+    );
     Ok(())
 }

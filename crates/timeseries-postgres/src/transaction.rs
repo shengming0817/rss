@@ -57,6 +57,20 @@ pub(crate) enum Mode {
 }
 
 impl<C: Clock> PgStore<C> {
+    pub(crate) async fn acquire(
+        &self,
+        tenant: TenantId,
+        deadline: Deadline,
+    ) -> Result<PoolConnection<Postgres>, Error> {
+        self.profile.check_tenant(tenant)?;
+        let remaining = deadline
+            .remaining(self.clock.now())
+            .ok_or(Error::Deadline)?;
+        tokio::time::timeout(remaining, self.pool.acquire())
+            .await
+            .map_err(|_| Error::Deadline)?
+            .map_err(sql_error)
+    }
     pub(crate) async fn transaction<T: Send>(
         &self,
         tenant: TenantId,
@@ -65,7 +79,19 @@ impl<C: Clock> PgStore<C> {
         operation: impl for<'a> FnOnce(&'a mut PgConnection, &'a C) -> BoxFuture<'a, Result<T, Error>>
         + Send,
     ) -> Result<Outcome<T>, Error> {
-        self.profile.check_tenant(tenant)?;
+        let connection = self.acquire(tenant, deadline).await?;
+        self.transaction_on(connection, tenant, deadline, mode, operation)
+            .await
+    }
+    pub(crate) async fn transaction_on<T: Send>(
+        &self,
+        connection: PoolConnection<Postgres>,
+        tenant: TenantId,
+        deadline: Deadline,
+        mode: Mode,
+        operation: impl for<'a> FnOnce(&'a mut PgConnection, &'a C) -> BoxFuture<'a, Result<T, Error>>
+        + Send,
+    ) -> Result<Outcome<T>, Error> {
         let started = AtomicBool::new(false);
         let remaining = deadline
             .remaining(self.clock.now())
@@ -73,7 +99,7 @@ impl<C: Clock> PgStore<C> {
         let mutation = mode == Mode::Write;
         let fault = if mutation { self.take_fault() } else { 0 };
         let result=tokio::time::timeout(remaining, async {
-            let mut lease=Lease{connection:self.pool.acquire().await.map_err(sql_error)?,settled:false};
+            let mut lease=Lease{connection,settled:false};
             let mut tx = match mode {
                 Mode::Snapshot => lease.connection.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").await,
                 _ => lease.connection.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE").await,

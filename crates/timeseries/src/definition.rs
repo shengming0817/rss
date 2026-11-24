@@ -7,12 +7,19 @@ pub(crate) const MAX_DIMENSIONS: u16 = 1024;
 
 /// Tenant and namespace are mandatory scope, not authentication evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "ScopeDto", into = "ScopeDto")]
+#[serde(try_from = "ScopeDto")]
 pub struct Scope {
+    #[serde(serialize_with = "serialize_tenant")]
     tenant: TenantId,
     namespace: Id,
 }
-#[derive(Serialize, Deserialize)]
+fn serialize_tenant<S: serde::Serializer>(
+    tenant: &TenantId,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(tenant)
+}
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ScopeDto {
     tenant: String,
@@ -25,14 +32,6 @@ impl TryFrom<ScopeDto> for Scope {
             TenantId::parse(&v.tenant).map_err(|_| Error::InvalidInput)?,
             v.namespace,
         ))
-    }
-}
-impl From<Scope> for ScopeDto {
-    fn from(v: Scope) -> Self {
-        Self {
-            tenant: v.tenant.to_string(),
-            namespace: v.namespace,
-        }
     }
 }
 impl Scope {
@@ -158,7 +157,7 @@ pub struct DefinitionSpec {
     pub dimensions: DimensionRules,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "DefinitionSpec", into = "DefinitionSpec")]
+#[serde(try_from = "DefinitionSpec")]
 pub struct Definition(Box<DefinitionSpec>);
 impl TryFrom<DefinitionSpec> for Definition {
     type Error = Error;

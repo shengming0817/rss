@@ -34,14 +34,14 @@ impl Stream {
 /// A series pins a full immutable definition snapshot. Snapshots are values,
 /// not a second registry; adapters may normalize storage using the definition digest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "SeriesDto", into = "SeriesDto")]
+#[serde(try_from = "SeriesDto")]
 pub struct Series {
     definition: Definition,
     subject: Id,
     resource: Id,
     dimensions: BTreeMap<Id, Id>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SeriesDto {
     definition: Definition,
@@ -80,16 +80,6 @@ impl TryFrom<SeriesDto> for Series {
         Self::new(v.definition, v.subject, v.resource, v.dimensions)
     }
 }
-impl From<Series> for SeriesDto {
-    fn from(v: Series) -> Self {
-        Self {
-            definition: v.definition,
-            subject: v.subject,
-            resource: v.resource,
-            dimensions: v.dimensions,
-        }
-    }
-}
 impl Series {
     pub fn new(
         definition: Definition,
@@ -123,7 +113,7 @@ impl Series {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "SampleInput", into = "SampleInput")]
+#[serde(try_from = "SampleInput")]
 pub struct Sample(SampleInput);
 /// Untrusted data, validated only by `Sample::new` (including during decode).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -212,13 +202,13 @@ pub enum IdentityMatch {
 
 /// Fixed ordered batch. Hard protocol ceilings keep serialized input bounded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "BatchDto", into = "BatchDto")]
+#[serde(try_from = "BatchDto")]
 pub struct Batch {
     stream: Stream,
     id: Id,
     samples: Vec<Sample>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BatchDto {
     stream: Stream,
@@ -229,15 +219,6 @@ impl TryFrom<BatchDto> for Batch {
     type Error = Error;
     fn try_from(v: BatchDto) -> Result<Self, Error> {
         Self::new(v.stream, v.id, v.samples)
-    }
-}
-impl From<Batch> for BatchDto {
-    fn from(v: Batch) -> Self {
-        Self {
-            stream: v.stream,
-            id: v.id,
-            samples: v.samples,
-        }
     }
 }
 impl Batch {
@@ -264,7 +245,7 @@ impl Batch {
             id,
             samples,
         };
-        batch.encode()?;
+        batch.write_to(std::io::sink())?;
         Ok(batch)
     }
     pub const fn stream(&self) -> &Stream {
@@ -290,9 +271,16 @@ impl Batch {
         }
     }
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut writer = BoundedWriter(Vec::new());
-        serde_json::to_writer(&mut writer, self).map_err(|_| Error::BudgetExceeded)?;
-        Ok(writer.0)
+        let mut bytes = Vec::new();
+        self.write_to(&mut bytes)?;
+        Ok(bytes)
+    }
+    fn write_to(&self, output: impl std::io::Write) -> Result<(), Error> {
+        let writer = BoundedWriter {
+            output,
+            remaining: Self::MAX_BYTES,
+        };
+        serde_json::to_writer(writer, self).map_err(|_| Error::BudgetExceeded)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() > Self::MAX_BYTES {
@@ -302,16 +290,20 @@ impl Batch {
     }
 }
 
-struct BoundedWriter(Vec<u8>);
-impl std::io::Write for BoundedWriter {
+struct BoundedWriter<W> {
+    output: W,
+    remaining: usize,
+}
+impl<W: std::io::Write> std::io::Write for BoundedWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len() > Batch::MAX_BYTES.saturating_sub(self.0.len()) {
+        if bytes.len() > self.remaining {
             return Err(std::io::Error::other("batch budget exceeded"));
         }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
+        let n = self.output.write(bytes)?;
+        self.remaining -= n;
+        Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        self.output.flush()
     }
 }

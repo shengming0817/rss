@@ -7,7 +7,7 @@ mod numeric;
 mod ordered;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(try_from = "Spec", into = "Spec")]
+#[serde(try_from = "Spec")]
 pub struct SummarySpec(Spec);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -24,11 +24,6 @@ impl TryFrom<Spec> for SummarySpec {
         let s = Self(value);
         s.validate()?;
         Ok(s)
-    }
-}
-impl From<SummarySpec> for Spec {
-    fn from(v: SummarySpec) -> Self {
-        v.0
     }
 }
 impl SummarySpec {
