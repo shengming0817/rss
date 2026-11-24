@@ -72,6 +72,7 @@ struct Database {
     pool: PgPool,
     owner: PgPool,
     options: PgConnectOptions,
+    // Struct fields drop in order, including when a test exits early or times out.
     fixture: testkit::PgTlsFixture,
     _network: testkit::BridgeNetwork,
 }
@@ -137,18 +138,25 @@ impl Database {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconcile_postgres_suite() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(240),async {
-        let clock=Clock::new();let cancel=CancellationToken::new();let control=Control::new(&clock,Duration::from_secs(210),&cancel);
-        let Database {pool, owner, options, fixture, _network:network}=Database::new(&control).await?;
-        sqlx::raw_sql("CREATE TABLE public.effects(tenant_id uuid NOT NULL,id text NOT NULL,n bigint NOT NULL,PRIMARY KEY(tenant_id,id)); ALTER TABLE public.effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT,UPDATE ON public.effects TO reconcile_runtime;").execute(&owner).await?;
-        let absent:Option<String>=sqlx::query_scalar("SELECT to_regnamespace('rss_transactional_messaging')::text").fetch_one(&owner).await?;assert!(absent.is_none());
-        assert!(matches!(PgStore::new(owner.clone(),&control).await,Err(e) if e.kind()==ErrorKind::StorageContract));
-        let store=PgStore::new(pool.clone(),&control).await?;
-        scenarios::run(&store,&pool,&owner,&control).await?;
-        process::run(&store,&owner,&fixture,&control).await?;
-        transport::run(&owner,options.clone(),&control).await?;
-        Box::pin(messaging::run(&store,&owner,&fixture,&control)).await?;
-        assert_eq!(store.close(&control).await,CloseOutcome::Drained);owner.close().await;drop(fixture);drop(network);Ok::<(),anyhow::Error>(())
+    tokio::time::timeout(Duration::from_secs(240), async {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(210), &cancel);
+        let db = Database::new(&control).await?;
+        sqlx::raw_sql("CREATE TABLE public.effects(tenant_id uuid NOT NULL,id text NOT NULL,n bigint NOT NULL,PRIMARY KEY(tenant_id,id)); ALTER TABLE public.effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT,UPDATE ON public.effects TO reconcile_runtime;")
+            .execute(&db.owner).await?;
+        let absent: Option<String> = sqlx::query_scalar("SELECT to_regnamespace('rss_transactional_messaging')::text")
+            .fetch_one(&db.owner).await?;
+        assert!(absent.is_none());
+        assert!(matches!(PgStore::new(db.owner.clone(), &control).await, Err(e) if e.kind() == ErrorKind::StorageContract));
+        let store = PgStore::new(db.pool.clone(), &control).await?;
+        scenarios::run(&store, &db.pool, &db.owner, &control).await?;
+        process::run(&store, &db.owner, &db.fixture, &control).await?;
+        transport::run(&db.owner, db.options.clone(), &control).await?;
+        Box::pin(messaging::run(&store, &db.owner, &db.fixture, &control)).await?;
+        assert_eq!(store.close(&control).await, CloseOutcome::Drained);
+        db.owner.close().await;
+        Ok::<(), anyhow::Error>(())
     }).await??;
     Ok(())
 }
