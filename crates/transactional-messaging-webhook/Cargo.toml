@@ -17,7 +17,7 @@ rss-transactional-messaging = { path = "../transactional-messaging", version = "
 rss-request-context.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 rss-contract.workspace = true
-tokio = { workspace = true, features = ["net", "sync", "time", "macros"] }
+tokio = { workspace = true, features = ["net", "sync", "time", "macros", "rt"] }
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util.workspace = true
 http-body-util.workspace = true

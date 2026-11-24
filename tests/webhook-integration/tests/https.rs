@@ -121,7 +121,7 @@ async fn cancellation_deadlines_and_capacity_release_actual_connections() -> any
         receiver.endpoint.clone(),
         Timer,
         Timer,
-        Limits::new(1, 65536, 4, 32, 8192)?,
+        Limits::new(1, 65536, 4, 32, 8192, None)?,
     ));
     let pending = message("cancel")?;
     let task = {

@@ -24,6 +24,11 @@ pub const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 #[derive(Clone)]
 pub enum Mode {
     Reply(Vec<u8>),
+    KeepAlive(Vec<u8>),
+    ReleaseHeaders {
+        send: Arc<tokio::sync::Notify>,
+        disconnect: Option<Arc<tokio::sync::Notify>>,
+    },
     DropResponse,
     StallHeaders,
     StallTls,
@@ -35,6 +40,9 @@ pub fn response(status: u16) -> Mode {
     )
 }
 pub struct Received {
+    pub connection: usize,
+    pub local: std::net::SocketAddr,
+    pub sni: Option<String>,
     pub headers: BTreeMap<String, String>,
     pub body: Vec<u8>,
     pub request_line: String,
@@ -72,11 +80,16 @@ pub struct Receiver {
     pub mode: Arc<Mutex<Mode>>,
     pub connections: Arc<AtomicUsize>,
     pub closed: Arc<AtomicUsize>,
+    pub handshakes: Arc<AtomicUsize>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
     records: mpsc::Receiver<Received>,
     task: Option<JoinHandle<()>>,
 }
 impl Receiver {
     pub async fn new(mode: Mode) -> anyhow::Result<Self> {
+        Self::on(TcpListener::bind("127.0.0.1:0").await?, mode).await
+    }
+    pub async fn on(listener: TcpListener, mode: Mode) -> anyhow::Result<Self> {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
         let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
@@ -89,7 +102,6 @@ impl Receiver {
         )?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let endpoint = Endpoint {
             tenant: TENANT.into(),
@@ -102,25 +114,38 @@ impl Receiver {
         let connections = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(AtomicUsize::new(0));
         let (tx, records) = mpsc::channel(32);
-        let state = (mode.clone(), connections.clone(), closed.clone());
+        let handshakes = Arc::new(AtomicUsize::new(0));
+        let server = Server {
+            acceptor,
+            mode: mode.clone(),
+            records: tx,
+            closed: closed.clone(),
+            handshakes: handshakes.clone(),
+        };
+        let accepted = connections.clone();
+        let (stop, mut stopping) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            let mut clients = tokio::task::JoinSet::new();
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                state.1.fetch_add(1, Ordering::SeqCst);
-                let mode = state.0.lock().await.clone();
-                // Every fixture connection also has a bounded lifetime; there are no detached tasks.
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    serve(stream, &acceptor, mode, &tx),
-                )
-                .await;
-                state.2.fetch_add(1, Ordering::SeqCst);
+                tokio::select! {
+                    _ = &mut stopping => break,
+                    Some(_) = clients.join_next(), if !clients.is_empty() => (),
+                    accepted_socket = listener.accept() => {
+                        let Ok((stream, _)) = accepted_socket else { break; };
+                        let id = accepted.fetch_add(1, Ordering::SeqCst);
+                        let server = server.clone();
+                        clients.spawn(async move {
+                            let _ = tokio::time::timeout(Duration::from_secs(10), server.serve(stream, id)).await;
+                        });
+                    }
+                }
             }
+            clients.shutdown().await;
         });
         Ok(Self {
             endpoint,
+            stop: Some(stop),
+            handshakes,
             mode,
             connections,
             closed,
@@ -153,7 +178,7 @@ impl Receiver {
     }
     pub async fn stop(mut self) -> anyhow::Result<()> {
         if let Some(task) = self.task.take() {
-            task.abort();
+            self.stop.take();
             let result = task.await;
             anyhow::ensure!(
                 result.is_ok() || result.is_err_and(|e| e.is_cancelled()),
@@ -170,19 +195,107 @@ impl Drop for Receiver {
         }
     }
 }
-async fn serve(
-    mut stream: tokio::net::TcpStream,
-    acceptor: &tokio_rustls::TlsAcceptor,
-    mode: Mode,
-    records: &mpsc::Sender<Received>,
-) -> anyhow::Result<()> {
-    if matches!(mode, Mode::StallTls) {
-        let mut buffer = [0; 4096];
-        while stream.read(&mut buffer).await? != 0 {}
-        return Ok(());
+#[derive(Clone)]
+struct Server {
+    acceptor: tokio_rustls::TlsAcceptor,
+    mode: Arc<Mutex<Mode>>,
+    records: mpsc::Sender<Received>,
+    closed: Arc<AtomicUsize>,
+    handshakes: Arc<AtomicUsize>,
+}
+impl Server {
+    async fn serve(&self, mut stream: tokio::net::TcpStream, id: usize) -> anyhow::Result<()> {
+        let local = stream.local_addr()?;
+        if matches!(*self.mode.lock().await, Mode::StallTls) {
+            let mut buffer = [0; 4096];
+            while stream.read(&mut buffer).await? != 0 {}
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            return Ok(());
+        }
+        let mut stream = self.acceptor.accept(stream).await?;
+        self.handshakes.fetch_add(1, Ordering::SeqCst);
+        let sni = stream.get_ref().1.server_name().map(str::to_owned);
+        loop {
+            let mut first = [0];
+            if !read_peer(&mut stream, &mut first).await? {
+                self.closed.fetch_add(1, Ordering::SeqCst);
+                return Ok(());
+            }
+            let record = read_request(&mut stream, first[0], id, local, sni.clone()).await?;
+            let mode = self.mode.lock().await.clone();
+            self.records
+                .send(record)
+                .await
+                .map_err(|_| anyhow::anyhow!("fixture record channel closed"))?;
+            if !self.reply(&mut stream, mode).await? {
+                return Ok(());
+            }
+        }
     }
-    let mut stream = acceptor.accept(stream).await?;
-    let mut header = Vec::new();
+
+    async fn reply(
+        &self,
+        stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        mode: Mode,
+    ) -> anyhow::Result<bool> {
+        let (bytes, keep_alive) = match mode {
+            Mode::ReleaseHeaders { send, disconnect } => {
+                send.notified().await;
+                stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await?;
+                stream.flush().await?;
+                if let Some(disconnect) = disconnect {
+                    disconnect.notified().await;
+                    stream.shutdown().await?;
+                    self.closed.fetch_add(1, Ordering::SeqCst);
+                    return Ok(false);
+                }
+                return Ok(true);
+            }
+            Mode::KeepAlive(bytes) => (bytes, true),
+            Mode::Reply(bytes) => (bytes, false),
+            Mode::StallHeaders => {
+                anyhow::ensure!(
+                    !read_peer(stream, &mut [0]).await?,
+                    "unexpected pipelined request"
+                );
+                self.closed.fetch_add(1, Ordering::SeqCst);
+                return Ok(false);
+            }
+            Mode::DropResponse | Mode::StallTls => return Ok(false),
+        };
+        stream.write_all(&bytes).await?;
+        stream.flush().await?;
+        Ok(keep_alive)
+    }
+}
+async fn read_peer(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    buf: &mut [u8],
+) -> std::io::Result<bool> {
+    use std::io::ErrorKind;
+    match stream.read(buf).await {
+        Ok(n) => Ok(n > 0),
+        Err(e)
+            if matches!(
+                e.kind(),
+                ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+async fn read_request(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    first: u8,
+    connection: usize,
+    local: std::net::SocketAddr,
+    sni: Option<String>,
+) -> anyhow::Result<Received> {
+    let mut header = vec![first];
     while !header.ends_with(b"\r\n\r\n") {
         anyhow::ensure!(header.len() < 16384, "fixture header budget");
         header.push(stream.read_u8().await?);
@@ -198,29 +311,14 @@ async fn serve(
     anyhow::ensure!(length <= 65536, "fixture body budget");
     let mut body = vec![0; length];
     stream.read_exact(&mut body).await?;
-    records
-        .send(Received {
-            headers,
-            body,
-            request_line,
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("fixture record channel"))?;
-    match mode {
-        Mode::Reply(bytes) => {
-            stream.write_all(&bytes).await?;
-            stream.flush().await?;
-        }
-        Mode::StallHeaders => {
-            let mut byte = [0];
-            let _ = stream.read(&mut byte).await;
-        }
-        Mode::DropResponse => { /* reason: deliberately lose confirmation after actual receipt. */ }
-        Mode::StallTls => unreachable_fixture_mode(),
-    }
-    Ok(())
-}
-fn unreachable_fixture_mode() { /* reason: StallTls returns before the handshake; no transport action here. */
+    Ok(Received {
+        headers,
+        body,
+        request_line,
+        connection,
+        local,
+        sni,
+    })
 }
 pub fn message(id: &str) -> anyhow::Result<PendingMessage<Vec<u8>>> {
     rss_examples::webhook::message(TenantId::parse(TENANT)?, id)

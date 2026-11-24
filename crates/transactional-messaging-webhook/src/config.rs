@@ -2,14 +2,40 @@ use crate::{Error, Publication, SigningKeys, Target};
 use ipnet::IpNet;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::policy::OperationDeadline;
+use sha2::{Digest as _, Sha256};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
+
+/// Publisher-wide bounds for idle HTTPS connections.
+#[derive(Clone, Copy, Debug)]
+pub struct IdlePoolLimits {
+    pub(crate) max_idle: usize,
+    pub(crate) timeout: Duration,
+}
+impl IdlePoolLimits {
+    /// Require a positive count and a positive, representable monotonic retention time.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "validate platform Instant range at construction; all operational deadlines use the injected clock"
+    )]
+    pub fn new(max_idle: usize, timeout: Duration) -> Result<Self, Error> {
+        if max_idle == 0
+            || timeout.is_zero()
+            || std::time::Instant::now().checked_add(timeout).is_none()
+        {
+            return Err(Error::Config);
+        }
+        Ok(Self { max_idle, timeout })
+    }
+}
 
 /// Bounded publication resources. All limits must be explicitly chosen by the host.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    pub(crate) pool: Option<IdlePoolLimits>,
     pub(crate) concurrent: usize,
     pub(crate) body_bytes: usize,
     pub(crate) addresses: usize,
@@ -24,6 +50,7 @@ impl Limits {
         addresses: usize,
         headers: usize,
         header_bytes: usize,
+        pool: Option<IdlePoolLimits>,
     ) -> Result<Self, Error> {
         if concurrent == 0
             || concurrent > tokio::sync::Semaphore::MAX_PERMITS
@@ -35,6 +62,7 @@ impl Limits {
             return Err(Error::Config);
         }
         Ok(Self {
+            pool,
             concurrent,
             body_bytes,
             addresses,
@@ -45,12 +73,17 @@ impl Limits {
 }
 /// Host-selected certificate authorities. There is no custom verifier or insecure mode.
 #[derive(Clone)]
-pub struct TrustRoots(pub(crate) Arc<rustls::ClientConfig>);
+pub struct TrustRoots {
+    pub(crate) config: Arc<rustls::ClientConfig>,
+    pub(crate) identity: [u8; 32],
+}
 impl TrustRoots {
     /// Build an exclusive trust store from DER CA certificates, including private CAs.
     pub fn from_der(certificates: impl IntoIterator<Item = Vec<u8>>) -> Result<Self, Error> {
         let mut roots = rustls::RootCertStore::empty();
+        let mut digests = Vec::<[u8; 32]>::new();
         for cert in certificates {
+            digests.push(Sha256::digest(&cert).into());
             roots.add(cert.into()).map_err(|_| Error::Config)?;
         }
         if roots.is_empty() {
@@ -65,7 +98,13 @@ impl TrustRoots {
         .with_no_client_auth();
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         config.enable_early_data = false;
-        Ok(Self(Arc::new(config)))
+        digests.sort_unstable();
+        digests.dedup();
+        let identity = Sha256::digest(digests.as_flattened()).into();
+        Ok(Self {
+            config: Arc::new(config),
+            identity,
+        })
     }
 }
 /// Explicit address snapshot and network allowlist supplied by the host.

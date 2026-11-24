@@ -1,10 +1,13 @@
 use crate::{
     AuthorizationFailure, AuthorizedTarget, Limits, Publication, TargetAuthorizer, WallClock,
 };
+use crate::{
+    connection::Connection,
+    pool::{CloseError, Connections, Identity},
+};
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::{Request, client::conn::http1};
-use hyper_util::rt::TokioIo;
+use hyper::Request;
 use rss_request_context::{Deadline, ExecutionTimer};
 use rss_transactional_messaging::{
     message::MessageEnvelope,
@@ -14,8 +17,7 @@ use rss_transactional_messaging::{
         PublishFailureStage as Stage, PublishOutcome, Publisher,
     },
 };
-use tokio::{net::TcpStream, sync::Semaphore};
-use tokio_rustls::TlsConnector;
+use std::sync::Arc;
 
 /// Move-only evidence of HTTP acceptance; cannot be constructed or deserialized by consumers.
 /// It does not prove business processing, uniqueness or durable receiver storage.
@@ -33,28 +35,28 @@ impl WebhookPublishReceipt {
         self.status
     }
 }
-/// Single-request HTTPS transport; owns no background tasks, retry queue or connection pool.
-/// Dropping a publish future drops its connection. Hosts own relay task cancellation and joining.
+/// Bounded HTTPS publisher. Each publish exclusively owns its active connection.
+/// An explicitly enabled idle pool is scoped to this publisher.
 pub struct WebhookPublisher<A, T, W> {
     authorizer: A,
-    timer: T,
+    timer: Arc<T>,
     wall_clock: W,
     limits: Limits,
-    capacity: Semaphore,
+    connections: Connections,
 }
 impl<A, T, W> WebhookPublisher<A, T, W> {
     /// Inject current authorization, monotonic timer, UTC clock and explicit resource limits.
     pub fn new(authorizer: A, timer: T, wall_clock: W, limits: Limits) -> Self {
         Self {
             authorizer,
-            timer,
+            timer: Arc::new(timer),
             wall_clock,
-            capacity: Semaphore::new(limits.concurrent),
+            connections: Connections::new(limits),
             limits,
         }
     }
 }
-impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> Publisher<Vec<u8>>
+impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> Publisher<Vec<u8>>
     for WebhookPublisher<A, T, W>
 {
     type Receipt = WebhookPublishReceipt;
@@ -64,11 +66,11 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> Publisher<Vec<u8>>
         deadline: OperationDeadline,
     ) -> PublishOutcome<Self::Receipt> {
         // Freeze the relative snapshot before any validation, hashing or host call.
-        let Ok(cutoff) = Deadline::from_timeout(&self.timer, deadline.timeout()) else {
+        let Ok(cutoff) = Deadline::from_timeout(self.timer.as_ref(), deadline.timeout()) else {
             return definite(Kind::Permanent, Stage::Admission, Reason::InvalidMessage);
         };
         let mut sending = false;
-        match within(&self.timer, cutoff, |_| {
+        match within(self.timer.as_ref(), cutoff, |_| {
             self.attempt(message, cutoff, &mut sending)
         })
         .await
@@ -79,14 +81,20 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> Publisher<Vec<u8>>
         }
     }
 }
-impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T, W> {
+impl<A: TargetAuthorizer, T: ExecutionTimer + 'static, W: WallClock> WebhookPublisher<A, T, W> {
+    /// Stop admission, release idle connections and wait for in-flight publishes and cleanup.
+    /// A timeout or cancelled wait leaves admission closed; callers can wait again.
+    pub async fn close(&self, deadline: Deadline) -> Result<(), CloseError> {
+        self.connections.close(self.timer.as_ref(), deadline).await
+    }
+
     async fn attempt(
         &self,
         message: &MessageEnvelope<Vec<u8>>,
         cutoff: Deadline,
         sending: &mut bool,
     ) -> PublishOutcome<WebhookPublishReceipt> {
-        let Ok(_permit) = self.capacity.try_acquire() else {
+        let Some(admission) = self.connections.admit() else {
             return definite(
                 Kind::Transient,
                 Stage::Admission,
@@ -103,7 +111,7 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
             .authorizer
             .authorize(
                 &publication,
-                OperationDeadline::from_cutoff(cutoff, &self.timer),
+                OperationDeadline::from_cutoff(cutoff, self.timer.as_ref()),
             )
             .await
         {
@@ -125,23 +133,26 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
         {
             return definite(Kind::Permanent, Stage::Admission, Reason::InvalidMessage);
         }
-        let Ok(tls) = connect(&target).await else {
-            return definite(
-                Kind::Transient,
-                Stage::Admission,
-                Reason::TransportUnavailable,
-            );
-        };
-        let mut builder = http1::Builder::new();
-        builder
-            .max_headers(self.limits.headers)
-            .max_buf_size(self.limits.header_bytes);
-        let Ok((mut sender, connection)) = builder.handshake(TokioIo::new(tls)).await else {
-            return definite(
-                Kind::Transient,
-                Stage::Admission,
-                Reason::TransportUnavailable,
-            );
+        let reuse = self.limits.pool.map(|_| Identity::of(&target));
+        let cached = reuse.as_ref().and_then(|identity| {
+            self.connections
+                .checkout(identity, &target, self.timer.as_ref())
+        });
+        let mut connection = match cached {
+            Some(connection) => connection,
+            None => {
+                match Connection::connect(&target, self.limits, self.timer.as_ref(), cutoff).await {
+                    Ok(connection) => connection,
+                    Err(()) => {
+                        let reason = if cutoff.is_expired(self.timer.now()) {
+                            Reason::DeadlineElapsed
+                        } else {
+                            Reason::TransportUnavailable
+                        };
+                        return definite(Kind::Transient, Stage::Admission, reason);
+                    }
+                }
+            }
         };
         let seconds = self.wall_clock.unix_seconds();
         if seconds < 0 {
@@ -152,26 +163,25 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
             return definite(Kind::Permanent, Stage::Encode, Reason::InvalidMessage);
         };
         // Synchronous preparation may consume the remaining budget; do not start sending late.
-        if OperationDeadline::from_cutoff(cutoff, &self.timer)
+        if OperationDeadline::from_cutoff(cutoff, self.timer.as_ref())
             .timeout()
             .is_zero()
         {
             return definite(Kind::Transient, Stage::Admission, Reason::DeadlineElapsed);
         }
         *sending = true;
-        let request = sender.send_request(request);
-        tokio::pin!(connection, request);
-        // Drive both futures locally; cancellation drops the entire IO owner, never a JoinHandle.
-        let result = tokio::select! {
-            biased;
-            response = &mut request => response,
-            _ = &mut connection => request.await,
-        };
-        match result {
-            Ok(response) if response.status().is_success() => {
-                PublishOutcome::Confirmed(WebhookPublishReceipt {
+        match connection.send(request).await {
+            Ok((mut response, driver_live)) if response.status().is_success() => {
+                let receipt = WebhookPublishReceipt {
                     status: response.status().as_u16(),
-                })
+                };
+                if let Some(identity) = reuse
+                    && driver_live
+                    && connection.finish_response(response.body_mut())
+                {
+                    admission.put(connection, identity, &self.timer);
+                }
+                PublishOutcome::Confirmed(receipt)
             }
             Ok(_) => ambiguous(Reason::ProviderRejected),
             Err(_) => ambiguous(Reason::TransportUnavailable),
@@ -190,7 +200,12 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
         let mut signature =
             hyper::header::HeaderValue::from_str(&signature).map_err(|_| crate::Error::Signing)?;
         signature.set_sensitive(true);
-        Request::post(&target.url[url::Position::BeforePath..url::Position::AfterQuery])
+        let mut request =
+            Request::post(&target.url[url::Position::BeforePath..url::Position::AfterQuery]);
+        if self.limits.pool.is_none() {
+            request = request.header(hyper::header::CONNECTION, "close");
+        }
+        request
             .header(
                 "host",
                 &target.url[url::Position::BeforeHost..url::Position::AfterPort],
@@ -199,36 +214,9 @@ impl<A: TargetAuthorizer, T: ExecutionTimer, W: WallClock> WebhookPublisher<A, T
             .header("webhook-timestamp", timestamp)
             .header("webhook-signature", signature)
             .header("content-type", "application/octet-stream")
-            .header("connection", "close")
             .body(Full::new(Bytes::copy_from_slice(message.payload())))
             .map_err(|_| crate::Error::Binding)
     }
-}
-async fn connect(
-    target: &AuthorizedTarget,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ()> {
-    let mut stream = None;
-    for address in &target.network.addresses {
-        if let Ok(connected) = TcpStream::connect(address).await {
-            let peer = connected.peer_addr().map_err(|_| ())?;
-            if peer != *address || !target.network.permits(peer.ip()) {
-                return Err(());
-            }
-            stream = Some(connected);
-            break;
-        }
-    }
-    let name = match target.url.host().ok_or(())? {
-        url::Host::Domain(name) => {
-            rustls::pki_types::ServerName::try_from(name.to_owned()).map_err(|_| ())?
-        }
-        url::Host::Ipv4(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
-        url::Host::Ipv6(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
-    };
-    TlsConnector::from(target.trust.0.clone())
-        .connect(name, stream.ok_or(())?)
-        .await
-        .map_err(|_| ())
 }
 fn definite(kind: Kind, stage: Stage, reason: Reason) -> PublishOutcome<WebhookPublishReceipt> {
     PublishOutcome::DefinitelyNotPublished(PublishFailure::new(kind, stage, reason))

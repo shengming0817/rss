@@ -1,7 +1,7 @@
 use crate::Error;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac as _};
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 /// Host-owned UTC clock used only for the attempt signature, not execution budgets.
@@ -54,6 +54,15 @@ impl SigningKeys {
     /// Supply a bounded rotation snapshot. Keys remain scoped to the authorized endpoint.
     pub const fn new(current: SigningKey, retiring: Option<SigningKey>) -> Self {
         Self { current, retiring }
+    }
+    // Fixed-size digests preserve key roles and the presence of a retiring key.
+    pub(crate) fn identity(&self) -> [u8; 32] {
+        let mut identity = Sha256::new();
+        identity.update(Sha256::digest(self.current.0.as_slice()));
+        if let Some(retiring) = &self.retiring {
+            identity.update(Sha256::digest(retiring.0.as_slice()));
+        }
+        identity.finalize().into()
     }
     pub(crate) fn sign(
         &self,
