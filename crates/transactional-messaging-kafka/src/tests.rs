@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    engine::{self, Command, Shared},
+    engine::{self, Command, QueuedCommand, Shared},
     record::Record,
 };
 use rdkafka::message::Headers;
@@ -183,10 +183,10 @@ fn deadline(duration: Duration) -> anyhow::Result<OperationDeadline> {
 fn isolated() -> anyhow::Result<(
     KafkaPublisher,
     KafkaPublisherResource,
-    mpsc::Receiver<Command>,
+    mpsc::Receiver<QueuedCommand>,
 )> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let shared = Arc::new(Shared::new(sender));
+    let (shared, receiver) = Shared::channel(1);
+    let shared = Arc::new(shared);
     Ok((
         publisher::KafkaPublisher::for_unit_test(
             shared.clone(),
@@ -202,7 +202,7 @@ async fn enqueue_is_not_confirmation_and_cancellation_keeps_owned_command() -> a
     let m = message()?;
     let outcome = p.publish(&m, deadline(Duration::from_millis(10))?).await;
     assert!(matches!(outcome, PublishOutcome::Ambiguous(_)));
-    let command = receiver.try_recv()?;
+    let command = receiver.try_recv()?.dequeue();
     assert!(command.reply.is_closed());
     assert_eq!(command.record.payload, m.payload().as_slice());
     drop(owner);
@@ -259,8 +259,8 @@ async fn invalid_lifecycle_budget_is_not_a_record_limit_error() -> anyhow::Resul
 
 #[test]
 fn host_runtime_does_not_wait_for_detached_owner_completion() -> anyhow::Result<()> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let shared = Arc::new(Shared::new(sender));
+    let (shared, receiver) = Shared::channel(1);
+    let shared = Arc::new(shared);
     let (done, completion) = tokio::sync::oneshot::channel();
     let host = tokio::runtime::Builder::new_current_thread()
         .enable_time()

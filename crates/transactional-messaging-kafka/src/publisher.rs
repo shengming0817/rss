@@ -1,7 +1,7 @@
 //! Cloneable port and move-only lifecycle owner. Native handles never enter async tasks.
 use crate::{
     KafkaConfig, KafkaError, KafkaPublishReceipt,
-    engine::{self, Command, Shared, lock, now},
+    engine::{self, Shared, now},
     record::Record,
 };
 use rss_transactional_messaging::{
@@ -12,10 +12,9 @@ use rss_transactional_messaging::{
         PublishOutcome, Publisher,
     },
 };
-use std::{
-    sync::{Arc, mpsc},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
+#[cfg(feature = "test-support")]
+use crate::engine::lock;
 use tokio::sync::oneshot;
 
 /// Cloneable publishing capability; retains neither native client nor process control.
@@ -43,8 +42,8 @@ impl KafkaPublisher {
             .ok_or(KafkaError::InvalidLifecycleTimeout)?;
         let (plan, native) = config.into_parts();
         let config = Arc::new(plan);
-        let (sender, receiver) = mpsc::sync_channel(config.limits.queued);
-        let shared = Arc::new(Shared::new(sender));
+        let (shared, receiver) = Shared::channel(config.limits.queued);
+        let shared = Arc::new(shared);
         let mut resource = KafkaPublisherResource {
             shared: shared.clone(),
             completion: None,
@@ -104,34 +103,10 @@ impl Publisher<Vec<u8>> for KafkaPublisher {
         if deadline.timeout().is_zero() {
             return engine::expired();
         }
-        let (reply, receiver) = oneshot::channel();
-        {
-            let state = lock(&self.shared.admission);
-            let Some(sender) = &state.sender else {
-                return engine::unavailable();
-            };
-            // Admission and bounded copying share the close lock: no check-then-enqueue race.
-            let Some(record) = Record::encode(message, &self.config) else {
-                return PublishOutcome::DefinitelyNotPublished(engine::failure(
-                    Kind::Permanent,
-                    Stage::Encode,
-                    Reason::InvalidMessage,
-                ));
-            };
-            if now() >= end {
-                return engine::expired();
-            }
-            if sender
-                .try_send(Command {
-                    record,
-                    deadline: end,
-                    reply,
-                })
-                .is_err()
-            {
-                return engine::unavailable();
-            }
-        }
+        let receiver = match self.shared.enqueue(end, || Record::encode(message, &self.config)) {
+            Ok(receiver) => receiver,
+            Err(outcome) => return outcome,
+        };
         match tokio::time::timeout_at(tokio::time::Instant::from_std(end), receiver).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => engine::ambiguous(),
