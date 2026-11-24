@@ -14,15 +14,7 @@ use std::time::Duration;
 mod probe;
 use probe::validate;
 /// Version-matched fresh schema SQL for an external migrator; reading this constant executes nothing.
-pub const MIGRATION_SQL: &str = concat!(
-    include_str!("../migrations/0001_create_saga.sql"),
-    "\n",
-    include_str!("../migrations/0002_add_history_bounds.sql"),
-    "\n",
-    include_str!("../migrations/0003_expand_lease_range.sql")
-);
-/// One-way schema 2 to 3 upgrade executed only by the external migrator with writers stopped.
-pub const UPGRADE_SQL: &str = include_str!("../migrations/0003_expand_lease_range.sql");
+pub const MIGRATION_SQL: &str = include_str!("../migrations/install.sql");
 #[derive(Clone)]
 /// Adopted PostgreSQL pool implementing the atomic Saga storage contract.
 pub struct PgStore {

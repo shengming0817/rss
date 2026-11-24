@@ -4,21 +4,18 @@ PostgreSQL 16+ implementation of `rss-saga::Store`. Instance progress, finite hi
 journal events and protected receipts settle in one transaction. The core owns actions and
 cryptography; the adapter persists protected records and independently validates transitions.
 
-## Installation and upgrade
+## Installation
 
-An external migrator executes `MIGRATION_SQL` as a dedicated NOSUPERUSER NOBYPASSRLS schema owner.
-For an existing component V2 installation, stop writers and execute `UPGRADE_SQL` instead.
-The upgrade locks both component tables, replaces lease routines and preserves all stored history,
-definitions, effect identities and protected receipts. The product owns the migration deadline,
-maintenance window and backup. Runtime admission accepts only schema V3 with its exact routines.
-Original migrations remain immutable; fresh installation executes the complete chain.
+An external migrator executes `MIGRATION_SQL` on a fresh database as a dedicated NOSUPERUSER
+NOBYPASSRLS schema owner. Runtime admission requires schema V4 and verifies its executable
+functions against the same installation SQL.
 
 Lease TTLs use positive whole milliseconds within PostgreSQL's signed 64-bit microsecond interval
 range (at most 9223372036854775 milliseconds). Timestamp addition must also remain representable.
 Each database operation separately requires a statement/lock timeout within i32::MAX milliseconds.
 
 Provision a separate runtime login with schema USAGE, table SELECT and EXECUTE on the component
-functions. The V2→V3 upgrade preserves function signatures and their existing grants. Grant
+functions. Grant
 no direct write, REFERENCES or TRIGGER privileges, including column grants, and no owner membership.
 Tables remain LOGGED with ENABLE/FORCE RLS. Admission checks every SET ROLE reachable role,
 PUBLIC privileges, rewrite rules, exact tenant policies, function signatures/bodies/attributes,
@@ -78,11 +75,6 @@ lease, expected revision and expected capacity. It does not append a journal eve
 `CandidateFilter::Runnable` and `CandidateFilter::CapacityBlocked` expose disjoint, bounded pages from the same admission predicate. Blocked discovery returns only scope metadata for explicit history_head/extend_history handling. Runnable discovery excludes capacity-blocked new intents while keeping
 pending settlements recoverable.
 
-The V2→V3 upgrade preserves each existing capacity and its accounting. An instance beyond a worker's read budget requires an
-explicitly larger finite read budget; further new attempts may also require capacity growth.
-All instances then follow the same runtime path. There is no unlimited grandfather mode,
-compaction, checkpoint, history reset or automatic compensation on capacity exhaustion.
-
 ## Failure and verification
 
 `CommitUnknown`, `RollbackUnknown`, cancellation and deadlines do not prove absence of a write or
@@ -91,8 +83,8 @@ claim and locked snapshot. Pending effects use their original idempotency key. A
 state, original definition and authenticated receipts remain authoritative.
 
 The real TLS PostgreSQL/Redis tests cover lease takeover, process crashes, acknowledgement loss,
-compensation pause/resume, tenant isolation, capacity boundaries, schema drift and one-way upgrade
-of pending, paused, terminal and long-history instances. Explicit ignored measurement profiles
+compensation pause/resume, tenant isolation, capacity boundaries, schema drift and recovery of
+pending, paused, terminal and long-history instances on a fresh installation. Explicit ignored measurement profiles
 record 100/1,000/10,000 events and 50/95/100 percent byte occupancy; ordinary CI has no invented
 performance SLO. Measurement commands and results are recorded with the #2425 delivery artifact.
 

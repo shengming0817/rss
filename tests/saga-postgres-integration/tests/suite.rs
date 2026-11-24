@@ -423,31 +423,6 @@ async fn typed_success_receipt(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn history_upgrade() -> anyhow::Result<()> {
-    let network = testkit::bridge_network("saga-history-upgrade").await?;
-    let fixture = testkit::postgres_tls(
-        testkit::NetworkAttachment {
-            network: network.name(),
-            dns_name: "saga-history-upgrade",
-        },
-        testkit::PgTlsServerIdentity::MatchingHost,
-    )
-    .await?;
-    let (owner, pool) = provision(&fixture).await?;
-    let clock = Clock::new();
-    let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(120), &cancel);
-    tokio::time::timeout(
-        Duration::from_secs(120),
-        history::upgrade(&owner, &pool, &control),
-    )
-    .await??;
-    pool.close().await;
-    owner.close().await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit resource measurement profiles; ordinary CI has no performance SLO"]
 async fn history_measurements() -> anyhow::Result<()> {
     let network = testkit::bridge_network("saga-history-measure").await?;
