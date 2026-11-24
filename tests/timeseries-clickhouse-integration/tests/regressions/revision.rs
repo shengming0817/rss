@@ -48,7 +48,7 @@ async fn only_the_exact_complete_revision_can_publish_after_merge() -> anyhow::R
         let write = store.write(&request, deadline()?);
         tokio::pin!(write);
         tokio::select! { _=&mut write=>anyhow::bail!("INSERT missed gate"), ready=proxy.wait_held()=>ready?, }
-        let late_correct = matches!(name, "body" | "selector");
+        let late_correct = matches!(name, "body" | "selector" | "digest" | "time");
         if late_correct {
             f.ch.sql(&format!("CREATE TABLE default.original_{name} ENGINE=Memory AS SELECT * FROM rss_ts_ch.raw WHERE sample_id='{name}'")).await?;
         }
