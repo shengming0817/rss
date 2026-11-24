@@ -45,6 +45,14 @@ The core [README](../saga/README.md) shows typed actions, explicit `HistoryCapac
 a timer and authenticated receipt protection. Runtime roles never receive a business transaction
 writer, second receipt writer or history bypass.
 
+## Definition registration
+
+A tenant registers one immutable JSONB definition per contract and version. Each instance binds
+that exact key and owns its history limits. Registration uses a READ COMMITTED transaction. The
+unique key arbitrates concurrent first inserts; subsequent registrations compare the full body
+by key. Replaying an instance requires the same binding and its current durable limits.
+Snapshots, candidate discovery and event commits resolve the bound version.
+
 ## Bounded history and atomic commits
 
 `revision` is the event count. V1 accounting charges 256 bytes for each event plus the protected

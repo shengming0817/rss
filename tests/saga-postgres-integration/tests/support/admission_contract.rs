@@ -11,6 +11,7 @@ pub(super) async fn drift(
     let mut cases = Vec::new();
     for (object, privilege) in [
         ("SCHEMA rss_saga", "USAGE"),
+        ("rss_saga.definitions", "SELECT"),
         ("rss_saga.instances", "SELECT"),
         ("rss_saga.journal", "SELECT"),
         ("rss_saga.instances", "SELECT(revision)"),
@@ -24,6 +25,7 @@ pub(super) async fn drift(
     }
     for (object, privilege) in [
         ("SCHEMA rss_saga", "USAGE"),
+        ("rss_saga.definitions", "SELECT"),
         ("rss_saga.instances", "SELECT"),
         ("rss_saga.journal", "SELECT"),
         ("FUNCTION rss_saga.register(uuid,jsonb,jsonb)", "EXECUTE"),
@@ -48,7 +50,7 @@ pub(super) async fn drift(
     }
     history_cases(&mut cases);
     policy_cases(&mut cases);
-    for table in ["instances", "journal"] {
+    for table in ["definitions", "instances", "journal"] {
         for event in ["INSERT", "UPDATE"] {
             cases.push((
                 format!("F3 {table} {event} rule"),
@@ -84,10 +86,11 @@ pub(super) async fn drift(
 type Case = (String, String, String);
 fn history_cases(cases: &mut Vec<Case>) {
     for (table, name, expr) in [
+        ("definitions", "saga_definition", "rss_saga.valid_definition(definition)"),
         (
             "instances",
             "saga_history_instance",
-            "rss_saga.valid_instance(definition,progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)",
+            "rss_saga.valid_instance(progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)",
         ),
         (
             "journal",
@@ -106,7 +109,7 @@ fn history_cases(cases: &mut Vec<Case>) {
 }
 
 fn policy_cases(cases: &mut Vec<Case>) {
-    for table in ["instances", "journal"] {
+    for table in ["definitions", "instances", "journal"] {
         let create = format!(
             "CREATE POLICY tenant ON rss_saga.{table} USING ({TENANT_EXPR}) WITH CHECK ({TENANT_EXPR})"
         );

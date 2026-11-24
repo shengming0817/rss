@@ -2,10 +2,20 @@
 BEGIN;
 CREATE SCHEMA rss_saga;
 REVOKE ALL ON SCHEMA rss_saga FROM PUBLIC;
+-- ref: PostgreSQL REL_16_0 src/backend/executor/execIndexing.c (unique conflict wait and recheck).
+CREATE TABLE rss_saga.definitions (
+    tenant_id uuid NOT NULL,
+    definition jsonb NOT NULL,
+    contract text COLLATE "C" GENERATED ALWAYS AS (definition #>> '{identity,contract}') STORED,
+    version text COLLATE "C" GENERATED ALWAYS AS (definition #>> '{identity,version}') STORED,
+    PRIMARY KEY (tenant_id, contract, version)
+);
+
 CREATE TABLE rss_saga.instances (
     tenant_id uuid NOT NULL,
     saga_id uuid NOT NULL,
-    definition jsonb NOT NULL,
+    contract text COLLATE "C" NOT NULL,
+    version text COLLATE "C" NOT NULL,
     progress jsonb NOT NULL DEFAULT '{"status":"Ready","forward":0,"forwardAttempt":0,"forwardFailures":0,"compensation":null,"compensationAttempt":0,"pending":null,"lastKind":null}',
     revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
     history_encoded_bytes bigint NOT NULL DEFAULT 0,
@@ -16,7 +26,8 @@ CREATE TABLE rss_saga.instances (
     expires_at timestamptz,
     PRIMARY KEY (tenant_id,saga_id),
     CHECK ((lease_token IS NULL) = (expires_at IS NULL)),
-    CHECK (jsonb_array_length(definition->'steps') BETWEEN 1 AND 1024)
+    CONSTRAINT instance_definition FOREIGN KEY (tenant_id, contract, version)
+        REFERENCES rss_saga.definitions (tenant_id, contract, version)
 );
 CREATE TABLE rss_saga.journal (
     tenant_id uuid NOT NULL,
@@ -32,6 +43,9 @@ CREATE TABLE rss_saga.journal (
     FOREIGN KEY (tenant_id,saga_id) REFERENCES rss_saga.instances
 );
 
+ALTER TABLE rss_saga.definitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rss_saga.definitions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant ON rss_saga.definitions USING (tenant_id = nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK (tenant_id = nullif(current_setting('rss.tenant_id',true),'')::uuid);
 ALTER TABLE rss_saga.instances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rss_saga.instances FORCE ROW LEVEL SECURITY;
 ALTER TABLE rss_saga.journal ENABLE ROW LEVEL SECURITY;
@@ -103,9 +117,19 @@ BEGIN
  RETURN jsonb_build_object('status',state_,'forward',f,'forwardAttempt',fa,'forwardFailures',ff,'compensation',c,'compensationAttempt',ca,'pending',pending,'lastKind',k);
 END $$;
 
-CREATE FUNCTION rss_saga.valid_instance(d jsonb,p jsonb,q bigint,bytes_ bigint,entries bigint,limit_bytes bigint) RETURNS boolean LANGUAGE plpgsql SET search_path=pg_catalog,rss_saga AS $$
+CREATE FUNCTION rss_saga.valid_definition(d jsonb) RETURNS boolean LANGUAGE plpgsql SET search_path=pg_catalog,rss_saga AS $$
 BEGIN
- RETURN (octet_length(d::text)<=2097152 AND octet_length(p::text)<=2048 AND q>=0 AND bytes_>=0 AND entries>0 AND limit_bytes>0 AND q<=entries AND bytes_<=limit_bytes
+    RETURN (octet_length(d::text) <= 2097152
+        AND jsonb_typeof(d #> '{identity,contract}') = 'string'
+        AND octet_length(d #>> '{identity,contract}') BETWEEN 1 AND 255
+        AND jsonb_typeof(d #> '{identity,version}') = 'string'
+        AND octet_length(d #>> '{identity,version}') BETWEEN 2 AND 11
+        AND jsonb_array_length(d->'steps') BETWEEN 1 AND 1024) IS TRUE;
+END $$;
+
+CREATE FUNCTION rss_saga.valid_instance(p jsonb,q bigint,bytes_ bigint,entries bigint,limit_bytes bigint) RETURNS boolean LANGUAGE plpgsql SET search_path=pg_catalog,rss_saga AS $$
+BEGIN
+ RETURN (octet_length(p::text)<=2048 AND q>=0 AND bytes_>=0 AND entries>0 AND limit_bytes>0 AND q<=entries AND bytes_<=limit_bytes
  AND jsonb_typeof(p)='object' AND p->>'status' IN ('Ready','Running','Compensating','CompensationFailed','Succeeded','Compensated')
  AND (p->>'forward')::bigint BETWEEN 0 AND 1024 AND (p->>'forwardAttempt')::bigint BETWEEN 0 AND 4294967295 AND (p->>'forwardFailures')::bigint BETWEEN 0 AND 4294967295
  AND (p->>'compensationAttempt')::bigint BETWEEN 0 AND 4294967295 AND (p->'compensation'='null'::jsonb OR (p->>'compensation')::bigint BETWEEN 0 AND 1023)
@@ -120,14 +144,42 @@ BEGIN
 END $$;
 
 CREATE FUNCTION rss_saga.register(p_id uuid,p_definition jsonb,p_capacity jsonb) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_saga AS $$
-DECLARE existing rss_saga.instances; t uuid:=current_setting('rss.tenant_id')::uuid; entries bigint:=(p_capacity->>'maxEntries')::bigint; bytes_ bigint:=(p_capacity->>'maxEncodedBytes')::bigint;
+DECLARE
+    t uuid := current_setting('rss.tenant_id')::uuid;
+    contract_ text := p_definition #>> '{identity,contract}';
+    version_ text := p_definition #>> '{identity,version}';
+    entries bigint := (p_capacity->>'maxEntries')::bigint;
+    bytes_ bigint := (p_capacity->>'maxEncodedBytes')::bigint;
+    matches boolean;
+    existing rss_saga.instances;
 BEGIN
- IF entries IS NULL OR bytes_ IS NULL OR entries<=0 OR bytes_<=0 THEN RAISE EXCEPTION USING ERRCODE='RS004',MESSAGE='saga capacity invalid'; END IF;
- PERFORM pg_advisory_xact_lock(hashtextextended(t::text||':'||(p_definition->'identity'->>'contract')||':'||(p_definition->'identity'->>'version'),0));
- IF EXISTS(SELECT FROM rss_saga.instances WHERE tenant_id=t AND definition->'identity'->>'contract'=p_definition->'identity'->>'contract' AND definition->'identity'->>'version'=p_definition->'identity'->>'version' AND definition<>p_definition) THEN RAISE EXCEPTION USING ERRCODE='RS002',MESSAGE='saga version conflict'; END IF;
- INSERT INTO rss_saga.instances(tenant_id,saga_id,definition,history_entry_limit,history_byte_limit) VALUES(t,p_id,p_definition,entries,bytes_) ON CONFLICT DO NOTHING;
- SELECT * INTO existing FROM rss_saga.instances WHERE tenant_id=t AND saga_id=p_id FOR UPDATE;
- IF existing.definition IS DISTINCT FROM p_definition OR existing.history_entry_limit IS DISTINCT FROM entries OR existing.history_byte_limit IS DISTINCT FROM bytes_ THEN RAISE EXCEPTION USING ERRCODE='RS002',MESSAGE='saga registration conflict'; END IF;
+    IF entries IS NULL OR bytes_ IS NULL OR entries <= 0 OR bytes_ <= 0 THEN
+        RAISE EXCEPTION USING ERRCODE='RS004', MESSAGE='saga capacity invalid';
+    END IF;
+    SELECT definition = p_definition INTO matches FROM rss_saga.definitions
+        WHERE tenant_id=t AND contract=contract_ AND version=version_;
+    IF NOT FOUND THEN
+        INSERT INTO rss_saga.definitions(tenant_id,definition) VALUES(t,p_definition)
+            ON CONFLICT (tenant_id,contract,version) DO NOTHING;
+        matches := FOUND;
+        IF NOT matches THEN
+            -- A concurrent winner can be invisible to the INSERT snapshot. Read its committed row.
+            SELECT definition = p_definition INTO STRICT matches FROM rss_saga.definitions
+                WHERE tenant_id=t AND contract=contract_ AND version=version_;
+        END IF;
+    END IF;
+    IF matches IS DISTINCT FROM true THEN
+        RAISE EXCEPTION USING ERRCODE='RS002', MESSAGE='saga version conflict';
+    END IF;
+
+    INSERT INTO rss_saga.instances(tenant_id,saga_id,contract,version,history_entry_limit,history_byte_limit)
+        VALUES(t,p_id,contract_,version_,entries,bytes_) ON CONFLICT (tenant_id,saga_id) DO NOTHING;
+    IF FOUND THEN RETURN; END IF;
+    SELECT * INTO STRICT existing FROM rss_saga.instances WHERE tenant_id=t AND saga_id=p_id FOR UPDATE;
+    IF existing.contract IS DISTINCT FROM contract_ OR existing.version IS DISTINCT FROM version_
+        OR existing.history_entry_limit IS DISTINCT FROM entries OR existing.history_byte_limit IS DISTINCT FROM bytes_ THEN
+        RAISE EXCEPTION USING ERRCODE='RS002', MESSAGE='saga registration conflict';
+    END IF;
 END $$;
 
 CREATE FUNCTION rss_saga.lock_instance(p_id uuid,p_token uuid,p_epoch bigint) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_saga AS $$
@@ -157,7 +209,8 @@ BEGIN
   SELECT effect_key INTO previous_key FROM rss_saga.journal WHERE tenant_id=t AND saga_id=p_id AND seq=q-1;
   IF previous_key IS DISTINCT FROM p_key THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga pending key mismatch'; END IF;
  END IF;
- SELECT definition INTO d FROM rss_saga.instances WHERE tenant_id=t AND saga_id=p_id;
+ SELECT definition INTO STRICT d FROM rss_saga.instances JOIN rss_saga.definitions USING (tenant_id,contract,version)
+ WHERE tenant_id=t AND saga_id=p_id;
  n:=(h->>'encodedBytes')::bigint+rss_saga.history_charge(e->'receipt'); p:=rss_saga.next_progress(h->'progress',d,e);
  actual:=jsonb_build_object('revision',q+1,'encodedBytes',n,'capacity',h->'capacity','progress',p);
  IF actual IS DISTINCT FROM p_after THEN RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga projection mismatch'; END IF;
@@ -203,7 +256,8 @@ BEGIN
     ELSE RAISE EXCEPTION USING ERRCODE='RS003',MESSAGE='saga lease ttl'; END IF;
 END $$;
 
-ALTER TABLE rss_saga.instances ADD CONSTRAINT saga_history_instance CHECK(rss_saga.valid_instance(definition,progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit));
+ALTER TABLE rss_saga.definitions ADD CONSTRAINT saga_definition CHECK(rss_saga.valid_definition(definition));
+ALTER TABLE rss_saga.instances ADD CONSTRAINT saga_history_instance CHECK(rss_saga.valid_instance(progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit));
 ALTER TABLE rss_saga.journal ADD CONSTRAINT saga_history_journal CHECK(rss_saga.valid_journal(kind,seq,attempt,effect_key,protected,encoded_bytes));
 CREATE UNIQUE INDEX saga_forward_step ON rss_saga.journal(tenant_id,saga_id,step) WHERE kind='ForwardApplied';
 CREATE UNIQUE INDEX saga_forward_effect ON rss_saga.journal(tenant_id,effect_key) WHERE kind='ForwardApplied';

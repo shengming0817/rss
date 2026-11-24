@@ -180,7 +180,7 @@ async fn load(
     let head = locked(connection, lease).await?;
     head.check_read(read)?;
     // SQL withholds oversized payloads before SQLx receives a complete DataRow.
-    let definition: Option<sqlx::types::Json<Definition>> = sqlx::query_scalar("SELECT CASE WHEN octet_length(definition::text)<=$3 THEN definition END FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND saga_id=$2")
+    let definition: Option<sqlx::types::Json<Definition>> = sqlx::query_scalar("SELECT CASE WHEN octet_length(definition::text)<=$3 THEN definition END FROM rss_saga.instances JOIN rss_saga.definitions USING (tenant_id,contract,version) WHERE tenant_id=$1::text::uuid AND saga_id=$2")
         .bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).bind(rss_saga::DEFINITION_BYTES as i64)
         .fetch_one(&mut *connection).await.map_err(sql_error)?;
     let definition = definition.ok_or(ErrorKind::HistoryReadLimit)?.0;
@@ -400,7 +400,7 @@ impl Store for PgStore {
             return Err(Error::new(rss_saga::ErrorKind::InvalidBudget));
         }
         self.transact(tenant,control,|c|Box::pin(async move {
-            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND progress->>'status' IN ('Ready','Running','Compensating') AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)=$4 AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).bind(filter==rss_saga::CandidateFilter::Runnable).fetch_all(c).await.map_err(sql_error)?;
+            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances JOIN rss_saga.definitions USING (tenant_id,contract,version) WHERE tenant_id=$1::text::uuid AND progress->>'status' IN ('Ready','Running','Compensating') AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)=$4 AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).bind(filter==rss_saga::CandidateFilter::Runnable).fetch_all(c).await.map_err(sql_error)?;
             Ok(ids.into_iter().map(|id|Scope::new(tenant,id)).collect())
         })).await
     }
