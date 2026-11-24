@@ -64,7 +64,7 @@ BEGIN
        OR j#>>'{stream,generation}' IS DISTINCT FROM g THEN '42501'
      WHEN old.sample_id IS NOT NULL THEN CASE WHEN old.digest IS DISTINCT FROM x.digest THEN 'TS001' END
      WHEN EXISTS(SELECT FROM rss_timeseries.fences f WHERE f.tenant_id=t AND f.namespace=n
-                 AND f.lo<=at_time AND f.hi>at_time AND rss_timeseries.matches_row(f.selection,f.series_digest,t,n,s,g,series_hash,j#>>'{series,subject}',j#>>'{series,resource}',x.key)) THEN 'TS004'
+                 AND f.lo<=at_time AND f.hi>at_time AND rss_timeseries.matches(f.selection,j)) THEN 'TS004'
      WHEN e.definition IS DISTINCT FROM j#>'{series,definition}' THEN 'TS002'
      WHEN d.retired THEN 'TS003'
     END AS error_code

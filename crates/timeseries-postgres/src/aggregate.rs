@@ -23,17 +23,6 @@ pub(crate) async fn store(
         return Err(Error::BudgetExceeded);
     }
     let start = summary.window.start().micros();
-    let unbounded = matches!(
-        spec.series().definition().spec().metric,
-        Metric::Bool | Metric::State { .. }
-    ) && spec.coverage() == CoveragePolicy::ObservedOnly;
-    let lower = if unbounded {
-        0
-    } else {
-        start
-            .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
-            .max(0)
-    };
     sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
         .bind(spec.stream().scope().tenant().to_string())
         .bind(spec.stream().scope().namespace().as_str())
@@ -47,7 +36,7 @@ pub(crate) async fn store(
         .bind(spec.series().definition().spec().key.as_str())
         .bind(start)
         .bind(summary.window.end().micros())
-        .bind(lower)
+        .bind(dependency_start(spec, start))
         .bind(data)
         .execute(c)
         .await
@@ -178,16 +167,7 @@ pub(crate) async fn predecessor(
     if !needs_predecessor(spec) {
         return Ok(None);
     }
-    let s = spec.stream();
-    let row = sqlx::query("SELECT CASE WHEN octet_length(raw)::bigint <= $7 THEN raw END AS raw
-        FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3
-        AND generation=$4 AND series_digest=$5 AND observed_at<$6
-        AND rss_timeseries.visible(tenant_id,namespace,source,generation,series_digest,subject,resource,key,observed_at)
-        ORDER BY observed_at DESC,sequence DESC,sample_id DESC LIMIT 1")
-        .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str())
-        .bind(s.source().as_str()).bind(s.generation().as_str())
-        .bind(spec.series().digest()?.as_bytes().as_slice()).bind(at.micros())
-        .bind(i64::from(limits.max_bytes.get())).fetch_optional(c).await.map_err(sql_error)?;
+    let row = predecessor_row(c, spec, at, Some(limits.max_bytes.get())).await?;
     row.map(|row| {
         let raw = row
             .try_get::<Option<&[u8]>, _>("raw")
@@ -196,6 +176,34 @@ pub(crate) async fn predecessor(
         serde_json::from_slice(raw).map_err(|_| Error::Invariant)
     })
     .transpose()
+}
+pub(crate) async fn predecessor_time(
+    c: &mut PgConnection,
+    spec: &SummarySpec,
+    at: Timestamp,
+) -> Result<Option<Timestamp>, Error> {
+    predecessor_row(c, spec, at, None)
+        .await?
+        .map(|row| Timestamp::new(row.try_get("observed_at").map_err(sql_error)?))
+        .transpose()
+}
+
+async fn predecessor_row(
+    c: &mut PgConnection,
+    spec: &SummarySpec,
+    at: Timestamp,
+    max_bytes: Option<u32>,
+) -> Result<Option<sqlx::postgres::PgRow>, Error> {
+    let s = spec.stream();
+    sqlx::query("SELECT observed_at,CASE WHEN $7::bigint IS NOT NULL AND octet_length(raw)::bigint <= $7 THEN raw END AS raw
+        FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3
+        AND generation=$4 AND series_digest=$5 AND observed_at<$6
+        AND rss_timeseries.visible(tenant_id,namespace,source,generation,series_digest,subject,resource,key,observed_at)
+        ORDER BY observed_at DESC,sequence DESC,sample_id DESC LIMIT 1")
+        .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str())
+        .bind(s.source().as_str()).bind(s.generation().as_str())
+        .bind(spec.series().digest()?.as_bytes().as_slice()).bind(at.micros())
+        .bind(max_bytes.map(i64::from)).fetch_optional(c).await.map_err(sql_error)
 }
 pub(crate) async fn ensure_boundary(
     c: &mut PgConnection,
@@ -207,17 +215,7 @@ pub(crate) async fn ensure_boundary(
     if !needs_predecessor(spec) {
         return Ok(());
     }
-    let observed_only = matches!(
-        spec.series().definition().spec().metric,
-        Metric::Bool | Metric::State { .. }
-    ) && spec.coverage() == CoveragePolicy::ObservedOnly;
-    let start = if observed_only {
-        0
-    } else {
-        at.micros()
-            .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
-            .max(0)
-    };
+    let start = dependency_start(spec, at.micros());
     if start == at.micros() {
         return Ok(());
     }
@@ -236,6 +234,21 @@ pub(crate) async fn ensure_boundary(
         }
     }
     Ok(())
+}
+
+// Earliest observation that can affect a bucket starting at this timestamp.
+fn dependency_start(spec: &SummarySpec, start: i64) -> i64 {
+    let unbounded = matches!(
+        spec.series().definition().spec().metric,
+        Metric::Bool | Metric::State { .. }
+    ) && spec.coverage() == CoveragePolicy::ObservedOnly;
+    if unbounded {
+        0
+    } else {
+        start
+            .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
+            .max(0)
+    }
 }
 
 // Delta intervals contain their own increase; only cumulative/state semantics

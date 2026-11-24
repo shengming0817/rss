@@ -488,8 +488,21 @@ async fn observed_only_transition_invalidates_across_empty_buckets() -> anyhow::
         )?,
     )
     .await?;
+    // Prune needs only the anchor timestamp, even when its payload exceeds
+    // the maintenance store's byte cap. The checkpoint itself fits.
+    let mut caps = limits()?;
+    caps.max_bytes = NonZeroU32::new(256).ok_or(Error::InvalidInput)?;
+    let pruner = PgStore::new(
+        f.profile.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        Timer,
+        caps,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
     complete(
-        &f.store,
+        &pruner,
         plan(
             "prune",
             MaintenanceAction::Prune {
@@ -812,6 +825,66 @@ async fn raw_byte_overflow_preserves_the_committed_fold() -> anyhow::Result<()> 
     assert_eq!(
         narrow.aggregate(&query, None, deadline()?).await.err(),
         Some(Error::BudgetExceeded)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn retained_tiles_can_cover_a_window_past_a_longer_dead_end() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-tile-cover").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    f.write(&batch(
+        "initial",
+        vec![sample(&d, "a", 2, 3)?, sample(&d, "b", 8, 7)?],
+    )?)
+    .await?;
+    for (resolution, hi) in [(6, 6), (5, 10)] {
+        complete(
+            &f.store,
+            plan(
+                &format!("recompute-{resolution}"),
+                MaintenanceAction::Recompute {
+                    spec: spec(&d, resolution)?,
+                    window: window(0, hi)?,
+                },
+                2,
+            )?,
+        )
+        .await?;
+    }
+    let coarse = spec(&d, 10)?;
+    let before = Timestamp::new(10)?;
+    complete(
+        &f.store,
+        plan(
+            "cut",
+            MaintenanceAction::AdvanceCutoff {
+                selection: coarse.selection(),
+                before,
+            },
+            2,
+        )?,
+    )
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "prune",
+            MaintenanceAction::Prune {
+                selection: coarse.selection(),
+                raw_before: before,
+                summaries_before: Timestamp::new(0)?,
+            },
+            2,
+        )?,
+    )
+    .await?;
+    assert_eq!(f.count().await?, 0);
+    let page = aggregate(&f.store, coarse, 0, 10).await?;
+    assert_eq!(page.refreshed_through, Some(before));
+    assert!(
+        matches!(page.buckets[0].value,AggregateValue::Mean {sum:Sum::U128(10),count} if count.get()==2)
     );
     Ok(())
 }

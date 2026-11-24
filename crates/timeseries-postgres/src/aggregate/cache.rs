@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub(super) struct Tile {
     identity: (Vec<u8>, i64),
     end: i64,
+    bytes: usize,
 }
 #[derive(Default)]
 pub(super) struct Cover {
@@ -43,63 +44,67 @@ pub(super) async fn plan(
         .bind(windows.iter().map(|w| w.start().micros()).collect::<Vec<_>>())
         .bind(windows.iter().map(|w| w.end().micros()).collect::<Vec<_>>())
         .bind(i64::from(limits.max_points.get())+1).fetch(c);
-    let mut buckets: Vec<_> = windows
-        .into_iter()
-        .map(|window| Bucket {
-            window,
-            cover: Ok(Some(Cover::default())),
-        })
-        .collect();
-    let mut previous = None;
-    let mut candidates = 0;
+    let mut candidates: Vec<Vec<Tile>> = windows.iter().map(|_| Vec::new()).collect();
     while let Some(row) = rows.try_next().await.map_err(sql_error)? {
         let idx: i64 = row.try_get("idx").map_err(sql_error)?;
-        if previous != Some(idx) {
-            previous = Some(idx);
-            candidates = 0;
-        }
-        candidates += 1u64;
-        let b = buckets
+        candidates
             .get_mut((idx - 1) as usize)
-            .ok_or(Error::Invariant)?;
-        if candidates > u64::from(limits.max_points.get()) {
-            b.cover = Err(Error::BudgetExceeded);
-            continue;
-        }
-        let Ok(Some(cover)) = &mut b.cover else {
-            continue;
-        };
-        let lo: i64 = row.try_get("lo").map_err(sql_error)?;
-        if cover
-            .tiles
-            .last()
-            .map_or(b.window.start().micros(), |t| t.end)
-            != lo
-        {
-            continue;
-        }
-        let size = usize::try_from(row.try_get::<i32, _>("size").map_err(sql_error)?)
-            .map_err(|_| Error::Invariant)?;
-        if size > limits.max_bytes.get() as usize - cover.bytes {
-            b.cover = Err(Error::BudgetExceeded);
-            continue;
-        }
-        cover.bytes += size;
-        cover.tiles.push(Tile {
-            identity: (row.try_get("spec_digest").map_err(sql_error)?, lo),
-            end: row.try_get("hi").map_err(sql_error)?,
-        });
+            .ok_or(Error::Invariant)?
+            .push(Tile {
+                identity: (
+                    row.try_get("spec_digest").map_err(sql_error)?,
+                    row.try_get("lo").map_err(sql_error)?,
+                ),
+                end: row.try_get("hi").map_err(sql_error)?,
+                bytes: usize::try_from(row.try_get::<i32, _>("size").map_err(sql_error)?)
+                    .map_err(|_| Error::Invariant)?,
+            });
     }
-    for bucket in &mut buckets {
-        if let Ok(Some(c)) = &bucket.cover
-            && c.tiles
-                .last()
-                .is_none_or(|t| t.end != bucket.window.end().micros())
-        {
-            bucket.cover = Ok(None);
+    Ok(windows
+        .into_iter()
+        .zip(candidates)
+        .map(|(window, tiles)| Bucket {
+            window,
+            cover: choose(window, tiles, limits),
+        })
+        .collect())
+}
+
+// A longer tile may end at a dead end. Compute the cheapest complete suffix
+// at each boundary, then prefer the longest viable tile in the original order.
+fn choose(window: Interval, tiles: Vec<Tile>, limits: &Limits) -> Result<Option<Cover>, Error> {
+    if tiles.len() > limits.max_points.get() as usize {
+        return Err(Error::BudgetExceeded);
+    }
+    let mut suffix = HashMap::from([(window.end().micros(), 0u64)]);
+    for t in tiles.iter().rev() {
+        if let Some(rest) = suffix.get(&t.end) {
+            let cost = rest + t.bytes as u64;
+            let best = suffix.entry(t.identity.1).or_insert(cost);
+            *best = (*best).min(cost);
         }
     }
-    Ok(buckets)
+    let mut at = window.start().micros();
+    let Some(minimum) = suffix.get(&at) else {
+        return Ok(None);
+    };
+    let cap = u64::from(limits.max_bytes.get());
+    if *minimum > cap {
+        return Err(Error::BudgetExceeded);
+    }
+    let mut cover = Cover::default();
+    for t in tiles {
+        if t.identity.1 == at
+            && suffix
+                .get(&t.end)
+                .is_some_and(|rest| rest + t.bytes as u64 <= cap - cover.bytes as u64)
+        {
+            at = t.end;
+            cover.bytes += t.bytes;
+            cover.tiles.push(t);
+        }
+    }
+    Ok(Some(cover))
 }
 
 pub(super) type Payloads = HashMap<(Vec<u8>, i64), Vec<u8>>;
