@@ -574,7 +574,13 @@ mod consumer {
     }
 
     struct InboxState {
-        heads: HashMap<(rss_transactional_messaging::inbox::ConsumerGroup, PartitionIdentity), (InboxKey, MessageFingerprint)>,
+        heads: HashMap<
+            (
+                rss_transactional_messaging::inbox::ConsumerGroup,
+                PartitionIdentity,
+            ),
+            (InboxKey, MessageFingerprint),
+        >,
         records: HashMap<InboxKey, InboxRecord>,
         next_epoch: u64,
     }
@@ -620,18 +626,21 @@ mod consumer {
             disposition: TerminalDisposition,
         ) {
             let key = identity_key(&identity);
-            let mut state = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if disposition == TerminalDisposition::Succeeded {
-                state.heads.retain(|_,(head,_)| head != &key);
+                state.heads.retain(|_, (head, _)| head != &key);
             }
             state.records.insert(
-                    key,
-                    InboxRecord::Terminal {
-                        identity,
-                        fingerprint,
-                        disposition,
-                    },
-                );
+                key,
+                InboxRecord::Terminal {
+                    identity,
+                    fingerprint,
+                    disposition,
+                },
+            );
         }
 
         /// Expire the current claim so a later call can acquire a new epoch.
@@ -678,13 +687,18 @@ mod consumer {
                 )),
                 None => {
                     if let Some(partition) = verified.partition() {
-                        let (head, digest) = state.heads.entry((identity.group().clone(), partition.clone()))
+                        let (head, digest) = state
+                            .heads
+                            .entry((identity.group().clone(), partition.clone()))
                             .or_insert_with(|| (key.clone(), verified.fingerprint()));
                         if *head != key {
                             return Ok(IdempotencyDisposition::PartitionBlocked);
                         }
                         if *digest != verified.fingerprint() {
-                            return Err(MessagingError::new(MessagingErrorKind::Conflict, MemoryConsumerError));
+                            return Err(MessagingError::new(
+                                MessagingErrorKind::Conflict,
+                                MemoryConsumerError,
+                            ));
                         }
                     }
                     let epoch = state.next_epoch;

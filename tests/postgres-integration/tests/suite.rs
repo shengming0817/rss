@@ -259,9 +259,15 @@ fn message(id: &str) -> rss_transactional_messaging::message::MessageEnvelope<Ve
 fn binding(
     message: &rss_transactional_messaging::message::MessageEnvelope<Vec<u8>>,
 ) -> rss_transactional_messaging::transaction::VerifiedConsumerBinding {
-    binding_for_group(message, rss_transactional_messaging::inbox::ConsumerGroup::parse("suite").expect("group"))
+    binding_for_group(
+        message,
+        rss_transactional_messaging::inbox::ConsumerGroup::parse("suite").expect("group"),
+    )
 }
-fn binding_for_group(message: &rss_transactional_messaging::message::MessageEnvelope<Vec<u8>>, group: rss_transactional_messaging::inbox::ConsumerGroup) -> rss_transactional_messaging::transaction::VerifiedConsumerBinding {
+fn binding_for_group(
+    message: &rss_transactional_messaging::message::MessageEnvelope<Vec<u8>>,
+    group: rss_transactional_messaging::inbox::ConsumerGroup,
+) -> rss_transactional_messaging::transaction::VerifiedConsumerBinding {
     use rss_transactional_messaging::{message::SubscriptionIdentity, transaction::verify_ingress};
     let metadata = message.metadata();
     verify_ingress(
@@ -360,9 +366,7 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
     ] {
         let message = message(id);
         let binding = binding(&message);
-        let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(&binding, deadline())
-            .await?
+        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
         else {
             panic!("new claim")
         };
@@ -382,9 +386,7 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
         assert_eq!(receipt.disposition(), disposition);
         assert!(binding.validate_terminal(receipt).is_ok());
         assert!(matches!(
-            inbox
-                .claim(&binding, deadline())
-                .await?,
+            inbox.claim(&binding, deadline()).await?,
             IdempotencyDisposition::Terminal(_)
         ));
         let actual: i64 =

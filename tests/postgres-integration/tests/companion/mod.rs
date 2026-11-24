@@ -225,9 +225,7 @@ async fn interrupted_scopes(
             "companion-failed-consumer"
         });
         let binding = super::binding(&message);
-        let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(&binding, deadline())
-            .await?
+        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
         else {
             panic!("fresh claim");
         };

@@ -16,10 +16,7 @@ async fn deliver(
         f.runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(&binding, budget()?)
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, budget()?).await? else {
         anyhow::bail!("expected fresh ingress claim")
     };
     let consumer = PgConsumerTx::receipt_only(
@@ -137,9 +134,7 @@ pub(crate) async fn permanent_inputs(f: &Fixture) -> anyhow::Result<()> {
             LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
         )?;
         assert!(matches!(
-            inbox
-                .claim(&binding(m.envelope())?, budget()?)
-                .await?,
+            inbox.claim(&binding(m.envelope())?, budget()?).await?,
             IdempotencyDisposition::Terminal(_)
         ));
     }

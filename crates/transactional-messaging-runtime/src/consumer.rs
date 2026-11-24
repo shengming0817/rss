@@ -231,7 +231,11 @@ where
         };
     let claim = wait_for_claim(inbox, execution, &binding, deadlines.operation()).await;
     match claim {
-        Ok(busy @ (IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::InProgress | IdempotencyDisposition::PartitionBlocked)) => {
+        Ok(
+            busy @ (IdempotencyDisposition::CapacityBusy
+            | IdempotencyDisposition::InProgress
+            | IdempotencyDisposition::PartitionBlocked),
+        ) => {
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
@@ -341,7 +345,7 @@ where
             Ok(IdempotencyDisposition::InProgress) => execution
                 .emitter
                 .emit(TransactionalMessagingObservation::ConsumerClaimInProgress),
-            Ok(IdempotencyDisposition::PartitionBlocked) => {},
+            Ok(IdempotencyDisposition::PartitionBlocked) => {}
             _ => break claim,
         }
         let wake = cutoff.capped(execution.timer, interval);

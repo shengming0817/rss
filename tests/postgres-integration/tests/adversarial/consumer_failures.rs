@@ -79,9 +79,7 @@ pub(super) async fn run(
     ] {
         let message = message(id);
         let binding = binding(&message);
-        let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(&binding, deadline())
-            .await?
+        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
         else {
             panic!("new claim")
         };
@@ -138,11 +136,7 @@ pub(super) async fn run(
         let message = message(id);
         let binding = binding(&message);
         let identity = binding.identity().clone();
-        let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(
-                &binding, deadline(),
-            )
-            .await?
+        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
         else {
             panic!("new claim")
         };

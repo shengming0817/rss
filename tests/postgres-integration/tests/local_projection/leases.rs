@@ -115,15 +115,22 @@ async fn inbox_contention(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> an
     f.append(id, "orders").await?;
     let message = message(id, "orders")?;
     let meta = message.metadata();
-    let verified = verify_ingress(&Validator, group()?, &SubscriptionIdentity::new(meta.domain().clone(), meta.route().clone(), meta.contract().clone()), &message).map_err(|_|anyhow::anyhow!("fixture ingress"))?;
+    let verified = verify_ingress(
+        &Validator,
+        group()?,
+        &SubscriptionIdentity::new(
+            meta.domain().clone(),
+            meta.route().clone(),
+            meta.contract().clone(),
+        ),
+        &message,
+    )
+    .map_err(|_| anyhow::anyhow!("fixture ingress"))?;
     let other = PgInboxStore::new(
         f.worker.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let IdempotencyDisposition::Acquired(held) = other
-        .claim(&verified, deadline())
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(held) = other.claim(&verified, deadline()).await? else {
         anyhow::bail!("external consumer did not acquire Inbox")
     };
     assert!(matches!(project(p).await?, PgProjectionOutcome::InProgress));

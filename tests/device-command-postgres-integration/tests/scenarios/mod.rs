@@ -416,10 +416,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
         f.runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(&binding, budget()?)
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, budget()?).await? else {
         anyhow::bail!("new claim missing")
     };
     let consumer = PgConsumerTx::receipt_only(
@@ -457,10 +454,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     inbox.release(claim, budget()?).await?;
     f.publish().await?;
     let _page = f.recover(s).await?;
-    let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(&binding, budget()?)
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, budget()?).await? else {
         anyhow::bail!("retry claim missing")
     };
     assert_eq!(
@@ -658,9 +652,7 @@ async fn verify_terminal(
         .ok_or_else(|| anyhow::anyhow!("receipt missing"))?;
     assert!(binding.validate_terminal(receipt).is_ok());
     assert!(matches!(
-        inbox
-            .claim(&binding, budget()?)
-            .await?,
+        inbox.claim(&binding, budget()?).await?,
         IdempotencyDisposition::Terminal(_)
     ));
     Ok(())

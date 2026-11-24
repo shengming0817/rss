@@ -71,10 +71,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let claim = match inbox
-        .claim(&consumer, deadline())
-        .await?
-    {
+    let claim = match inbox.claim(&consumer, deadline()).await? {
         IdempotencyDisposition::Acquired(c) => c,
         _ => anyhow::bail!("consumer claim"),
     };
@@ -92,9 +89,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         vec![MemberStatus::Completed]
     );
     assert!(matches!(
-        inbox
-            .claim(&consumer, deadline())
-            .await?,
+        inbox.claim(&consumer, deadline()).await?,
         IdempotencyDisposition::Terminal(_)
     ));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM public.dr_effect")
@@ -130,10 +125,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         next.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let claim = match inbox
-        .claim(&identity, deadline())
-        .await?
-    {
+    let claim = match inbox.claim(&identity, deadline()).await? {
         IdempotencyDisposition::Acquired(c) => c,
         _ => anyhow::bail!("mismatch claim"),
     };

@@ -276,9 +276,8 @@ async fn claim_original(
         message,
     )
     .map_err(|_| anyhow::anyhow!("fixture binding"))?;
-    let IdempotencyDisposition::Acquired(holder) = store
-        .claim(&verified, provider_deadline())
-        .await?
+    let IdempotencyDisposition::Acquired(holder) =
+        store.claim(&verified, provider_deadline()).await?
     else {
         anyhow::bail!("original claim");
     };

@@ -160,7 +160,10 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "consumer")]
-use rss_transactional_messaging::{message::MessageEnvelope,transaction::{EnvelopeValidationFailure, IngressChallenge, IngressValidator, VerifiedIngress}};
+use rss_transactional_messaging::{
+    message::MessageEnvelope,
+    transaction::{EnvelopeValidationFailure, IngressChallenge, IngressValidator, VerifiedIngress},
+};
 #[cfg(feature = "consumer")]
 struct Validator(rss_transactional_messaging::fence::ExecutionBinding);
 #[cfg(feature = "consumer")]
@@ -187,17 +190,23 @@ async fn consumer(clock: &FakeClock) -> anyhow::Result<()> {
     use rss_transactional_messaging_testkit::memory::MemoryInboxStore;
     let message = envelope()?;
     let meta = message.metadata();
-    let verified = rss_transactional_messaging::transaction::verify_ingress(&Validator(binding()?), ConsumerGroup::parse("example-handler")?,
-        &rss_transactional_messaging::message::SubscriptionIdentity::new(meta.domain().clone(),meta.route().clone(),meta.contract().clone()),&message)
-        .map_err(|_|anyhow::anyhow!("example ingress"))?;
+    let verified = rss_transactional_messaging::transaction::verify_ingress(
+        &Validator(binding()?),
+        ConsumerGroup::parse("example-handler")?,
+        &rss_transactional_messaging::message::SubscriptionIdentity::new(
+            meta.domain().clone(),
+            meta.route().clone(),
+            meta.contract().clone(),
+        ),
+        &message,
+    )
+    .map_err(|_| anyhow::anyhow!("example ingress"))?;
     let store = MemoryInboxStore::new();
     let deadline = OperationDeadline::from_cutoff(
         Deadline::from_timeout(clock, Duration::from_secs(5))?,
         clock,
     );
-    let IdempotencyDisposition::Acquired(claim) =
-        store.claim(&verified, deadline).await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = store.claim(&verified, deadline).await? else {
         anyhow::bail!("initial claim was not acquired")
     };
     assert!(matches!(
@@ -220,9 +229,7 @@ async fn uncertain_consumer(
         message::{MessageEnvelope, SubscriptionIdentity},
         observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
         policy::{ConsumerExecutionPolicy, ExecutionBudget, OperationDeadline, RetryPolicy},
-        transaction::{
-            ConsumerTx, ReceiptIntent, TransactionOutcome,
-        },
+        transaction::{ConsumerTx, ReceiptIntent, TransactionOutcome},
         transport::Delivery,
     };
     use rss_transactional_messaging_runtime::consumer::{

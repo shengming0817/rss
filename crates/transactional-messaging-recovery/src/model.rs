@@ -1,7 +1,10 @@
 use rss_request_context::TenantId;
 use rss_transactional_messaging::{
     inbox::ConsumerGroup,
-    message::{ContractIdentity, MessageId, MessageRoute, MessagingDomain, PartitionKey, MessageFingerprint},
+    message::{
+        ContractIdentity, MessageFingerprint, MessageId, MessageRoute, MessagingDomain,
+        PartitionKey,
+    },
     transaction::RejectKind,
 };
 use serde::{Deserialize, Serialize};
@@ -167,18 +170,25 @@ impl Target {
         match self {
             Self::DeadLetter(id) => id.to_string(),
             // MessageId excludes slash, so the split is unique even when the group contains one.
-            Self::ConsumerHead(head) => format!("{}/{}", head.message.as_str(), head.group.as_str()),
+            Self::ConsumerHead(head) => {
+                format!("{}/{}", head.message.as_str(), head.group.as_str())
+            }
             Self::Outbox(id) => id.as_str().into(),
         }
     }
 }
 impl Target {
     fn bind_coordinates(&self, request_digest: [u8; 32]) -> [u8; 32] {
-        let Self::ConsumerHead(head) = self else { return request_digest };
+        let Self::ConsumerHead(head) = self else {
+            return request_digest;
+        };
         // The request digest already covers tenant, target kind and unambiguous message/group key.
-        Sha256::new().chain_update(request_digest)
+        Sha256::new()
+            .chain_update(request_digest)
             .chain_update(hash(&[head.domain.as_str(), head.partition.as_str()]))
-            .chain_update(head.fingerprint.as_bytes()).finalize().into()
+            .chain_update(head.fingerprint.as_bytes())
+            .finalize()
+            .into()
     }
 }
 /// Explicit product decision for a partition-blocking message.
@@ -230,7 +240,10 @@ impl Mutation {
         if !matches!(
             (&target, &action),
             (Target::DeadLetter(_), Action::Replay(_))
-                | (Target::ConsumerHead(_), Action::Resolve(Resolution::AcceptedGap))
+                | (
+                    Target::ConsumerHead(_),
+                    Action::Resolve(Resolution::AcceptedGap)
+                )
                 | (Target::Outbox(_), Action::Redrive | Action::Resolve(_))
         ) {
             return Err(Error::Invalid);
@@ -397,7 +410,9 @@ impl Query {
             &self.limit.to_string(),
             &self.target.as_ref().map(Target::key).unwrap_or_default(),
         ]);
-        self.target.as_ref().map_or(digest, |target| target.bind_coordinates(digest))
+        self.target
+            .as_ref()
+            .map_or(digest, |target| target.bind_coordinates(digest))
     }
 }
 /// Payload-free state returned by a trusted provider.

@@ -16,6 +16,13 @@ use sqlx::{
 };
 use std::{sync::Arc, time::Duration};
 use support::*;
+#[path = "recovery/consumer_head.rs"]
+mod consumer_head;
+
+// Independent recovery scenarios must not share an unresolved ordered head.
+fn message(id: &str) -> MessageEnvelope<Vec<u8>> {
+    message_in_partition(id, id)
+}
 
 struct Allow;
 impl Authorizer for Allow {
@@ -252,9 +259,7 @@ async fn run() -> anyhow::Result<()> {
     let b = binding(&message("unknown-capture"))?;
     assert!(
         matches!(
-            inbox
-                .claim(&b, deadline())
-                .await?,
+            inbox.claim(&b, deadline()).await?,
             IdempotencyDisposition::Terminal(_)
         ),
         "committed rejection survives missing ACK"
@@ -318,6 +323,7 @@ async fn run() -> anyhow::Result<()> {
         &owner,
     ))
     .await?;
+    Box::pin(consumer_head::run(&config, &store, &owner)).await?;
     store.close().await;
     assert!(store.is_closed());
     let clock = Timer::new();
@@ -990,9 +996,7 @@ async fn capture_failures(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
             runtime.clone(),
             LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
         )?;
-        let IdempotencyDisposition::Acquired(claim) = inbox
-            .claim(&binding, deadline())
-            .await?
+        let IdempotencyDisposition::Acquired(claim) = inbox.claim(&binding, deadline()).await?
         else {
             anyhow::bail!("claim")
         };
@@ -1300,10 +1304,7 @@ async fn replay_partition_race(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(&verified, deadline())
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = inbox.claim(&verified, deadline()).await? else {
         anyhow::bail!("replay source claim");
     };
     let capture = PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(1)), deadline()).await?;

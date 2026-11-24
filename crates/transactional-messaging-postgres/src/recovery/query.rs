@@ -1,10 +1,13 @@
 use super::map_attempt;
 use crate::{PgError, PgRuntime};
-use rss_transactional_messaging::{inbox::ConsumerGroup, message::{MessageId, MessagingDomain, PartitionKey}};
 use rss_transactional_messaging::policy::OperationDeadline;
+use rss_transactional_messaging::{
+    inbox::ConsumerGroup,
+    message::{MessageId, MessagingDomain, PartitionKey},
+};
 use rss_transactional_messaging_recovery::{
-    ConsumerDetails, ConsumerHead, OperationId, DeadLetterId, Details, Eligibility, Entry, Error, OutboxDetails, Page, Query,
-    Source, Target, Version,
+    ConsumerDetails, ConsumerHead, DeadLetterId, Details, Eligibility, Entry, Error, OperationId,
+    OutboxDetails, Page, Query, Source, Target, Version,
 };
 use sqlx::Row;
 
@@ -55,7 +58,9 @@ pub(super) async fn query(
     map_attempt(result).fold(Ok, Err, Err, Err, Err, Err)
 }
 
-fn reject_kind(row: &sqlx::postgres::PgRow) -> Result<rss_transactional_messaging::transaction::RejectKind,PgError> {
+fn reject_kind(
+    row: &sqlx::postgres::PgRow,
+) -> Result<rss_transactional_messaging::transaction::RejectKind, PgError> {
     use rss_transactional_messaging::transaction::TerminalDisposition;
     match crate::inbox::disposition(row.try_get("reason")?)? {
         TerminalDisposition::Rejected(reason) => Ok(reason),
@@ -65,10 +70,14 @@ fn reject_kind(row: &sqlx::postgres::PgRow) -> Result<rss_transactional_messagin
 
 fn head(row: &sqlx::postgres::PgRow) -> Result<ConsumerHead, PgError> {
     Ok(ConsumerHead {
-        message: MessageId::parse(row.try_get("message_id")?).map_err(|_| Error::StorageContract)?,
-        group: ConsumerGroup::parse(row.try_get("consumer_group")?).map_err(|_| Error::StorageContract)?,
-        domain: MessagingDomain::parse(row.try_get("domain")?).map_err(|_| Error::StorageContract)?,
-        partition: PartitionKey::parse(row.try_get("partition_key")?).map_err(|_| Error::StorageContract)?,
+        message: MessageId::parse(row.try_get("message_id")?)
+            .map_err(|_| Error::StorageContract)?,
+        group: ConsumerGroup::parse(row.try_get("consumer_group")?)
+            .map_err(|_| Error::StorageContract)?,
+        domain: MessagingDomain::parse(row.try_get("domain")?)
+            .map_err(|_| Error::StorageContract)?,
+        partition: PartitionKey::parse(row.try_get("partition_key")?)
+            .map_err(|_| Error::StorageContract)?,
         fingerprint: crate::inbox::fingerprint(row.try_get("fingerprint")?)?,
     })
 }
@@ -81,7 +90,10 @@ fn details(row: &sqlx::postgres::PgRow, request: &Query) -> Result<Details, PgEr
     match request.source() {
         Source::ConsumerHead => Ok(Details::ConsumerHead {
             reason: reject_kind(row)?,
-            resolved_by: row.try_get::<Option<&str>, _>("resolved_by")?.map(OperationId::parse).transpose()?,
+            resolved_by: row
+                .try_get::<Option<&str>, _>("resolved_by")?
+                .map(OperationId::parse)
+                .transpose()?,
         }),
         Source::Consumer => {
             let reason = reject_kind(row)?;
