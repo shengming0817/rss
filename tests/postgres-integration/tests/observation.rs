@@ -384,7 +384,7 @@ async fn schema_checks(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_err());
-    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:2'")
+    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:3'")
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_ok());
@@ -575,7 +575,7 @@ async fn prepare(
     sqlx::raw_sql(rss_observation_postgres::MIGRATION_SQL)
         .execute(&owner)
         .await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_observation TO obs_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_observation TO obs_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation TO obs_runtime;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_observation TO obs_runtime; GRANT SELECT ON rss_observation.streams,rss_observation.batches TO obs_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation TO obs_runtime;").execute(&owner).await?;
     let pool = runtime_pool(params, ca).await?;
     Ok((admin, owner, pool))
 }

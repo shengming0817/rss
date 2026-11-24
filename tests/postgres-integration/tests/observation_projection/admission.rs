@@ -1,17 +1,23 @@
 use super::fixture::*;
-use rss_observation::{Body, ErrorKind, Id, ObservationStore, ReadGrant};
+use rss_observation::{Body, ObservationStore};
 use rss_projection::{BatchLimit, Source};
 #[tokio::test]
 async fn required_permissions_are_checked() -> anyhow::Result<()> {
-    let f = Fixture::new(false).await?;
+    let f = Fixture::new().await?;
+    let can_read_admissions: bool = sqlx::query_scalar(
+        "SELECT has_any_column_privilege(current_user,'rss_observation.admissions','SELECT')",
+    )
+    .fetch_one(&f.pool)
+    .await?;
+    assert!(!can_read_admissions);
     for (revoke, restore) in [
         (
             "REVOKE USAGE ON SCHEMA rss_observation FROM handoff_runtime",
             "GRANT USAGE ON SCHEMA rss_observation TO handoff_runtime",
         ),
         (
-            "REVOKE SELECT ON rss_observation.journals FROM handoff_runtime",
-            "GRANT SELECT ON rss_observation.journals TO handoff_runtime",
+            "REVOKE SELECT ON rss_observation.streams FROM handoff_runtime",
+            "GRANT SELECT ON rss_observation.streams TO handoff_runtime",
         ),
         (
             "REVOKE SELECT ON rss_observation.batches FROM handoff_runtime",
@@ -31,75 +37,9 @@ async fn required_permissions_are_checked() -> anyhow::Result<()> {
     Ok(())
 }
 #[tokio::test]
-async fn exhausted_journal_rejects_every_new_report() -> anyhow::Result<()> {
-    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
-    let budget_cancel = tokio_util::sync::CancellationToken::new();
-    let control = rss_projection::Control::new(
-        &budget_clock,
-        std::time::Duration::from_secs(60),
-        &budget_cancel,
-    );
-    let f = Fixture::new(false).await?;
-    let store = f.store().await?;
-    let stream = scope(TENANT, "exhausted", "r", "source", "e")?;
-    activate(&store, &stream, None).await?;
-    let input = batch(&stream, "first", 0, "all", Body::Snapshot(vec![]))?;
-    store.receive(&input, deadline()).await?;
-    let grant = ReadGrant::verify(&Trusted, stream.clone())?;
-    let before = store.state(&grant, deadline()).await?;
-    sqlx::query("UPDATE rss_observation.journals SET last_position=9223372036854775807 WHERE tenant_id=$1::uuid").bind(TENANT).execute(&f.admin).await?;
-    reject_exhausted(&store, &stream).await?;
-    assert_eq!(store.state(&grant, deadline()).await?, before);
-    assert!(matches!(
-        store.receive(&input, deadline()).await?,
-        rss_observation::ReceiveOutcome::Replay(_)
-    ));
-    let source = f.source(store, TENANT)?;
-    assert_eq!(
-        source
-            .read(source.scope(), None, BatchLimit::new(10)?, &control)
-            .await?
-            .len(),
-        1
-    );
-    Ok(())
-}
-async fn reject_exhausted(
-    store: &rss_observation_postgres::PgStore<Clock>,
-    scope: &rss_observation::Scope,
-) -> anyhow::Result<()> {
-    for (id, body) in [
-        ("snapshot", Body::Snapshot(vec![])),
-        (
-            "failed",
-            Body::Failed {
-                code: Id::new("offline")?,
-            },
-        ),
-        ("partial", Body::Partial(vec![])),
-    ] {
-        let result = store
-            .receive(&batch(scope, id, 1, "all", body)?, deadline())
-            .await;
-        assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Invariant));
-        assert!(
-            store
-                .lookup(
-                    &ReadGrant::verify(&Trusted, scope.clone())?,
-                    &Id::new(id)?,
-                    deadline()
-                )
-                .await?
-                .is_none()
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn permanent_resolver_failures_reject_the_effect() -> anyhow::Result<()> {
     use rss_projection::{Control, GenerationStart, ProjectionScope, ReplayBound};
-    let f = Fixture::new(false).await?;
+    let f = Fixture::new().await?;
     let (source, event) = resolver_record(&f).await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();

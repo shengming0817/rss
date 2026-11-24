@@ -5,7 +5,6 @@ use rss_projection::{
     RunLimit, Source,
 };
 use rss_projection_postgres::PgFault;
-use sqlx::Row;
 use std::time::Duration;
 #[path = "../../../../crates/examples/src/observation/model.rs"]
 pub(super) mod model;
@@ -341,8 +340,14 @@ async fn resumed_projection(
 pub async fn ordered_visibility(f: &Fixture) -> anyhow::Result<()> {
     let store = f.store().await?;
     let source = f.source(store.clone(), TENANT)?;
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(60), &cancel);
+    let projection = f.projection(&control).await?;
+    let scope = ProjectionScope::new(source.scope().clone(), "facts", "ordered")?;
+    let execution = session(&projection, &scope, &source, &control).await?;
     for rollback in [false, true] {
-        concurrent_pair(f, &store, &source, rollback).await?;
+        concurrent_pair(f, &store, &source, &execution, &control, rollback).await?;
     }
     Ok(())
 }
@@ -366,64 +371,70 @@ async fn concurrent_pair(
     f: &Fixture,
     store: &ObsStore,
     source: &ObsSource,
+    execution: &Session,
+    control: &Control<'_, ProjectionClock>,
     rollback: bool,
 ) -> anyhow::Result<()> {
-    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
-    let budget_cancel = tokio_util::sync::CancellationToken::new();
-    let control = rss_projection::Control::new(
-        &budget_clock,
-        std::time::Duration::from_secs(60),
-        &budget_cancel,
-    );
     let (input, other) = parallel_inputs(store, rollback).await?;
-    let before = source.high_water(source.scope(), &control).await?;
-    // Use the actual commit funnel, but deliberately hold the first transaction before COMMIT.
-    let mut tx = f.pool.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(TENANT)
-        .execute(&mut *tx)
+    let before = source.high_water(source.scope(), control).await?;
+    let (tx, pid) = f.stage(&input).await?;
+    let (pending, settled) = tokio::join!(store.receive(&other, deadline()), async {
+        f.wait_for_blocked(pid, 1).await?;
+        assert_eq!(source.high_water(source.scope(), control).await?, before);
+        assert!(
+            source
+                .read(source.scope(), before, BatchLimit::new(10)?, control)
+                .await?
+                .is_empty()
+        );
+        project_to(source, execution, before, control).await?;
+        if rollback {
+            tx.rollback().await?;
+        } else {
+            tx.commit().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    settled?;
+    pending?;
+    let first = store
+        .lookup(
+            &ReadGrant::verify(&Trusted, input.scope().clone())?,
+            input.batch().id(),
+            deadline(),
+        )
         .await?;
-    stage(&mut tx, &input).await?;
-    let pending = store.receive(&other, deadline());
-    tokio::pin!(pending);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut pending)
-            .await
-            .is_err()
-    );
-    assert_invisible(source, before).await?;
-    settle(tx, rollback).await?;
-    pending.await?;
+    assert_eq!(first.is_none(), rollback);
     let events = source
-        .read(source.scope(), before, BatchLimit::new(10)?, &control)
+        .read(source.scope(), before, BatchLimit::new(10)?, control)
         .await?;
     assert_eq!(events.len(), if rollback { 1 } else { 2 });
     assert_positions(&events, before);
-    Ok(())
+    project_to(
+        source,
+        execution,
+        events.last().map(Event::position),
+        control,
+    )
+    .await
 }
-async fn settle(tx: sqlx::Transaction<'_, sqlx::Postgres>, rollback: bool) -> anyhow::Result<()> {
-    if rollback {
-        tx.rollback().await?;
-    } else {
-        tx.commit().await?;
-    }
-    Ok(())
-}
-async fn assert_invisible(source: &ObsSource, before: Option<Position>) -> anyhow::Result<()> {
-    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
-    let budget_cancel = tokio_util::sync::CancellationToken::new();
-    let control = rss_projection::Control::new(
-        &budget_clock,
-        std::time::Duration::from_secs(60),
-        &budget_cancel,
-    );
-    assert_eq!(source.high_water(source.scope(), &control).await?, before);
-    assert!(
-        source
-            .read(source.scope(), before, BatchLimit::new(10)?, &control)
-            .await?
-            .is_empty()
-    );
+
+async fn project_to(
+    source: &ObsSource,
+    execution: &Session,
+    expected: Option<Position>,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    let report = rss_projection::run(
+        source,
+        execution,
+        control,
+        RunLimit::new(BatchLimit::new(10)?, 50)?,
+    )
+    .await
+    .into_result()?;
+    assert_eq!(report.position, expected);
+    assert_eq!(execution.checkpoint(control).await?.position, expected);
     Ok(())
 }
 fn assert_positions(events: &[Event], before: Option<Position>) {
@@ -431,34 +442,6 @@ fn assert_positions(events: &[Event], before: Option<Position>) {
     for (offset, event) in events.iter().enumerate() {
         assert_eq!(event.position().get(), start + 1 + offset as u64);
     }
-}
-pub async fn stage(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    input: &rss_observation::VerifiedBatch,
-) -> anyhow::Result<()> {
-    let row = sqlx::query("SELECT state,policy FROM rss_observation.lock_stream($1)")
-        .bind(input.scope().encode()?)
-        .fetch_one(&mut **tx)
-        .await?;
-    let state = rss_observation::State::decode(row.try_get("state")?)?;
-    let policy = rss_observation::Policy::decode(row.try_get("policy")?)?;
-    let decision = state.advance(input.batch(), 100, &policy)?;
-    sqlx::query(
-        "SELECT rss_observation.commit_batch($1,$2,$3::numeric,$4,$5,$6,$7,$8,$9::numeric,$10)",
-    )
-    .bind(input.scope().encode()?)
-    .bind(input.batch().id().as_str())
-    .bind(input.batch().sequence().to_string())
-    .bind(input.batch().encode())
-    .bind(input.fingerprint().as_slice())
-    .bind(100_i64)
-    .bind(policy.encode()?)
-    .bind(decision.encode()?)
-    .bind(state.revision().to_string())
-    .bind(decision.outcome().is_applicable())
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
 struct Large {
     store: Arc<ObsStore>,
@@ -602,7 +585,7 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
     ] {
         let next = scope(OTHER, "large", registration, producer, epoch)?;
         activate(store, &next, Some(revision)).await?;
-        store
+        let accepted = store
             .receive(
                 &batch(
                     &next,
@@ -614,6 +597,15 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
                 deadline(),
             )
             .await?;
+        let current = store
+            .lookup(
+                &ReadGrant::verify(&Trusted, next)?,
+                input.batch().id(),
+                deadline(),
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing current receipt"))?;
+        assert_same_record(&current, accepted.record());
     }
     let all = source
         .read(source.scope(), None, BatchLimit::new(10)?, &control)
@@ -623,18 +615,19 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
         .map(|e| e.id())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids.len(), 4);
-    assert!(source.resolve(event, &control).await.is_ok());
-    assert_eq!(
-        store
-            .lookup(
-                &ReadGrant::verify(&Trusted, stream.clone())?,
-                input.batch().id(),
-                deadline()
-            )
-            .await?
-            .map(|r| r.received_at()),
-        Some(receipt.record().received_at())
+    assert_same_record(
+        source.resolve(event, &control).await?.record(),
+        receipt.record(),
     );
+    let retired = store
+        .lookup(
+            &ReadGrant::verify(&Trusted, stream.clone())?,
+            input.batch().id(),
+            deadline(),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing retired receipt"))?;
+    assert_same_record(&retired, receipt.record());
     Ok(())
 }
 async fn ack_loss(store: &ObsStore) -> anyhow::Result<()> {
