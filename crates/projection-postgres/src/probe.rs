@@ -83,21 +83,20 @@ SELECT
         AND conname='definition_identity_length' AND convalidated
         AND pg_get_constraintdef(oid)='CHECK ((octet_length(definition_identity) = 32))')
     AND NOT EXISTS (
-        SELECT FROM (VALUES
-            ('rss_projection.initialize(uuid,text,text,text,bigint,boolean,bigint,text[],bytea[])'),
-            ('rss_projection.takeover(uuid,text,text,text,uuid)'),
-            ('rss_projection.lock_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea)'),
-            ('rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea)')
-        ) AS old(signature) WHERE to_regprocedure(signature) IS NOT NULL
-    )
-    AND NOT EXISTS (
-        SELECT FROM (VALUES
+        WITH required(signature) AS (VALUES
             ('rss_projection.initialize(uuid,text,text,text,bigint,boolean,bigint,text[],bytea[],bytea)'),
             ('rss_projection.takeover(uuid,text,text,text,uuid,bytea)'),
             ('rss_projection.lock_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea)'),
             ('rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea)')
-        ) AS required(signature)
-        WHERE has_function_privilege(current_user, to_regprocedure(signature), 'EXECUTE') IS NOT TRUE
+        ), expected AS (
+            SELECT to_regprocedure(signature) AS oid FROM required
+        )
+        SELECT FROM expected WHERE has_function_privilege(current_user,oid,'EXECUTE') IS NOT TRUE
+        UNION ALL
+        SELECT FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid
+        WHERE n.nspname='rss_projection'
+          AND p.proname IN ('initialize','takeover','lock_event','finish_event')
+          AND NOT EXISTS (SELECT FROM expected WHERE expected.oid=p.oid)
     )
     AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:4'
          FROM pg_namespace WHERE nspname='rss_projection')

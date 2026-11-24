@@ -59,15 +59,9 @@ and business-table policies. The tenant setting provides isolation within a trus
 it does not authenticate a caller that already holds database credentials.
 
 The schema contains only source allocators, events, generation/checkpoint state and fact receipts.
-It does not contain product read models or settings. Revision 3 binds each generation to exactly
-one 32-byte `definition_identity`, independent of its primary key. Runtime roles cannot update it.
-
-`UPGRADE_SQL` upgrades revision 3 to 4, expanding source/projection names to 255 bytes.
-Stop workers and execute it outside another transaction as the schema owner. It takes exclusive
-component table locks and preserves generation definitions, checkpoints and receipts across tenants.
-Runtime admission requires revision 4 and the exact name constraints. Historical migrations remain
-immutable; the public upgrade entry accepts only the immediately preceding schema.
-Fresh `MIGRATION_SQL` executes the complete chain; do not nest it inside another transaction.
+It does not contain product read models or settings. Revision 4 binds each generation to one 32-byte definition and accepts
+source/projection names up to 255 bytes. Install the current schema in an empty database
+using the dedicated schema owner. Runtime admission verifies its identity and permissions.
 
 ## API and recovery
 

@@ -124,7 +124,7 @@ async fn projection_postgres_suite() -> anyhow::Result<()> {
         sqlx::raw_sql("CREATE ROLE projection_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE projection_runtime LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS; GRANT CREATE ON DATABASE rss_test TO projection_owner;").execute(&owner).await?;
         let mut migration = owner.acquire().await?;
         sqlx::raw_sql("SET ROLE projection_owner").execute(&mut *migration).await?;
-        scenarios::upgrade(&mut migration).await?;
+        scenarios::install::verify(&mut migration).await?;
         sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_projection TO projection_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_projection TO projection_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_projection TO projection_runtime;").execute(&mut *migration).await?;
         drop(migration);
         sqlx::raw_sql("CREATE TABLE public.counts(tenant_id uuid NOT NULL,source_id text NOT NULL,projection_id text NOT NULL,generation text NOT NULL,n bigint NOT NULL,PRIMARY KEY(tenant_id,source_id,projection_id,generation)); ALTER TABLE public.counts ENABLE ROW LEVEL SECURITY; ALTER TABLE public.counts FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.counts USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT,UPDATE ON public.counts TO projection_runtime;").execute(&owner).await?;
