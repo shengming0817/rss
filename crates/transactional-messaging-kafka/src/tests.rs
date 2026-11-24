@@ -289,6 +289,14 @@ fn parallel_reservations_do_not_delay_sealing_or_hold_a_sender() -> anyhow::Resu
                 engine::unavailable().failure()
             );
         }
+        // Both slots have returned. Only the closed semaphore can skip this encoder now.
+        let fresh_deadline = engine::now() + Duration::from_secs(5);
+        let refused = definite_refusal(shared.enqueue(fresh_deadline, || {
+            encode_calls += 1;
+            Record::encode(&m, &plan)
+        }))?;
+        assert_eq!(Some(refused), engine::unavailable().failure());
+        assert_eq!(encode_calls, 0);
         Ok(())
     })
 }
@@ -469,11 +477,19 @@ fn finite_limits_replace_policy_ceilings_and_check_aggregate_budget() -> anyhow:
             Err(KafkaError::InvalidLimits)
         ));
     }
+    let channel_slot = std::mem::size_of::<(std::sync::atomic::AtomicUsize, QueuedCommand)>();
+    let largest_channel = isize::MAX as usize / channel_slot;
+    // Only validate the layouts; allocating even the representable neighbour is unnecessary.
+    assert!(KafkaLimits::new(largest_channel, 1, 1, usize::MAX, timeouts).is_ok());
+    assert!(matches!(
+        KafkaLimits::new(largest_channel + 1, 1, 1, usize::MAX, timeouts),
+        Err(KafkaError::InvalidLimits)
+    ));
     for (queued, record) in [(1, 1023usize), (2, 1024), (64, 1025)] {
         let rounded_native = record.div_ceil(1024) * 1024;
         let required = (2 * queued + 1) * record
             + rounded_native
-            + 2 * queued * std::mem::size_of::<QueuedCommand>()
+            + queued * (channel_slot + std::mem::size_of::<QueuedCommand>())
             + std::mem::size_of::<Command>()
             + engine::pending_entry_bytes();
         assert!(KafkaLimits::new(queued, 1, record, required, timeouts).is_ok());

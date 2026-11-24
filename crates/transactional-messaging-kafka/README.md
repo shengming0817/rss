@@ -46,7 +46,8 @@ The static record-accounting budget is checked before allocating queues or recor
 - Each of the `queued` slots covers one record and up to one record of encoding scratch.
   One more record is charged to the worker after dequeue: `(2 * queued + 1) * record_bytes`.
 - Native records are charged `ceil(in_flight * record_bytes / 1024) * 1024`.
-- The preallocated channel and concurrent candidates each charge `queued * size_of::<QueuedCommand>()`.
+- The preallocated channel charges one queued command and its atomic slot stamp per slot,
+  including alignment. Concurrent candidates charge another `queued * size_of::<QueuedCommand>()`.
   The worker charges one `Command`; the pending map charges `in_flight * size_of::<(token, reply)>()`.
 
 All arithmetic and conversions are checked; construction rejects an insufficient aggregate budget.

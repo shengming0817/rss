@@ -23,13 +23,13 @@ async fn shared_kafka_resource_budget_and_broker_rejection() -> anyhow::Result<(
             Ok(receipt)
         }).await?;
         emit(&format!("memory payload_bytes={PAYLOAD_BYTES} record_bytes={RECORD_BYTES} baseline_rss_bytes={baseline} sampled_peak_rss_bytes={peak} teardown_rss_bytes={} sample_interval_ms=25 scope=client_process_rust_and_native", resident_bytes()?))?;
-    let records = read_records(&fixture, "load-sample", 1).await?;
-    let record = &records[0];
-    assert_record_payload(record, "load-sample", &vec![42; PAYLOAD_BYTES]);
-    assert_eq!(
-        (record.topic(), record.partition(), record.offset()),
-        (receipt.topic(), receipt.partition(), receipt.offset())
-    );
+        let records = read_records(&fixture, "load-sample", 1).await?;
+        let record = &records[0];
+        assert_record_payload(record, "load-sample", &vec![42; PAYLOAD_BYTES]);
+        assert_eq!(
+            (record.topic(), record.partition(), record.offset()),
+            (receipt.topic(), receipt.partition(), receipt.offset())
+        );
         broker_rejection(&fixture).await
     }).await??;
     Ok(())

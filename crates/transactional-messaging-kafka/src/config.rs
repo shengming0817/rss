@@ -172,15 +172,19 @@ impl KafkaLimits {
             .checked_mul(record)?
             .checked_add(native)?;
         // Channel backing slots coexist with candidates on publishing threads.
-        let slots = queued.checked_mul(std::mem::size_of::<crate::engine::QueuedCommand>())?;
-        let commands = slots
-            .checked_mul(2)?
+        // Rust 1.96 std::sync::mpmc::array::Slot<T> stores an atomic stamp beside each T.
+        // Layout::array checks both multiplication and the platform's single-allocation limit.
+        let channel = std::alloc::Layout::array::<(
+            std::sync::atomic::AtomicUsize,
+            crate::engine::QueuedCommand,
+        )>(queued)
+        .ok()?;
+        let candidates = queued.checked_mul(std::mem::size_of::<crate::engine::QueuedCommand>())?;
+        let commands = channel
+            .size()
+            .checked_add(candidates)?
             .checked_add(std::mem::size_of::<crate::engine::Command>())?;
         let pending = in_flight.checked_mul(crate::engine::pending_entry_bytes())?;
-        // Rust channel allocation must also be representable independently of its record charge.
-        if slots > isize::MAX as usize {
-            return None;
-        }
         records.checked_add(commands)?.checked_add(pending)
     }
 }
