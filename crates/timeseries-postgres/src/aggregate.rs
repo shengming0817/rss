@@ -16,6 +16,7 @@ pub(crate) async fn store(
     c: &mut PgConnection,
     spec: &SummarySpec,
     summary: &Summary,
+    predecessor_at: Option<Timestamp>,
     limits: &Limits,
 ) -> Result<(), Error> {
     let data = bytes(summary)?;
@@ -23,7 +24,11 @@ pub(crate) async fn store(
         return Err(Error::BudgetExceeded);
     }
     let start = summary.window.start().micros();
-    sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
+    // A new or restored observation can supply a missing predecessor. Once an
+    // anchor exists, observations strictly before it cannot replace it.
+    let impact_start =
+        predecessor_at.map_or_else(|| dependency_start(spec, start), Timestamp::micros);
+    sqlx::query("SELECT rss_timeseries.put_summary($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
         .bind(spec.stream().scope().tenant().to_string())
         .bind(spec.stream().scope().namespace().as_str())
         .bind(spec.binding()?.as_bytes().as_slice())
@@ -36,7 +41,8 @@ pub(crate) async fn store(
         .bind(spec.series().definition().spec().key.as_str())
         .bind(start)
         .bind(summary.window.end().micros())
-        .bind(dependency_start(spec, start))
+        .bind(impact_start)
+        .bind(predecessor_at.map(Timestamp::micros))
         .bind(data)
         .execute(c)
         .await
@@ -238,7 +244,9 @@ pub(crate) async fn ensure_boundary(
 
 // Earliest observation that can affect a bucket starting at this timestamp.
 fn dependency_start(spec: &SummarySpec, start: i64) -> i64 {
-    if needs_history_anchor(spec) {
+    if !needs_predecessor(spec) {
+        start
+    } else if needs_history_anchor(spec) {
         0
     } else {
         start

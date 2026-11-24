@@ -255,7 +255,7 @@ pub(super) async fn step(
                 return Ok(Step::More(0));
             }
             let summary = statistics(c, spec, bucket, limits).await?;
-            crate::aggregate::store(c, spec, &summary, limits).await?;
+            crate::aggregate::store(c, spec, &summary, None, limits).await?;
             fold.at = bucket.end();
             fold.phase = Phase::Project { last: None };
             Ok(if fold.at >= window.end() {

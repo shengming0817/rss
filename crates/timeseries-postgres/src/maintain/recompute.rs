@@ -4,6 +4,7 @@ pub(super) struct Fold {
     at: Timestamp,
     revision: Revision,
     builder: Option<SummaryBuilder>,
+    predecessor_at: Option<Timestamp>,
     last: Option<(Timestamp, u64, Id)>,
 }
 pub(super) async fn step(
@@ -56,6 +57,7 @@ pub(super) async fn step(
             at: window.start(),
             revision,
             builder: None,
+            predecessor_at: None,
             last: None,
         });
     }
@@ -71,6 +73,7 @@ pub(super) async fn step(
         let mut builder = SummaryBuilder::new(spec.clone(), bucket)?;
         let prior = crate::aggregate::predecessor(c, spec, fold.at, limits).await?;
         crate::aggregate::ensure_boundary(c, spec, fold.at, prior.as_ref(), limits).await?;
+        fold.predecessor_at = prior.as_ref().map(|p| p.input().observed_at);
         if let Some(prior) = prior {
             builder.push(prior, limits.max_points.get() as usize)?;
         }
@@ -118,7 +121,7 @@ pub(super) async fn step(
             .take()
             .ok_or(Error::Invariant)?
             .finish(limits.max_points.get() as usize)?;
-        crate::aggregate::store(c, spec, &summary, limits).await?;
+        crate::aggregate::store(c, spec, &summary, fold.predecessor_at, limits).await?;
         fold.at = bucket.end();
         fold.last = None;
         if fold.at == window.end() {

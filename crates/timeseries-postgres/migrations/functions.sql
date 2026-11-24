@@ -67,6 +67,7 @@ CREATE TABLE rss_timeseries.summaries (
  lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo AND lo>=0),
  impact int8range NOT NULL CHECK(NOT isempty(impact) AND NOT lower_inf(impact) AND NOT upper_inf(impact)
                                 AND lower(impact) BETWEEN 0 AND lo AND upper(impact)=hi),
+ predecessor_at bigint CHECK(predecessor_at=lower(impact) AND predecessor_at<lo),
  dirty boolean NOT NULL DEFAULT false, data bytea NOT NULL,
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo)
 );
@@ -127,18 +128,32 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries A
  AND (f.kind='pruned' OR (f.kind='delete' AND NOT f.restored)) AND f.lo<=at_time AND f.hi>at_time
  AND rss_timeseries.matches_row(f.selection,f.series_digest,t,n,s,g,d,sub,res,k))
 $$;
-CREATE FUNCTION rss_timeseries.invalidate(t uuid,n text,sel jsonb,wanted bytea,lo_time bigint,hi_time bigint) RETURNS void
+CREATE FUNCTION rss_timeseries.invalidate(t uuid,n text,sel jsonb,wanted bytea,lo_time bigint,hi_time bigint,restoring boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
  UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
- IF sel->>'selection'='exact' AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}') THEN
-  UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND NOT dirty
-   AND impact && int8range(lo_time,hi_time,'[)') AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted);
- ELSIF sel->>'selection'='resource' AND (t::text,n)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}') THEN
-  UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND NOT dirty
-   AND impact && int8range(lo_time,hi_time,'[)') AND (subject,resource)=(sel->>'subject',sel->>'resource')
-     AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key);
- END IF;
+ WITH scoped AS NOT MATERIALIZED (
+  SELECT * FROM rss_timeseries.summaries
+  WHERE tenant_id=t AND namespace=n AND NOT dirty AND impact && int8range(lo_time,hi_time,'[)')
+ ), candidates AS (
+  SELECT * FROM scoped WHERE sel->>'selection'='exact'
+   AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}')
+   AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted)
+  UNION ALL
+  SELECT * FROM scoped WHERE sel->>'selection'='resource'
+   AND (t::text,n,subject,resource)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}',sel->>'subject',sel->>'resource')
+   AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key)
+ )
+ UPDATE rss_timeseries.summaries m SET dirty=true FROM candidates c
+ WHERE (m.tenant_id,m.namespace,m.spec_digest,m.lo)=(t,n,c.spec_digest,c.lo)
+ AND (hi_time>coalesce(c.predecessor_at,c.lo)
+      -- With no published predecessor, an earlier deletion cannot break a
+      -- dependency. Restore can introduce one, but only from visible raw data.
+      OR (restoring AND c.predecessor_at IS NULL AND EXISTS (
+          SELECT FROM rss_timeseries.samples x
+          WHERE (x.tenant_id,x.namespace,x.source,x.generation,x.series_digest)=(t,n,c.source,c.generation,c.series_digest)
+          AND x.observed_at>=greatest(lo_time,lower(c.impact)) AND x.observed_at<least(hi_time,c.lo)
+          AND rss_timeseries.visible(t,n,x.source,x.generation,x.series_digest,x.subject,x.resource,x.key,x.observed_at))));
 END $$;
 CREATE FUNCTION rss_timeseries.put_plan(t uuid,n text,i text,b bytea,s bytea,d boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
@@ -156,7 +171,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  END IF;
  INSERT INTO rss_timeseries.fences VALUES(t,n,i,k,sel,wanted,l,h,u,false);
  IF k='delete' THEN
-  PERFORM rss_timeseries.invalidate(t,n,sel,wanted,l,h);
+  PERFORM rss_timeseries.invalidate(t,n,sel,wanted,l,h,false);
  ELSIF k='pruned' THEN
   -- In-flight folds must recheck raw availability; retained materialized summaries stay valid.
   UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
@@ -167,12 +182,12 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $
  PERFORM rss_timeseries.lock_namespace(t,n);
  UPDATE rss_timeseries.fences SET restored=true WHERE tenant_id=t AND namespace=n AND id=i AND kind='delete' AND selection=sel AND lo=l AND hi=h AND NOT restored AND restore_until>floor(extract(epoch FROM clock_timestamp())*1000000)::bigint RETURNING series_digest INTO wanted;
  IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='TS004',MESSAGE='restore unavailable'; END IF;
- PERFORM rss_timeseries.invalidate(t,n,sel,wanted,l,h);
+ PERFORM rss_timeseries.invalidate(t,n,sel,wanted,l,h,true);
 END $$;
-CREATE FUNCTION rss_timeseries.put_summary(t uuid,n text,d bytea,m bytea,s text,g text,series bytea,sub text,res text,k text,l bigint,h bigint,impact_lo bigint,b bytea) RETURNS void
+CREATE FUNCTION rss_timeseries.put_summary(t uuid,n text,d bytea,m bytea,s text,g text,series bytea,sub text,res text,k text,l bigint,h bigint,impact_lo bigint,anchor_time bigint,b bytea) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
- INSERT INTO rss_timeseries.summaries VALUES(t,n,d,m,s,g,series,sub,res,k,l,h,int8range(impact_lo,h,'[)'),false,b) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET hi=excluded.hi,impact=excluded.impact,data=excluded.data,dirty=false;
+ INSERT INTO rss_timeseries.summaries VALUES(t,n,d,m,s,g,series,sub,res,k,l,h,int8range(impact_lo,h,'[)'),anchor_time,false,b) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET hi=excluded.hi,impact=excluded.impact,predecessor_at=excluded.predecessor_at,data=excluded.data,dirty=false;
 END $$;
 CREATE FUNCTION rss_timeseries.register_summary(t uuid,n text,d bytea,s bytea,l bigint,h bigint) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN

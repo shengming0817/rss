@@ -2,7 +2,7 @@ use crate::transaction::sql_error;
 use rss_timeseries::Error;
 use sqlx::{Connection, PgPool};
 // PostgreSQL 17 catalog projection; functions, columns, constraints, indexes and policies.
-const CATALOG: &str = "d143b8093187591dc0831af53c6b71d1";
+const CATALOG: &str = "9cdadaccc38ac043a4b6d0b36ef1d5b4";
 pub(crate) async fn validate(pool: &PgPool) -> Result<String, Error> {
     let mut lease = pool.acquire().await.map_err(sql_error)?;
     // Admission cancellation must not return a possibly open transaction to the pool.

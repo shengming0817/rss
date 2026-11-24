@@ -1067,3 +1067,99 @@ async fn tied_points_cross_internal_keyset_in_read_and_recompute() -> anyhow::Re
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn unrelated_fences_keep_pruned_counter_summary_readable() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-retained-reset").await?;
+    let mut definition = definition(TENANT)?.spec().clone();
+    definition.metric = Metric::Counter {
+        number: NumberKind::U64,
+        temporality: Temporality::Cumulative,
+    };
+    let d = Definition::new(definition)?;
+    f.register(&d).await?;
+    let samples = [21, 25, 50]
+        .into_iter()
+        .map(|at| {
+            ordered_sample(
+                &d,
+                &format!("c{at}"),
+                at,
+                Value::Number(Number::U64(at as u64)),
+                Some(0),
+            )
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let spec = ordered_spec(
+        &samples[0],
+        CoveragePolicy::ObservedOnly,
+        NonZeroU64::new(10),
+    )?;
+    f.write(&batch("initial", samples)?).await?;
+    let range = window(20, 30)?;
+    complete(
+        &f.store,
+        plan(
+            "fold",
+            MaintenanceAction::Recompute {
+                spec: spec.clone(),
+                window: range,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    let expected = ordered_read(&f.store, spec.clone(), range, AggregateOp::Increase).await?;
+    let frontier = Timestamp::new(60)?;
+    complete(
+        &f.store,
+        plan(
+            "cut",
+            MaintenanceAction::AdvanceCutoff {
+                selection: spec.selection(),
+                before: frontier,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    complete(
+        &f.store,
+        plan(
+            "prune",
+            MaintenanceAction::Prune {
+                selection: spec.selection(),
+                raw_before: frontier,
+                summaries_before: Timestamp::new(0)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    assert_eq!(f.count().await?, 1);
+    let empty = window(1, 2)?;
+    for (name, action) in [
+        (
+            "delete-empty",
+            MaintenanceAction::Delete {
+                selection: spec.selection(),
+                window: empty,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+        ),
+        (
+            "restore-empty",
+            MaintenanceAction::Restore {
+                selection: spec.selection(),
+                window: empty,
+                deletion_fence: id("delete-empty")?,
+            },
+        ),
+    ] {
+        complete(&f.store, plan(name, action, 1)?).await?;
+        let p = ordered_read(&f.store, spec.clone(), range, AggregateOp::Increase).await?;
+        assert_eq!(p.refreshed_through, Some(range.end()));
+        assert_eq!(p.buckets, expected.buckets);
+    }
+    Ok(())
+}
