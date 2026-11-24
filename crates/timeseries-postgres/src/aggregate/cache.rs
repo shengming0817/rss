@@ -38,7 +38,7 @@ pub(super) async fn plan(
         FROM unnest($4::bigint[],$5::bigint[]) WITH ORDINALITY w(l,h,idx)
         CROSS JOIN LATERAL (SELECT spec_digest,lo,hi,octet_length(data) AS size
           FROM rss_timeseries.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3
-          AND NOT dirty AND lo>=w.l AND hi<=w.h ORDER BY lo,hi DESC LIMIT $6) t
+          AND NOT dirty AND lo>=w.l AND lo<w.h AND hi<=w.h ORDER BY lo,hi DESC LIMIT $6) t
         ORDER BY w.idx,t.lo,t.hi DESC")
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(spec.semantics()?.as_bytes().as_slice())
         .bind(windows.iter().map(|w| w.start().micros()).collect::<Vec<_>>())

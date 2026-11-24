@@ -131,9 +131,14 @@ CREATE FUNCTION rss_timeseries.invalidate(t uuid,n text,sel jsonb,wanted bytea,l
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
  UPDATE rss_timeseries.namespaces SET revision=revision+1 WHERE tenant_id=t AND namespace=n;
- UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND NOT dirty
- AND impact && int8range(lo_time,hi_time,'[)')
- AND rss_timeseries.matches_row(sel,wanted,t,n,source,generation,series_digest,subject,resource,key);
+ IF sel->>'selection'='exact' AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}') THEN
+  UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND NOT dirty
+   AND impact && int8range(lo_time,hi_time,'[)') AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted);
+ ELSIF sel->>'selection'='resource' AND (t::text,n)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}') THEN
+  UPDATE rss_timeseries.summaries SET dirty=true WHERE tenant_id=t AND namespace=n AND NOT dirty
+   AND impact && int8range(lo_time,hi_time,'[)') AND (subject,resource)=(sel->>'subject',sel->>'resource')
+     AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key);
+ END IF;
 END $$;
 CREATE FUNCTION rss_timeseries.put_plan(t uuid,n text,i text,b bytea,s bytea,d boolean) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ BEGIN
@@ -182,11 +187,31 @@ END $$;
 CREATE FUNCTION rss_timeseries.prune_rows(t uuid,n text,sel jsonb,r bigint,s bigint,cap integer,wanted bytea) RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_timeseries AS $$ DECLARE total integer:=0; changed integer; BEGIN
  PERFORM rss_timeseries.lock_namespace(t,n);
- DELETE FROM rss_timeseries.samples WHERE (tenant_id,namespace,source,generation,sample_id,observed_at) IN
- (SELECT tenant_id,namespace,source,generation,sample_id,observed_at FROM rss_timeseries.samples WHERE tenant_id=t AND namespace=n AND observed_at<r AND rss_timeseries.matches_row(sel,wanted,t,n,source,generation,series_digest,subject,resource,key) ORDER BY observed_at,source,generation,sample_id LIMIT cap);
+ WITH scoped AS NOT MATERIALIZED (
+  SELECT * FROM rss_timeseries.samples WHERE tenant_id=t AND namespace=n AND observed_at<r
+ ), victims AS (
+  SELECT tenant_id,namespace,source,generation,sample_id,observed_at FROM scoped WHERE sel->>'selection'='exact' AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}')
+   AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted)
+  UNION ALL
+  SELECT tenant_id,namespace,source,generation,sample_id,observed_at FROM scoped WHERE sel->>'selection'='resource' AND (t::text,n)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}')
+   AND (subject,resource)=(sel->>'subject',sel->>'resource')
+     AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key)
+  ORDER BY observed_at,source,generation,sample_id LIMIT cap
+ )
+ DELETE FROM rss_timeseries.samples WHERE (tenant_id,namespace,source,generation,sample_id,observed_at) IN (SELECT * FROM victims);
  GET DIAGNOSTICS changed=ROW_COUNT; total:=total+changed;
- DELETE FROM rss_timeseries.summaries WHERE (tenant_id,namespace,spec_digest,lo) IN
- (SELECT tenant_id,namespace,spec_digest,lo FROM rss_timeseries.summaries WHERE tenant_id=t AND namespace=n AND hi<=s AND rss_timeseries.matches_row(sel,wanted,t,n,source,generation,series_digest,subject,resource,key) ORDER BY lo,spec_digest LIMIT greatest(cap-total,0));
+ WITH scoped AS NOT MATERIALIZED (
+  SELECT * FROM rss_timeseries.summaries WHERE tenant_id=t AND namespace=n AND hi<=s
+ ), victims AS (
+  SELECT tenant_id,namespace,spec_digest,lo FROM scoped WHERE sel->>'selection'='exact' AND (t::text,n)=(sel#>>'{stream,scope,tenant}',sel#>>'{stream,scope,namespace}')
+   AND (source,generation,series_digest)=(sel#>>'{stream,source}',sel#>>'{stream,generation}',wanted)
+  UNION ALL
+  SELECT tenant_id,namespace,spec_digest,lo FROM scoped WHERE sel->>'selection'='resource' AND (t::text,n)=(sel#>>'{scope,tenant}',sel#>>'{scope,namespace}')
+   AND (subject,resource)=(sel->>'subject',sel->>'resource')
+     AND (jsonb_array_length(sel->'keys')=0 OR (sel->'keys') ? key)
+  ORDER BY lo,spec_digest LIMIT greatest(cap-total,0)
+ )
+ DELETE FROM rss_timeseries.summaries WHERE (tenant_id,namespace,spec_digest,lo) IN (SELECT * FROM victims);
  GET DIAGNOSTICS changed=ROW_COUNT; total:=total+changed;
  DELETE FROM rss_timeseries.fences WHERE (tenant_id,namespace,id) IN
  (SELECT tenant_id,namespace,id FROM rss_timeseries.fences WHERE tenant_id=t AND namespace=n AND kind='delete' AND selection=sel AND hi<=r AND (restored OR restore_until<=floor(extract(epoch FROM clock_timestamp())*1000000)::bigint) ORDER BY id LIMIT greatest(cap-total,0));

@@ -888,3 +888,182 @@ async fn retained_tiles_can_cover_a_window_past_a_longer_dead_end() -> anyhow::R
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn expired_hold_predecessor_does_not_consume_the_bucket_budget() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-expired-hold").await?;
+    let mut definition = definition(TENANT)?.spec().clone();
+    definition.metric = Metric::Bool;
+    let d = Definition::new(definition)?;
+    f.register(&d).await?;
+    let old = ordered_sample(&d, &"\"".repeat(250), 1, Value::Bool(false), None)?;
+    let current = ordered_sample(&d, "current", 100, Value::Bool(true), None)?;
+    let spec = ordered_spec(
+        &current,
+        CoveragePolicy::HoldLast(NonZeroU64::new(5).ok_or(Error::InvalidInput)?),
+        None,
+    )?;
+    let cap = serde_json::to_vec(&current)?.len() + 128;
+    assert!(serde_json::to_vec(&old)?.len() > cap);
+    f.write(&batch("initial", vec![old, current])?).await?;
+    let mut limits = limits()?;
+    limits.max_bytes = NonZeroU32::new(cap as u32).ok_or(Error::InvalidInput)?;
+    let narrow = PgStore::new(
+        f.profile.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        Timer,
+        limits,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    let range = window(100, 110)?;
+    let page = ordered_read(&narrow, spec.clone(), range, AggregateOp::Coverage).await?;
+    assert_eq!(page.buckets[0].covered_micros, 5);
+    complete(
+        &narrow,
+        plan(
+            "fold",
+            MaintenanceAction::Recompute {
+                spec: spec.clone(),
+                window: range,
+            },
+            2,
+        )?,
+    )
+    .await?;
+    assert_eq!(
+        ordered_read(&narrow, spec.clone(), range, AggregateOp::Coverage)
+            .await?
+            .refreshed_through,
+        Some(range.end())
+    );
+    f.write(&batch(
+        "at-lower-bound",
+        vec![ordered_sample(
+            &d,
+            "boundary",
+            95,
+            Value::Bool(false),
+            None,
+        )?],
+    )?)
+    .await?;
+    let page = ordered_read(&f.store, spec.clone(), range, AggregateOp::Transitions).await?;
+    assert!(matches!(&page.buckets[0].value,AggregateValue::Transitions(v) if v.len()==1));
+    complete(
+        &f.store,
+        plan(
+            "interrupt",
+            MaintenanceAction::Delete {
+                selection: spec.selection(),
+                window: window(97, 98)?,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+            1,
+        )?,
+    )
+    .await?;
+    let page = ordered_read(&f.store, spec, range, AggregateOp::Transitions).await?;
+    assert!(matches!(&page.buckets[0].value,AggregateValue::Transitions(v) if v.is_empty()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn far_counter_predecessor_controls_cached_reset_flags() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-reset-impact").await?;
+    let mut definition = definition(TENANT)?.spec().clone();
+    definition.metric = Metric::Counter {
+        number: NumberKind::U64,
+        temporality: Temporality::Cumulative,
+    };
+    let d = Definition::new(definition)?;
+    f.register(&d).await?;
+    let prior = ordered_sample(&d, "prior", 50, Value::Number(Number::U64(100)), Some(0))?;
+    let current = ordered_sample(&d, "current", 105, Value::Number(Number::U64(5)), Some(0))?;
+    let sp = ordered_spec(&current, CoveragePolicy::ObservedOnly, NonZeroU64::new(10))?;
+    f.write(&batch("counter", vec![prior, current])?).await?;
+    let range = window(100, 110)?;
+    for (name, reset) in [("initial", true), ("deleted", false), ("restored", true)] {
+        let action = match name {
+            "deleted" => Some(MaintenanceAction::Delete {
+                selection: sp.selection(),
+                window: window(50, 51)?,
+                restore_until: Timestamp::new(i64::MAX)?,
+            }),
+            "restored" => Some(MaintenanceAction::Restore {
+                selection: sp.selection(),
+                window: window(50, 51)?,
+                deletion_fence: id("deleted")?,
+            }),
+            _ => None,
+        };
+        if let Some(action) = action {
+            complete(&f.store, plan(name, action, 1)?).await?;
+        }
+        let raw = ordered_read(&f.store, sp.clone(), range, AggregateOp::Increase).await?;
+        assert_eq!(raw.refreshed_through, None);
+        assert_eq!(
+            raw.buckets[0]
+                .completeness
+                .contains(&Completeness::ResetBoundary),
+            reset
+        );
+        complete(
+            &f.store,
+            plan(
+                &format!("fold-{name}"),
+                MaintenanceAction::Recompute {
+                    spec: sp.clone(),
+                    window: range,
+                },
+                2,
+            )?,
+        )
+        .await?;
+        let cached = ordered_read(&f.store, sp.clone(), range, AggregateOp::Increase).await?;
+        assert_eq!(cached.refreshed_through, Some(range.end()));
+        assert_eq!(cached.buckets[0].completeness, raw.buckets[0].completeness);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn tied_points_cross_internal_keyset_in_read_and_recompute() -> anyhow::Result<()> {
+    let f = Fixture::new("ts-tied-scan").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let mut samples = Vec::new();
+    for i in 0..65 {
+        let mut input = sample(&d, &format!("point-{i:02}"), 3, i)?.input().clone();
+        input.sequence = 1;
+        samples.push(Sample::new(input)?);
+    }
+    f.write(&batch("tied", samples)?).await?;
+    let sp = spec(&d, 10)?;
+    let range = window(0, 10)?;
+    let raw = aggregate(&f.store, sp.clone(), 0, 10).await?;
+    let request = Authorized::<MaintenanceRequest>::verify(
+        &authority(TENANT)?,
+        plan(
+            "fold",
+            MaintenanceAction::Recompute {
+                spec: sp.clone(),
+                window: range,
+            },
+            65,
+        )?,
+    )?;
+    assert!(matches!(
+        confirmed(f.store.step(&request, None, deadline()?).await?)?,
+        MaintenanceProgress::Complete { processed: 65, .. }
+    ));
+    let cached = aggregate(&f.store, sp, 0, 10).await?;
+    assert_eq!(cached.refreshed_through, Some(range.end()));
+    for p in [raw, cached] {
+        assert!(
+            matches!(p.buckets[0].value,AggregateValue::Mean {sum:Sum::U128(2080),count} if count.get()==65)
+        );
+    }
+    Ok(())
+}

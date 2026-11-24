@@ -138,17 +138,21 @@ impl<C: Clock> Writer for PgStore<C> {
         deadline: Deadline,
     ) -> Result<Outcome<Receipt>, Error> {
         let tenant = request.request().stream().scope().tenant();
-        let connection = self.acquire(tenant, deadline).await?;
-        let batch = PreparedBatch::new(
-            request.request(),
-            &self.clock,
-            deadline,
-            self.limits.replay_micros.get(),
-        )?;
         let out = self
-            .transaction_on(connection, tenant, deadline, Mode::Write, move |c, _| {
-                Box::pin(batch.admit(c))
-            })
+            .prepared_transaction(
+                tenant,
+                deadline,
+                Mode::Write,
+                || {
+                    PreparedBatch::new(
+                        request.request(),
+                        &self.clock,
+                        deadline,
+                        self.limits.replay_micros.get(),
+                    )
+                },
+                |c, _, batch| Box::pin(batch.admit(c)),
+            )
             .await?;
         Ok(flatten(out))
     }

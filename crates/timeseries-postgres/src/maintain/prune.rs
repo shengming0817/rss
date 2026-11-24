@@ -48,10 +48,7 @@ async fn safe_raw(
             serde_json::from_slice(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)
                 .map_err(|_| Error::Invariant)?;
         halo = halo.max(spec.lookback());
-        if matches!(
-            spec.series().definition().spec().metric,
-            Metric::Bool | Metric::State { .. }
-        ) && spec.coverage() == CoveragePolicy::ObservedOnly
+        if crate::aggregate::needs_history_anchor(&spec)
             && let Some(prior) = crate::aggregate::predecessor_time(c, &spec, raw_before).await?
         {
             anchor_limit = anchor_limit.min(prior.micros());

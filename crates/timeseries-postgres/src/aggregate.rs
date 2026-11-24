@@ -197,13 +197,13 @@ async fn predecessor_row(
     let s = spec.stream();
     sqlx::query("SELECT observed_at,CASE WHEN $7::bigint IS NOT NULL AND octet_length(raw)::bigint <= $7 THEN raw END AS raw
         FROM rss_timeseries.samples WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3
-        AND generation=$4 AND series_digest=$5 AND observed_at<$6
+        AND generation=$4 AND series_digest=$5 AND observed_at<$6 AND observed_at>=$8
         AND rss_timeseries.visible(tenant_id,namespace,source,generation,series_digest,subject,resource,key,observed_at)
         ORDER BY observed_at DESC,sequence DESC,sample_id DESC LIMIT 1")
         .bind(s.scope().tenant().to_string()).bind(s.scope().namespace().as_str())
         .bind(s.source().as_str()).bind(s.generation().as_str())
         .bind(spec.series().digest()?.as_bytes().as_slice()).bind(at.micros())
-        .bind(max_bytes.map(i64::from)).fetch_optional(c).await.map_err(sql_error)
+        .bind(max_bytes.map(i64::from)).bind(dependency_start(spec,at.micros())).fetch_optional(c).await.map_err(sql_error)
 }
 pub(crate) async fn ensure_boundary(
     c: &mut PgConnection,
@@ -238,16 +238,25 @@ pub(crate) async fn ensure_boundary(
 
 // Earliest observation that can affect a bucket starting at this timestamp.
 fn dependency_start(spec: &SummarySpec, start: i64) -> i64 {
-    let unbounded = matches!(
-        spec.series().definition().spec().metric,
-        Metric::Bool | Metric::State { .. }
-    ) && spec.coverage() == CoveragePolicy::ObservedOnly;
-    if unbounded {
+    if needs_history_anchor(spec) {
         0
     } else {
         start
             .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
             .max(0)
+    }
+}
+
+// Reset/invalid predecessor flags for cumulative counters are evaluated before
+// max_gap. ObservedOnly transitions likewise depend on the last visible state.
+pub(crate) fn needs_history_anchor(spec: &SummarySpec) -> bool {
+    match spec.series().definition().spec().metric {
+        Metric::Counter {
+            temporality: Temporality::Cumulative,
+            ..
+        } => true,
+        Metric::Bool | Metric::State { .. } => spec.coverage() == CoveragePolicy::ObservedOnly,
+        _ => false,
     }
 }
 

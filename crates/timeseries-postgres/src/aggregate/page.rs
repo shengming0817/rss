@@ -89,7 +89,9 @@ impl<C: Clock> Read<'_, C> {
                 return Err(Error::HistoryExpired);
             }
             let mut builder = SummaryBuilder::new(spec.clone(), w)?;
-            if let Some(p) = prior.as_ref() {
+            if let Some(p) = prior.as_ref()
+                && p.input().observed_at.micros() >= dependency_start(spec, w.start().micros())
+            {
                 builder.push(p.clone(), point_limit)?;
             }
             let gap_start = builder.last_observed_at().unwrap_or(w.start());

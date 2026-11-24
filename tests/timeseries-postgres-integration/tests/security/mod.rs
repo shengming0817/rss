@@ -303,3 +303,73 @@ async fn definition_lock_wait_precedes_receipt_clock() -> anyhow::Result<()> {
     assert!(confirmed(outcome?)?.received_at().micros() >= release?);
     Ok(())
 }
+
+#[tokio::test]
+async fn waiting_for_the_pool_spends_the_transaction_watchdog() -> anyhow::Result<()> {
+    struct Frozen(Instant);
+    impl Clock for Frozen {
+        fn now(&self) -> Instant {
+            self.0
+        }
+    }
+    let f = Fixture::new("ts-single-watchdog").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let clock = Frozen(Timer.now());
+    let cutoff = Deadline::from_timeout(&clock, Duration::from_secs(10))?;
+    let store = PgStore::new(
+        f.profile.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        clock,
+        limits()?,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    let request = Authorized::<Batch>::verify(
+        &authority(TENANT)?,
+        batch("wait", vec![sample(&d, "a", 1, 1)?])?,
+    )?;
+    let mut occupied = Vec::new();
+    for _ in 0..f.pool.options().get_max_connections() {
+        occupied.push(f.pool.acquire().await?);
+    }
+    let mut lock = f.admin.begin().await?;
+    sqlx::query("SELECT 1 FROM rss_timeseries.namespaces FOR UPDATE")
+        .execute(&mut *lock)
+        .await?;
+    tokio::time::pause();
+    // Drive real socket I/O without automatic virtual-time jumps.
+    let mut activity = tokio::task::JoinSet::new();
+    activity.spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let write = store.write(&request, cutoff);
+    tokio::pin!(write);
+    tokio::select! { biased; result=&mut write => anyhow::bail!("early write {result:?}"), ()=std::future::ready(())=>{} }
+    tokio::time::advance(Duration::from_secs(8)).await;
+    drop(occupied.pop());
+    let locked = async {
+        let probe_cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(10))?;
+        loop {
+            anyhow::ensure!(
+                !probe_cutoff.is_expired(Timer.now()),
+                "write never reached the namespace lock"
+            );
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='ts_runtime' AND wait_event_type='Lock' AND query LIKE '%admit_batch%')").fetch_one(&f.admin).await?;
+            if waiting {
+                return anyhow::Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::select! { result=&mut write => anyhow::bail!("unexpected settlement {result:?}"), result=locked => result? }
+    tokio::time::advance(Duration::from_millis(2001)).await;
+    tokio::select! { biased; result=&mut write => assert!(matches!(result?,Outcome::Unknown)), ()=std::future::ready(()) => anyhow::bail!("watchdog restarted after acquire") }
+    tokio::time::resume();
+    drop(activity);
+    lock.rollback().await?;
+    Ok(())
+}

@@ -159,8 +159,8 @@ AdvanceCutoff permanently rejects new observations before the chosen boundary. P
 protects unfinished requested summaries, Counter/state boundary input and unexpired
 restore windows. It hides the pruned range before bounded physical removal, while
 completed retained summaries remain queryable. The raw frontier may lag the requested
-cutoff by the greatest necessary Counter/state lookback. ObservedOnly transitions
-also retain their last predecessor, independently of duration coverage. If a newly
+cutoff by the greatest necessary Counter/state lookback. ObservedOnly transitions and cumulative Counter reset detection
+also retain their last visible predecessor, independently of the duration or rate lookback. If a newly
 requested computation has already lost required boundary input, it returns HistoryExpired. Raw and summary cutoffs use
 observation time; ExpireReceipts uses first acceptance time and never shortens replay_until.
 Receipt expiry is a stream operation, so a series-scoped grant cannot erase unrelated
