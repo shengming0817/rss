@@ -891,19 +891,28 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("SAVEPOINT forbidden_inbox")
         .execute(&mut *tx)
         .await?;
-    assert!(sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until) VALUES($1::uuid,'foreign-domain','projection','foreign',gen_random_uuid(),clock_timestamp()+interval '5 seconds')")
+    assert!(sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint) VALUES($1::uuid,'foreign-domain','projection','foreign',gen_random_uuid(),clock_timestamp()+interval '5 seconds',decode(repeat('00',32),'hex'))")
         .bind(tenant().to_string()).execute(&mut *tx).await.is_err());
     sqlx::query("ROLLBACK TO SAVEPOINT forbidden_inbox")
         .execute(&mut *tx)
         .await?;
+    let error = sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint,domain,partition_key) VALUES($1::uuid,'atomic-success','projection','orders',gen_random_uuid(),clock_timestamp(),decode(repeat('00',32),'hex'),'other','lane')")
+        .bind(tenant().to_string()).execute(&mut *tx).await.expect_err("fixed projection cannot write ordinary queue heads");
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    sqlx::query("ROLLBACK TO SAVEPOINT forbidden_inbox")
+        .execute(&mut *tx)
+        .await?;
     // Keep the source domain valid and vary only consumer_group, with table ACLs admitted.
-    let granted: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'rss_transactional_messaging.inbox','INSERT') AND has_table_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','INSERT')")
+    let granted: bool = sqlx::query_scalar("SELECT (SELECT bool_and(has_column_privilege(current_user,'rss_transactional_messaging.inbox',col,'INSERT')) FROM unnest(ARRAY['tenant_id','message_id','consumer_group','contract','lease_token','lease_until','fingerprint','domain','partition_key']) col) AND has_table_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','INSERT')")
         .fetch_one(&mut *tx).await?;
     assert!(granted);
     sqlx::query("SAVEPOINT wrong_group")
         .execute(&mut *tx)
         .await?;
-    let error = sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until) VALUES($1::uuid,'atomic-success','wrong-group','foreign',gen_random_uuid(),clock_timestamp()+interval '5 seconds')")
+    let error = sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint) VALUES($1::uuid,'atomic-success','wrong-group','foreign',gen_random_uuid(),clock_timestamp()+interval '5 seconds',decode(repeat('00',32),'hex'))")
         .bind(tenant().to_string()).execute(&mut *tx).await.expect_err("same-domain wrong group must fail RLS");
     assert_eq!(
         error.as_database_error().and_then(|e| e.code()).as_deref(),

@@ -56,7 +56,7 @@ the window as per-subscription prefetch. MQTT accepts one. Independent deliverie
 completion; one subscription serializes verified tenant/domain/partition keys through settlement.
 A rejected terminal head retires that subscription before starting queued successors. PostgreSQL also
 retains the first admitted message for each tenant/group/domain/partition across subscriptions and
-restarts. A different message waits for success or authorized gap acceptance. Admission starts at
+restarts. A different message is requeued until success or authorized gap acceptance. The subscription stays open so the original head can be redelivered and other partitions can run. Admission starts at
 the first verified claim observed by the consumer; the broker envelope carries no source ordinal.
 Queued and busy deliveries count toward the same window and keep their original deadlines.
 A live claim or unstarted capacity wait keeps the handle unacknowledged and rechecks at one quarter of the operation budget, clamped to 1–250 ms, until the original cutoff.

@@ -36,16 +36,18 @@ fn envelope(
     id: &str,
     payload: &[u8],
 ) -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error>> {
-    envelope_for_tenant(
+    envelope_in_partition(
         id,
         payload,
         TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+        Some("customer-7"),
     )
 }
-fn envelope_for_tenant(
+fn envelope_in_partition(
     id: &str,
     payload: &[u8],
     tenant: TenantId,
+    key: Option<&str>,
 ) -> Result<MessageEnvelope<Vec<u8>>, Box<dyn std::error::Error>> {
     let metadata = MessageMetadata::new(
         AuthoredMessageMetadata::new(
@@ -63,7 +65,7 @@ fn envelope_for_tenant(
         ),
         MessageMetadataExtensions::new(
             None,
-            Some(PartitionKey::parse("customer-7")?),
+            key.map(PartitionKey::parse).transpose()?,
             None,
             BTreeMap::new(),
         ),
@@ -437,10 +439,11 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     };
     assert!(receipt.matches(&identity, MessageFingerprint::of(&message)));
     assert_eq!(receipt.disposition(), TerminalDisposition::Succeeded);
-    let other_message = envelope_for_tenant(
+    let other_message = envelope_in_partition(
         "message-inbox",
         b"payload",
         TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+        Some("customer-7"),
     )?;
     let other_binding = verified(&other_message, "orders-worker")?;
     let other = other_binding.identity().clone();
@@ -468,6 +471,21 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         _ => return Err("release fixture must acquire".into()),
     };
     releasable.release(claim, deadline(&clock)?).await?;
+    let unkeyed = envelope_in_partition(
+        message.id().as_str(),
+        b"payload",
+        identity.tenant_id(),
+        None,
+    )?;
+    let altered = verified(&unkeyed, "orders-worker")?;
+    assert_eq!(
+        releasable
+            .claim(&altered, deadline(&clock)?)
+            .await
+            .err()
+            .map(|e| e.kind()),
+        Some(MessagingErrorKind::Conflict)
+    );
     assert!(matches!(
         releasable.claim(&binding, deadline(&clock)?).await?,
         IdempotencyDisposition::Acquired(_)
@@ -546,7 +564,12 @@ async fn outbox_same_message_id_is_independent_across_tenants() -> TestResult {
             store
                 .append(
                     &mut (),
-                    PendingMessage::new(envelope_for_tenant("shared-id", b"payload", tenant)?)
+                    PendingMessage::new(envelope_in_partition(
+                        "shared-id",
+                        b"payload",
+                        tenant,
+                        Some("customer-7")
+                    )?)
                 )
                 .await?,
             AppendOutcome::Inserted
@@ -588,7 +611,12 @@ async fn outbox_same_message_id_is_independent_across_tenants() -> TestResult {
             store
                 .append(
                     &mut (),
-                    PendingMessage::new(envelope_for_tenant("shared-id", b"payload", tenant)?)
+                    PendingMessage::new(envelope_in_partition(
+                        "shared-id",
+                        b"payload",
+                        tenant,
+                        Some("customer-7")
+                    )?)
                 )
                 .await?,
             AppendOutcome::AlreadyPresent

@@ -33,6 +33,8 @@ pub enum ProcessingDisposition {
     CapacityBusy,
     /// Another live claim owns this message.
     InProgress,
+    /// Another message owns this partition; this delivery was requeued without a claim.
+    PartitionBlocked,
     /// A matching durable terminal receipt bypassed the handler.
     Duplicate(TerminalDisposition),
     /// The consumer transaction committed a terminal result.
@@ -247,7 +249,7 @@ where
             Ok(match busy {
                 IdempotencyDisposition::CapacityBusy => ProcessingDisposition::CapacityBusy,
                 IdempotencyDisposition::InProgress => ProcessingDisposition::InProgress,
-                _ => ProcessingDisposition::Deferred,
+                _ => ProcessingDisposition::PartitionBlocked,
             })
         }
         Err(error) => {
@@ -345,7 +347,12 @@ where
             Ok(IdempotencyDisposition::InProgress) => execution
                 .emitter
                 .emit(TransactionalMessagingObservation::ConsumerClaimInProgress),
-            Ok(IdempotencyDisposition::PartitionBlocked) => {}
+            Ok(IdempotencyDisposition::PartitionBlocked) => {
+                execution
+                    .emitter
+                    .emit(TransactionalMessagingObservation::ConsumerPartitionBlocked);
+                break claim;
+            }
             _ => break claim,
         }
         let wake = cutoff.capped(execution.timer, interval);
@@ -1159,6 +1166,7 @@ fn can_continue(
             *recovery_attempt = NonZeroU32::MIN;
             !ordered || terminal == TerminalDisposition::Succeeded
         }
+        Ok(ProcessingDisposition::PartitionBlocked) => true,
         Ok(ProcessingDisposition::Rejected(_)) => {
             *recovery_attempt = NonZeroU32::MIN;
             true

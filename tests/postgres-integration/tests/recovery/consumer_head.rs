@@ -124,7 +124,7 @@ pub(super) async fn run(
         assert_eq!(
             deliver(&restarted, successor.clone(), &count).await?,
             (
-                ProcessingDisposition::Deferred,
+                ProcessingDisposition::PartitionBlocked,
                 vec![SettlementKind::Requeue]
             )
         );
@@ -177,6 +177,12 @@ async fn resolve(
     let authorized = request(entry.target.clone(), entry.version, accepted.clone()).await?;
     let mut wrong = head.clone();
     wrong.partition = PartitionKey::parse("different")?;
+    let missing = page(
+        store,
+        Query::inspect(tenant(), Target::ConsumerHead(wrong.clone())),
+    )
+    .await?;
+    assert!(missing.entries.is_empty());
     let foreign = request(Target::ConsumerHead(wrong), entry.version, accepted.clone()).await?;
     let execution = crate::execution(tenant(), 1);
     assert_eq!(
@@ -197,10 +203,30 @@ async fn resolve(
     );
     assert!(sqlx::query("UPDATE rss_transactional_messaging.inbox SET resolved_by=gen_random_uuid() WHERE message_id=$1").bind(message.id().as_str()).execute(&mut *tx).await.is_err());
     tx.rollback().await?;
-    let (receipt, delivery) = tokio::join!(
-        store.mutate(execution, &authorized, deadline()),
-        deliver(runtime, successor.clone(), count)
-    );
+    // Keep the resolver between the Inbox update and its mandatory receipt INSERT.
+    let mut gate = owner.begin().await?;
+    sqlx::query("LOCK TABLE rss_transactional_messaging.recovery_operations IN SHARE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let gate_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    let race = async {
+        let resolver_pid = waiter(owner, gate_pid).await?;
+        let unblock = async {
+            waiter(owner, resolver_pid).await?;
+            assert_eq!(
+                count.0.load(Ordering::SeqCst),
+                1,
+                "successor has not entered its effect"
+            );
+            gate.commit().await?;
+            anyhow::Ok(())
+        };
+        let (delivery, ()) = tokio::try_join!(deliver(runtime, successor.clone(), count), unblock)?;
+        anyhow::Ok(delivery)
+    };
+    let (receipt, delivery) = tokio::join!(store.mutate(execution, &authorized, deadline()), race);
     assert_eq!(committed(receipt)?.outcome, Outcome::Resolved);
     assert_eq!(
         delivery?.0,
@@ -222,4 +248,12 @@ async fn resolve(
         matches!(inspected.entries[0].details,Details::ConsumerHead { resolved_by: Some(id),.. } if id==authorized.request().operation())
     );
     Ok(())
+}
+
+async fn waiter(owner: &sqlx::PgPool, blocker: i32) -> anyhow::Result<i32> {
+    testkit::await_try(Duration::from_secs(2), async || {
+        Ok::<_, anyhow::Error>(sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity WHERE wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) LIMIT 1",
+        ).bind(blocker).fetch_optional(owner).await?)
+    }).await
 }

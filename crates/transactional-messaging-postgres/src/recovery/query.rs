@@ -21,30 +21,19 @@ pub(super) async fn query(
         return Err(Error::Unauthorized);
     }
     let result = runtime.local_tx_with_context(binding, deadline, request, |request, tx| Box::pin(async move {
-        let sql = match request.source() {
-            Source::ConsumerHead => "SELECT *, CASE WHEN resolved_by IS NULL THEN 1 ELSE 2 END::bigint AS recovery_version
-                FROM (SELECT message_id || '/' || consumer_group AS key, message_id, consumer_group, domain,partition_key,fingerprint,disposition AS reason,resolved_by::text
-                FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND partition_key IS NOT NULL AND disposition IN ('rejected_permanent','rejected_invariant')
-                AND (resolved_by IS NULL OR $3::text IS NOT NULL)) AS heads
-                WHERE ($2::text IS NULL OR key COLLATE \"C\" > $2) AND ($3::text IS NULL OR key COLLATE \"C\"=$3)
-                ORDER BY key COLLATE \"C\" LIMIT $4",
-            Source::Consumer => "SELECT capsule IS NOT NULL AS hot_available, id::text AS key, message_id, recovery_version, false AS resolved, consumer_group,contract,contract_version,schema_digest,reason,(extract(epoch FROM created_at)*1000000)::bigint AS captured_at, (SELECT count(*) FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed') AS replay_count, (SELECT replay_message_id FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed' ORDER BY created_at DESC,operation_id DESC LIMIT 1) AS last_replay FROM rss_transactional_messaging.consumer_dead_letter d WHERE tenant_id=$1::uuid AND ($2::text IS NULL OR id::text COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR id::text=$3) ORDER BY id::text COLLATE \"C\" LIMIT $4",
-            Source::Outbox => "SELECT message_id AS key, message_id, recovery_version, status='resolved' AS resolved, envelope::text,payload,fingerprint,(extract(epoch FROM automatic_retry_deadline)*1000000)::bigint AS deadline, automatic_retry_deadline<=clock_timestamp() AS expired FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND status IN ('dead_letter','resolved') AND ($2::text IS NULL OR message_id COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR message_id=$3) ORDER BY message_id COLLATE \"C\" LIMIT $4",
+        let query = match request.source() {
+            Source::ConsumerHead => head_query(request)?,
+            Source::Consumer => common_query("SELECT capsule IS NOT NULL AS hot_available, id::text AS key, message_id, recovery_version, false AS resolved, consumer_group,contract,contract_version,schema_digest,reason,(extract(epoch FROM created_at)*1000000)::bigint AS captured_at, (SELECT count(*) FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed') AS replay_count, (SELECT replay_message_id FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed' ORDER BY created_at DESC,operation_id DESC LIMIT 1) AS last_replay FROM rss_transactional_messaging.consumer_dead_letter d WHERE tenant_id=$1::uuid AND ($2::text IS NULL OR id::text COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR id::text=$3) ORDER BY id::text COLLATE \"C\" LIMIT $4",request),
+            Source::Outbox => common_query("SELECT message_id AS key, message_id, recovery_version, status='resolved' AS resolved, envelope::text,payload,fingerprint,(extract(epoch FROM automatic_retry_deadline)*1000000)::bigint AS deadline, automatic_retry_deadline<=clock_timestamp() AS expired FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND status IN ('dead_letter','resolved') AND ($2::text IS NULL OR message_id COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR message_id=$3) ORDER BY message_id COLLATE \"C\" LIMIT $4",request),
         };
-        let rows = sqlx::query(sql).bind(request.tenant().to_string()).bind(request.after()).bind(request.target().map(Target::key)).bind(i64::from(request.limit())+1).fetch_all(&mut *tx.connection).await?;
+        let rows = query.fetch_all(&mut *tx.connection).await?;
         let has_more = rows.len() > usize::from(request.limit());
         let mut entries = Vec::new();
         let mut last = None;
         for row in rows.into_iter().take(usize::from(request.limit())) {
             let key: String = row.try_get("key")?;
             let target = match request.source() {
-                Source::ConsumerHead => {
-                    let target = Target::ConsumerHead(head(&row)?);
-                    if request.target().is_some_and(|expected| *expected != target) {
-                        return Err(Error::NotFound.into());
-                    }
-                    target
-                }
+                Source::ConsumerHead => Target::ConsumerHead(head(&row)?),
                 Source::Consumer => Target::DeadLetter(DeadLetterId::parse(&key)?),
                 Source::Outbox => Target::Outbox(MessageId::parse(&key).map_err(|_| Error::Invalid)?),
             };
@@ -56,6 +45,48 @@ pub(super) async fn query(
         Ok::<_, PgError>(Page { entries, next_cursor: if has_more { last.map(|key| request.cursor(&key)) } else { None } })
     })).await;
     map_attempt(result).fold(Ok, Err, Err, Err, Err, Err)
+}
+
+type PgQuery<'a> = sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>;
+
+fn common_query<'a>(sql: &'static str, request: &'a Query) -> PgQuery<'a> {
+    sqlx::query(sql)
+        .bind(request.tenant().to_string())
+        .bind(request.after())
+        .bind(request.target().map(Target::key))
+        .bind(i64::from(request.limit()) + 1)
+}
+
+fn head_query(request: &Query) -> Result<PgQuery<'_>, PgError> {
+    macro_rules! rows {
+        ($filter:literal) => {
+            concat!(
+                "SELECT message_id || '/' || consumer_group AS key, message_id,consumer_group,domain,partition_key,
+        fingerprint,disposition AS reason,resolved_by::text, CASE WHEN resolved_by IS NULL THEN 1 ELSE 2 END::bigint AS recovery_version
+        FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND partition_key IS NOT NULL
+        AND disposition IN ('rejected_permanent','rejected_invariant')",
+                $filter
+            )
+        };
+    }
+    let tenant = request.tenant().to_string();
+    if let Some(Target::ConsumerHead(head)) = request.target() {
+        return Ok(sqlx::query(rows!(" AND message_id=$2 AND consumer_group=$3 AND domain=$4 AND partition_key=$5 AND fingerprint=$6"))
+            .bind(tenant).bind(head.message.as_str()).bind(head.group.as_str()).bind(head.domain.as_str())
+            .bind(head.partition.as_str()).bind(head.fingerprint.as_bytes().as_slice()));
+    }
+    let after = request
+        .after()
+        .map(|key| key.split_once('/').ok_or(Error::Invalid))
+        .transpose()?;
+    Ok(sqlx::query(rows!(
+        " AND resolved_by IS NULL AND ($2::text IS NULL OR (message_id,consumer_group)>($2,$3))
+        ORDER BY message_id,consumer_group LIMIT $4"
+    ))
+    .bind(tenant)
+    .bind(after.map(|pair| pair.0))
+    .bind(after.map(|pair| pair.1))
+    .bind(i64::from(request.limit()) + 1))
 }
 
 fn reject_kind(

@@ -238,6 +238,8 @@ pub enum TransactionalMessagingObservation {
     InboxBacklogUnavailable,
     /// An in-progress claim was observed.
     ConsumerClaimInProgress,
+    /// Another message holds the verified partition head.
+    ConsumerPartitionBlocked,
     /// Ordinary execution capacity was occupied before a durable claim started.
     ConsumerClaimCapacityBusy,
     /// Elapsed time from the first capacity refusal to the final claim result or cutoff.
@@ -291,6 +293,7 @@ impl TransactionalMessagingObservation {
             Self::InboxBacklog { .. } => TransactionalMessagingEvent::InboxBacklog,
             Self::InboxBacklogUnavailable => TransactionalMessagingEvent::InboxBacklogUnavailable,
             Self::ConsumerClaimInProgress => TransactionalMessagingEvent::ConsumerClaimInProgress,
+            Self::ConsumerPartitionBlocked => TransactionalMessagingEvent::ConsumerPartitionBlocked,
             Self::ConsumerCapacityWait { .. } => TransactionalMessagingEvent::ConsumerCapacityWait,
             Self::ConsumerClaimCapacityBusy => {
                 TransactionalMessagingEvent::ConsumerClaimCapacityBusy
@@ -459,6 +462,8 @@ pub enum TransactionalMessagingEvent {
     InboxBacklogUnavailable,
     /// A consumer claim that is already in progress.
     ConsumerClaimInProgress,
+    /// Another message holds the verified partition head.
+    ConsumerPartitionBlocked,
     /// Ordinary execution capacity was occupied before a durable claim started.
     ConsumerClaimCapacityBusy,
     /// Completion of a delivery capacity wait.
@@ -481,7 +486,7 @@ pub enum TransactionalMessagingEvent {
 
 impl TransactionalMessagingEvent {
     /// Complete event inventory in stable order.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::RuntimeFailure,
         Self::OutboxPublish,
         Self::OutboxPublishFailure,
@@ -491,6 +496,7 @@ impl TransactionalMessagingEvent {
         Self::InboxBacklog,
         Self::InboxBacklogUnavailable,
         Self::ConsumerClaimInProgress,
+        Self::ConsumerPartitionBlocked,
         Self::ConsumerClaimCapacityBusy,
         Self::ConsumerCapacityWait,
         Self::ConsumerIngressRejected,
@@ -515,6 +521,7 @@ impl TransactionalMessagingEvent {
             Self::InboxBacklog => "transactional_messaging.inbox.backlog",
             Self::InboxBacklogUnavailable => "transactional_messaging.inbox.backlog_unavailable",
             Self::ConsumerClaimInProgress => "transactional_messaging.consumer.claim_in_progress",
+            Self::ConsumerPartitionBlocked => "transactional_messaging.consumer.partition_blocked",
             Self::ConsumerCapacityWait => "transactional_messaging.consumer.capacity_wait",
             Self::ConsumerClaimCapacityBusy => {
                 "transactional_messaging.consumer.claim_capacity_busy"
@@ -551,6 +558,7 @@ impl TransactionalMessagingEvent {
             Self::OutboxBacklogUnavailable
             | Self::InboxBacklogUnavailable
             | Self::ConsumerClaimInProgress
+            | Self::ConsumerPartitionBlocked
             | Self::ConsumerClaimCapacityBusy
             | Self::ConsumerLeaseLost
             | Self::RelayLeaseLost

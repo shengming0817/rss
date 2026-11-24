@@ -158,7 +158,9 @@ pub trait InboxStore: Send + Sync {
     fn lease_policy(&self) -> crate::policy::LeaseRenewalPolicy;
 
     /// Acquire exclusive ownership, or return the existing live or terminal state for the full
-    /// identity.
+    /// identity. The first admitted ordered message owns its tenant/group/domain/partition
+    /// until success or authorized resolution of a rejection. Return `PartitionBlocked` for
+    /// other messages while it owns that partition. A terminal duplicate returns its receipt.
     fn claim(
         &self,
         verified: &crate::transaction::VerifiedConsumerBinding,
@@ -182,7 +184,8 @@ pub trait InboxStore: Send + Sync {
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<LeaseStatus, MessagingError>> + Send;
 
-    /// Release this claim without removing or downgrading a durable terminal result.
+    /// End this lease. Keep an ordered head bound to its original message and fingerprint
+    /// for redelivery, and preserve every durable terminal result.
     fn release(
         &self,
         claim: Self::Claim,

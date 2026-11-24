@@ -34,7 +34,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  UNION ALL SELECT 'rss_transactional_messaging.outbox_partitions'::regclass, 'outbox_partition_tenant', ARRAY[0]::oid[], value, true FROM tenant_predicate
  UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_relay', ARRAY[oid], 'true', true FROM relay_role
  UNION ALL SELECT 'rss_transactional_messaging.outbox'::regclass, 'outbox_consumer_scope', ARRAY[0]::oid[], '((domain = ( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain)) IS NOT FALSE)', false
- UNION ALL SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_consumer_scope', ARRAY[0]::oid[], 'rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group)', false
+ UNION ALL SELECT 'rss_transactional_messaging.inbox'::regclass, 'inbox_consumer_scope', ARRAY[0]::oid[], '(rss_transactional_messaging.consumer_inbox_allowed(tenant_id, message_id, consumer_group) AND ((domain IS NULL) OR (( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain) IS NULL) OR ((disposition IS NOT NULL) AND (domain = ( SELECT rss_transactional_messaging.consumer_scope_domain() AS consumer_scope_domain)))))', false
 ), actual_policies AS (
  SELECT * FROM pg_policy WHERE NOT (polrelid='rss_transactional_messaging.inbox'::regclass AND polname='inbox_release') AND polrelid IN ('rss_transactional_messaging.inbox'::regclass, 'rss_transactional_messaging.outbox'::regclass, 'rss_transactional_messaging.outbox_partitions'::regclass)
 ), expected_constraints(relation, name, definition) AS (VALUES
@@ -187,7 +187,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
     WHERE e.name IS NULL OR p.oid IS NULL OR p.polpermissive IS DISTINCT FROM e.permissive OR p.polcmd <> '*'
       OR p.polroles IS DISTINCT FROM e.roles
       OR pg_get_expr(p.polqual, p.polrelid) IS DISTINCT FROM e.predicate
-      OR pg_get_expr(p.polwithcheck, p.polrelid) IS DISTINCT FROM e.predicate))),
+      OR pg_get_expr(COALESCE(p.polwithcheck,p.polqual), p.polrelid) IS DISTINCT FROM e.predicate))),
  ('functions', (NOT EXISTS (SELECT 1 FROM functions f LEFT JOIN pg_proc p ON p.oid = to_regprocedure(f.signature)
     WHERE p.oid IS NULL OR NOT p.prosecdef OR p.proowner <> (SELECT oid FROM relay_role)
       OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp' = ANY(p.proconfig))

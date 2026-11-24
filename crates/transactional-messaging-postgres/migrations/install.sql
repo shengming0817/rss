@@ -980,7 +980,7 @@ BEGIN
   RETURN NEW;
  END IF;
  FOR member IN SELECT m.* FROM dr_members m JOIN dr_plans p ON p.tenant_id=m.tenant_id AND p.operation_id=m.operation_id WHERE m.tenant_id=NEW.tenant_id AND m.message_id=NEW.message_id AND m.consumer_group=NEW.consumer_group AND p.epoch=current_setting('rss.execution_epoch')::bigint AND p.lineage=decode(current_setting('rss.storage_lineage'),'hex') FOR UPDATE OF m LOOP
-  IF member.contract<>NEW.contract OR (NEW.fingerprint IS NOT NULL AND member.fingerprint<>NEW.fingerprint) THEN RAISE EXCEPTION 'consumer recovery evidence' USING ERRCODE='23505'; END IF;
+  IF member.contract<>NEW.contract OR member.fingerprint<>NEW.fingerprint THEN RAISE EXCEPTION 'consumer recovery evidence' USING ERRCODE='23505'; END IF;
   IF NEW.disposition IS NOT NULL THEN UPDATE dr_members SET status='completed' WHERE tenant_id=member.tenant_id AND operation_id=member.operation_id AND ordinal=member.ordinal; END IF;
  END LOOP;
  RETURN NEW;
@@ -1018,8 +1018,9 @@ CREATE POLICY outbox_partition_tenant ON rss_transactional_messaging.outbox_part
  WITH CHECK(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid);
 
 CREATE POLICY inbox_consumer_scope ON rss_transactional_messaging.inbox AS RESTRICTIVE
- USING(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group))
- WITH CHECK(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group));
+ USING(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group) AND
+ (domain IS NULL OR (SELECT rss_transactional_messaging.consumer_scope_domain()) IS NULL OR
+  (disposition IS NOT NULL AND domain=(SELECT rss_transactional_messaging.consumer_scope_domain()))));
 
 CREATE POLICY inbox_release ON rss_transactional_messaging.inbox AS RESTRICTIVE FOR DELETE
  USING (partition_key IS NULL AND disposition IS NULL);

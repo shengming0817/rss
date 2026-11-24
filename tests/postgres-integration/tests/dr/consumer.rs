@@ -96,7 +96,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         .fetch_one(owner)
         .await?;
     assert_eq!(count, 1);
-    // Same tenant/id/group but different trusted authored facts must roll back effects and progress.
+    // Same tenant/id/group but different trusted authored facts must prevent admission and progress.
     let mismatch = message("broker-mismatch");
     let identity = consumer_binding(binding(10)?, &mismatch)?;
     let clock = Timer::new();
@@ -120,23 +120,22 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
     let operator4 =
         PgDrStore::connect(operator.clone(), Timer::new(), (binding(9)?).storage()).await?;
     committed(operator4.apply(&request, deadline()).await)?;
-    let next = runtime.clone();
     let inbox = PgInboxStore::new(
-        next.clone(),
+        runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let claim = match inbox.claim(&identity, deadline()).await? {
-        IdempotencyDisposition::Acquired(c) => c,
-        _ => anyhow::bail!("mismatch claim"),
-    };
-    let result = PgConsumerTx::receipt_only(next.clone(), Effect)
-        .execute(&claim, &mismatch, identity.receipt_intent(), deadline())
-        .await;
-    assert_ne!(result.status(),rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
+    assert_eq!(
+        inbox
+            .claim(&identity, deadline())
+            .await
+            .err()
+            .map(|error| error.kind()),
+        Some(rss_transactional_messaging::error::MessagingErrorKind::Conflict)
+    );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM public.dr_effect")
         .fetch_one(owner)
         .await?;
-    assert_eq!(count, 1, "mismatched member effect rolls back");
+    assert_eq!(count, 1, "mismatched member never starts");
     assert_eq!(
         operator4
             .progress(&request, deadline())
