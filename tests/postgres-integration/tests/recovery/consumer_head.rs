@@ -80,68 +80,12 @@ pub(super) async fn run(
     for (key, protected) in [("receipt-head", false), ("protected-head", true)] {
         let original = message_in_partition(&format!("{key}-a"), key);
         let successor = message_in_partition(&format!("{key}-b"), key);
-        let first = connect(config).await?;
-        let other = connect(config).await?;
-        let holder = inbox(&first)?;
-        let verified = binding(&original)?;
-        let contender = inbox(&other)?;
-        let successor_binding = binding(&successor)?;
-        let IdempotencyDisposition::Acquired(initial) = holder.claim(&verified, deadline()).await?
-        else {
-            anyhow::bail!("first claim")
-        };
-        assert!(matches!(
-            contender.claim(&successor_binding, deadline()).await?,
-            IdempotencyDisposition::PartitionBlocked
-        ));
-        holder.release(initial, deadline()).await?;
-        assert!(matches!(
-            contender.claim(&successor_binding, deadline()).await?,
-            IdempotencyDisposition::PartitionBlocked
-        ));
-        let IdempotencyDisposition::Acquired(head) = contender.claim(&verified, deadline()).await?
-        else {
-            anyhow::bail!("head reclaim")
-        };
-        let status = if protected {
-            let capture =
-                PgRecoveryCapture::new(other.clone(), Arc::new(Key(1)), deadline()).await?;
-            PgConsumerTx::with_recovery(Reject, capture)
-                .execute(&head, &original, verified.receipt_intent(), deadline())
-                .await
-                .status()
-        } else {
-            PgConsumerTx::receipt_only(other.clone(), Reject)
-                .execute(&head, &original, verified.receipt_intent(), deadline())
-                .await
-                .status()
-        };
-        assert_eq!(status, TransactionalMessagingTransactionStatus::Committed);
-        first.close().await;
-        other.close().await;
+        reject_after_takeover(config, &original, &successor, protected).await?;
         let restarted = connect(config).await?;
         let count = Count(AtomicUsize::new(0));
-        assert_eq!(
-            deliver(&restarted, successor.clone(), &count).await?,
-            (
-                ProcessingDisposition::PartitionBlocked,
-                vec![SettlementKind::Requeue]
-            )
-        );
-        assert_eq!(count.0.load(Ordering::SeqCst), 0);
-        let reject =
-            ProcessingDisposition::Duplicate(TerminalDisposition::Rejected(RejectKind::Permanent));
-        assert_eq!(
-            deliver(&restarted, original.clone(), &count).await?,
-            (reject, vec![SettlementKind::Reject])
-        );
-        let independent = message_in_partition(&format!("{key}-independent"), "other-key");
-        assert_eq!(
-            deliver(&restarted, independent, &count).await?.0,
-            ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
-        );
+        assert_blocked(&restarted, &original, &successor, key, &count).await?;
         resolve(store, owner, &original, &restarted, &successor, &count).await?;
-        assert_eq!(deliver(&restarted, original, &count).await?.0, reject);
+        assert_eq!(deliver(&restarted, original, &count).await?.0, rejected());
         assert_eq!(
             deliver(&restarted, successor, &count).await?.0,
             ProcessingDisposition::Duplicate(TerminalDisposition::Succeeded)
@@ -149,6 +93,91 @@ pub(super) async fn run(
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
         restarted.close().await;
     }
+    Ok(())
+}
+
+fn rejected() -> ProcessingDisposition {
+    ProcessingDisposition::Duplicate(TerminalDisposition::Rejected(RejectKind::Permanent))
+}
+async fn reject_after_takeover(
+    config: &PgConfig,
+    original: &MessageEnvelope<Vec<u8>>,
+    successor: &MessageEnvelope<Vec<u8>>,
+    protected: bool,
+) -> anyhow::Result<()> {
+    let first = connect(config).await?;
+    let other = connect(config).await?;
+    let holder = inbox(&first)?;
+    let verified = binding(original)?;
+    let contender = inbox(&other)?;
+    let successor_binding = binding(successor)?;
+    let IdempotencyDisposition::Acquired(initial) = holder.claim(&verified, deadline()).await?
+    else {
+        anyhow::bail!("first claim")
+    };
+    assert!(matches!(
+        contender.claim(&successor_binding, deadline()).await?,
+        IdempotencyDisposition::PartitionBlocked
+    ));
+    holder.release(initial, deadline()).await?;
+    assert!(matches!(
+        contender.claim(&successor_binding, deadline()).await?,
+        IdempotencyDisposition::PartitionBlocked
+    ));
+    let IdempotencyDisposition::Acquired(head) = contender.claim(&verified, deadline()).await?
+    else {
+        anyhow::bail!("head reclaim")
+    };
+    let status = reject(&other, &head, original, &verified, protected).await?;
+    assert_eq!(status, TransactionalMessagingTransactionStatus::Committed);
+    first.close().await;
+    other.close().await;
+    Ok(())
+}
+async fn reject(
+    other: &Arc<PgRuntime>,
+    head: &PgInboxClaim,
+    original: &MessageEnvelope<Vec<u8>>,
+    verified: &VerifiedConsumerBinding,
+    protected: bool,
+) -> anyhow::Result<TransactionalMessagingTransactionStatus> {
+    Ok(if protected {
+        let capture = PgRecoveryCapture::new(other.clone(), Arc::new(Key(1)), deadline()).await?;
+        PgConsumerTx::with_recovery(Reject, capture)
+            .execute(head, original, verified.receipt_intent(), deadline())
+            .await
+            .status()
+    } else {
+        PgConsumerTx::receipt_only(other.clone(), Reject)
+            .execute(head, original, verified.receipt_intent(), deadline())
+            .await
+            .status()
+    })
+}
+async fn assert_blocked(
+    restarted: &Arc<PgRuntime>,
+    original: &MessageEnvelope<Vec<u8>>,
+    successor: &MessageEnvelope<Vec<u8>>,
+    key: &str,
+    count: &Count,
+) -> anyhow::Result<()> {
+    assert_eq!(
+        deliver(restarted, successor.clone(), count).await?,
+        (
+            ProcessingDisposition::PartitionBlocked,
+            vec![SettlementKind::Requeue]
+        )
+    );
+    assert_eq!(count.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        deliver(restarted, original.clone(), count).await?,
+        (rejected(), vec![SettlementKind::Reject])
+    );
+    let independent = message_in_partition(&format!("{key}-independent"), "other-key");
+    assert_eq!(
+        deliver(restarted, independent, count).await?.0,
+        ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
+    );
     Ok(())
 }
 
@@ -175,6 +204,33 @@ async fn resolve(
     };
     let accepted = Action::Resolve(Resolution::AcceptedGap);
     let authorized = request(entry.target.clone(), entry.version, accepted.clone()).await?;
+    assert_foreign(store, head, entry.version).await?;
+    runtime_permissions(owner, message).await?;
+    race_resolution(store, owner, &authorized, runtime, successor, count).await?;
+    let execution = crate::execution(tenant(), 1);
+    assert_eq!(
+        committed(store.mutate(execution, &authorized, deadline()).await)?
+            .version
+            .get(),
+        2
+    );
+    let stale = request(entry.target.clone(), entry.version, accepted).await?;
+    assert_eq!(
+        failure(store.mutate(execution, &stale, deadline()).await),
+        Some(Error::Conflict)
+    );
+    let inspected = page(store, Query::inspect(tenant(), entry.target)).await?;
+    assert!(
+        matches!(inspected.entries[0].details,Details::ConsumerHead { resolved_by: Some(id),.. } if id==authorized.request().operation())
+    );
+    Ok(())
+}
+
+async fn assert_foreign(
+    store: &PgRecoveryStore<Key>,
+    head: &ConsumerHead,
+    version: Version,
+) -> anyhow::Result<()> {
     let mut wrong = head.clone();
     wrong.partition = PartitionKey::parse("different")?;
     let missing = page(
@@ -183,12 +239,26 @@ async fn resolve(
     )
     .await?;
     assert!(missing.entries.is_empty());
-    let foreign = request(Target::ConsumerHead(wrong), entry.version, accepted.clone()).await?;
-    let execution = crate::execution(tenant(), 1);
+    let foreign = request(
+        Target::ConsumerHead(wrong),
+        version,
+        Action::Resolve(Resolution::AcceptedGap),
+    )
+    .await?;
     assert_eq!(
-        failure(store.mutate(execution, &foreign, deadline()).await),
+        failure(
+            store
+                .mutate(crate::execution(tenant(), 1), &foreign, deadline())
+                .await
+        ),
         Some(Error::Conflict)
     );
+    Ok(())
+}
+async fn runtime_permissions(
+    owner: &sqlx::PgPool,
+    message: &MessageEnvelope<Vec<u8>>,
+) -> anyhow::Result<()> {
     let mut tx = owner.begin().await?;
     sqlx::query("SET LOCAL ROLE recovery_runtime")
         .execute(&mut *tx)
@@ -203,6 +273,16 @@ async fn resolve(
     );
     assert!(sqlx::query("UPDATE rss_transactional_messaging.inbox SET resolved_by=gen_random_uuid() WHERE message_id=$1").bind(message.id().as_str()).execute(&mut *tx).await.is_err());
     tx.rollback().await?;
+    Ok(())
+}
+async fn race_resolution(
+    store: &PgRecoveryStore<Key>,
+    owner: &sqlx::PgPool,
+    authorized: &AuthorizedMutation,
+    runtime: &Arc<PgRuntime>,
+    successor: &MessageEnvelope<Vec<u8>>,
+    count: &Count,
+) -> anyhow::Result<()> {
     // Keep the resolver between the Inbox update and its mandatory receipt INSERT.
     let mut gate = owner.begin().await?;
     sqlx::query("LOCK TABLE rss_transactional_messaging.recovery_operations IN SHARE MODE")
@@ -226,26 +306,14 @@ async fn resolve(
         let (delivery, ()) = tokio::try_join!(deliver(runtime, successor.clone(), count), unblock)?;
         anyhow::Ok(delivery)
     };
-    let (receipt, delivery) = tokio::join!(store.mutate(execution, &authorized, deadline()), race);
+    let (receipt, delivery) = tokio::join!(
+        store.mutate(crate::execution(tenant(), 1), authorized, deadline()),
+        race
+    );
     assert_eq!(committed(receipt)?.outcome, Outcome::Resolved);
     assert_eq!(
         delivery?.0,
         ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
-    );
-    assert_eq!(
-        committed(store.mutate(execution, &authorized, deadline()).await)?
-            .version
-            .get(),
-        2
-    );
-    let stale = request(entry.target.clone(), entry.version, accepted).await?;
-    assert_eq!(
-        failure(store.mutate(execution, &stale, deadline()).await),
-        Some(Error::Conflict)
-    );
-    let inspected = page(store, Query::inspect(tenant(), entry.target)).await?;
-    assert!(
-        matches!(inspected.entries[0].details,Details::ConsumerHead { resolved_by: Some(id),.. } if id==authorized.request().operation())
     );
     Ok(())
 }

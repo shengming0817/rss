@@ -129,12 +129,12 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let prepared = PreparedDelivery::valid(execution, Box::new(delivery), execution.deadlines()?);
+    let prepared = PreparedDelivery::valid(execution, delivery, execution.deadlines()?);
     process_prepared(inbox, transaction, execution, prepared).await
 }
 
 enum Ingress<P, S> {
-    Verified(Box<Delivery<P, S>>, VerifiedConsumerBinding),
+    Verified(Box<(Delivery<P, S>, VerifiedConsumerBinding)>),
     Rejected(EnvelopeValidationFailure, SettlementDecision, S),
 }
 
@@ -146,7 +146,7 @@ struct PreparedDelivery<P, S> {
 impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
     fn valid<V: IngressValidator<P>, R, E>(
         execution: &ConsumerExecution<'_, V, R, E>,
-        delivery: Box<Delivery<P, S>>,
+        delivery: Delivery<P, S>,
         deadlines: ExecutionDeadlines,
     ) -> Self {
         let ingress = match verify_ingress(
@@ -155,7 +155,7 @@ impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
             execution.subscription,
             delivery.message(),
         ) {
-            Ok(binding) => Ingress::Verified(delivery, binding),
+            Ok(binding) => Ingress::Verified(Box::new((delivery, binding))),
             Err(rejection) => Ingress::Rejected(
                 rejection.reason(),
                 rejection.into_decision(),
@@ -171,7 +171,7 @@ impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
         deadlines: ExecutionDeadlines,
     ) -> Self {
         match item {
-            IncomingDelivery::Valid(delivery) => Self::valid(execution, delivery, deadlines),
+            IncomingDelivery::Valid(delivery) => Self::valid(execution, *delivery, deadlines),
             IncomingDelivery::Invalid(invalid) => {
                 let (rejection, settlement) = invalid.into_parts();
                 PreparedDelivery {
@@ -188,7 +188,7 @@ impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
 
     fn partition(&self) -> Option<&PartitionIdentity> {
         match &self.ingress {
-            Ingress::Verified(_, binding) => binding.partition(),
+            Ingress::Verified(verified) => verified.1.partition(),
             Ingress::Rejected(..) => None,
         }
     }
@@ -211,7 +211,10 @@ where
     let PreparedDelivery { ingress, deadlines } = prepared;
     let ((message, settlement), binding) =
         match ingress {
-            Ingress::Verified(delivery, binding) => (delivery.into_parts(), binding),
+            Ingress::Verified(verified) => {
+                let (delivery, binding) = *verified;
+                (delivery.into_parts(), binding)
+            }
             Ingress::Rejected(failure, decision, settlement) => {
                 execution.emitter.emit(
                     TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure },

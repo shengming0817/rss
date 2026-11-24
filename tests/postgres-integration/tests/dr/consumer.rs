@@ -1,4 +1,5 @@
 use super::*;
+use crate::support::message_in_partition;
 use rss_transactional_messaging::{inbox::*, message::*, transaction::*};
 struct Validator(ExecutionBinding);
 impl IngressValidator<Vec<u8>> for Validator {
@@ -48,7 +49,7 @@ pub(super) fn consumer_binding(
 #[allow(clippy::cognitive_complexity)] // reason: sequential committed-effect, rollback and physical-lineage evidence checks.
 pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let clock = Timer::new();
-    let msg = message("broker-member");
+    let msg = message_in_partition("broker-member", "broker-member");
     let consumer = consumer_binding(binding(9)?, &msg)?;
     let plan = Plan::new(
         tenant(),
@@ -97,7 +98,7 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         .await?;
     assert_eq!(count, 1);
     // Same tenant/id/group but different trusted authored facts must prevent admission and progress.
-    let mismatch = message("broker-mismatch");
+    let mismatch = message_in_partition("broker-mismatch", "broker-mismatch");
     let identity = consumer_binding(binding(10)?, &mismatch)?;
     let clock = Timer::new();
     let request = authorize_dr(

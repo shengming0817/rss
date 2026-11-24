@@ -19,11 +19,6 @@ use support::*;
 #[path = "recovery/consumer_head.rs"]
 mod consumer_head;
 
-// Independent recovery scenarios must not share an unresolved ordered head.
-fn message(id: &str) -> MessageEnvelope<Vec<u8>> {
-    message_in_partition(id, id)
-}
-
 struct Allow;
 impl Authorizer for Allow {
     async fn authorize(
@@ -100,10 +95,9 @@ impl PgConsumerEffect<Vec<u8>> for Reject {
 }
 async fn capture(
     runtime: Arc<PgRuntime>,
-    id: &str,
+    message: MessageEnvelope<Vec<u8>>,
     key: u8,
 ) -> anyhow::Result<TransactionalMessagingTransactionStatus> {
-    let message = message(id);
     let binding = binding(&message)?;
     let inbox = PgInboxStore::new(
         runtime.clone(),
@@ -117,7 +111,7 @@ async fn capture(
         anyhow::bail!("expected claim");
     };
     let capture = PgRecoveryCapture::new(runtime.clone(), Arc::new(Key(key)), deadline()).await?;
-    if id == "unknown-capture" {
+    if message.id().as_str() == "unknown-capture" {
         runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     }
     Ok(PgConsumerTx::with_recovery(Reject, capture)
@@ -226,11 +220,16 @@ async fn run() -> anyhow::Result<()> {
         "capture does not grant mutation"
     );
     assert_eq!(
-        capture(runtime.clone(), "rejected", 1).await?,
+        capture(runtime.clone(), message("rejected"), 1).await?,
         TransactionalMessagingTransactionStatus::Committed
     );
     assert_eq!(
-        capture(runtime.clone(), "protected-failure", 0).await?,
+        capture(
+            runtime.clone(),
+            message_in_partition("protected-failure", "protected-failure"),
+            0
+        )
+        .await?,
         TransactionalMessagingTransactionStatus::InfrastructureTransient
     );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM public.effect")
@@ -249,14 +248,19 @@ async fn run() -> anyhow::Result<()> {
     .await?;
     assert_eq!(terminal, 1);
     assert_eq!(
-        capture(runtime.clone(), "unknown-capture", 1).await?,
+        capture(
+            runtime.clone(),
+            message_in_partition("unknown-capture", "unknown-capture"),
+            1
+        )
+        .await?,
         TransactionalMessagingTransactionStatus::CommitUnknown
     );
     let inbox = PgInboxStore::new(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let b = binding(&message("unknown-capture"))?;
+    let b = binding(&message_in_partition("unknown-capture", "unknown-capture"))?;
     assert!(
         matches!(
             inbox.claim(&b, deadline()).await?,
@@ -990,7 +994,7 @@ impl PgConsumerEffect<Vec<u8>> for Fence {
 #[allow(clippy::cognitive_complexity)] // reason: each failure is followed by assertions on all three durable effects.
 async fn capture_failures(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     for (id, fence) in [("insert-fails", false), ("lease-fenced", true)] {
-        let message = message(id);
+        let message = message_in_partition(id, id);
         let binding = binding(&message)?;
         let inbox = PgInboxStore::new(
             runtime.clone(),
@@ -1278,7 +1282,7 @@ async fn replay_partition_race(
     store: Arc<PgRecoveryStore<Key>>,
     owner: &sqlx::PgPool,
 ) -> anyhow::Result<()> {
-    let template = support::message("partition-replay-source");
+    let template = message("partition-replay-source");
     let m = template.metadata();
     let source = MessageEnvelope::new(
         template.id().clone(),

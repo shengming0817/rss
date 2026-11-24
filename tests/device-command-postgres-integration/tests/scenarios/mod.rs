@@ -643,16 +643,12 @@ async fn verify_terminal(
 ) -> anyhow::Result<()> {
     use rss_transactional_messaging::inbox::{IdempotencyDisposition, InboxStore};
     let receipt = inbox
-        .read_terminal(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            budget()?,
-        )
+        .read_terminal(binding.execution(), binding.identity(), budget()?)
         .await?
         .ok_or_else(|| anyhow::anyhow!("receipt missing"))?;
     assert!(binding.validate_terminal(receipt).is_ok());
     assert!(matches!(
-        inbox.claim(&binding, budget()?).await?,
+        inbox.claim(binding, budget()?).await?,
         IdempotencyDisposition::Terminal(_)
     ));
     Ok(())
