@@ -86,24 +86,7 @@ pub(crate) async fn verify(
 }
 async fn atomic(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
     let s = generation(&scope("batch-mixed", TENANT)?, "mixed")?;
-    let replay = generation(&s, "bounded")?;
-    let witness = Arc::new(Recorder::default());
-    let bounded = worker(
-        store,
-        &replay,
-        ReplayBound::Through(Some(Position::new(1)?)),
-        witness.clone(),
-        c,
-    )
-    .await?;
-    let over = vec![
-        event(&replay, 0, "first", b"one")?,
-        event(&replay, 2, "overflow", b"two")?,
-    ];
-    assert!(
-        matches!(bounded.execute_batch(None,over,c).await,Err(e) if e.kind()==ErrorKind::OutOfOrder)
-    );
-    assert_eq!(witness.calls.load(Ordering::SeqCst), 0);
+    direct_bound(store, &s, c).await?;
     let peer = generation(&scope("batch-peer", OTHER)?, "peer")?;
     let recorder = Arc::new(Recorder::default());
     recorder.reject.store(true, Ordering::SeqCst);
@@ -128,19 +111,53 @@ async fn atomic(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyh
     observed?;
     assert!(matches!(failed,Err(e) if e.kind()==ErrorKind::Rejected));
     assert_eq!(snapshot(owner, &s).await?, (None, 0, vec![], 0));
+    retry(store, owner, &s, &peer, exec, recorder, events, c).await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "same failed page, worker claim and observer"
+)]
+async fn retry(
+    store: &PgStore,
+    owner: &PgPool,
+    s: &ProjectionScope,
+    peer: &ProjectionScope,
+    exec: PgProjection<Writer>,
+    recorder: Arc<Recorder>,
+    events: Vec<Event>,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     recorder.reject.store(false, Ordering::SeqCst);
     let mut conflict = events.clone();
-    conflict[1] = event(&s, 1, "one", b"changed")?;
+    conflict[1] = event(s, 1, "one", b"changed")?;
     assert!(
         matches!(exec.execute_batch(None,conflict,c).await,Err(e) if e.kind()==ErrorKind::Conflict)
     );
-    assert_eq!(snapshot(owner, &s).await?, (None, 0, vec![], 0));
-    let fresh = worker(store, &s, ReplayBound::Live, recorder, c).await?;
+    assert_eq!(snapshot(owner, s).await?, (None, 0, vec![], 0));
+    takeover(store, owner, s, peer, exec, recorder, events, c).await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a resumed worker replaces the old claim on the same page"
+)]
+async fn takeover(
+    store: &PgStore,
+    owner: &PgPool,
+    s: &ProjectionScope,
+    peer: &ProjectionScope,
+    exec: PgProjection<Writer>,
+    recorder: Arc<Recorder>,
+    events: Vec<Event>,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let fresh = worker(store, s, ReplayBound::Live, recorder, c).await?;
     assert!(
         matches!(exec.execute_batch(None,events.clone(),c).await,Err(e) if e.kind()==ErrorKind::Fenced)
     );
     assert!(
-        matches!(fresh.execute_batch(None,vec![event(&peer,0,"other",b"one")?],c).await,Err(e) if e.kind()==ErrorKind::ScopeMismatch)
+        matches!(fresh.execute_batch(None,vec![event(peer,0,"other",b"one")?],c).await,Err(e) if e.kind()==ErrorKind::ScopeMismatch)
     );
     assert_eq!(
         fresh.execute_batch(None, events, c).await?,
@@ -151,7 +168,7 @@ async fn atomic(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyh
             ApplyOutcome::Applied
         ]
     );
-    assert_eq!(snapshot(owner, &s).await?, (Some(3), 3, vec![0, 3], 1));
+    assert_eq!(snapshot(owner, s).await?, (Some(3), 3, vec![0, 3], 1));
     Ok(())
 }
 async fn lost_ack(
@@ -196,26 +213,7 @@ async fn lost_ack(
         c,
     )
     .await?;
-    let limits = RunLimit::new(BatchLimit::new(2)?, 10)?;
-    let run = run_batched(store, &exec, c, limits);
-    let observation = run.observation();
-    let report = run.await;
-    assert!(matches!(&report.stop,Stop::Failed(e) if e.kind()==ErrorKind::CommitUnknown));
-    assert_eq!(
-        (report.applied, report.position),
-        (2, Some(Position::new(1)?))
-    );
-    assert_eq!(observation.read(), ObservationStatus::Stopped(report));
-    assert_eq!(proxy.lost.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        snapshot(owner, &s).await?,
-        (Some(3), 4, vec![0, 1, 2, 3], 2)
-    );
-    let resumed = run_batched(store, &exec, c, limits).await.into_result()?;
-    assert_eq!(
-        (resumed.position, resumed.applied, resumed.stop),
-        (Some(Position::new(3)?), 0, Stop::CaughtUp)
-    );
+    verify_recovery(store, owner, &s, &exec, &proxy, c).await?;
     assert_eq!(loss_store.close(c).await, CloseOutcome::Drained);
     Ok(())
 }
@@ -258,16 +256,74 @@ async fn comparison(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> 
             }
         }
     }
+    report_samples(samples, N, B);
+    Ok(())
+}
+
+async fn direct_bound(
+    store: &PgStore,
+    s: &ProjectionScope,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let replay = generation(s, "bounded")?;
+    let witness = Arc::new(Recorder::default());
+    let bounded = worker(
+        store,
+        &replay,
+        ReplayBound::Through(Some(Position::new(1)?)),
+        witness.clone(),
+        c,
+    )
+    .await?;
+    let over = vec![
+        event(&replay, 0, "first", b"one")?,
+        event(&replay, 2, "overflow", b"two")?,
+    ];
+    assert!(
+        matches!(bounded.execute_batch(None,over,c).await,Err(e) if e.kind()==ErrorKind::OutOfOrder)
+    );
+    assert_eq!(witness.calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+async fn verify_recovery(
+    store: &PgStore,
+    owner: &PgPool,
+    s: &ProjectionScope,
+    exec: &PgProjection<Writer>,
+    proxy: &Proxy,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let limits = RunLimit::new(BatchLimit::new(2)?, 10)?;
+    let run = run_batched(store, exec, c, limits);
+    let observation = run.observation();
+    let report = run.await;
+    assert!(matches!(&report.stop,Stop::Failed(e) if e.kind()==ErrorKind::CommitUnknown));
+    assert_eq!(
+        (report.applied, report.position),
+        (2, Some(Position::new(1)?))
+    );
+    assert_eq!(observation.read(), ObservationStatus::Stopped(report));
+    assert_eq!(proxy.lost.load(Ordering::SeqCst), 1);
+    assert_eq!(snapshot(owner, s).await?, (Some(3), 4, vec![0, 1, 2, 3], 2));
+    let resumed = run_batched(store, exec, c, limits).await.into_result()?;
+    assert_eq!(
+        (resumed.position, resumed.applied, resumed.stop),
+        (Some(Position::new(3)?), 0, Stop::CaughtUp)
+    );
+    Ok(())
+}
+
+fn report_samples(samples: [Vec<Duration>; 2], n: i64, b: u32) {
     for (mode, mut durations) in samples.into_iter().enumerate() {
         durations.sort();
         let p50 = durations[(durations.len() - 1) / 2];
         let p95 = durations[durations.len() - 1];
         println!(
-            "projection_measure mode={mode} events={N} page={B} p50_ms={:.3} p95_ms={:.3} median_events_per_s={:.1}",
+            "projection_measure mode={mode} events={n} page={b} p50_ms={:.3} p95_ms={:.3} median_events_per_s={:.1}",
             p50.as_secs_f64() * 1000.,
             p95.as_secs_f64() * 1000.,
-            N as f64 / p50.as_secs_f64()
+            n as f64 / p50.as_secs_f64()
         );
     }
-    Ok(())
 }

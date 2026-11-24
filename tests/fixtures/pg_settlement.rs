@@ -98,21 +98,7 @@ async fn relay(
     lost: Arc<AtomicUsize>,
     gate: ReturnGate,
 ) -> anyhow::Result<()> {
-    let mut tcp = TcpStream::connect((params.host.as_str(), params.port)).await?;
-    tcp.write_all(&[0, 0, 0, 8, 4, 210, 22, 47]).await?;
-    anyhow::ensure!(tcp.read_u8().await? == b'S', "upstream TLS required");
-    let name = ServerName::try_from(params.host)?;
-    let mut server = connector.connect(name, tcp).await?;
-    let length = client.read_u32().await?;
-    anyhow::ensure!(
-        (8..=1024 * 1024).contains(&length),
-        "invalid startup length"
-    );
-    let mut startup = vec![0; length as usize];
-    startup[..4].copy_from_slice(&length.to_be_bytes());
-    client.read_exact(&mut startup[4..]).await?;
-    server.write_all(&startup).await?;
-    server.flush().await?;
+    let server = connect_upstream(&mut client, params, connector).await?;
     let (mut cr, mut cw) = client.into_split();
     let (mut sr, mut sw) = tokio::io::split(server);
     let active = AtomicU8::new(0);
@@ -122,26 +108,7 @@ async fn relay(
                 Ok(bytes) => bytes,
                 Err(_) => return Ok::<(), anyhow::Error>(()),
             };
-            let command = if bytes[0] == b'Q' {
-                std::str::from_utf8(&bytes[5..])
-                    .unwrap_or("")
-                    .trim_end_matches('\0')
-            } else {
-                ""
-            };
-            let mode = arm.load(Ordering::SeqCst);
-            if ((matches!(mode, LOSE_COMMIT | HOLD_RETURN) && command == "COMMIT")
-                || (mode == 2 && command == "ROLLBACK"))
-                && arm
-                    .compare_exchange(mode, 0, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-            {
-                active.store(mode, Ordering::SeqCst);
-            }
-            if active.load(Ordering::SeqCst) == WAIT_SYNC {
-                anyhow::ensure!(bytes[0] == b'S', "expected standalone SQLx return Sync");
-                active.store(WAIT_READY, Ordering::SeqCst);
-            }
+            arm_frame(&bytes, &arm, &active)?;
             sw.write_all(&bytes).await?;
             sw.flush().await?;
         }
@@ -182,4 +149,51 @@ async fn relay(
             if matches!(active.load(Ordering::SeqCst), LOSE_COMMIT | 2) { backward.await } else { Ok(()) }
         }
     }
+}
+
+fn arm_frame(bytes: &[u8], arm: &AtomicU8, active: &AtomicU8) -> anyhow::Result<()> {
+    let command = if bytes[0] == b'Q' {
+        std::str::from_utf8(&bytes[5..])
+            .unwrap_or("")
+            .trim_end_matches('\0')
+    } else {
+        ""
+    };
+    let mode = arm.load(Ordering::SeqCst);
+    if ((matches!(mode, LOSE_COMMIT | HOLD_RETURN) && command == "COMMIT")
+        || (mode == 2 && command == "ROLLBACK"))
+        && arm
+            .compare_exchange(mode, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        active.store(mode, Ordering::SeqCst);
+    }
+    if active.load(Ordering::SeqCst) == WAIT_SYNC {
+        anyhow::ensure!(bytes[0] == b'S', "expected standalone SQLx return Sync");
+        active.store(WAIT_READY, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+async fn connect_upstream(
+    client: &mut TcpStream,
+    params: testkit::PgConnParams,
+    connector: tokio_rustls::TlsConnector,
+) -> anyhow::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let mut tcp = TcpStream::connect((params.host.as_str(), params.port)).await?;
+    tcp.write_all(&[0, 0, 0, 8, 4, 210, 22, 47]).await?;
+    anyhow::ensure!(tcp.read_u8().await? == b'S', "upstream TLS required");
+    let name = ServerName::try_from(params.host)?;
+    let mut server = connector.connect(name, tcp).await?;
+    let length = client.read_u32().await?;
+    anyhow::ensure!(
+        (8..=1024 * 1024).contains(&length),
+        "invalid startup length"
+    );
+    let mut startup = vec![0; length as usize];
+    startup[..4].copy_from_slice(&length.to_be_bytes());
+    client.read_exact(&mut startup[4..]).await?;
+    server.write_all(&startup).await?;
+    server.flush().await?;
+    Ok(server)
 }
