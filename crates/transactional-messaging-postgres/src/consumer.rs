@@ -92,8 +92,14 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>> 
         if !matches_message(claim, message, &intent) {
             return TransactionOutcome::not_started(FailureClass::Infrastructure);
         }
-        execute_transaction(
+        let slot = claim.take_slot(&self.runtime);
+        let access = slot.as_ref().map_or(
+            crate::transaction::PoolAccess::Ordinary,
+            crate::transaction::PoolAccess::Reserved,
+        );
+        let outcome = execute_transaction(
             &self.runtime,
+            access,
             &self.effect,
             &self.mode,
             claim,
@@ -104,7 +110,16 @@ impl<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>> 
             #[cfg(feature = "integration")]
             None,
         )
-        .await
+        .await;
+        use rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus as Status;
+        if matches!(
+            outcome.status(),
+            Status::HandlerTransient | Status::InfrastructureTransient | Status::RejectedPermanent
+        ) && let Some(slot) = slot
+        {
+            claim.return_slot(slot);
+        }
+        outcome
     }
 }
 
@@ -118,6 +133,7 @@ pub(crate) async fn execute_transaction<
     M: ConsumerRecoveryMode<P>,
 >(
     runtime: &PgRuntime,
+    access: crate::transaction::PoolAccess<'_>,
     effect: &H,
     mode: &M,
     claim: &PgInboxClaim,
@@ -141,6 +157,7 @@ pub(crate) async fn execute_transaction<
         cutoff,
         LocalTxDeadlineStage::Acquire,
         runtime.acquire_for_transaction(
+            access,
             #[cfg(feature = "integration")]
             injection,
         ),

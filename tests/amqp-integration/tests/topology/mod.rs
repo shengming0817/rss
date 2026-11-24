@@ -77,12 +77,17 @@ pub(super) async fn provision(url: &str, route: &MessageRoute, purge: bool) -> a
 }
 
 pub(super) async fn dead_letter_depth(url: &str, route: &MessageRoute) -> anyhow::Result<u32> {
+    ready_depth(url, &format!("{}.dlq", route.as_str())).await
+}
+
+/// Synchronous broker response about ready deliveries after the previous channel was closed.
+pub(super) async fn ready_depth(url: &str, name: &str) -> anyhow::Result<u32> {
     let connection = connection(url).await?;
     let result = tokio::time::timeout(TIMEOUT, async {
         let channel = connection.create_channel().await?;
         let queue = channel
             .queue_declare(
-                format!("{}.dlq", route.as_str()).into(),
+                name.into(),
                 QueueDeclareOptions {
                     passive: true,
                     ..Default::default()

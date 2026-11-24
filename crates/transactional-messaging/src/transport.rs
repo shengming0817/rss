@@ -253,6 +253,12 @@ impl<P, S> Delivery<P, S> {
             settlement,
         }
     }
+    /// Borrow the decoded envelope for ingress validation while retaining settlement ownership.
+    #[must_use]
+    pub const fn message(&self) -> &MessageEnvelope<P> {
+        &self.message
+    }
+
     /// Consume the delivery to verify its envelope and later settle through its original handle.
     pub fn into_parts(self) -> (MessageEnvelope<P>, S) {
         (self.message, self.settlement)
@@ -303,7 +309,19 @@ impl<S> InvalidDelivery<S> {
 /// lifecycle owner.
 #[cfg(feature = "consumer")]
 pub struct ManagedDeliveryStream<S> {
-    stream: S,
+    stream: Option<S>,
+    on_stop: StreamOnStop,
+    stopped: bool,
+}
+
+/// Whether stopping admission releases the raw stream or retains its session for settlement.
+#[cfg(feature = "consumer")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StreamOnStop {
+    /// Dropping the stream stops broker admission while outstanding handles can settle.
+    Release,
+    /// Outstanding settlements need the stream's session until draining completes.
+    Retain,
 }
 
 #[cfg(feature = "consumer")]
@@ -311,8 +329,20 @@ impl<S> ManagedDeliveryStream<S> {
     /// Wrap the stream created by one [`DeliverySource`] implementation.
     #[doc(hidden)]
     #[must_use]
-    pub const fn from_provider(stream: S) -> Self {
-        Self { stream }
+    pub const fn from_provider(on_stop: StreamOnStop, stream: S) -> Self {
+        Self {
+            stream: Some(stream),
+            on_stop,
+            stopped: false,
+        }
+    }
+
+    /// Seal this admission owner while preserving its provider-specific drain lifetime.
+    pub fn stop_admission(&mut self) {
+        self.stopped = true;
+        if self.on_stop == StreamOnStop::Release {
+            self.stream.take();
+        }
     }
 }
 
@@ -322,7 +352,10 @@ impl<S: Stream + Unpin> ManagedDeliveryStream<S> {
     /// This admission wait has no per-delivery deadline; the caller controls cancellation and
     /// shutdown. The underlying provider stream must preserve unyielded deliveries on cancellation.
     pub async fn next(&mut self) -> Option<S::Item> {
-        self.stream.next().await
+        if self.stopped {
+            return None;
+        }
+        self.stream.as_mut()?.next().await
     }
 }
 
@@ -343,9 +376,13 @@ pub trait DeliverySource<P>: Send + Sync {
     /// Stream of decoded envelopes or explicit decode rejections.
     type Deliveries: Stream<Item = IncomingDelivery<P, Self::Settlement>> + Send + Unpin;
 
-    /// Establish a stream for this subscription, or return a classified admission error.
+    /// Establish a stream for this subscription and its explicit maximum in-flight deliveries.
+    /// Apply the matching transport window when the protocol offers credit (AMQP prefetch).
+    /// Providers that cannot support the requested concurrency must reject it at establishment
+    /// with a permanent configuration error. Window one selects serial processing.
     fn deliveries(
         &self,
         subscription: &SubscriptionIdentity,
+        window: std::num::NonZeroU16,
     ) -> impl Future<Output = Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError>> + Send;
 }

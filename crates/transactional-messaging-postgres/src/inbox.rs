@@ -1,5 +1,7 @@
 //! Durable inbox identity and lease CAS adapted from baseline cotx/eventing.rs.
+use crate::transaction::PoolAccess;
 use crate::{PgError, PgRuntime, PgTransaction, transaction::settled};
+use rss_request_context::Clock as _;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     inbox::{ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
@@ -17,11 +19,32 @@ use std::{sync::Arc, time::Duration};
 /// fn duplicate(claim: PgInboxClaim) { let replay = claim.clone(); }
 /// ```
 pub struct PgInboxClaim {
+    // The first effect takes this worker's already-admitted slot. Only a confirmed
+    // retryable outcome may return it to the same claim for another attempt.
+    slot: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     pub(crate) identity: ConsumerIdentity,
     pub(crate) token: String,
     pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
 }
 impl PgInboxClaim {
+    pub(crate) fn take_slot(
+        &self,
+        runtime: &PgRuntime,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .filter(|slot| runtime.owns_slot(slot))
+    }
+
+    pub(crate) fn return_slot(&self, slot: tokio::sync::OwnedSemaphorePermit) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(slot);
+    }
+
     pub(crate) fn matches(&self, runtime: &PgRuntime) -> bool {
         self.binding.storage() == runtime.storage
             && self.binding.tenant() == self.identity.tenant_id()
@@ -36,6 +59,9 @@ pub struct PgInboxStore {
 impl PgInboxStore {
     /// Bind the shared pool and lease policy.
     pub fn new(runtime: Arc<PgRuntime>, policy: LeaseRenewalPolicy) -> Result<Self, PgError> {
+        if runtime.pool.options().get_max_connections() < 2 {
+            return Err(PgError::InsufficientRenewalCapacity);
+        }
         Ok(Self {
             runtime,
             lease_ms: milliseconds(policy.ttl())?,
@@ -102,6 +128,61 @@ async fn read(
         .fetch_optional(&mut *transaction.connection).await?)
 }
 
+impl PgInboxStore {
+    pub(crate) async fn claim_with_access(
+        &self,
+        binding: rss_transactional_messaging::fence::ExecutionBinding,
+        identity: &ConsumerIdentity,
+        deadline: OperationDeadline,
+        access: PoolAccess<'_>,
+    ) -> Result<IdempotencyDisposition<PgInboxClaim>, MessagingError> {
+        if binding.tenant() != identity.tenant_id() {
+            return Err(PgError::lost().port());
+        }
+        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
+        let identity = identity.clone();
+        let lease_ms = self.lease_ms;
+        settled(
+            self.runtime
+                .transaction_with_access(
+                    binding,
+                    cutoff,
+                    (),
+                    true,
+                    access,
+                    #[cfg(feature = "integration")]
+                    None,
+                    move |_, tx| {
+                        Box::pin(async move {
+                            let row = sqlx::query(CLAIM_SQL)
+                                .bind(identity.tenant_id().to_string())
+                                .bind(identity.message_id().as_str())
+                                .bind(identity.group().as_str())
+                                .bind(contract_key(identity.contract())?)
+                                .bind(lease_ms)
+                                .fetch_optional(&mut *tx.connection)
+                                .await?;
+                            if let Some(row) = row {
+                                return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
+                                    slot: std::sync::Mutex::new(None),
+                                    binding: *tx.binding(),
+                                    identity,
+                                    token: row.try_get("token")?,
+                                }));
+                            }
+                            let row = read(tx, &identity).await?.ok_or_else(PgError::invariant)?;
+                            Ok(match receipt(&row, &identity)? {
+                                Some(value) => IdempotencyDisposition::Terminal(value),
+                                None => IdempotencyDisposition::InProgress,
+                            })
+                        })
+                    },
+                )
+                .await,
+        )
+        .map_err(PgError::port)
+    }
+}
 pub(crate) async fn lock_identity(
     tx: &mut PgTransaction<'_>,
     identity: &ConsumerIdentity,
@@ -111,6 +192,27 @@ pub(crate) async fn lock_identity(
         .execute(&mut *tx.connection).await?;
     Ok(())
 }
+fn acknowledged_lease(
+    status: LeaseStatus,
+    elapsed: Duration,
+    policy: LeaseRenewalPolicy,
+) -> Result<LeaseStatus, PgError> {
+    let LeaseStatus::Held { remaining } = status else {
+        return Ok(LeaseStatus::Lost);
+    };
+    let remaining = remaining.saturating_sub(elapsed);
+    if remaining.is_zero() {
+        return Ok(LeaseStatus::Lost);
+    }
+    if !policy.fits(remaining) {
+        return Err(PgError::classified(
+            MessagingErrorKind::Transient,
+            std::io::Error::other("insufficient acknowledged Inbox lease headroom"),
+        ));
+    }
+    Ok(LeaseStatus::Held { remaining })
+}
+
 pub(crate) async fn extend_locked(
     tx: &mut PgTransaction<'_>,
     identity: &ConsumerIdentity,
@@ -142,37 +244,19 @@ impl InboxStore for PgInboxStore {
         if binding.tenant() != identity.tenant_id() {
             return Err(PgError::lost().port());
         }
-        let identity = identity.clone();
-        let lease_ms = self.lease_ms;
-        settled(
-            self.runtime
-                .local_tx(binding, deadline, move |tx| {
-                    Box::pin(async move {
-                        let row = sqlx::query(CLAIM_SQL)
-                            .bind(identity.tenant_id().to_string())
-                            .bind(identity.message_id().as_str())
-                            .bind(identity.group().as_str())
-                            .bind(contract_key(identity.contract())?)
-                            .bind(lease_ms)
-                            .fetch_optional(&mut *tx.connection)
-                            .await?;
-                        if let Some(row) = row {
-                            return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
-                                binding: *tx.binding(),
-                                identity,
-                                token: row.try_get("token")?,
-                            }));
-                        }
-                        let row = read(tx, &identity).await?.ok_or_else(PgError::invariant)?;
-                        Ok(match receipt(&row, &identity)? {
-                            Some(value) => IdempotencyDisposition::Terminal(value),
-                            None => IdempotencyDisposition::InProgress,
-                        })
-                    })
-                })
-                .await,
-        )
-        .map_err(PgError::port)
+        self.runtime
+            .validate_binding(binding)
+            .map_err(PgError::port)?;
+        let Some(permit) = self.runtime.try_claim_slot().map_err(PgError::port)? else {
+            return Ok(IdempotencyDisposition::CapacityBusy);
+        };
+        let outcome = self
+            .claim_with_access(binding, identity, deadline, PoolAccess::Reserved(&permit))
+            .await?;
+        if let IdempotencyDisposition::Acquired(claim) = &outcome {
+            claim.return_slot(permit);
+        }
+        Ok(outcome)
     }
     async fn read_terminal(
         &self,
@@ -210,24 +294,47 @@ impl InboxStore for PgInboxStore {
         let identity = claim.identity.clone();
         let token = claim.token.clone();
         let lease_ms = self.lease_ms;
-        settled(
+        let timer = &self.runtime.timer;
+        let started = timer.now();
+        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
+        let checked = settled(
             self.runtime
-                .local_tx(claim.binding, deadline, move |tx| {
-                    Box::pin(async move {
-                        lock_identity(tx, &identity).await?;
-                        extend_locked(tx, &identity, &token, lease_ms).await
-                    })
-                })
+                .transaction_with_access(
+                    claim.binding,
+                    cutoff,
+                    (),
+                    true,
+                    PoolAccess::Renewal,
+                    #[cfg(feature = "integration")]
+                    None,
+                    move |_, tx| {
+                        Box::pin(async move {
+                            lock_identity(tx, &identity).await?;
+                            let observed = tx.timer.now();
+                            let status = extend_locked(tx, &identity, &token, lease_ms).await?;
+                            Ok((observed, status))
+                        })
+                    },
+                )
                 .await,
-        )
-        .map_err(PgError::port)
-        .or_else(|error| {
-            if error.kind() == MessagingErrorKind::OwnershipLost {
-                Ok(LeaseStatus::Lost)
-            } else {
-                Err(error)
-            }
-        })
+        );
+        let now = timer.now();
+        tracing::debug!(
+            renewal_us = now.saturating_duration_since(started).as_micros() as u64,
+            "PostgreSQL Inbox renewal"
+        );
+        checked
+            .and_then(|(observed, status)| {
+                acknowledged_lease(status, now.saturating_duration_since(observed), self.policy)
+            })
+            .map_err(PgError::port)
+            .or_else(|error| {
+                if error.kind() == MessagingErrorKind::OwnershipLost {
+                    Ok(LeaseStatus::Lost)
+                } else {
+                    Err(error)
+                }
+            })
     }
     async fn release(
         &self,
@@ -237,7 +344,12 @@ impl InboxStore for PgInboxStore {
         if !claim.matches(&self.runtime) {
             return Err(PgError::lost().port());
         }
-        settled(self.runtime.local_tx(claim.binding, deadline, move |tx| Box::pin(async move {
+        let slot = claim.take_slot(&self.runtime);
+        let access = slot
+            .as_ref()
+            .map_or(PoolAccess::Ordinary, PoolAccess::Reserved);
+        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
+        settled(self.runtime.transaction_with_access(claim.binding, cutoff, (), true, access, #[cfg(feature="integration")] None, move |_,tx| Box::pin(async move {
             lock_identity(tx, &claim.identity).await?;
             let count = sqlx::query("DELETE FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(claim.token)
@@ -287,5 +399,30 @@ mod tests {
                 Err(PgError::InvalidLeaseDuration)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_ack_can_consume_renewal_headroom() -> Result<(), Box<dyn std::error::Error>> {
+        let ttl = Duration::from_millis(900);
+        let policy = LeaseRenewalPolicy::from_ttl(ttl)?;
+        let check =
+            |elapsed| acknowledged_lease(LeaseStatus::Held { remaining: ttl }, elapsed, policy);
+        assert_eq!(
+            check(Duration::from_millis(100))?,
+            LeaseStatus::Held {
+                remaining: Duration::from_millis(800)
+            }
+        );
+        assert_eq!(
+            check(Duration::from_millis(600)).err().map(|e| e.kind()),
+            Some(MessagingErrorKind::Transient)
+        );
+        assert_eq!(check(ttl)?, LeaseStatus::Lost);
+        Ok(())
     }
 }

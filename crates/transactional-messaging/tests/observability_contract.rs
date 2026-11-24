@@ -8,8 +8,8 @@ fn descriptor_closes_metric_and_event_exact_sets() {
     let descriptor = transactional_messaging_observability_descriptor();
     assert_eq!(descriptor.metrics(), &TransactionalMessagingMetric::ALL);
     assert_eq!(descriptor.events(), &TransactionalMessagingEvent::ALL);
-    assert_eq!(TransactionalMessagingMetric::ALL.len(), 17);
-    assert_eq!(TransactionalMessagingEvent::ALL.len(), 16);
+    assert_eq!(TransactionalMessagingMetric::ALL.len(), 19);
+    assert_eq!(TransactionalMessagingEvent::ALL.len(), 18);
 
     assert_eq!(
         TransactionalMessagingMetric::ALL.map(TransactionalMessagingMetric::name),
@@ -24,6 +24,8 @@ fn descriptor_closes_metric_and_event_exact_sets() {
             "inbox_stale_claim_depth",
             "inbox_oldest_stale_claim_age_seconds",
             "consumer_claim_in_progress_total",
+            "consumer_claim_capacity_busy_total",
+            "consumer_capacity_wait_seconds",
             "transactional_messaging_ingress_rejected_total",
             "consumer_tx_outcome_total",
             "consumer_settle_total",
@@ -64,6 +66,8 @@ fn descriptor_closes_metric_and_event_exact_sets() {
             "transactional_messaging.inbox.backlog",
             "transactional_messaging.inbox.backlog_unavailable",
             "transactional_messaging.consumer.claim_in_progress",
+            "transactional_messaging.consumer.claim_capacity_busy",
+            "transactional_messaging.consumer.capacity_wait",
             "transactional_messaging.consumer.ingress_rejected",
             "transactional_messaging.consumer.transaction",
             "transactional_messaging.consumer.settlement",

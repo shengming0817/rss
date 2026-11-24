@@ -534,16 +534,22 @@ impl InboxStore for FakeInbox {
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-        self.disposition
-            .lock()
-            .expect("lock")
-            .take()
-            .ok_or_else(|| {
-                MessagingError::new(
-                    MessagingErrorKind::Invariant,
-                    std::io::Error::other("claim reused"),
-                )
-            })
+        let mut state = self.disposition.lock().expect("lock");
+        match *state {
+            Some(IdempotencyDisposition::CapacityBusy) => {
+                return Ok(IdempotencyDisposition::CapacityBusy);
+            }
+            Some(IdempotencyDisposition::InProgress) => {
+                return Ok(IdempotencyDisposition::InProgress);
+            }
+            _ => {}
+        }
+        state.take().ok_or_else(|| {
+            MessagingError::new(
+                MessagingErrorKind::Invariant,
+                std::io::Error::other("claim reused"),
+            )
+        })
     }
 
     async fn read_terminal(
@@ -2325,12 +2331,14 @@ impl DeliverySource<Vec<u8>> for RedeliverySource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         self.subscriptions.fetch_add(1, Ordering::SeqCst);
         let delivery = self.deliveries.lock().expect("deliveries").pop_front();
-        Ok(ManagedDeliveryStream::from_provider(futures::stream::iter(
-            delivery.into_iter().collect::<Vec<_>>(),
-        )))
+        Ok(ManagedDeliveryStream::from_provider(
+            rss_transactional_messaging::transport::StreamOnStop::Release,
+            futures::stream::iter(delivery.into_iter().collect::<Vec<_>>()),
+        ))
     }
 }
 
@@ -2395,11 +2403,13 @@ impl DeliverySource<Vec<u8>> for OneDeliverySource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         let delivery = self.delivery.lock().expect("delivery lock").take();
-        Ok(ManagedDeliveryStream::from_provider(futures::stream::iter(
-            delivery.into_iter().collect::<Vec<_>>(),
-        )))
+        Ok(ManagedDeliveryStream::from_provider(
+            rss_transactional_messaging::transport::StreamOnStop::Release,
+            futures::stream::iter(delivery.into_iter().collect::<Vec<_>>()),
+        ))
     }
 }
 
@@ -2426,6 +2436,7 @@ async fn transient_delivery_failure_replaces_stream_and_resubscribes() {
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::clone(&source),
         Arc::new(TransientThenAcquiredInbox(AtomicUsize::new(0))),
         Arc::new(FakeTx {
@@ -2480,6 +2491,7 @@ async fn claim_deadline_replaces_stream_and_mints_a_fresh_delivery_budget() {
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::clone(&source),
         Arc::new(FakeInbox {
             disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
@@ -2583,6 +2595,7 @@ async fn forced_shutdown_during_claim_drops_without_settlement_or_cleanup() {
     let claim_started = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         source,
         Arc::new(BlockingClaimInbox {
             started: Arc::clone(&claim_started),
@@ -2638,6 +2651,7 @@ async fn provider_decoding_failure_uses_core_minted_reject() {
     let abandoned = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(OneDeliverySource {
             delivery: Mutex::new(Some(IncomingDelivery::invalid_from_provider(
                 rss_transactional_messaging::transaction::EnvelopeValidationFailure::MalformedMetadata,
@@ -2698,6 +2712,7 @@ async fn forced_worker_shutdown_drops_handler_without_settlement() {
     let timer = Arc::new(ManualTimer::new());
     let started = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         source,
         inbox,
         Arc::new(BlockingCommitTx {
@@ -2758,6 +2773,7 @@ async fn terminal_outcome_completing_during_cancellation_is_settled() {
     let started = Arc::new(AtomicUsize::new(0));
     let complete = Arc::new(tokio::sync::Notify::new());
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         source,
         idle_inbox(),
         Arc::new(BlockingCommitTx {
@@ -2811,12 +2827,14 @@ impl DeliverySource<Vec<u8>> for BlockingSubscribeSource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         self.started.fetch_add(1, Ordering::SeqCst);
         self.gate.notified().await;
-        Ok(ManagedDeliveryStream::from_provider(Box::pin(
-            futures::stream::empty(),
-        )))
+        Ok(ManagedDeliveryStream::from_provider(
+            rss_transactional_messaging::transport::StreamOnStop::Release,
+            Box::pin(futures::stream::empty()),
+        ))
     }
 }
 
@@ -2833,16 +2851,18 @@ impl DeliverySource<Vec<u8>> for GatedDeliverySource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         self.subscribed.fetch_add(1, Ordering::SeqCst);
         let gate = Arc::clone(&self.gate);
         let delivery = self.delivery.lock().expect("delivery").take();
-        Ok(ManagedDeliveryStream::from_provider(Box::pin(
-            futures::stream::once(async move {
+        Ok(ManagedDeliveryStream::from_provider(
+            rss_transactional_messaging::transport::StreamOnStop::Release,
+            Box::pin(futures::stream::once(async move {
                 gate.notified().await;
                 delivery.expect("one delivery")
-            }),
-        )))
+            })),
+        ))
     }
 }
 
@@ -2858,6 +2878,7 @@ impl DeliverySource<Vec<u8>> for FailingSubscribeSource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(MessagingError::new(
@@ -2880,6 +2901,7 @@ impl DeliverySource<Vec<u8>> for PanickingSubscribeSource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         panic!("private provider panic")
     }
@@ -2899,6 +2921,7 @@ async fn cancellation_during_subscribe_stops_without_admitting_work() {
     let started = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(BlockingSubscribeSource {
             started: Arc::clone(&started),
             gate: Arc::new(tokio::sync::Notify::new()),
@@ -2941,6 +2964,7 @@ async fn cancellation_wins_over_a_simultaneously_ready_new_delivery() {
     let subscribed = Arc::new(AtomicUsize::new(0));
     let gate = Arc::new(tokio::sync::Notify::new());
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(GatedDeliverySource {
             subscribed: Arc::clone(&subscribed),
             gate: Arc::clone(&gate),
@@ -2989,6 +3013,7 @@ async fn cancellation_interrupts_subscription_backoff() {
     let message = envelope(|_| {});
     let subscribe_calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(FailingSubscribeSource {
             calls: Arc::clone(&subscribe_calls),
             kind: MessagingErrorKind::Transient,
@@ -3026,6 +3051,7 @@ async fn cancellation_interrupts_subscription_backoff() {
 async fn non_transient_subscribe_failure_is_fail_loud() {
     let message = envelope(|_| {});
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(FailingSubscribeSource {
             calls: Arc::new(AtomicUsize::new(0)),
             kind: MessagingErrorKind::Invariant,
@@ -3074,6 +3100,7 @@ async fn non_transient_subscribe_failure_is_fail_loud() {
 async fn provider_panic_maps_to_typed_worker_failure() {
     let message = envelope(|_| {});
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(PanickingSubscribeSource),
         idle_inbox(),
         Arc::new(FakeTx {
@@ -3194,11 +3221,13 @@ impl DeliverySource<Vec<u8>> for TwoDeliverySource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         let deliveries = std::mem::take(&mut *self.deliveries.lock().expect("deliveries"));
-        Ok(ManagedDeliveryStream::from_provider(futures::stream::iter(
-            deliveries,
-        )))
+        Ok(ManagedDeliveryStream::from_provider(
+            rss_transactional_messaging::transport::StreamOnStop::Release,
+            futures::stream::iter(deliveries),
+        ))
     }
 }
 
@@ -3211,6 +3240,7 @@ async fn consumer_does_not_process_the_next_delivery_before_settlement() {
     let settled = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(TwoDeliverySource {
             deliveries: Mutex::new(vec![
                 IncomingDelivery::Valid(Box::new(Delivery::new(
@@ -3317,6 +3347,7 @@ impl DeliverySource<Vec<u8>> for RecoverySource {
     async fn deliveries(
         &self,
         _subscription: &rss_transactional_messaging::message::SubscriptionIdentity,
+        _window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
         match self.steps.lock().expect("steps").pop_front() {
             Some(RecoveryStep::TransientError) => Err(MessagingError::new(
@@ -3324,9 +3355,11 @@ impl DeliverySource<Vec<u8>> for RecoverySource {
                 std::io::Error::other("subscription unavailable"),
             )),
             Some(RecoveryStep::EmptyStream) | None => Ok(ManagedDeliveryStream::from_provider(
+                rss_transactional_messaging::transport::StreamOnStop::Release,
                 futures::stream::iter(Vec::new()),
             )),
             Some(RecoveryStep::Delivery { fails }) => Ok(ManagedDeliveryStream::from_provider(
+                rss_transactional_messaging::transport::StreamOnStop::Release,
                 futures::stream::iter(vec![IncomingDelivery::Valid(Box::new(Delivery::new(
                     envelope(|_| {}),
                     if fails {
@@ -3348,6 +3381,7 @@ async fn assert_subscription_delays(steps: Vec<RecoveryStep>, expected_delays: &
         permits: tokio::sync::Semaphore::new(0),
     });
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(RecoverySource {
             steps: Mutex::new(steps.into()),
         }),
@@ -3430,6 +3464,7 @@ async fn directly_awaited_consumer_accepts_borrowed_timer_and_stops_before_claim
         ))))),
     });
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::clone(&source),
         idle_inbox(),
         Arc::new(FakeTx {
@@ -3456,6 +3491,7 @@ async fn directly_awaited_consumer_accepts_borrowed_timer_and_stops_before_claim
 async fn host_non_transient_subscribe_failure_is_fail_loud() {
     let message = envelope(|_| {});
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::new(FailingSubscribeSource {
             calls: Arc::new(AtomicUsize::new(0)),
             kind: MessagingErrorKind::Invariant,
@@ -3502,6 +3538,7 @@ async fn host_forced_worker_shutdown_drops_handler_without_settlement() {
     let timer = Arc::new(ManualTimer::new());
     let started = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         source,
         inbox,
         Arc::new(BlockingCommitTx {
@@ -3553,6 +3590,7 @@ async fn host_forced_shutdown_during_claim_drops_without_settlement_or_cleanup()
     let claim_started = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         source,
         Arc::new(BlockingClaimInbox {
             started: Arc::clone(&claim_started),
@@ -3687,6 +3725,7 @@ async fn shared_consumer_worker_uses_each_deliveries_explicit_execution() {
     let inbox = Arc::new(ScopedInbox(Mutex::new(Vec::new())));
     let calls = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         source,
         inbox.clone(),
         Arc::new(FakeTx {
@@ -3746,4 +3785,120 @@ fn wrong_execution_tenant_requeues_instead_of_rejecting_message_content() {
     .expect("mismatched tenant must be rejected");
     assert_eq!(error.reason(), EnvelopeValidationFailure::ExecutionMismatch);
     assert_eq!(error.into_decision().kind(), SettlementKind::Requeue);
+}
+
+#[tokio::test(start_paused = true)]
+async fn busy_claims_retain_one_delivery_until_the_operation_cutoff() {
+    for (claim, expected) in [
+        (
+            IdempotencyDisposition::InProgress,
+            ProcessingDisposition::InProgress,
+        ),
+        (
+            IdempotencyDisposition::CapacityBusy,
+            ProcessingDisposition::CapacityBusy,
+        ),
+    ] {
+        let msg = envelope(|_| {});
+        let sub = subscription(&msg);
+        let timer = RealtimeClock::new();
+        let policy = ConsumerExecutionPolicy::new(
+            RetryPolicy::STANDARD,
+            ExecutionBudget::new(Duration::from_secs(2), Duration::from_secs(1)).expect("budget"),
+        );
+        let execution = ConsumerExecution::new(
+            ConsumerGroup::parse("busy").expect("group"),
+            &TrustedIngress,
+            &sub,
+            &timer,
+            policy,
+            &NoopEmitter,
+        );
+        let recorder = RecordingSettlement::new();
+        let inbox = FakeInbox {
+            disposition: Mutex::new(Some(claim)),
+            lease: LeaseStatus::Lost,
+        };
+        let tx = FakeTx {
+            calls: Arc::new(AtomicUsize::new(0)),
+            disposition: TerminalDisposition::Succeeded,
+        };
+        let attempt = consume_once(
+            &inbox,
+            &tx,
+            &execution,
+            Delivery::new(msg, recorder.clone()),
+        );
+        tokio::pin!(attempt);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(999), &mut attempt)
+                .await
+                .is_err()
+        );
+        assert!(recorder.settlements().is_empty());
+        assert_eq!(attempt.await.expect("bounded wait"), expected);
+        assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
+        assert_eq!(recorder.abandon_count(), 0);
+        assert_eq!(tx.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_budget_reclaims_released_capacity_on_the_original_delivery() {
+    let msg = envelope(|_| {});
+    let sub = subscription(&msg);
+    let timer = RealtimeClock::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = RecordingEmitter(events.clone());
+    let execution = ConsumerExecution::new(
+        ConsumerGroup::parse("capacity").expect("group"),
+        &TrustedIngress,
+        &sub,
+        &timer,
+        consumer_policy(),
+        &emitter,
+    );
+    let inbox = FakeInbox {
+        disposition: Mutex::new(Some(IdempotencyDisposition::CapacityBusy)),
+        lease: LeaseStatus::Held {
+            remaining: Duration::from_secs(30),
+        },
+    };
+    let tx = FakeTx {
+        calls: Arc::new(AtomicUsize::new(0)),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let recorder = RecordingSettlement::new();
+    let attempt = consume_once(
+        &inbox,
+        &tx,
+        &execution,
+        Delivery::new(msg, recorder.clone()),
+    );
+    tokio::pin!(attempt);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut attempt)
+            .await
+            .is_err()
+    );
+    *inbox.disposition.lock().expect("disposition") = Some(IdempotencyDisposition::Acquired(Claim));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(251), attempt)
+            .await
+            .expect("recheck")
+            .expect("consume"),
+        ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
+    );
+    assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
+    let durations: Vec<_> = events
+        .lock()
+        .expect("events")
+        .iter()
+        .filter_map(|e| match e {
+            TransactionalMessagingObservation::ConsumerCapacityWait { duration } => Some(*duration),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(durations.len(), 1);
+    assert!((Duration::from_secs(1)..=Duration::from_millis(1251)).contains(&durations[0]));
 }

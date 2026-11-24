@@ -109,8 +109,10 @@ impl std::fmt::Debug for ConsumerIdentity {
     }
 }
 
-/// Durable inbox state observed while attempting to acquire ownership.
+/// Admission or durable inbox state observed while attempting to acquire ownership.
 pub enum IdempotencyDisposition<C> {
+    /// Execution capacity is occupied; the provider did not attempt a durable claim.
+    CapacityBusy,
     /// This attempt acquired a fenced claim and may enter the transaction path.
     Acquired(C),
     /// Another live attempt owns the record; do not execute the handler.

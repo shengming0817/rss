@@ -129,7 +129,21 @@ pub(super) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         .await?;
     let runtime = Arc::new(
         PgRuntime::connect(
-            config.with_pool_limits(1, 1),
+            config.clone().with_pool_limits(1, 1),
+            Timer::new(),
+            fence_fixture::storage(),
+        )
+        .await?,
+    );
+    let policy =
+        rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?;
+    assert!(matches!(
+        PgInboxStore::new(runtime.clone(), policy),
+        Err(PgError::InsufficientRenewalCapacity)
+    ));
+    let consumer = Arc::new(
+        PgRuntime::connect(
+            config.with_pool_limits(1, 2),
             Timer::new(),
             fence_fixture::storage(),
         )
@@ -137,9 +151,10 @@ pub(super) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     );
     let first = observe(&runtime, execution(a, 1)).await?;
     unprovisioned_is_fenced(&runtime, b).await;
-    newly_provisioned(runtime.clone(), owner, a, b, first).await?;
+    newly_provisioned(runtime.clone(), &consumer, owner, a, b, first).await?;
     reject_wrong_storage(&runtime, a).await?;
     shared_capacity(runtime.clone(), a, b, first).await?;
+    consumer.close().await;
     runtime.close().await;
     assert!(runtime.is_closed());
     Ok(())
@@ -232,6 +247,7 @@ async fn shared_capacity(
 
 async fn newly_provisioned(
     runtime: Arc<PgRuntime>,
+    consumer: &Arc<PgRuntime>,
     owner: &sqlx::PgPool,
     a: TenantId,
     b: TenantId,
@@ -244,10 +260,10 @@ async fn newly_provisioned(
     {
         let scope = execution(b, 1);
         assert_eq!(observe(&runtime, scope).await?, first);
-        roundtrip(runtime.clone(), scope).await?;
+        roundtrip(consumer.clone(), scope).await?;
     }
     assert!(!runtime.is_closed());
-    roundtrip(runtime.clone(), execution(a, 1)).await?;
+    roundtrip(consumer.clone(), execution(a, 1)).await?;
     assert_eq!(observe(&runtime, execution(a, 1)).await?, first);
     sqlx::query(
         "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",

@@ -13,6 +13,7 @@ managed-runtime = ["dep:rss-runtime", "rss-transactional-messaging-amqp/managed-
 rss-runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
+tokio-util.workspace = true
 lapin.workspace = true
 rss-contract.workspace = true
 rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }

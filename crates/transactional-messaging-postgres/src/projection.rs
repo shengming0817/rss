@@ -134,12 +134,11 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             return Err(PgError::InvalidLeaseDuration);
         }
         let runtime = capture.runtime.clone();
-        if runtime.pool.options().get_max_connections() < 2 {
-            return Err(PgError::invariant());
-        }
+        let inbox = PgInboxStore::new(runtime.clone(), renewal)?;
         let cutoff = Deadline::from_timeout(&runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant())?;
         let valid = within(&runtime.timer, cutoff, |_| async {
+            let _slot = runtime.ordinary_slot().await?;
             sqlx::query_scalar::<_,bool>("SELECT rss_transactional_messaging.projection_scope_matches($1,$2) AND has_function_privilege(current_user,'rss_transactional_messaging.local_projection_dr_status(uuid,bigint,uuid)','EXECUTE') AND NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND (has_function_privilege(r.oid,'rss_transactional_messaging.append_outbox(bytea,jsonb)','EXECUTE') OR has_function_privilege(r.oid,'rss_transactional_messaging.prepare_outbox_partitions(jsonb)','EXECUTE')))")
                 .bind(domain.as_str()).bind(group.as_str()).fetch_one(&runtime.pool).await
         }).await??;
@@ -150,7 +149,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         }
         Ok(Self {
             outbox: PgOutboxStore::new(runtime.clone(), domain.clone(), delivery)?,
-            inbox: PgInboxStore::new(runtime.clone(), renewal)?,
+            inbox,
             runtime,
             capture,
             effect,
@@ -307,10 +306,11 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         }
         let acquired = self
             .inbox
-            .claim(
+            .claim_with_access(
                 binding.execution(),
                 binding.identity(),
                 remaining(self, cutoff),
+                crate::transaction::PoolAccess::Ordinary,
             )
             .await
             .map_err(pg)?;
@@ -318,6 +318,8 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         // a wait for Inbox must not overturn a matching durable terminal receipt.
         let claim = match acquired {
             IdempotencyDisposition::Acquired(claim) => claim,
+            // Projection waits for admission before the durable claim query.
+            IdempotencyDisposition::CapacityBusy => return Err(PgError::invariant()),
             IdempotencyDisposition::InProgress => {
                 self.outbox
                     .settle(source, OutboxSettlement::Retry, remaining(self, cutoff))
@@ -351,6 +353,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let injection = self.take_projection_fault()?;
         let outcome = crate::consumer::execute_transaction(
             &self.runtime,
+            crate::transaction::PoolAccess::Ordinary,
             &effect,
             &self.capture,
             &claim,
@@ -649,11 +652,12 @@ impl<H: Sync, K: Send + Sync> RenewedEffect<'_, H, K> {
         // Recheck and renew once under the original cutoff before entering the effect.
         for force_renewal in [false, true] {
             let previous = *expected;
-            let attempt = Box::pin(p.runtime.transaction_until(
+            let attempt = Box::pin(p.runtime.transaction_with_access(
                 self.source.binding,
                 cutoff,
                 self,
                 true,
+                crate::transaction::PoolAccess::Renewal,
                 #[cfg(feature = "integration")]
                 None,
                 move |effect, tx| {

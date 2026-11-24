@@ -13,6 +13,7 @@ use std::{
 };
 use tokio::sync::Notify;
 mod consumer_failures;
+pub(super) mod consumer_window;
 mod relay;
 mod roles;
 

@@ -119,6 +119,11 @@ impl RabbitFixture {
 
     /// Observes actual broker registrations, excluding cancelled consumers holding unacked messages.
     pub async fn broker_consumer_count(&self, vhost: &str, queue: &str) -> Result<usize> {
+        Ok(self.broker_consumer_prefetch(vhost, queue).await?.len())
+    }
+
+    /// Observe each registered consumer's actual broker-side prefetch limit.
+    pub async fn broker_consumer_prefetch(&self, vhost: &str, queue: &str) -> Result<Vec<u16>> {
         self.require_vhost(vhost)?;
         validate_exact_queue_name(queue)?;
         let output = run_rabbitmqctl_output(
@@ -128,6 +133,7 @@ impl RabbitFixture {
                 "-p",
                 vhost,
                 "queue_name",
+                "prefetch_count",
                 "--formatter",
                 "json",
             ],
@@ -137,10 +143,15 @@ impl RabbitFixture {
         let rows = rows
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("invalid broker consumer list"))?;
-        Ok(rows
-            .iter()
+        rows.iter()
             .filter(|row| row.get("queue_name").and_then(serde_json::Value::as_str) == Some(queue))
-            .count())
+            .map(|row| {
+                row["prefetch_count"]
+                    .as_u64()
+                    .and_then(|n| u16::try_from(n).ok())
+                    .ok_or_else(|| anyhow::anyhow!("invalid broker consumer prefetch"))
+            })
+            .collect()
     }
 
     /// Includes dead letters retained by a source quorum queue while its target is unavailable.

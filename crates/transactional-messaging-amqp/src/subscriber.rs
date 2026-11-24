@@ -2,7 +2,7 @@
 //!
 //! `basic_consume` 的 `Consumer`（`Stream<Item = Result<Delivery>>`）适配成 canonical incoming delivery stream；
 //! settlement authority 随 delivery move（manual-ack）。
-//! P7 manual-ack：`no_ack=false` + `basic_qos(PREFETCH)`，每条 [`rss_transactional_messaging::transport::Delivery`] 携 [`AmqpSettlement`] 句柄。
+//! P7 manual-ack：`no_ack=false` + `basic_qos(window)`，每条 [`rss_transactional_messaging::transport::Delivery`] 携 [`AmqpSettlement`] 句柄。
 //! AMQP 仅 at-least-once（manual-ack）：经 `DeliverySource::deliveries`；
 //! Provider-neutral delivery doubles live in `rss-transactional-messaging-testkit`.
 //! ref: lapin examples/pubsub.rs@main；rabbitmq docs/confirms。
@@ -66,12 +66,6 @@ impl SubscriberError {
         MessagingError::new(self.kind, self)
     }
 }
-
-/// channel 上最多 unacked 消息上限（限 channel 级 unacked window；at-least-once 背压）。
-/// 取值依据：RabbitMQ 推荐 100–300（ref: rabbitmq docs/confirms §prefetch / consumer-prefetch）。
-// ConsumerTx is deliberately sequential. A window of one prevents a second delivery from becoming
-// in-flight while the first transaction is blocked during graceful shutdown.
-const PREFETCH: u16 = 1;
 
 fn validate_queue_name(name: &str) -> Result<(), SubscriberError> {
     if name.is_empty() || name.len() > 255 {
@@ -515,8 +509,8 @@ async fn run_subscription_close(
     rpc.cancel_requested.cancel();
     rpc.closing.seal();
     stop_subscription_admission(rpc, channel, consumer_tag, resource).await;
-    // Normal stream cancellation preserves admitted settlement authority. Abandonment or
-    // resource shutdown retires it; every path still awaits the same channel-close receipt.
+    // Local retirement preserves sibling authority. Explicit shutdown and transport failure
+    // may force the shared channel closed. All paths use one close receipt.
     await_settlement_retirement(rpc, shutdown).await;
     let result = rpc.closing.drive().await;
     ShutdownFailures::report_subscription_close(resource, &result);
@@ -671,20 +665,31 @@ impl DeliverySettlement for AmqpSettlement {
     }
 
     async fn abandon(self, deadline: OperationDeadline) -> Result<(), MessagingError> {
-        let closing = self.subscription_rpc.closing.clone();
-        closing.requested.cancel();
+        let rpc = Arc::clone(&self.subscription_rpc);
+        rpc.cancel_requested.cancel();
+        let active = rpc.closing.seal();
         drop(self);
-        tokio::time::timeout(deadline.timeout(), closing.wait())
-            .await
-            .map_err(|error| MessagingError::new(MessagingErrorKind::DeadlineElapsed, error))?
-            .map_err(|error| MessagingError::new(MessagingErrorKind::Transient, error))
+        tokio::time::timeout(deadline.timeout(), async {
+            // Other admitted handles can be queued behind this delivery. Waiting here for
+            // their retirement would prevent the worker from seeing this outcome and draining.
+            rpc.admission_stopped.cancelled().await;
+            if active == 1 || rpc.closing.requested.is_cancelled() {
+                rpc.closing
+                    .wait()
+                    .await
+                    .map_err(|error| MessagingError::new(MessagingErrorKind::Transient, error))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| MessagingError::new(MessagingErrorKind::DeadlineElapsed, error))?
     }
 }
 
 impl Drop for AmqpSettlement {
     fn drop(&mut self) {
         if !self.settled {
-            self.subscription_rpc.closing.requested.cancel();
+            self.subscription_rpc.cancel_requested.cancel();
         }
     }
 }
@@ -695,6 +700,7 @@ impl SubscriberInner {
     async fn delivery_stream(
         &self,
         subscription: &SubscriptionIdentity,
+        window: std::num::NonZeroU16,
         token: CancellationToken,
     ) -> Result<AmqpDeliveries, SubscriberError> {
         self.ensure_operational()?;
@@ -714,7 +720,7 @@ impl SubscriberInner {
         let cleanup = conn::OnDrop::new(|| conn::close_channel_now(&channel));
         // prefetch：限 channel 上 unacked 消息上限（P7 at-least-once 背压，RabbitMQ 推荐 100–300）。
         channel
-            .basic_qos(PREFETCH, BasicQosOptions::default())
+            .basic_qos(window.get(), BasicQosOptions::default())
             .await
             .map_err(SubscriberError::new)?;
         // Queue, bindings and policies are provisioned externally. basic.consume fails closed
@@ -745,8 +751,7 @@ impl SubscriberInner {
         }
         // Consumer → Delivery（携 acker）。take_until 在 token cancel 后以同一稳定 tag 等待
         // broker 确认 basic.cancel，再终止流；channel 保持打开，让 in-flight acker 继续 settle。
-        // Drive admission cancellation independently from stream polling. ConsumerTx processes one
-        // delivery at a time and may be blocked in its PG transaction when shutdown begins.
+        // Drive admission cancellation independently from stream polling. Outstanding transactions may still be running when shutdown begins.
         let admission_stopped = CancellationToken::new();
         let cancel_confirmation = admission_stopped.clone();
         let close_channel = channel.clone();
@@ -907,10 +912,16 @@ impl DeliverySource<Vec<u8>> for SubscriberInner {
     async fn deliveries(
         &self,
         subscription: &SubscriptionIdentity,
+        window: std::num::NonZeroU16,
     ) -> Result<ManagedDeliveryStream<Self::Deliveries>, MessagingError> {
-        self.delivery_stream(subscription, self.shutdown.child_token())
+        self.delivery_stream(subscription, window, self.shutdown.child_token())
             .await
-            .map(ManagedDeliveryStream::from_provider)
+            .map(|stream| {
+                ManagedDeliveryStream::from_provider(
+                    rss_transactional_messaging::transport::StreamOnStop::Release,
+                    stream,
+                )
+            })
             .map_err(SubscriberError::into_messaging)
     }
 }

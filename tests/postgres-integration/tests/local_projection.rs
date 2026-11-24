@@ -1066,7 +1066,11 @@ async fn pool_capacity(f: &Fixture) -> anyhow::Result<()> {
             }
         )
         .await
-        .is_err(),
+        .err()
+        .is_some_and(|error| matches!(
+            error.downcast_ref::<rss_transactional_messaging_postgres::PgError>(),
+            Some(rss_transactional_messaging_postgres::PgError::InsufficientRenewalCapacity)
+        )),
         "a one-connection pool cannot renew while holding an effect connection"
     );
     one.close().await;

@@ -49,7 +49,6 @@ use rss_transactional_messaging_testkit::memory::{FakeClock, MemoryInboxStore};
 #[cfg(feature = "managed-runtime")]
 use rss_transactional_messaging::policy::ShutdownBudget;
 use rss_transactional_messaging_amqp::{AmqpShutdownError, AmqpShutdownErrorKind};
-#[cfg(feature = "managed-runtime")]
 use rss_transactional_messaging_runtime::consumer::{ConsumerWorker, SubscriptionBackoffPolicy};
 
 const TIMEOUT: Duration = Duration::from_secs(40);
@@ -86,6 +85,15 @@ fn envelope_with_payload(
     id: &str,
     payload: Vec<u8>,
 ) -> MessageEnvelope<Vec<u8>> {
+    envelope_in_partition(route, id, payload, "integration-partition")
+}
+
+fn envelope_in_partition(
+    route: &MessageRoute,
+    id: &str,
+    payload: Vec<u8>,
+    key: &str,
+) -> MessageEnvelope<Vec<u8>> {
     let tenant = TenantId::parse(TENANT).expect("tenant");
     MessageEnvelope::new(
         MessageId::parse(id).expect("message id"),
@@ -103,7 +111,7 @@ fn envelope_with_payload(
             ),
             MessageMetadataExtensions::new(
                 None,
-                Some(PartitionKey::parse("integration-partition").expect("partition")),
+                Some(PartitionKey::parse(key).expect("partition")),
                 None,
                 BTreeMap::new(),
             ),
@@ -405,9 +413,10 @@ async fn assert_same_id_redelivery(
 ) -> Result<(), LiveConformanceFailure> {
     let (subscriber, subscriber_resource) =
         prepared_subscriber(url, route, "managed-cancel-sub-2", false).await?;
-    let mut deliveries = DeliverySource::deliveries(&subscriber, subscription)
-        .await
-        .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
+    let mut deliveries =
+        DeliverySource::deliveries(&subscriber, subscription, std::num::NonZeroU16::MIN)
+            .await
+            .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
     let delivery = next_valid_delivery(&mut deliveries).await?;
     let (message, settlement) = delivery.into_parts();
     if message.id() != expected_id {
@@ -486,9 +495,10 @@ async fn run_ambiguous_publish_retries_the_same_message_identity(
     let (publisher, publisher_resource) = connected_publisher(&url, "ambiguous-pub").await?;
     let message = envelope(&route, "stable-message-id");
     let subscription = subscription_for(&message, &route);
-    let mut deliveries = DeliverySource::deliveries(&subscriber, &subscription)
-        .await
-        .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
+    let mut deliveries =
+        DeliverySource::deliveries(&subscriber, &subscription, std::num::NonZeroU16::MIN)
+            .await
+            .map_err(|error| live_failure(LivePhase::Delivery, error.kind()))?;
 
     publisher.inject_post_send_connection_close_once();
     let first = Publisher::publish(&publisher, &message, provider_deadline()).await;
@@ -550,7 +560,8 @@ async fn rejected_commit_enters_broker_dead_letter_queue(
         route.clone(),
         message.metadata().contract().clone(),
     );
-    let mut deliveries = DeliverySource::deliveries(&subscriber, &subscription).await?;
+    let mut deliveries =
+        DeliverySource::deliveries(&subscriber, &subscription, std::num::NonZeroU16::MIN).await?;
     assert!(matches!(
         Publisher::publish(&publisher, &message, provider_deadline()).await,
         PublishOutcome::Confirmed(())
@@ -601,6 +612,7 @@ async fn run_managed_forced_cancel_redelivers_the_same_message_id(
 
     let started = Arc::new(AtomicUsize::new(0));
     let worker = ConsumerWorker::new(
+        std::num::NonZeroU16::MIN,
         Arc::clone(&first),
         Arc::new(LiveInbox),
         Arc::new(BlockingLiveTx(Arc::clone(&started))),
@@ -871,6 +883,12 @@ async fn shared_amqp_settlement_and_runtime_suite() -> anyhow::Result<()> {
         rejected_commit_enters_broker_dead_letter_queue(&rabbit),
     )
     .await?;
+    suite_phase(
+        deadline,
+        "subscription window and drain",
+        window::run(&rabbit),
+    )
+    .await?;
     #[cfg(feature = "managed-runtime")]
     suite_phase(
         deadline,
@@ -991,7 +1009,9 @@ async fn assert_tls_roundtrip(
     ));
     let message = envelope(route, "private-ca-valid");
     let subscription = subscription_for(&message, route);
-    let mut stream = subscriber.deliveries(&subscription).await?;
+    let mut stream = subscriber
+        .deliveries(&subscription, std::num::NonZeroU16::MIN)
+        .await?;
     let delivery = next_valid_delivery(&mut stream).await?;
     let (received, settlement) = (*delivery).into_parts();
     transport::acknowledge(settlement, &received, &subscription).await?;
@@ -1014,3 +1034,5 @@ fn execution(
         Epoch::new(epoch).expect("fixture epoch"),
     )
 }
+
+mod window;

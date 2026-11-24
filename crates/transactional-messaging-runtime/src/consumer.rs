@@ -10,7 +10,7 @@ use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::inbox::{
     ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
 };
-use rss_transactional_messaging::message::SubscriptionIdentity;
+use rss_transactional_messaging::message::{PartitionIdentity, SubscriptionIdentity};
 use rss_transactional_messaging::observability::{
     TransactionalMessagingDisposition, TransactionalMessagingEmitter,
     TransactionalMessagingIoOutcome, TransactionalMessagingObservation,
@@ -29,6 +29,8 @@ use rss_transactional_messaging::transport::{
 /// Closed result of processing one broker delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessingDisposition {
+    /// Execution capacity remained occupied through the delivery budget.
+    CapacityBusy,
     /// Another live claim owns this message.
     InProgress,
     /// A matching durable terminal receipt bypassed the handler.
@@ -125,24 +127,96 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let (message, settlement) = delivery.into_parts();
-    let deadlines = execution.deadlines()?;
-    let binding =
-        match verify_ingress(
+    let prepared = PreparedDelivery::valid(execution, Box::new(delivery), execution.deadlines()?);
+    process_prepared(inbox, transaction, execution, prepared).await
+}
+
+enum Ingress<P, S> {
+    Verified(Box<Delivery<P, S>>, VerifiedConsumerBinding),
+    Rejected(EnvelopeValidationFailure, SettlementDecision, S),
+}
+
+struct PreparedDelivery<P, S> {
+    ingress: Ingress<P, S>,
+    deadlines: ExecutionDeadlines,
+}
+
+impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
+    fn valid<V: IngressValidator<P>, R, E>(
+        execution: &ConsumerExecution<'_, V, R, E>,
+        delivery: Box<Delivery<P, S>>,
+        deadlines: ExecutionDeadlines,
+    ) -> Self {
+        let ingress = match verify_ingress(
             execution.validator,
             execution.group.clone(),
             execution.subscription,
-            &message,
+            delivery.message(),
         ) {
-            Ok(binding) => binding,
-            Err(rejection) => {
-                let failure = rejection.reason();
+            Ok(binding) => Ingress::Verified(delivery, binding),
+            Err(rejection) => Ingress::Rejected(
+                rejection.reason(),
+                rejection.into_decision(),
+                delivery.into_parts().1,
+            ),
+        };
+        Self { ingress, deadlines }
+    }
+
+    fn incoming<V: IngressValidator<P>, R, E>(
+        execution: &ConsumerExecution<'_, V, R, E>,
+        item: IncomingDelivery<P, S>,
+        deadlines: ExecutionDeadlines,
+    ) -> Self {
+        match item {
+            IncomingDelivery::Valid(delivery) => Self::valid(execution, delivery, deadlines),
+            IncomingDelivery::Invalid(invalid) => {
+                let (rejection, settlement) = invalid.into_parts();
+                PreparedDelivery {
+                    ingress: Ingress::Rejected(
+                        rejection.reason(),
+                        rejection.into_decision(),
+                        settlement,
+                    ),
+                    deadlines,
+                }
+            }
+        }
+    }
+
+    fn partition(&self) -> Option<&PartitionIdentity> {
+        match &self.ingress {
+            Ingress::Verified(delivery, _) => delivery.message().metadata().partition(),
+            Ingress::Rejected(..) => None,
+        }
+    }
+}
+
+async fn process_prepared<P, S, I, T, V, R, E>(
+    inbox: &I,
+    transaction: &T,
+    execution: &ConsumerExecution<'_, V, R, E>,
+    prepared: PreparedDelivery<P, S>,
+) -> Result<ProcessingDisposition, MessagingError>
+where
+    P: AsRef<[u8]> + Send + Sync,
+    S: DeliverySettlement,
+    I: InboxStore,
+    T: ConsumerTx<P, Claim = I::Claim>,
+    R: ExecutionTimer,
+    E: TransactionalMessagingEmitter,
+{
+    let PreparedDelivery { ingress, deadlines } = prepared;
+    let ((message, settlement), binding) =
+        match ingress {
+            Ingress::Verified(delivery, binding) => (delivery.into_parts(), binding),
+            Ingress::Rejected(failure, decision, settlement) => {
                 execution.emitter.emit(
                     TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure },
                 );
                 settle_observed(
                     settlement,
-                    rejection.into_decision(),
+                    decision,
                     deadlines.settlement(),
                     execution.timer,
                     execution.emitter,
@@ -155,35 +229,9 @@ where
                 });
             }
         };
-
-    let claimed = match within(execution.timer, deadlines.operation(), |deadline| {
-        inbox.claim(binding.execution(), binding.identity(), deadline)
-    })
-    .await
-    .and_then(std::convert::identity)
-    {
-        Ok(claimed) => claimed,
-        Err(error) => {
-            emit_runtime_failure(
-                execution.emitter,
-                TransactionalMessagingRuntimePhase::ConsumerClaim,
-                &error,
-            );
-            return Err(abandon_after_error(
-                settlement,
-                deadlines.settlement(),
-                execution.timer,
-                execution.emitter,
-                error,
-            )
-            .await);
-        }
-    };
-    match claimed {
-        IdempotencyDisposition::InProgress => {
-            execution
-                .emitter
-                .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
+    let claim = wait_for_claim(inbox, execution, &binding, deadlines.operation()).await;
+    match claim {
+        Ok(busy @ (IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::InProgress)) => {
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
@@ -192,9 +240,28 @@ where
                 execution.emitter,
             )
             .await?;
-            Ok(ProcessingDisposition::InProgress)
+            Ok(if matches!(busy, IdempotencyDisposition::CapacityBusy) {
+                ProcessingDisposition::CapacityBusy
+            } else {
+                ProcessingDisposition::InProgress
+            })
         }
-        IdempotencyDisposition::Terminal(receipt) => match binding.validate_terminal(receipt) {
+        Err(error) => {
+            emit_runtime_failure(
+                execution.emitter,
+                TransactionalMessagingRuntimePhase::ConsumerClaim,
+                &error,
+            );
+            Err(abandon_after_error(
+                settlement,
+                deadlines.settlement(),
+                execution.timer,
+                execution.emitter,
+                error,
+            )
+            .await)
+        }
+        Ok(IdempotencyDisposition::Terminal(receipt)) => match binding.validate_terminal(receipt) {
             Ok(terminal) => {
                 let disposition = terminal.disposition();
                 settle_observed(
@@ -223,7 +290,7 @@ where
                 Ok(ProcessingDisposition::Rejected(failure))
             }
         },
-        IdempotencyDisposition::Acquired(claim) => {
+        Ok(IdempotencyDisposition::Acquired(claim)) => {
             process_acquired(
                 inbox,
                 transaction,
@@ -239,6 +306,65 @@ where
             .await
         }
     }
+}
+
+// Recheck busy admission on its own clock. A long lease interval can exceed the
+// entire operation budget; recomputing a fraction of remaining time would spin near expiry.
+async fn wait_for_claim<I, V, R, E>(
+    inbox: &I,
+    execution: &ConsumerExecution<'_, V, R, E>,
+    binding: &VerifiedConsumerBinding,
+    cutoff: Deadline,
+) -> Result<IdempotencyDisposition<I::Claim>, MessagingError>
+where
+    I: InboxStore,
+    R: ExecutionTimer,
+    E: TransactionalMessagingEmitter,
+{
+    let budget = execution.policy.budget();
+    let interval = ((budget.total() - budget.settlement_reserve()) / 4)
+        .clamp(Duration::from_millis(1), Duration::from_millis(250));
+    let mut capacity_wait = None;
+    let result = loop {
+        let claim = within(execution.timer, cutoff, |deadline| {
+            inbox.claim(binding.execution(), binding.identity(), deadline)
+        })
+        .await
+        .and_then(std::convert::identity);
+        match &claim {
+            Ok(IdempotencyDisposition::CapacityBusy) => {
+                capacity_wait.get_or_insert_with(|| execution.timer.now());
+                execution
+                    .emitter
+                    .emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
+            }
+            Ok(IdempotencyDisposition::InProgress) => execution
+                .emitter
+                .emit(TransactionalMessagingObservation::ConsumerClaimInProgress),
+            _ => break claim,
+        }
+        let wake = cutoff.capped(execution.timer, interval);
+        if within(execution.timer, cutoff, |_| {
+            execution.timer.sleep_until(wake)
+        })
+        .await
+        .is_err()
+            || cutoff
+                .remaining(execution.timer.now())
+                .unwrap_or_default()
+                .is_zero()
+        {
+            break claim;
+        }
+    };
+    if let Some(start) = capacity_wait {
+        execution
+            .emitter
+            .emit(TransactionalMessagingObservation::ConsumerCapacityWait {
+                duration: execution.timer.now().saturating_duration_since(start),
+            });
+    }
+    result
 }
 
 struct AcquiredDelivery<P, S, C> {
@@ -272,14 +398,15 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    match within(execution.timer, state.deadlines.operation(), |deadline| {
+    let first_wait = match within(execution.timer, state.deadlines.operation(), |deadline| {
         inbox.extend(&state.claim, deadline)
     })
     .await
     .and_then(std::convert::identity)
     {
-        Ok(LeaseStatus::Held { remaining }) => {
-            if let Err(error) = validate_renewal_window(inbox, execution, remaining) {
+        Ok(LeaseStatus::Held { remaining }) => match renewal_delay(inbox, execution, remaining) {
+            Ok(wait) => wait,
+            Err(error) => {
                 return Err(abandon_after_error(
                     state.settlement,
                     state.deadlines.settlement(),
@@ -289,7 +416,7 @@ where
                 )
                 .await);
             }
-        }
+        },
         Ok(LeaseStatus::Lost) => {
             execution
                 .emitter
@@ -318,7 +445,7 @@ where
             )
             .await);
         }
-    }
+    };
     let raced = {
         let transaction_flow = transaction_loop(
             transaction,
@@ -328,7 +455,13 @@ where
             &state.binding,
             state.deadlines.operation(),
         );
-        let renewal = renewal_loop(inbox, execution, &state.claim, state.deadlines.operation());
+        let renewal = renewal_loop(
+            inbox,
+            execution,
+            &state.claim,
+            state.deadlines.operation(),
+            first_wait,
+        );
         tokio::pin!(transaction_flow);
         tokio::pin!(renewal);
         tokio::select! {
@@ -375,6 +508,7 @@ async fn renewal_loop<I, V, R, E>(
     execution: &ConsumerExecution<'_, V, R, E>,
     claim: &I::Claim,
     deadline: Deadline,
+    mut wait: Duration,
 ) -> Result<RenewalExit, MessagingError>
 where
     I: InboxStore,
@@ -382,7 +516,7 @@ where
     E: TransactionalMessagingEmitter,
 {
     loop {
-        let wake = deadline.capped(execution.timer, inbox.lease_policy().interval());
+        let wake = deadline.capped(execution.timer, wait);
         within(execution.timer, deadline, |_| {
             execution.timer.sleep_until(wake)
         })
@@ -394,7 +528,7 @@ where
         .and_then(std::convert::identity)
         {
             Ok(LeaseStatus::Held { remaining }) => {
-                validate_renewal_window(inbox, execution, remaining)?;
+                wait = renewal_delay(inbox, execution, remaining)?;
                 tokio::task::yield_now().await;
             }
             Ok(LeaseStatus::Lost) => return Ok(RenewalExit::Lost),
@@ -410,17 +544,18 @@ where
     }
 }
 
-fn validate_renewal_window<I: InboxStore, V, R, E>(
+fn renewal_delay<I: InboxStore, V, R, E>(
     inbox: &I,
     execution: &ConsumerExecution<'_, V, R, E>,
     remaining: Duration,
-) -> Result<(), MessagingError>
+) -> Result<Duration, MessagingError>
 where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
+    let interval = inbox.lease_policy().interval();
     if inbox.lease_policy().fits(remaining) {
-        return Ok(());
+        return Ok(interval.min(remaining - interval));
     }
     let error = MessagingError::new(
         MessagingErrorKind::Invariant,
@@ -628,25 +763,6 @@ where
     }
 }
 
-async fn reject_invalid<S: DeliverySettlement>(
-    rejection: rss_transactional_messaging::transaction::DecodeRejection,
-    settlement: S,
-    deadline: Deadline,
-    timer: &impl ExecutionTimer,
-    emitter: &impl TransactionalMessagingEmitter,
-) -> Result<(), MessagingError> {
-    let failure = rejection.reason();
-    emitter.emit(TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure });
-    settle_observed(
-        settlement,
-        rejection.into_decision(),
-        deadline,
-        timer,
-        emitter,
-    )
-    .await
-}
-
 async fn settle_observed<S: DeliverySettlement>(
     settlement: S,
     decision: SettlementDecision,
@@ -773,8 +889,18 @@ impl SubscriptionBackoffPolicy {
     }
 }
 
+enum SubscriptionEvent<P, S> {
+    Cancel,
+    Received(Option<IncomingDelivery<P, S>>),
+    Completed(
+        Option<PartitionIdentity>,
+        Result<ProcessingDisposition, MessagingError>,
+    ),
+}
+
 /// Dependencies owned by one caller-driven transactional consumer worker.
 pub struct ConsumerWorker<P, S, I, T, V, R, E> {
+    window: std::num::NonZeroU16,
     source: Arc<S>,
     inbox: Arc<I>,
     transaction: Arc<T>,
@@ -803,6 +929,7 @@ where
     // reason: each argument is an independent mandatory port, identity, or closed policy.
     #[must_use]
     pub const fn new(
+        window: std::num::NonZeroU16,
         source: Arc<S>,
         inbox: Arc<I>,
         transaction: Arc<T>,
@@ -815,6 +942,7 @@ where
         subscription_backoff: SubscriptionBackoffPolicy,
     ) -> Self {
         Self {
+            window,
             source,
             inbox,
             transaction,
@@ -842,7 +970,7 @@ where
     ) -> Result<(), MessagingError> {
         let mut recovery_attempt = NonZeroU32::MIN;
         loop {
-            let subscribe = self.source.deliveries(&self.subscription);
+            let subscribe = self.source.deliveries(&self.subscription, self.window);
             tokio::pin!(subscribe);
             let deliveries = tokio::select! {
                 biased;
@@ -877,78 +1005,165 @@ where
                 }
             };
 
-            loop {
-                let delivery = tokio::select! {
-                    biased;
-                    () = token.cancelled() => return Ok(()),
-                    item = deliveries.next() => item,
-                };
-                let Some(delivery) = delivery else {
-                    self.emitter
-                        .emit(TransactionalMessagingObservation::ConsumerSubscribeRetry {
-                            outcome: TransactionalMessagingSubscribeOutcome::StreamEnd,
-                        });
-                    break;
-                };
-                let execution = ConsumerExecution::new(
-                    self.group.clone(),
-                    self.validator.as_ref(),
-                    &self.subscription,
-                    self.timer.as_ref(),
-                    self.policy,
-                    self.emitter.as_ref(),
-                );
-                let processing = async {
-                    match delivery {
-                        IncomingDelivery::Valid(delivery) => {
-                            consume_once(
-                                self.inbox.as_ref(),
-                                self.transaction.as_ref(),
-                                &execution,
-                                *delivery,
-                            )
-                            .await?;
-                        }
-                        IncomingDelivery::Invalid(invalid) => {
-                            let (rejection, settlement) = invalid.into_parts();
-                            reject_invalid(
-                                rejection,
-                                settlement,
-                                execution.deadlines()?.settlement(),
-                                execution.timer,
-                                execution.emitter(),
-                            )
-                            .await?;
-                        }
-                    }
-                    Ok::<(), MessagingError>(())
-                };
-                tokio::pin!(processing);
-                let result = tokio::select! {
-                    biased;
-                    result = &mut processing => result,
-                    () = token.cancelled() => {
-                        processing.await?;
-                        return Ok(());
-                    }
-                };
-                match result {
-                    Ok(()) => recovery_attempt = NonZeroU32::MIN,
-                    Err(error) if is_recoverable(error.kind()) => {
-                        self.emitter.emit(
-                            TransactionalMessagingObservation::ConsumerSubscribeRetry {
-                                outcome: TransactionalMessagingSubscribeOutcome::DeliveryError,
-                            },
-                        );
-                        break;
-                    }
-                    Err(error) => return Err(error),
-                }
+            match self
+                .drive_subscription(&mut deliveries, &token, &mut recovery_attempt)
+                .await?
+            {
+                None => return Ok(()),
+                Some(outcome) => self
+                    .emitter
+                    .emit(TransactionalMessagingObservation::ConsumerSubscribeRetry { outcome }),
             }
+            drop(deliveries);
             if wait_for_recovery(&self, &token, recovery_attempt).await? {
                 return Ok(());
             }
             recovery_attempt = recovery_attempt.saturating_add(1);
+        }
+    }
+    async fn drive_subscription(
+        &self,
+        stream: &mut rss_transactional_messaging::transport::ManagedDeliveryStream<S::Deliveries>,
+        token: &tokio_util::sync::CancellationToken,
+        recovery_attempt: &mut NonZeroU32,
+    ) -> Result<Option<TransactionalMessagingSubscribeOutcome>, MessagingError> {
+        use futures::{StreamExt as _, stream::FuturesUnordered};
+        use std::collections::{HashMap, VecDeque, hash_map::Entry};
+        let execution = ConsumerExecution::new(
+            self.group.clone(),
+            self.validator.as_ref(),
+            &self.subscription,
+            self.timer.as_ref(),
+            self.policy,
+            self.emitter.as_ref(),
+        );
+        let start = |item: PreparedDelivery<P, S::Settlement>| {
+            let execution = &execution;
+            async move {
+                let key = item.partition().cloned();
+                (
+                    key,
+                    process_prepared(
+                        self.inbox.as_ref(),
+                        self.transaction.as_ref(),
+                        execution,
+                        item,
+                    )
+                    .await,
+                )
+            }
+        };
+        let mut active = FuturesUnordered::new();
+        let mut partitions =
+            HashMap::<PartitionIdentity, VecDeque<PreparedDelivery<P, S::Settlement>>>::new();
+        let mut outstanding = 0usize;
+        let mut stopped = false;
+        let mut retiring = false;
+        let mut cause = Ok(None);
+        loop {
+            if stopped && active.is_empty() {
+                return cause;
+            }
+            let event = tokio::select! {
+                biased;
+                () = token.cancelled(), if !stopped => SubscriptionEvent::Cancel,
+                Some((key, result)) = active.next(), if !active.is_empty() => SubscriptionEvent::Completed(key, result),
+                item = stream.next(), if !stopped && outstanding < usize::from(self.window.get()) => SubscriptionEvent::Received(item),
+            };
+            match event {
+                SubscriptionEvent::Cancel => {
+                    stopped = true;
+                    stream.stop_admission();
+                }
+                SubscriptionEvent::Completed(key, result) => {
+                    outstanding -= 1;
+                    let reusable = can_continue(
+                        result,
+                        key.is_some(),
+                        token.is_cancelled(),
+                        recovery_attempt,
+                        &mut cause,
+                    );
+                    if !reusable {
+                        stopped = true;
+                        stream.stop_admission();
+                        // Dropping an unstarted AMQP handle forces the channel closed. Hold
+                        // queued handles until active siblings finish their one-shot settlement.
+                        retiring = true;
+                        if cause.is_ok() {
+                            cause = Ok(Some(TransactionalMessagingSubscribeOutcome::DeliveryError));
+                        }
+                    }
+                    if !retiring
+                        && let Some(key) = key
+                        && let Entry::Occupied(mut lane) = partitions.entry(key)
+                    {
+                        if let Some(next) = lane.get_mut().pop_front() {
+                            active.push(start(next));
+                        } else {
+                            lane.remove();
+                        }
+                    }
+                }
+                SubscriptionEvent::Received(None) => {
+                    stopped = true;
+                    stream.stop_admission();
+                    cause = Ok(Some(TransactionalMessagingSubscribeOutcome::StreamEnd));
+                }
+                SubscriptionEvent::Received(Some(item)) => {
+                    let deadlines = match execution.deadlines() {
+                        Ok(deadlines) => deadlines,
+                        Err(error) => {
+                            stream.stop_admission();
+                            stopped = true;
+                            cause = Err(error);
+                            continue;
+                        }
+                    };
+                    let item = PreparedDelivery::incoming(&execution, item, deadlines);
+                    outstanding += 1;
+                    if let Some(key) = item.partition() {
+                        match partitions.entry(key.clone()) {
+                            Entry::Occupied(mut lane) => {
+                                lane.get_mut().push_back(item);
+                                continue;
+                            }
+                            Entry::Vacant(lane) => {
+                                lane.insert(VecDeque::new());
+                            }
+                        }
+                    }
+                    active.push(start(item));
+                }
+            }
+        }
+    }
+}
+
+fn can_continue(
+    result: Result<ProcessingDisposition, MessagingError>,
+    ordered: bool,
+    cancelled: bool,
+    recovery_attempt: &mut NonZeroU32,
+    cause: &mut Result<Option<TransactionalMessagingSubscribeOutcome>, MessagingError>,
+) -> bool {
+    match result {
+        Ok(
+            ProcessingDisposition::Committed(terminal) | ProcessingDisposition::Duplicate(terminal),
+        ) => {
+            *recovery_attempt = NonZeroU32::MIN;
+            !ordered || terminal == TerminalDisposition::Succeeded
+        }
+        Ok(ProcessingDisposition::Rejected(_)) => {
+            *recovery_attempt = NonZeroU32::MIN;
+            true
+        }
+        Ok(_) => !ordered,
+        Err(error) => {
+            if (!is_recoverable(error.kind()) || cancelled) && cause.is_ok() {
+                *cause = Err(error);
+            }
+            false
         }
     }
 }

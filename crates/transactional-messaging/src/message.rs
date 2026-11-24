@@ -197,7 +197,7 @@ impl std::fmt::Debug for PartitionKey {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 /// Tenant and domain scope for messages sharing one ordered sequence.
 pub struct PartitionIdentity {
     tenant_id: TenantId,

@@ -49,11 +49,17 @@ without exposing a general-purpose Reject constructor.
 `ConsumerWorker` supervises subscription establishment, unexpected stream termination, and
 transient delivery-processing failures with a distinct unbounded, saturating exponential backoff.
 Opening a stream does not reset backoff: consecutive subscribe errors, empty streams and
-recoverable processing errors share the failure cursor. Only a completed delivery-processing
-operation (including successful settlement or invalid-delivery rejection) resets it to the base.
-Transient delivery failures retire the current provider stream before resubscription. It processes
-exactly one delivery at a time, so the next delivery is not polled until the current settlement
-completes. Graceful shutdown stops admission and lets the current delivery finish. The same loop
+recoverable processing errors share the failure cursor. A committed result, verified terminal duplicate, or settled rejection resets it to the base.
+Busy and deferred deliveries preserve the failure cursor.
+Transient delivery failures retire the current provider stream before resubscription. Pass a nonzero delivery window explicitly. One selects serial processing. AMQP applies
+the window as per-subscription prefetch. MQTT accepts one. Independent deliveries refill on
+completion; one subscription serializes verified tenant/domain/partition keys through settlement.
+A rejected terminal head retires that subscription before starting queued successors. Durable
+cross-subscription consumer ordering requires a separate recovery contract.
+Queued and busy deliveries count toward the same window and keep their original deadlines.
+A live claim or unstarted capacity wait keeps the handle unacknowledged and rechecks at one quarter of the operation budget, clamped to 1–250 ms, until the original cutoff.
+The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.
+The same loop
 runs on an application's Tokio host or through the optional RSS lifecycle bridge.
 
 ## Caller-driven Tokio workers
