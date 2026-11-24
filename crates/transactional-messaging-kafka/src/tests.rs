@@ -265,10 +265,13 @@ fn parallel_reservations_do_not_delay_sealing_or_hold_a_sender() -> anyhow::Resu
         for _ in 0..2 {
             encoding.recv_timeout(Duration::from_secs(5))?;
         }
-        assert_eq!(
-            Some(definite_refusal(shared.enqueue(end, || None))?),
-            engine::unavailable().failure()
-        );
+        let mut encode_calls = 0;
+        let refused = definite_refusal(shared.enqueue(end, || {
+            encode_calls += 1;
+            Record::encode(&m, &plan)
+        }))?;
+        assert_eq!(Some(refused), engine::unavailable().failure());
+        assert_eq!(encode_calls, 0);
         shared.close(end);
         assert!(matches!(
             receiver.try_recv(),
@@ -316,13 +319,16 @@ fn abandoned_expired_and_dequeued_records_return_capacity() -> anyhow::Result<()
         .ok()
         .context("expected capacity after expiry")?;
     drop(reply);
+    let mut encode_calls = 0;
     for _ in 0..128 {
         // Even a cancelled caller's queued record still owns one slot.
-        assert_eq!(
-            Some(definite_refusal(shared.enqueue(end, || None))?),
-            engine::unavailable().failure()
-        );
+        let refused = definite_refusal(shared.enqueue(end, || {
+            encode_calls += 1;
+            Record::encode(&m, &plan)
+        }))?;
+        assert_eq!(Some(refused), engine::unavailable().failure());
     }
+    assert_eq!(encode_calls, 0);
     let command = queue.try_recv()?.dequeue();
     assert!(command.reply.is_closed());
     assert!(shared.enqueue(end, || Record::encode(&m, &plan)).is_ok());
