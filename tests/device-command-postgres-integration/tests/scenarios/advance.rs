@@ -31,7 +31,7 @@ async fn advance(
 }
 
 // pg_blocking_pids ties the observed wait to the fixture's final-row lock.
-async fn wait_for_blocked(f: &Fixture, pid: i32) -> anyhow::Result<()> {
+pub(super) async fn wait_for_blocked(f: &Fixture, pid: i32) -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
@@ -174,6 +174,7 @@ async fn assert_rolled_back(
 }
 
 pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
+    partial_recovery(f).await?;
     let s = Scope::new(
         scope(TENANT)?.tenant(),
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440066")?,
@@ -193,6 +194,61 @@ pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
     }
     isolated_handoff(f, s, old, next).await?;
     queue_race(f, s, next).await
+}
+
+async fn partial_recovery(f: &Fixture) -> anyhow::Result<()> {
+    let scope = Scope::new(
+        scope(TENANT)?.tenant(),
+        DeviceId::parse("550e8400-e29b-41d4-a716-446655440068")?,
+    );
+    let current = Coordinate::new(1, 1)?;
+    f.initialize(scope, current).await?;
+    let first = f.queue("cas-page-a", scope, current).await?;
+    f.queue("cas-page-z", scope, current).await?;
+    // Only the competing version commits. The earlier successful save in this page rolls back.
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE tenant_id=$1::uuid AND message_id IN ('dispatch.cas-page-a','dispatch.cas-page-z')")
+        .bind(scope.tenant().to_string()).execute(&f.owner).await?;
+    let mut competing = f.owner.begin().await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *competing)
+        .await?;
+    sqlx::query("UPDATE rss_device_command.commands SET version=version+1 WHERE tenant_id=$1::uuid AND command_id='cas-page-z'")
+        .bind(scope.tenant().to_string()).execute(&mut *competing).await?;
+    let recover = async {
+        let store = f.store.clone();
+        let result = f
+            .runtime
+            .local_tx(crate::execution(scope.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move { store.recover(tx, scope, BatchLimit::default(), None).await })
+            })
+            .await;
+        assert_eq!(
+            result.fold(
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |_| None,
+                |e| Some(e.kind())
+            ),
+            Some(MessagingErrorKind::OwnershipLost)
+        );
+        anyhow::Ok(())
+    };
+    let release = async {
+        wait_for_blocked(f, pid).await?;
+        competing.commit().await?;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(recover, release)?;
+    assert_eq!(f.load("cas-page-a", scope).await?, Some(first));
+    assert_eq!(
+        f.load("cas-page-z", scope)
+            .await?
+            .map(|c| (c.version(), c.status())),
+        Some((2, Status::Queued))
+    );
+    Ok(())
 }
 
 async fn isolated_handoff(

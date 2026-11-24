@@ -163,13 +163,75 @@ pub(crate) async fn active_rows(
     let d = s.device().as_uuid().to_string();
     let after = after.map(str::to_owned);
     tx.with_connection(move |c| Box::pin(async move {
-        sqlx::query(r#"SELECT *,tenant_id::text AS tenant,device_id::text AS device,
-                    CASE WHEN $5 THEN floor(extract(epoch FROM clock_timestamp())*1000000)::bigint END AS command_time
-                FROM rss_device_command.commands
-                WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND terminal_at IS NULL
-                  AND ($3::text IS NULL OR command_id COLLATE "C" > $3 COLLATE "C")
-                ORDER BY command_id COLLATE "C" LIMIT $4"#)
-            .bind(t).bind(d).bind(after).bind(i64::from(limit.get())).bind(sample_time)
-            .fetch_all(c).await
+        macro_rules! active_page {
+            ($cursor:literal) => { concat!(
+                r#"SELECT *,tenant_id::text AS tenant,device_id::text AS device,
+                    CASE WHEN $4 THEN floor(extract(epoch FROM clock_timestamp())*1000000)::bigint END AS command_time
+                   FROM rss_device_command.commands
+                   WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND terminal_at IS NULL "#,
+                $cursor, r#" ORDER BY command_id COLLATE "C" LIMIT $3"#)
+            };
+        }
+        let query = match after {
+            Some(id) => sqlx::query(active_page!(r#"AND command_id COLLATE "C" > $5 COLLATE "C""#))
+                .bind(t).bind(d).bind(i64::from(limit.get())).bind(sample_time).bind(id),
+            None => sqlx::query(active_page!(""))
+                .bind(t).bind(d).bind(i64::from(limit.get())).bind(sample_time),
+        };
+        query.fetch_all(c).await
     })).await
+}
+
+/// Only changed records cross the SQL boundary. PostgreSQL rejects a partial page.
+#[derive(Default)]
+pub(crate) struct PageChanges {
+    pub(crate) ids: Vec<String>,
+    versions: Vec<i64>,
+    statuses: Vec<&'static str>,
+    published: Vec<Option<i64>>,
+    received: Vec<Option<i64>>,
+    terminal: Vec<Option<i64>>,
+}
+
+impl PageChanges {
+    pub(crate) fn push(&mut self, command: &Command, previous: i64) {
+        if command.version() == previous {
+            return;
+        }
+        let record = command.record();
+        self.ids.push(record.spec.id().as_str().to_owned());
+        self.versions.push(previous);
+        self.statuses.push(record.status.as_str());
+        self.published.push(record.published_at);
+        self.received.push(record.received_at);
+        self.terminal.push(record.terminal_at);
+    }
+    pub(crate) async fn save(
+        self,
+        tx: &mut PgTransaction<'_>,
+        scope: Scope,
+    ) -> Result<(), PgError> {
+        if self.ids.is_empty() {
+            return Ok(());
+        }
+        tx.with_connection(move |c| {
+            Box::pin(async move {
+                sqlx::query(
+                    "SELECT rss_device_command.save_page($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8)",
+                )
+                .bind(scope.tenant().to_string())
+                .bind(scope.device().as_uuid().to_string())
+                .bind(self.ids)
+                .bind(self.versions)
+                .bind(self.statuses)
+                .bind(self.published)
+                .bind(self.received)
+                .bind(self.terminal)
+                .execute(c)
+                .await
+                .map(|_| ())
+            })
+        })
+        .await
+    }
 }

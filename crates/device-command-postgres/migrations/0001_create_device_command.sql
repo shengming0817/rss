@@ -34,6 +34,7 @@ CREATE TABLE rss_device_command.commands (
     CHECK(status<>'applied' OR terminal_at<deadline)
 );
 CREATE INDEX command_scope ON rss_device_command.commands(tenant_id,device_id,command_id);
+CREATE INDEX command_active_page ON rss_device_command.commands(tenant_id,device_id,command_id COLLATE "C") WHERE terminal_at IS NULL;
 ALTER TABLE rss_device_command.authorities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rss_device_command.authorities FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_scope ON rss_device_command.authorities
@@ -70,6 +71,23 @@ LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,rss_device_command AS $
     WITH changed AS (UPDATE rss_device_command.commands SET status=s,version=v+1,published_at=p,received_at=r,terminal_at=done
     WHERE tenant_id=t AND device_id=d AND command_id=c AND version=v AND terminal_at IS NULL RETURNING 1)
     SELECT EXISTS(SELECT FROM changed);
+$$;
+-- The scalar CAS owns the update predicate. A missed version aborts the whole statement
+-- and transaction, including rows that succeeded earlier in this page.
+CREATE FUNCTION rss_device_command.save_page(t uuid,d uuid,ids text[],versions bigint[],statuses text[],published bigint[],received bigint[],terminal bigint[]) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_device_command AS $$
+DECLARE expected integer:=cardinality(ids); changed bigint;
+BEGIN
+    IF expected IS NULL OR expected NOT BETWEEN 1 AND 1024
+      OR cardinality(versions) IS DISTINCT FROM expected OR cardinality(statuses) IS DISTINCT FROM expected
+      OR cardinality(published) IS DISTINCT FROM expected OR cardinality(received) IS DISTINCT FROM expected
+      OR cardinality(terminal) IS DISTINCT FROM expected THEN
+        RAISE EXCEPTION 'invalid command page' USING ERRCODE='22023';
+    END IF;
+    SELECT count(*) FILTER (WHERE rss_device_command.save(t,d,id,v,s,p,r,done)) INTO changed
+      FROM unnest(ids,versions,statuses,published,received,terminal) AS page(id,v,s,p,r,done);
+    IF changed<>expected THEN RAISE EXCEPTION 'command version fenced' USING ERRCODE='PZ001'; END IF;
+END
 $$;
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_device_command FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_device_command FROM PUBLIC;

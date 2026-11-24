@@ -254,18 +254,15 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     sqlx::query("LOCK TABLE rss_transactional_messaging.outbox IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
         .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await?;
     let release = async {
-        let ready=tokio::time::timeout(Duration::from_secs(3),async {
-            loop {
-                let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT domain,fingerprint,status FROM rss_transactional_messaging.outbox%')").fetch_one(&f.owner).await?;
-                if blocked { return Ok::<(),anyhow::Error>(()); }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await;
+        let ready = super::advance::wait_for_blocked(&f, pid).await;
         let seen = clock.now();
         clock.advance_to(expires)?;
         lock.rollback().await?;
-        ready??;
+        ready?;
         assert!(
             seen < expires,
             "the publication read must start before deadline"

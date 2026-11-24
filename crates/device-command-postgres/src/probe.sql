@@ -35,6 +35,12 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
     AND (SELECT count(*)=2 FROM rels)),
  (2,'relations',
     (SELECT bool_and(relkind='r' AND relpersistence='p' AND relowner=(SELECT nspowner FROM namespace)) FROM rels)
+    AND EXISTS(SELECT FROM pg_index i WHERE i.indexrelid=to_regclass('rss_device_command.command_active_page')
+        AND i.indrelid='rss_device_command.commands'::regclass AND i.indisvalid AND i.indisready
+        AND pg_get_expr(i.indpred,i.indrelid)='(terminal_at IS NULL)'
+        AND pg_get_indexdef(i.indexrelid,1,true)='tenant_id' AND pg_get_indexdef(i.indexrelid,2,true)='device_id'
+        AND pg_get_indexdef(i.indexrelid,3,true)='command_id'
+        AND i.indcollation[2]='pg_catalog."C"'::regcollation)
     AND NOT EXISTS(SELECT FROM pg_trigger WHERE tgrelid IN(SELECT oid FROM rels) AND NOT tgisinternal)
     AND NOT EXISTS(SELECT FROM pg_rewrite WHERE ev_class IN(SELECT oid FROM rels))),
  (3,'caller_roles',

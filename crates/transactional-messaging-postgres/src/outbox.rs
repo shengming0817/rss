@@ -8,7 +8,7 @@ use rss_request_context::{Clock, Deadline};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     fence::ExecutionBinding,
-    message::MessagingDomain,
+    message::{MessageFingerprint, MessageId, MessagingDomain},
     outbox::*,
     policy::{DeliveryBudget, OperationDeadline, within},
 };
@@ -228,27 +228,55 @@ impl<R> PgOutboxStore<R> {
         message_id: &rss_transactional_messaging::message::MessageId,
         expected: rss_transactional_messaging::message::MessageFingerprint,
     ) -> Result<bool, PgError> {
+        self.publication_states(tx, &[(domain, message_id, expected)])
+            .await?
+            .pop()
+            .ok_or_else(PgError::invariant)
+    }
+
+    /// Verify each exact dispatch in the borrowed transaction, in request order.
+    /// Missing rows are invariant failures even if another request in the batch matches.
+    pub async fn publication_states(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        expected: &[(&MessagingDomain, &MessageId, MessageFingerprint)],
+    ) -> Result<Vec<bool>, PgError> {
         self.validate_transaction(tx)?;
+        if expected.is_empty() {
+            return Ok(Vec::new());
+        }
         let tenant = tx.tenant_id().to_string();
-        let id = message_id.as_str().to_owned();
-        let row = tx.with_connection(move |connection| Box::pin(async move {
-            sqlx::query("SELECT domain,fingerprint,status FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2")
-                .bind(tenant).bind(id).fetch_optional(connection).await
-        })).await?.ok_or_else(PgError::invariant)?;
-        let digest: Vec<u8> = row.try_get("fingerprint")?;
-        if row.try_get::<String, _>("domain")? != domain.as_str()
-            || fingerprint(digest)? != expected
-        {
-            return Err(PgError::classified(
-                MessagingErrorKind::Conflict,
-                std::io::Error::other("dispatch identity conflict"),
-            ));
-        }
-        match row.try_get::<String, _>("status")?.as_str() {
-            "published" => Ok(true),
-            "pending" | "publishing" | "dead_letter" | "resolved" => Ok(false),
-            _ => Err(PgError::invariant()),
-        }
+        let ids: Vec<_> = expected
+            .iter()
+            .map(|(_, id, _)| id.as_str().to_owned())
+            .collect();
+        let rows = tx.with_connection(move |connection| Box::pin(async move {
+            sqlx::query("SELECT o.domain,o.fingerprint,o.status
+                FROM unnest($2::text[]) WITH ORDINALITY requested(id,ordinal)
+                LEFT JOIN rss_transactional_messaging.outbox o ON o.tenant_id=$1::uuid AND o.message_id=requested.id
+                ORDER BY requested.ordinal")
+                .bind(tenant).bind(ids).fetch_all(connection).await
+        })).await?;
+        rows.iter()
+            .zip(expected)
+            .map(|(row, (domain, _, digest))| {
+                let actual = row
+                    .try_get::<Option<&str>, _>("domain")?
+                    .ok_or_else(PgError::invariant)?;
+                if actual != domain.as_str() || fingerprint(row.try_get("fingerprint")?)? != *digest
+                {
+                    return Err(PgError::classified(
+                        MessagingErrorKind::Conflict,
+                        std::io::Error::other("dispatch identity conflict"),
+                    ));
+                }
+                match row.try_get::<&str, _>("status")? {
+                    "published" => Ok(true),
+                    "pending" | "publishing" | "dead_letter" | "resolved" => Ok(false),
+                    _ => Err(PgError::invariant()),
+                }
+            })
+            .collect()
     }
     fn valid_claim(&self, claim: &PgOutboxClaim) -> bool {
         self.writer.domain == *claim.message.envelope().metadata().domain()

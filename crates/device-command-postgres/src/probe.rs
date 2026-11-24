@@ -55,7 +55,7 @@ async fn functions(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
 WITH expected AS (SELECT * FROM unnest($1::text[],$2::text[]) AS e(signature,result))
 SELECT p.proname, p.prosrc, pg_get_function_identity_arguments(p.oid) AS arguments,
     p.proretset, p.prorettype=to_regtype(e.result) AS returns,
-    p.prosecdef AND p.prokind='f' AND l.lanname='sql'
+    p.prosecdef AND p.prokind='f' AND l.lanname=CASE WHEN p.proname='save_page' THEN 'plpgsql' ELSE 'sql' END
         AND NOT p.proisstrict AND p.provolatile='v' AND p.proparallel='u' AND NOT p.proleakproof
         AND NOT owner.rolsuper AND NOT owner.rolbypassrls AND p.proowner=n.nspowner
         AND p.proconfig=ARRAY['search_path=pg_catalog, rss_device_command']::text[] AS safe
@@ -103,7 +103,7 @@ struct Definition<'a> {
 fn compact(value: &str) -> String {
     value.chars().filter(|c| !c.is_whitespace()).collect()
 }
-// This is a reader for the shipped five-function declaration grammar, not a general SQL parser.
+// This is a reader for the shipped function declaration grammar, not a general SQL parser.
 fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
     let mut result = Vec::new();
     for declaration in sql.split("CREATE FUNCTION ").skip(1) {
@@ -116,7 +116,19 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
             return Err(());
         }
         let (arguments, rest) = rest.split_once(") RETURNS ").ok_or(())?;
-        let (returns, rest) = rest.split_once("\nLANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,rss_device_command AS $$").ok_or(())?;
+        let (returns, rest) = rest.split_once("\nLANGUAGE ").ok_or(())?;
+        let (language, rest) = rest
+            .split_once(" SECURITY DEFINER SET search_path=pg_catalog,rss_device_command AS $$")
+            .ok_or(())?;
+        if language
+            != if name == "save_page" {
+                "plpgsql"
+            } else {
+                "sql"
+            }
+        {
+            return Err(());
+        }
         let (body, _) = rest.split_once("$$;").ok_or(())?;
         let setof = returns.starts_with("SETOF ");
         let returns = returns.strip_prefix("SETOF ").unwrap_or(returns);
@@ -144,7 +156,7 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
             body,
         });
     }
-    if result.len() != 5 {
+    if result.len() != 6 {
         return Err(());
     }
     Ok(result)
@@ -158,7 +170,14 @@ mod tests {
         let definitions = definitions(MIGRATION_SQL)?;
         assert_eq!(
             definitions.iter().map(|d| d.name).collect::<Vec<_>>(),
-            ["initialize", "lock_authority", "advance", "enqueue", "save"]
+            [
+                "initialize",
+                "lock_authority",
+                "advance",
+                "enqueue",
+                "save",
+                "save_page"
+            ]
         );
         assert!(definitions.iter().all(|d| !d.body.trim().is_empty()));
         Ok(())

@@ -1,6 +1,7 @@
 //! Page active commands under the authority lock held by the caller's transaction.
 use crate::{
     CommandClock,
+    persistence::PageChanges,
     persistence::{active_rows, decode, error},
 };
 use rss_device_command::{BatchLimit, Coordinate, Error, Event, Outcome, Scope};
@@ -43,13 +44,7 @@ async fn save_page(
     rows: Vec<PgRow>,
     clock: &CommandClock,
 ) -> Result<String, PgError> {
-    let count = rows.len();
-    let mut ids = Vec::with_capacity(count);
-    let mut versions = Vec::with_capacity(count);
-    let mut statuses = Vec::with_capacity(count);
-    let mut published = Vec::with_capacity(count);
-    let mut received = Vec::with_capacity(count);
-    let mut terminal = Vec::with_capacity(count);
+    let mut changes = PageChanges::default();
     for row in rows {
         let now = match clock {
             CommandClock::Postgres => row.try_get("command_time")?,
@@ -57,7 +52,7 @@ async fn save_page(
             CommandClock::Controlled(frozen) => frozen.now(),
         };
         let mut command = decode(row)?.command;
-        versions.push(command.version());
+        let previous = command.version();
         if command
             .transition(Event::Supersede, next, now)
             .map_err(error)?
@@ -65,41 +60,13 @@ async fn save_page(
         {
             return Err(error(Error::InvalidSnapshot));
         }
-        let record = command.record();
-        ids.push(record.spec.id().as_str().to_owned());
-        statuses.push(record.status.as_str());
-        published.push(record.published_at);
-        received.push(record.received_at);
-        terminal.push(record.terminal_at);
+        changes.push(&command, previous);
     }
-    let last = ids
+    let last = changes
+        .ids
         .last()
         .cloned()
         .ok_or_else(|| error(Error::InvalidSnapshot))?;
-    let changed: i64 = tx
-        .with_connection(move |c| {
-            Box::pin(async move {
-                sqlx::query_scalar(
-                    "SELECT count(*) FILTER (WHERE rss_device_command.save(
-                    $1::uuid,$2::uuid,id,version,status,published,received,terminal))
-                FROM unnest($3::text[], $4::bigint[], $5::text[], $6::bigint[], $7::bigint[], $8::bigint[])
-                     AS batch(id,version,status,published,received,terminal)",
-                )
-                .bind(scope.tenant().to_string())
-                .bind(scope.device().as_uuid().to_string())
-                .bind(ids)
-                .bind(versions)
-                .bind(statuses)
-                .bind(published)
-                .bind(received)
-                .bind(terminal)
-                .fetch_one(c)
-                .await
-            })
-        })
-        .await?;
-    if usize::try_from(changed) != Ok(count) {
-        return Err(error(Error::Fenced));
-    }
+    changes.save(tx, scope).await?;
     Ok(last)
 }
