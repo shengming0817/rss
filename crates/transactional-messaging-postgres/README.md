@@ -95,6 +95,9 @@ error. Transaction stages log only the phase, classification and redacted source
 
 Every ordered writer first calls `tx.prepare_outbox_partitions(&partitions)` with its complete
 `PartitionIdentity` set, including identities used by other writers/domains in the same transaction.
+A SQL transaction that both appends ordered output and releases an ordered source head must include
+the source in this set and prepare before locking the source. An incomplete declaration rejects the
+handoff with PZ002. A standalone settlement acquires its own source allocator during handoff.
 Prepare before companion business locks when those identities are known. An empty set acquires
 nothing; one nonempty set may be declared per tenant transaction. Duplicate entries are deduplicated;
 repeated or expanded declarations and undeclared ordered append fail closed. Unordered messages

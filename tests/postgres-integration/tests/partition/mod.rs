@@ -107,9 +107,14 @@ fn transport(message: &MessageEnvelope<Vec<u8>>) -> serde_json::Value {
 
 async fn sql_tx(pool: &PgPool, tenant: TenantId) -> anyhow::Result<Transaction<'static, Postgres>> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target','01010101010101010101010101010101',true),set_config('rss.storage_lineage','02020202020202020202020202020202',true),set_config('rss.execution_epoch','1',true),set_config('statement_timeout','3s',true)")
-        .bind(tenant.to_string()).execute(&mut *tx).await?;
+    sql_scope(&mut tx, tenant).await?;
     Ok(tx)
+}
+
+async fn sql_scope(connection: &mut PgConnection, tenant: TenantId) -> anyhow::Result<()> {
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target','01010101010101010101010101010101',true),set_config('rss.storage_lineage','02020202020202020202020202020202',true),set_config('rss.execution_epoch','1',true),set_config('statement_timeout','3s',true)")
+        .bind(tenant.to_string()).execute(connection).await?;
+    Ok(())
 }
 
 async fn sql_prepare(
@@ -671,6 +676,25 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
                 PgStorageContractFailure::RuntimeAcl
             ))
         ));
+    }
+    let trigger:String = sqlx::query_scalar("SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid='rss_transactional_messaging.outbox'::regclass AND tgname='refresh_outbox_head'").fetch_one(owner).await?;
+    let altered = trigger.replace("UPDATE OF status", "UPDATE OF payload");
+    assert_ne!(trigger, altered);
+    for definition in [&altered, &trigger] {
+        sqlx::query("DROP TRIGGER refresh_outbox_head ON rss_transactional_messaging.outbox")
+            .execute(owner)
+            .await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(definition.clone()))
+            .execute(owner)
+            .await?;
+        if definition == &altered {
+            assert!(matches!(
+                PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await,
+                Err(PgError::IncompatibleStorageContract(
+                    PgStorageContractFailure::Functions
+                ))
+            ));
+        }
     }
     for (change, restore, expected) in [
         (

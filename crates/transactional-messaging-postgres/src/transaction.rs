@@ -419,11 +419,16 @@ impl PgRuntime {
                 return Ok(());
             }
             let recovery_operator = profile == Profile::Recovery;
+            let refresh_head = crate::consumer_profile::function_body(
+                crate::MIGRATION_SQL,
+                "refresh_outbox_head",
+            )?;
             let failure = within(&runtime.timer, cutoff, |_| async {
                 sqlx::query_scalar::<_, String>(include_str!("probe.sql"))
                     .bind(recovery_operator)
                     .bind(profile == Profile::Producer)
                     .bind(profile == Profile::Consumer)
+                    .bind(refresh_head)
                     .fetch_optional(&runtime.pool)
                     .await
             })

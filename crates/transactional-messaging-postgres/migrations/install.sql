@@ -525,8 +525,19 @@ CREATE FUNCTION rss_transactional_messaging.refresh_outbox_head() RETURNS trigge
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE next_seq bigint;
 BEGIN
- PERFORM 1 FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
-  AND partition_key=NEW.partition_key FOR UPDATE;
+ IF NOT (NEW.partition_key IS NOT NULL AND
+  ((OLD.partition_head AND NEW.status IN ('published','resolved') AND OLD.status NOT IN ('published','resolved'))
+   OR (OLD.status IN ('published','resolved') AND NEW.status NOT IN ('published','resolved')))) THEN RETURN NULL; END IF;
+ -- A writer has already locked its complete declared set in canonical order.
+ -- Acquiring a source outside that set could wait on an oppositely ordered writer.
+ IF EXISTS(SELECT FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND prepared_by=pg_current_xact_id())
+  AND NOT EXISTS(SELECT FROM outbox_partitions WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
+   AND partition_key=NEW.partition_key AND prepared_by=pg_current_xact_id()) THEN
+  RAISE EXCEPTION 'source partition outside transaction declaration' USING ERRCODE='PZ002';
+ END IF;
+ -- A new tuple version also fences repeatable-read appenders holding an older snapshot.
+ UPDATE outbox_partitions SET last_sequence=last_sequence WHERE tenant_id=NEW.tenant_id
+  AND domain=NEW.domain AND partition_key=NEW.partition_key;
  IF NOT FOUND THEN RAISE EXCEPTION 'partition allocator missing'; END IF;
  SELECT seq INTO next_seq FROM outbox WHERE tenant_id=NEW.tenant_id AND domain=NEW.domain
   AND partition_key=NEW.partition_key AND status NOT IN ('published','resolved')
@@ -540,9 +551,7 @@ END $f$;
 ALTER FUNCTION rss_transactional_messaging.refresh_outbox_head() OWNER TO rss_tmsg_relay;
 
 CREATE TRIGGER refresh_outbox_head AFTER UPDATE OF status ON rss_transactional_messaging.outbox
- FOR EACH ROW WHEN (NEW.partition_key IS NOT NULL AND
-  ((OLD.partition_head AND NEW.status IN ('published','resolved') AND OLD.status NOT IN ('published','resolved'))
-   OR (OLD.status IN ('published','resolved') AND NEW.status NOT IN ('published','resolved'))))
+ FOR EACH ROW
  EXECUTE FUNCTION rss_transactional_messaging.refresh_outbox_head();
 
 CREATE FUNCTION rss_transactional_messaging.outbox_candidates(p_tenant uuid,p_domain text)

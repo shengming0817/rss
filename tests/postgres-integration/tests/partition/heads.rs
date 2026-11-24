@@ -62,7 +62,48 @@ pub(super) async fn handoff(raw: &PgPool, owner: &PgPool) -> anyhow::Result<()> 
                 .collect::<Vec<_>>()
         );
     }
+    stale_snapshot(raw).await?;
+    crossed_declarations(raw).await?;
     capacity(raw).await
+}
+
+async fn stale_snapshot(raw: &PgPool) -> anyhow::Result<()> {
+    let head = ordered("repeatable-first", "repeatable", "p");
+    let next = ordered("repeatable-next", "repeatable", "p");
+    let tenant = head.metadata().tenant_id();
+    let pairs = serde_json::json!([["repeatable", "p"]]);
+    let mut seed = sql_tx(raw, tenant).await?;
+    sql_prepare(&mut seed, pairs.clone()).await?;
+    sql_append(&mut seed, &head).await?;
+    seed.commit().await?;
+
+    let mut old = raw.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *old)
+        .await?;
+    sql_scope(&mut old, tenant).await?;
+    let first: bool = sqlx::query_scalar("SELECT partition_head FROM rss_transactional_messaging.outbox WHERE message_id='repeatable-first'")
+        .fetch_one(&mut *old).await?;
+    assert!(first);
+    let mut relay = sql_tx(raw, tenant).await?;
+    let settled: String = sqlx::query_scalar("SELECT rss_transactional_messaging.settle_outbox(tenant_id,seq,lease_token,(extract(epoch FROM lease_until)*1000000)::bigint,'published',NULL) FROM rss_transactional_messaging.claim_outbox($1::uuid,'repeatable',1,60000)")
+        .bind(tenant.to_string()).fetch_one(&mut *relay).await?;
+    assert_eq!(settled, "settled");
+    relay.commit().await?;
+    let error = sql_prepare(&mut old, pairs.clone())
+        .await
+        .expect_err("stale allocator snapshot");
+    assert_eq!(code(&error).as_deref(), Some("40001"));
+    old.rollback().await?;
+
+    let mut retry = sql_tx(raw, tenant).await?;
+    sql_prepare(&mut retry, pairs).await?;
+    sql_append(&mut retry, &next).await?;
+    let claimed:String = sqlx::query_scalar("SELECT message_id FROM rss_transactional_messaging.claim_outbox($1::uuid,'repeatable',1,60000)")
+        .bind(tenant.to_string()).fetch_one(&mut *retry).await?;
+    assert_eq!(claimed, next.id().as_str());
+    retry.rollback().await?;
+    Ok(())
 }
 
 async fn capacity(raw: &PgPool) -> anyhow::Result<()> {
@@ -98,5 +139,77 @@ async fn capacity(raw: &PgPool) -> anyhow::Result<()> {
     assert_eq!(rest, ["lock-scope-b", "lock-scope-c"]);
     second.rollback().await?;
     first.rollback().await?;
+    Ok(())
+}
+
+async fn crossed_declarations(raw: &PgPool) -> anyhow::Result<()> {
+    let domain = "crossed-heads";
+    let tenant = message("a").metadata().tenant_id();
+    let both = serde_json::json!([[domain, "a"], [domain, "b"]]);
+    let mut seed = sql_tx(raw, tenant).await?;
+    sql_prepare(&mut seed, both.clone()).await?;
+    for key in ["a", "b"] {
+        sql_append(
+            &mut seed,
+            &ordered(&format!("cross-head-{key}"), domain, key),
+        )
+        .await?;
+    }
+    let claims:Vec<(i64,String,i64)> = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,2,60000) ORDER BY seq")
+        .bind(tenant.to_string()).bind(domain).fetch_all(&mut *seed).await?;
+    seed.commit().await?;
+    assert_eq!(claims.len(), 2);
+    let settle = "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,'published',NULL)";
+    let mut left = sql_tx(raw, tenant).await?;
+    let mut right = sql_tx(raw, tenant).await?;
+    for (tx, key) in [(&mut left, "b"), (&mut right, "a")] {
+        sql_prepare(tx, serde_json::json!([[domain, key]])).await?;
+        sql_append(tx, &ordered(&format!("cross-output-{key}"), domain, key)).await?;
+    }
+    let release = |mut tx: Transaction<'static, Postgres>,
+                   (seq, token, until): (i64, String, i64)| async move {
+        let error = sqlx::query(settle)
+            .bind(tenant.to_string())
+            .bind(seq)
+            .bind(token)
+            .bind(until)
+            .execute(&mut *tx)
+            .await
+            .expect_err("source was not declared");
+        assert_eq!(code(&error).as_deref(), Some("PZ002"));
+        tx.rollback().await?;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(
+        release(left, claims[0].clone()),
+        release(right, claims[1].clone())
+    )?;
+    let complete = |claim: (i64, String, i64), key: &'static str, pairs: serde_json::Value| async move {
+        let mut tx = sql_tx(raw, tenant).await?;
+        sql_prepare(&mut tx, pairs).await?;
+        sql_append(
+            &mut tx,
+            &ordered(&format!("cross-output-{key}"), domain, key),
+        )
+        .await?;
+        let status: String = sqlx::query_scalar(settle)
+            .bind(tenant.to_string())
+            .bind(claim.0)
+            .bind(claim.1)
+            .bind(claim.2)
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(status, "settled");
+        tx.commit().await?;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(
+        complete(claims[0].clone(), "b", both),
+        complete(
+            claims[1].clone(),
+            "a",
+            serde_json::json!([[domain, "b"], [domain, "a"]])
+        )
+    )?;
     Ok(())
 }

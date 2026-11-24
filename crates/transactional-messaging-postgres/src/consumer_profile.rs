@@ -74,7 +74,7 @@ pub async fn grant_consumer(
     Ok(())
 }
 
-fn function_body<'a>(sql: &'a str, name: &str) -> Result<&'a str, PgError> {
+pub(crate) fn function_body<'a>(sql: &'a str, name: &str) -> Result<&'a str, PgError> {
     sql.split_once(&format!("FUNCTION rss_transactional_messaging.{name}("))
         .and_then(|(_, definition)| definition.split_once("AS $f$"))
         .and_then(|(_, body)| body.split_once("$f$;"))

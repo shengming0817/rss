@@ -76,7 +76,9 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
    OR ARRAY(SELECT lower(pg_get_indexdef(i.indexrelid,k,true)) FROM generate_series(1,i.indnatts) k)<>e.keys)),
  ('functions', EXISTS(SELECT FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
   WHERE t.tgrelid='rss_transactional_messaging.outbox'::regclass AND t.tgname='refresh_outbox_head'
-   AND t.tgenabled='O' AND t.tgtype=17 AND NOT t.tgisinternal
+   AND t.tgenabled='O' AND t.tgtype=17 AND NOT t.tgisinternal AND t.tgqual IS NULL
+   AND t.tgattr::text=(SELECT attnum::text FROM pg_attribute WHERE attrelid=t.tgrelid AND attname='status')
+   AND p.prosrc=$4::text
    AND p.oid=to_regprocedure('rss_transactional_messaging.refresh_outbox_head()')
    AND p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
    AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']

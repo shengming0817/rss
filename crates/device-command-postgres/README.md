@@ -71,7 +71,7 @@ between payload and command intent remain product responsibilities.
   transaction partition set before command/authority mutations; repositories do not add locks incrementally.
 - Outbox append and command admission commit together. Broker publish itself is outside this
   transaction and remains at-least-once. Never mint a new message ID for an ambiguous attempt.
-- `recover` and `recover_exact` share the same lifecycle implementation and call the messaging owner's `is_published` for the persisted domain/message/fingerprint. A scope may contain commands
+- `recover` and `recover_exact` share the same lifecycle implementation. The messaging adapter checks each selected dispatch's persisted domain, message ID and fingerprint using one publication query per page. A scope may contain commands
   from several messaging domains; recovery never substitutes the current relay domain. Pending,
   in-flight and dead-lettered delivery are not device rejection. Missing dispatch or changed
   identity is an error. `published_at` is the database time this component observes durable
