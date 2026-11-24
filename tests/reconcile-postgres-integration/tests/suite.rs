@@ -1,6 +1,8 @@
 mod examples;
 mod measure;
 mod messaging;
+#[path = "../../fixtures/pg_settlement.rs"]
+pub mod pg_settlement;
 mod process;
 mod scenarios;
 mod transport;
@@ -152,6 +154,7 @@ async fn reconcile_postgres_suite() -> anyhow::Result<()> {
         let store = PgStore::new(db.pool.clone(), &control).await?;
         scenarios::run(&store, &db.pool, &db.owner, &control).await?;
         process::run(&store, &db.owner, &db.fixture, &control).await?;
+        transport::permit::verify(&db, &control).await?;
         transport::run(&db.owner, db.options.clone(), &control).await?;
         Box::pin(messaging::run(&store, &db.owner, &db.fixture, &control)).await?;
         assert_eq!(store.close(&control).await, CloseOutcome::Drained);

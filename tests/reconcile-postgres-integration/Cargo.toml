@@ -9,13 +9,15 @@ publish = false
 workspace = true
 
 [dev-dependencies]
+tokio-rustls.workspace = true
+rustls.workspace = true
 rss-examples = { path = "../../crates/examples", features = ["reconcile-pg"] }
 
 rss-reconcile.workspace = true
 rss-reconcile-postgres = { workspace = true, features = ["integration", "transactional-messaging"] }
 rss-request-context.workspace = true
 testkit = { path = "../../crates/testkit", features = ["containers"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 tokio-util.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "any", "migrate", "json"] }
 uuid.workspace = true

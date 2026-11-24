@@ -37,15 +37,16 @@ impl<R: Send> PgStore<R> {
         self.outbox.validate_transaction(tx)?;
         self.clock.now(tx).await
     }
-    async fn recover_rows(
+    async fn recover_rows<'a>(
         &self,
         tx: &mut PgTransaction<'_>,
         scope: Scope,
         current: Coordinate,
-        rows: Vec<Stored>,
-    ) -> Result<Vec<Command>, PgError> {
-        if rows.is_empty() {
-            return Ok(Vec::new());
+        rows: impl Iterator<Item = &'a mut Stored>,
+    ) -> Result<(), PgError> {
+        let active: Vec<_> = rows.filter(|r| !r.command.status().is_terminal()).collect();
+        if active.is_empty() {
+            return Ok(());
         }
         let observed = self.now(tx).await?;
         let needs_confirmation = |row: &Stored| {
@@ -53,7 +54,7 @@ impl<R: Send> PgStore<R> {
                 && row.command.spec().coordinate() == current
                 && observed < row.command.spec().deadline()
         };
-        let requested: Vec<_> = rows
+        let requested: Vec<_> = active
             .iter()
             .filter(|row| needs_confirmation(row))
             .map(|row| (&row.domain, &row.message_id, row.fingerprint))
@@ -70,9 +71,8 @@ impl<R: Send> PgStore<R> {
             observed
         };
         let mut changes = PageChanges::default();
-        let mut commands = Vec::with_capacity(rows.len());
-        for row in rows {
-            let event = if needs_confirmation(&row) {
+        for row in active {
+            let event = if needs_confirmation(row) {
                 let published = facts.next().ok_or_else(|| error(Error::InvalidSnapshot))?;
                 if published {
                     Event::Published
@@ -84,7 +84,7 @@ impl<R: Send> PgStore<R> {
             } else {
                 Event::Expire
             };
-            let mut command = row.command;
+            let command = &mut row.command;
             let previous = command.version();
             let outcome = command
                 .transition(event, current, confirmed_at)
@@ -92,11 +92,9 @@ impl<R: Send> PgStore<R> {
             if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
                 return Err(error(Error::InvalidSnapshot));
             }
-            changes.push(&command, previous);
-            commands.push(command);
+            changes.push(command, previous);
         }
-        changes.save(tx, scope).await?;
-        Ok(commands)
+        changes.save(tx, scope).await
     }
     async fn mutate(
         &self,
@@ -320,12 +318,13 @@ impl<R: Send> Store for PgStore<R> {
     ) -> Result<RecoveryPage, PgError> {
         self.outbox.validate_transaction(tx)?;
         let current = authority(tx, s).await?;
-        let rows = active_rows(tx, s, after.map(CommandId::as_str), limit, false)
+        let mut rows = active_rows(tx, s, after.map(CommandId::as_str), limit, false)
             .await?
             .into_iter()
             .map(decode)
             .collect::<Result<Vec<_>, _>>()?;
-        let commands = self.recover_rows(tx, s, current, rows).await?;
+        self.recover_rows(tx, s, current, rows.iter_mut()).await?;
+        let commands: Vec<_> = rows.into_iter().map(|row| row.command).collect();
         let after = commands.last().map(|c| c.spec().id().clone());
         Ok(RecoveryPage { commands, after })
     }
@@ -333,15 +332,13 @@ impl<R: Send> Store for PgStore<R> {
         &self,
         tx: &mut Self::Transaction<'_>,
         s: Scope,
-        id: &CommandId,
-    ) -> Result<Option<Command>, PgError> {
+        ids: ExactCommandIds<'_>,
+    ) -> Result<Vec<Option<Command>>, PgError> {
         self.outbox.validate_transaction(tx)?;
         let current = authority(tx, s).await?;
-        match read(tx, s, id).await? {
-            Some(row) if row.command.status().is_terminal() => Ok(Some(row.command)),
-            Some(row) => Ok(self.recover_rows(tx, s, current, vec![row]).await?.pop()),
-            // reason: an absent identity is distinct from an invalid scope or corrupt snapshot.
-            None => Ok(None),
-        }
+        let mut rows = exact_rows(tx, s, ids).await?;
+        self.recover_rows(tx, s, current, rows.iter_mut().flatten())
+            .await?;
+        Ok(rows.into_iter().map(|row| row.map(|r| r.command)).collect())
     }
 }

@@ -7,10 +7,10 @@ pub(super) async fn drift(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    let mut accepted = Vec::new();
     let mut cases = Vec::new();
     for (object, privilege) in [
         ("SCHEMA rss_saga", "USAGE"),
+        ("rss_saga.definitions", "SELECT"),
         ("rss_saga.instances", "SELECT"),
         ("rss_saga.journal", "SELECT"),
         ("rss_saga.instances", "SELECT(revision)"),
@@ -24,6 +24,7 @@ pub(super) async fn drift(
     }
     for (object, privilege) in [
         ("SCHEMA rss_saga", "USAGE"),
+        ("rss_saga.definitions", "SELECT"),
         ("rss_saga.instances", "SELECT"),
         ("rss_saga.journal", "SELECT"),
         ("FUNCTION rss_saga.register(uuid,jsonb,jsonb)", "EXECUTE"),
@@ -46,9 +47,10 @@ pub(super) async fn drift(
             format!("GRANT {privilege} ON {object} TO saga_runtime"),
         ));
     }
+    definition_cases(&mut cases);
     history_cases(&mut cases);
     policy_cases(&mut cases);
-    for table in ["instances", "journal"] {
+    for table in ["definitions", "instances", "journal"] {
         for event in ["INSERT", "UPDATE"] {
             cases.push((
                 format!("F3 {table} {event} rule"),
@@ -60,6 +62,16 @@ pub(super) async fn drift(
         }
     }
     function_cases(owner, &mut cases).await?;
+    check_drift_cases(pool, owner, control, cases).await
+}
+
+async fn check_drift_cases(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+    cases: Vec<Case>,
+) -> anyhow::Result<()> {
+    let mut accepted = Vec::new();
     let count = cases.len();
     for (label, change, restore) in cases {
         PgStore::new(pool.clone(), control).await?;
@@ -82,12 +94,59 @@ pub(super) async fn drift(
 }
 
 type Case = (String, String, String);
+fn definition_cases(cases: &mut Vec<Case>) {
+    for (label, change, restore) in [
+        (
+            "inherited relation",
+            "CREATE TABLE public.saga_fixture_child () INHERITS (rss_saga.definitions)",
+            "DROP TABLE public.saga_fixture_child",
+        ),
+        (
+            "external validator",
+            "CREATE FUNCTION public.valid_definition(jsonb) RETURNS boolean LANGUAGE sql AS 'SELECT rss_saga.valid_definition($1)'; ALTER TABLE rss_saga.definitions DROP CONSTRAINT saga_definition, ADD CONSTRAINT saga_definition CHECK(public.valid_definition(definition))",
+            "ALTER TABLE rss_saga.definitions DROP CONSTRAINT saga_definition, ADD CONSTRAINT saga_definition CHECK(rss_saga.valid_definition(definition)); DROP FUNCTION public.valid_definition(jsonb)",
+        ),
+        (
+            "unexpected foreign key",
+            "CREATE TABLE public.saga_fixture_tenants(id uuid PRIMARY KEY); ALTER TABLE rss_saga.definitions ADD FOREIGN KEY(tenant_id) REFERENCES public.saga_fixture_tenants(id) ON UPDATE CASCADE NOT VALID",
+            "DROP TABLE public.saga_fixture_tenants CASCADE",
+        ),
+        (
+            "cross-tenant unique index",
+            "CREATE UNIQUE INDEX global_version ON rss_saga.definitions(contract,version) WHERE version='v99'",
+            "DROP INDEX rss_saga.global_version",
+        ),
+        (
+            "definition body writable",
+            "GRANT UPDATE(definition) ON rss_saga.definitions TO saga_runtime",
+            "REVOKE UPDATE(definition) ON rss_saga.definitions FROM saga_runtime",
+        ),
+        (
+            "nullable instance binding",
+            "ALTER TABLE rss_saga.instances ALTER COLUMN version DROP NOT NULL",
+            "ALTER TABLE rss_saga.instances ALTER COLUMN version SET NOT NULL",
+        ),
+        (
+            "missing definition reference",
+            "ALTER TABLE rss_saga.instances DROP CONSTRAINT instance_definition",
+            "ALTER TABLE rss_saga.instances ADD CONSTRAINT instance_definition FOREIGN KEY(tenant_id,contract,version) REFERENCES rss_saga.definitions",
+        ),
+    ] {
+        cases.push((label.into(), change.into(), restore.into()));
+    }
+}
+
 fn history_cases(cases: &mut Vec<Case>) {
     for (table, name, expr) in [
         (
+            "definitions",
+            "saga_definition",
+            "rss_saga.valid_definition(definition)",
+        ),
+        (
             "instances",
             "saga_history_instance",
-            "rss_saga.valid_instance(definition,progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)",
+            "rss_saga.valid_instance(progress,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)",
         ),
         (
             "journal",
@@ -106,7 +165,7 @@ fn history_cases(cases: &mut Vec<Case>) {
 }
 
 fn policy_cases(cases: &mut Vec<Case>) {
-    for table in ["instances", "journal"] {
+    for table in ["definitions", "instances", "journal"] {
         let create = format!(
             "CREATE POLICY tenant ON rss_saga.{table} USING ({TENANT_EXPR}) WITH CHECK ({TENANT_EXPR})"
         );

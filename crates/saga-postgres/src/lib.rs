@@ -11,18 +11,12 @@ use rss_saga::{DiagnosticPhase, ErrorKind};
 use sqlx::{Connection as _, PgConnection, PgPool, Row as _, pool::PoolConnection};
 use std::time::Duration;
 
+const BEGIN: &str = "BEGIN";
+
 mod probe;
 use probe::validate;
 /// Version-matched fresh schema SQL for an external migrator; reading this constant executes nothing.
-pub const MIGRATION_SQL: &str = concat!(
-    include_str!("../migrations/0001_create_saga.sql"),
-    "\n",
-    include_str!("../migrations/0002_add_history_bounds.sql"),
-    "\n",
-    include_str!("../migrations/0003_expand_lease_range.sql")
-);
-/// One-way schema 2 to 3 upgrade executed only by the external migrator with writers stopped.
-pub const UPGRADE_SQL: &str = include_str!("../migrations/0003_expand_lease_range.sql");
+pub const MIGRATION_SQL: &str = include_str!("../migrations/install.sql");
 #[derive(Clone)]
 /// Adopted PostgreSQL pool implementing the atomic Saga storage contract.
 pub struct PgStore {
@@ -66,6 +60,7 @@ impl PgStore {
         &self,
         tenant: rss_request_context::TenantId,
         control: &Control<'_, T>,
+        begin: &'static str,
         operation: F,
     ) -> Result<R, Error>
     where
@@ -78,7 +73,7 @@ impl PgStore {
         let settlement = std::sync::atomic::AtomicU8::new(0);
         let result = control.run(async {
             let mut lease=ConnectionLease { connection:self.pool.acquire().await.map_err(|e|sql_error_at(DiagnosticPhase::Acquire,e))?,settled:false };
-            let mut tx=lease.connection.begin().await.map_err(|e|sql_error_at(DiagnosticPhase::Begin,e))?;
+            let mut tx=lease.connection.begin_with(begin).await.map_err(|e|sql_error_at(DiagnosticPhase::Begin,e))?;
             settlement.store(2, std::sync::atomic::Ordering::SeqCst);
             let result=async {
                 sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)").bind(tenant.to_string()).bind(timeout).execute(&mut *tx).await.map_err(|e|sql_error_at(DiagnosticPhase::Setup,e))?;
@@ -188,7 +183,7 @@ async fn load(
     let head = locked(connection, lease).await?;
     head.check_read(read)?;
     // SQL withholds oversized payloads before SQLx receives a complete DataRow.
-    let definition: Option<sqlx::types::Json<Definition>> = sqlx::query_scalar("SELECT CASE WHEN octet_length(definition::text)<=$3 THEN definition END FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND saga_id=$2")
+    let definition: Option<sqlx::types::Json<Definition>> = sqlx::query_scalar("SELECT CASE WHEN octet_length(definition::text)<=$3 THEN definition END FROM rss_saga.instances JOIN rss_saga.definitions USING (tenant_id,contract,version) WHERE tenant_id=$1::text::uuid AND saga_id=$2")
         .bind(lease.scope().tenant().to_string()).bind(lease.scope().id()).bind(rss_saga::DEFINITION_BYTES as i64)
         .fetch_one(&mut *connection).await.map_err(sql_error)?;
     let definition = definition.ok_or(ErrorKind::HistoryReadLimit)?.0;
@@ -261,18 +256,23 @@ impl Store for PgStore {
     ) -> Result<(), Error> {
         definition.validate()?;
         let definition = sqlx::types::Json(definition.clone());
-        self.transact(scope.tenant(), control, |c| {
-            Box::pin(async move {
-                sqlx::query("SELECT rss_saga.register($1,$2,$3)")
-                    .bind(scope.id())
-                    .bind(definition)
-                    .bind(sqlx::types::Json(capacity))
-                    .execute(c)
-                    .await
-                    .map_err(sql_error)?;
-                Ok(())
-            })
-        })
+        self.transact(
+            scope.tenant(),
+            control,
+            "BEGIN ISOLATION LEVEL READ COMMITTED",
+            |c| {
+                Box::pin(async move {
+                    sqlx::query("SELECT rss_saga.register($1,$2,$3)")
+                        .bind(scope.id())
+                        .bind(definition)
+                        .bind(sqlx::types::Json(capacity))
+                        .execute(c)
+                        .await
+                        .map_err(sql_error)?;
+                    Ok(())
+                })
+            },
+        )
         .await
     }
     async fn claim<T: Timer>(
@@ -284,7 +284,7 @@ impl Store for PgStore {
         let token = uuid::Uuid::new_v4();
         let ttl = ttl_millis(ttl)?;
         let epoch = self
-            .transact(scope.tenant(), control, |c| {
+            .transact(scope.tenant(), control, BEGIN, |c| {
                 Box::pin(async move {
                     sqlx::query_scalar("SELECT rss_saga.claim($1,$2,$3)")
                         .bind(scope.id())
@@ -319,7 +319,7 @@ impl Store for PgStore {
         control: &Control<'_, T>,
     ) -> Result<HistoryHead, Error> {
         let lease = lease.clone();
-        self.transact(lease.scope().tenant(), control, |c| {
+        self.transact(lease.scope().tenant(), control, BEGIN, |c| {
             Box::pin(async move { locked(c, &lease).await })
         })
         .await
@@ -338,7 +338,7 @@ impl Store for PgStore {
         let revision =
             i64::try_from(expected_revision).map_err(|_| Error::new(ErrorKind::Conflict))?;
         let lease = lease.clone();
-        self.transact(lease.scope().tenant(), control, |c| {
+        self.transact(lease.scope().tenant(), control, BEGIN, |c| {
             Box::pin(async move {
                 sqlx::query("SELECT rss_saga.extend_history($1,$2,$3,$4,$5,$6)")
                     .bind(lease.scope().id())
@@ -362,7 +362,7 @@ impl Store for PgStore {
         control: &Control<'_, T>,
     ) -> Result<Snapshot, Error> {
         let lease = lease.clone();
-        self.transact(lease.scope().tenant(), control, |c| {
+        self.transact(lease.scope().tenant(), control, BEGIN, |c| {
             Box::pin(async move { load(c, &lease, read).await })
         })
         .await
@@ -378,7 +378,7 @@ impl Store for PgStore {
         }
         let mutation = mutation.clone();
         let lease = lease.clone();
-        self.transact(lease.scope().tenant(), control, |c| {
+        self.transact(lease.scope().tenant(), control, BEGIN, |c| {
             Box::pin(async move {
                 sqlx::query("SELECT rss_saga.commit_event($1,$2,$3,$4,$5,$6,$7)")
                     .bind(lease.scope().id())
@@ -407,8 +407,8 @@ impl Store for PgStore {
         if limit == 0 || limit > 10_000 {
             return Err(Error::new(rss_saga::ErrorKind::InvalidBudget));
         }
-        self.transact(tenant,control,|c|Box::pin(async move {
-            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances WHERE tenant_id=$1::text::uuid AND progress->>'status' IN ('Ready','Running','Compensating') AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)=$4 AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).bind(filter==rss_saga::CandidateFilter::Runnable).fetch_all(c).await.map_err(sql_error)?;
+        self.transact(tenant,control,BEGIN,|c|Box::pin(async move {
+            let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT saga_id FROM rss_saga.instances JOIN rss_saga.definitions USING (tenant_id,contract,version) WHERE tenant_id=$1::text::uuid AND progress->>'status' IN ('Ready','Running','Compensating') AND rss_saga.runnable(progress,definition,revision,history_encoded_bytes,history_entry_limit,history_byte_limit)=$4 AND (expires_at IS NULL OR expires_at<=clock_timestamp()) AND ($3::uuid IS NULL OR saga_id>$3) ORDER BY saga_id LIMIT $2").bind(tenant.to_string()).bind(i64::from(limit)).bind(after).bind(filter==rss_saga::CandidateFilter::Runnable).fetch_all(c).await.map_err(sql_error)?;
             Ok(ids.into_iter().map(|id|Scope::new(tenant,id)).collect())
         })).await
     }
@@ -421,7 +421,7 @@ impl PgStore {
         control: &Control<'_, T>,
     ) -> Result<(), Error> {
         let lease = lease.clone();
-        self.transact(lease.scope().tenant(), control, |c| {
+        self.transact(lease.scope().tenant(), control, BEGIN, |c| {
             Box::pin(async move {
                 sqlx::query("SELECT rss_saga.lease($1,$2,$3,$4)")
                     .bind(lease.scope().id())

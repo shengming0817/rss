@@ -12,6 +12,8 @@ keywords = ["reconcile", "postgres", "worker"]
 publish = ["crates-io"]
 
 [dependencies]
+tokio = { workspace = true, features = ["rt", "time"] }
+tokio-util.workspace = true
 thiserror.workspace = true
 rss-reconcile.workspace = true
 rss-request-context.workspace = true
@@ -31,7 +33,6 @@ transactional-messaging = ["dep:rss-transactional-messaging", "dep:rss-transacti
 [dev-dependencies]
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-tokio-util.workspace = true
 
 [lints]
 workspace = true

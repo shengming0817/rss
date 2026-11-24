@@ -43,18 +43,17 @@ postgres_image=sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ff
 升级覆盖 416 条事件、pending、补偿暂停、成功和 400 条长历史四类实例。
 本次升级耗时 **22.030 ms**，WAL 增量 **270,536 字节**，组件关系及索引占用由
 **286,720** 变为 **360,448 字节**。关系占用差值不是迁移期间的临时磁盘峰值；
-产品仍需为实际数据规模安排停写窗口、执行时限与临时磁盘空间。
+该次测量对应上列固定 revision。
 
 ## 复现
 
-在仓库工作目录先编译 `saga-postgres-integration` 的 suite 和已有 fixture launcher。
+上述历史结果绑定所列 revision。复现当前历史资源测量时，在仓库工作目录先编译 `saga-postgres-integration` 的 suite 和已有 fixture launcher。
 使用 `cargo test --locked -p saga-postgres-integration --test suite --no-run --message-format=json`
 返回的 executable 路径替换下面的 `SUITE_BINARY`；无需创建新的 CI gate。
 
 ```sh
 cargo build --locked -p testkit --features containers --bin rss-test-launcher
 RSS_TEST_RUN_ID=saga-history-local RSS_SAGA_HISTORY_PROFILE=entries-10000   target/debug/rss-test-launcher -- /usr/bin/time -l SUITE_BINARY   --exact history_measurements --ignored --nocapture
-RSS_TEST_RUN_ID=saga-history-upgrade   target/debug/rss-test-launcher -- /usr/bin/time -l SUITE_BINARY   --exact history_upgrade --nocapture
 ```
 
 其余 profile 为 `entries-100`、`entries-1000`、`bytes-50`、`bytes-95`、`bytes-100`。

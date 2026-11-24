@@ -1,7 +1,7 @@
-pub(super) mod startup;
-mod upgrade;
-pub(super) use upgrade::upgrade;
+pub(super) mod batch;
 mod definition;
+pub(super) mod install;
+pub(super) mod startup;
 pub(super) use definition::binding as definition_binding;
 mod baseline;
 pub(super) use baseline::{

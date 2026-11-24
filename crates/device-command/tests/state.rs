@@ -303,3 +303,20 @@ fn late_rejection_is_not_success() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(c.status(), Status::TimedOut);
     Ok(())
 }
+
+#[test]
+fn exact_command_page_validates_the_requested_identities() -> Result<(), Error> {
+    let mut ids = (0..1024)
+        .map(|i| CommandId::parse(&i.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(ExactCommandIds::new(&[])?.as_slice().is_empty());
+    assert_eq!(ExactCommandIds::new(&ids)?.as_slice(), ids);
+    ids.push(CommandId::parse("another")?);
+    assert_eq!(ExactCommandIds::new(&ids).err(), Some(Error::InvalidValue));
+    let repeated = [ids[0].clone(), ids[1].clone(), ids[0].clone()];
+    assert_eq!(
+        ExactCommandIds::new(&repeated).err(),
+        Some(Error::InvalidValue)
+    );
+    Ok(())
+}

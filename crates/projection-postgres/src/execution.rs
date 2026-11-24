@@ -4,9 +4,9 @@ use crate::{
     transaction::map_sql,
 };
 use rss_projection::{
-    ApplyOutcome, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event, Execution,
-    ExternalCheckpoint, GenerationStart, Position, ProjectionScope, ReceiptQuery, ReceiptStatus,
-    ReplayBound, Timer,
+    ApplyOutcome, BatchExecution, BatchLimit, Checkpoint, Control, DefinitionIdentity, Error,
+    ErrorKind, Event, Execution, ExternalCheckpoint, GenerationStart, Position, ProjectionScope,
+    ReceiptQuery, ReceiptStatus, ReplayBound, Timer,
 };
 use sqlx::Row;
 use std::{future::Future, sync::Arc};
@@ -197,19 +197,44 @@ impl PgStore {
         control: &Control<'_, T>,
     ) -> Result<Checkpoint, Error> {
         let source = claim.scope.source().clone();
-        self.controlled_read(&source, control, move |tx| Box::pin(async move {
-            let s = &claim.scope;
-            let row = sqlx::query("SELECT position,replay,end_position,definition_identity FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id=$2 AND projection_id=$3 AND generation=$4 AND epoch=$5 AND worker_token=$6::uuid")
+        self.controlled_read(&source, control, move |tx| {
+            Box::pin(async move { load_checkpoint(tx, &claim).await })
+        })
+        .await
+    }
+}
+
+async fn load_checkpoint(tx: &mut PgTransaction<'_>, claim: &PgClaim) -> Result<Checkpoint, Error> {
+    let s = &claim.scope;
+    let row = sqlx::query("SELECT position,replay,end_position,definition_identity FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id=$2 AND projection_id=$3 AND generation=$4 AND epoch=$5 AND worker_token=$6::uuid")
                 .bind(s.source().tenant().to_string()).bind(s.source().source()).bind(s.projection()).bind(s.generation()).bind(claim.epoch).bind(claim.token.to_string())
                 .fetch_optional(&mut *tx.connection).await.map_err(map_sql)?.ok_or(Error::new(ErrorKind::Fenced))?;
-            if row.try_get::<Vec<u8>,_>("definition_identity").map_err(map_sql)?.as_slice() != claim.definition.as_bytes() {
-                return Err(Error::new(ErrorKind::Conflict));
-            }
-            let position = row.try_get::<Option<i64>,_>("position").map_err(map_sql)?.map(decode_position).transpose()?;
-            let end = row.try_get::<Option<i64>,_>("end_position").map_err(map_sql)?.map(decode_position).transpose()?;
-            Ok::<_, Error>(Checkpoint { position, bound: if row.try_get::<bool,_>("replay").map_err(map_sql)? { ReplayBound::Through(end) } else { ReplayBound::Live } })
-        })).await
+    if row
+        .try_get::<Vec<u8>, _>("definition_identity")
+        .map_err(map_sql)?
+        .as_slice()
+        != claim.definition.as_bytes()
+    {
+        return Err(Error::new(ErrorKind::Conflict));
     }
+    let position = row
+        .try_get::<Option<i64>, _>("position")
+        .map_err(map_sql)?
+        .map(decode_position)
+        .transpose()?;
+    let end = row
+        .try_get::<Option<i64>, _>("end_position")
+        .map_err(map_sql)?
+        .map(decode_position)
+        .transpose()?;
+    Ok::<_, Error>(Checkpoint {
+        position,
+        bound: if row.try_get::<bool, _>("replay").map_err(map_sql)? {
+            ReplayBound::Through(end)
+        } else {
+            ReplayBound::Live
+        },
+    })
 }
 /// Application decision before transaction settlement. Duplicate is deliberately absent:
 /// only the adapter's locked receipt lookup may classify an already committed fact.
@@ -223,7 +248,8 @@ pub enum PgEffectOutcome {
 /// Trusted application read-model writer. Include tenant and generation in application keys.
 /// A successful result means only that SQL was staged; the adapter still owns settlement.
 pub trait PgEffect: Send + Sync {
-    /// Apply within the borrowed transaction. Returning Err rolls back the entire event.
+    /// Apply within the borrowed transaction. An error rolls back the settlement: one event in `run`,
+    /// or the entire page (including earlier successful callbacks) in `run_batched`.
     fn apply(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -261,28 +287,84 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
         let event = event.clone();
         self.store
             .controlled_tx(self.scope().source(), control, move |tx| {
+                Box::pin(async move { stage(tx, &claim, effect.as_ref(), expected, &event).await })
+            })
+            .await
+    }
+}
+impl<H: PgEffect + 'static> BatchExecution for PgProjection<H> {
+    async fn execute_batch<T: Timer>(
+        &self,
+        mut expected: Option<Position>,
+        events: Vec<Event>,
+        control: &Control<'_, T>,
+    ) -> Result<Vec<ApplyOutcome>, Error> {
+        BatchLimit::new(
+            u32::try_from(events.len()).map_err(|_| Error::new(ErrorKind::InvalidInput))?,
+        )?;
+        let mut previous = expected;
+        for event in &events {
+            if event.source() != self.scope().source() {
+                return Err(Error::new(ErrorKind::ScopeMismatch));
+            }
+            if previous.is_some_and(|p| event.position() <= p) {
+                return Err(Error::new(ErrorKind::OutOfOrder));
+            }
+            previous = Some(event.position());
+        }
+        let claim = self.claim.clone();
+        let effect = self.effect.clone();
+        self.store
+            .controlled_tx(self.scope().source(), control, move |tx| {
                 Box::pin(async move {
-                    let duplicate = lock(tx, &claim, expected, &event).await?;
-                    tx.check()?;
-                    let outcome = if duplicate {
-                        ApplyOutcome::Duplicate
-                    } else {
-                        match effect
-                            .apply(tx, &claim.scope, &event)
-                            .await
-                            .map_err(|error| error.0)?
-                        {
-                            PgEffectOutcome::Applied => ApplyOutcome::Applied,
-                            PgEffectOutcome::Filtered => ApplyOutcome::Filtered,
-                        }
-                    };
-                    tx.check()?;
-                    finish(tx, &claim, expected, &event).await?;
-                    Ok(outcome)
+                    // Replay bounds are immutable for this generation. The first stage
+                    // locks the row and rechecks its epoch and cursor before any effect.
+                    let checkpoint = load_checkpoint(tx, &claim).await?;
+                    if checkpoint.position != expected {
+                        return Err(Error::new(ErrorKind::Fenced));
+                    }
+                    if let ReplayBound::Through(end) = checkpoint.bound
+                        && previous > end
+                    {
+                        return Err(Error::new(ErrorKind::OutOfOrder));
+                    }
+                    let mut outcomes = Vec::with_capacity(events.len());
+                    for event in events {
+                        outcomes.push(stage(tx, &claim, effect.as_ref(), expected, &event).await?);
+                        expected = Some(event.position());
+                    }
+                    Ok(outcomes)
                 })
             })
             .await
     }
+}
+
+async fn stage<H: PgEffect>(
+    tx: &mut PgTransaction<'_>,
+    claim: &PgClaim,
+    effect: &H,
+    expected: Option<Position>,
+    event: &Event,
+) -> Result<ApplyOutcome, Error> {
+    tx.check()?;
+    let duplicate = lock(tx, claim, expected, event).await?;
+    tx.check()?;
+    let outcome = if duplicate {
+        ApplyOutcome::Duplicate
+    } else {
+        match effect
+            .apply(tx, &claim.scope, event)
+            .await
+            .map_err(|error| error.0)?
+        {
+            PgEffectOutcome::Applied => ApplyOutcome::Applied,
+            PgEffectOutcome::Filtered => ApplyOutcome::Filtered,
+        }
+    };
+    tx.check()?;
+    finish(tx, claim, expected, event).await?;
+    Ok(outcome)
 }
 /// PostgreSQL checkpoint session for a remote target. This type does not claim atomic effects.
 pub struct PgCheckpoint {

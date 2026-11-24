@@ -1,8 +1,8 @@
 //! ref: baseline 5b63e10 crates/eventexec/src/projection.rs; ordered resume algorithm only.
 use crate::observation::Publisher;
 use crate::{
-    ApplyOutcome, BatchLimit, Checkpoint, Control, Error, ErrorKind, Event, Execution, Position,
-    ReplayBound, RunObservation, Source, Timer,
+    ApplyOutcome, BatchExecution, BatchLimit, Checkpoint, Control, Error, ErrorKind, Event,
+    Execution, Position, ReplayBound, RunObservation, Source, Timer,
 };
 use std::future::{Future, IntoFuture};
 
@@ -119,6 +119,26 @@ pub fn run<'a, S: Source, E: Execution, T: Timer>(
     control: &'a Control<'_, T>,
     limit: RunLimit,
 ) -> Run<impl Future<Output = Report> + Send + 'a> {
+    prepare::<_, _, _, Individual>(source, execution, control, limit)
+}
+
+/// Run ordered, atomic pages. A rejected or uncertain page publishes no progress.
+/// Read size and remaining event budget bound each transaction.
+pub fn run_batched<'a, S: Source, E: BatchExecution, T: Timer>(
+    source: &'a S,
+    execution: &'a E,
+    control: &'a Control<'_, T>,
+    limit: RunLimit,
+) -> Run<impl Future<Output = Report> + Send + 'a> {
+    prepare::<_, _, _, AtomicPage>(source, execution, control, limit)
+}
+
+fn prepare<'a, S: Source, E: Execution, T: Timer, M: Settlement<E>>(
+    source: &'a S,
+    execution: &'a E,
+    control: &'a Control<'_, T>,
+    limit: RunLimit,
+) -> Run<impl Future<Output = Report> + Send + 'a> {
     let mut publisher = Publisher::new(execution.scope().clone(), *execution.definition_identity());
     let observation = publisher.observation();
     let future = async move {
@@ -129,7 +149,7 @@ pub fn run<'a, S: Source, E: Execution, T: Timer>(
             filtered: 0,
             stop: Stop::CaughtUp,
         };
-        report.stop = match drive(
+        report.stop = match drive::<_, _, _, M>(
             source,
             execution,
             control,
@@ -150,7 +170,7 @@ pub fn run<'a, S: Source, E: Execution, T: Timer>(
         observation,
     }
 }
-async fn drive<S: Source, E: Execution, T: Timer>(
+async fn drive<S: Source, E: Execution, T: Timer, M: Settlement<E>>(
     source: &S,
     execution: &E,
     control: &Control<'_, T>,
@@ -188,24 +208,21 @@ async fn drive<S: Source, E: Execution, T: Timer>(
         if events.is_empty() {
             return empty_stop(checkpoint);
         }
-        for event in events {
-            if matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if event.position() > end)
-            {
-                return Err(Error::new(ErrorKind::SourceContract));
-            }
+        let mut events = events.into_iter();
+        while !events.as_slice().is_empty() {
             control.check()?;
-            let result = execution
-                .execute(checkpoint.position, &event, control)
-                .await?;
-            match result {
-                ApplyOutcome::Applied => report.applied += 1,
-                ApplyOutcome::Duplicate => report.duplicates += 1,
-                ApplyOutcome::Filtered => report.filtered += 1,
+            let (position, outcomes) = M::next(execution, checkpoint, &mut events, control).await?;
+            for outcome in outcomes {
+                match outcome {
+                    ApplyOutcome::Applied => report.applied += 1,
+                    ApplyOutcome::Duplicate => report.duplicates += 1,
+                    ApplyOutcome::Filtered => report.filtered += 1,
+                }
+                remaining -= 1;
             }
-            checkpoint.position = Some(event.position());
+            checkpoint.position = Some(position);
             report.position = checkpoint.position;
             publisher.confirmed(report);
-            remaining -= 1;
             control.check()?;
             if replay_done(checkpoint) {
                 return Ok(Stop::CaughtUp);
@@ -225,5 +242,69 @@ fn empty_stop(checkpoint: Checkpoint) -> Result<Stop, Error> {
         Err(Error::new(ErrorKind::SourceContract))
     } else {
         Ok(Stop::CaughtUp)
+    }
+}
+
+trait Settlement<E: Execution> {
+    type Outcomes: IntoIterator<Item = ApplyOutcome> + Send;
+    fn next<T: Timer>(
+        execution: &E,
+        checkpoint: Checkpoint,
+        events: &mut std::vec::IntoIter<Event>,
+        control: &Control<'_, T>,
+    ) -> impl Future<Output = Result<(Position, Self::Outcomes), Error>> + Send;
+}
+
+struct Individual;
+impl<E: Execution> Settlement<E> for Individual {
+    type Outcomes = [ApplyOutcome; 1];
+    async fn next<T: Timer>(
+        execution: &E,
+        checkpoint: Checkpoint,
+        events: &mut std::vec::IntoIter<Event>,
+        control: &Control<'_, T>,
+    ) -> Result<(Position, Self::Outcomes), Error> {
+        let event = events.next().ok_or(Error::new(ErrorKind::SourceContract))?;
+        if matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if event.position() > end) {
+            return Err(Error::new(ErrorKind::SourceContract));
+        }
+        let outcome = execution
+            .execute(checkpoint.position, &event, control)
+            .await?;
+        Ok((event.position(), [outcome]))
+    }
+}
+
+struct AtomicPage;
+impl<E: BatchExecution> Settlement<E> for AtomicPage {
+    type Outcomes = Vec<ApplyOutcome>;
+    async fn next<T: Timer>(
+        execution: &E,
+        checkpoint: Checkpoint,
+        events: &mut std::vec::IntoIter<Event>,
+        control: &Control<'_, T>,
+    ) -> Result<(Position, Self::Outcomes), Error> {
+        let mut page: Vec<_> = std::mem::take(events).collect();
+        if let ReplayBound::Through(Some(end)) = checkpoint.bound {
+            match page.binary_search_by_key(&end, Event::position) {
+                Ok(index) => page.truncate(index + 1),
+                Err(index) if index < page.len() => {
+                    return Err(Error::new(ErrorKind::SourceContract));
+                }
+                Err(_) => {}
+            }
+        }
+        let position = page
+            .last()
+            .ok_or(Error::new(ErrorKind::SourceContract))?
+            .position();
+        let len = page.len();
+        let outcomes = execution
+            .execute_batch(checkpoint.position, page, control)
+            .await?;
+        if outcomes.len() != len {
+            return Err(Error::new(ErrorKind::StorageContract));
+        }
+        Ok((position, outcomes))
     }
 }

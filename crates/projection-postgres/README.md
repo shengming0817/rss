@@ -1,6 +1,6 @@
 # rss-projection-postgres
 
-PostgreSQL 16+ committed-order journals and atomic projection execution. In one event transaction the
+PostgreSQL 16+ committed-order journals and atomic projection execution. With `run_batched`, each page commits in one transaction. A business rejection rolls back the whole page. With `run`, each event commits separately. In either case the
 adapter locks the checkpoint, validates the worker epoch and definition identity, applies trusted read-model SQL, records
 fact identity and advances the checkpoint. An old worker is fenced **before** the effect.
 
@@ -59,15 +59,9 @@ and business-table policies. The tenant setting provides isolation within a trus
 it does not authenticate a caller that already holds database credentials.
 
 The schema contains only source allocators, events, generation/checkpoint state and fact receipts.
-It does not contain product read models or settings. Revision 3 binds each generation to exactly
-one 32-byte `definition_identity`, independent of its primary key. Runtime roles cannot update it.
-
-`UPGRADE_SQL` upgrades revision 3 to 4, expanding source/projection names to 255 bytes.
-Stop workers and execute it outside another transaction as the schema owner. It takes exclusive
-component table locks and preserves generation definitions, checkpoints and receipts across tenants.
-Runtime admission requires revision 4 and the exact name constraints. Historical migrations remain
-immutable; the public upgrade entry accepts only the immediately preceding schema.
-Fresh `MIGRATION_SQL` executes the complete chain; do not nest it inside another transaction.
+It does not contain product read models or settings. Revision 4 binds each generation to one 32-byte definition and accepts
+source/projection names up to 255 bytes. Install as the dedicated schema owner in a database where `rss_projection` is absent.
+Run the script outside an enclosing transaction: it owns its BEGIN and COMMIT. Runtime admission verifies its identity and permissions.
 
 ## API and recovery
 
@@ -187,16 +181,12 @@ Call `store.close(&control)` after cancelling and joining workers. Admission clo
 `CloseOutcome` distinguishes a drained pool from cancellation/deadline with outstanding borrowers.
 All adopted connections must use the same dedicated runtime login without `SET ROLE` masking.
 
-## Definition declaration and API replacement
+## Definition declaration
 
 The application mapping owns its definition value. The counter example declares a stable fingerprint
 beside its effect; initialization, replay and restart reuse it. The library does not compute or prove
 SQL/binary identity. Change the generation when changing the mapping; change the source when
 rebuilding the input stream, even if payload encoding stays the same.
-
-Revision 3 replaces the old Rust initialization/takeover signatures and adds session identity
-accessors and the external-target definition parameter. Update consumers together with the schema;
-there are no old overloads, aliases, defaults or compatibility features.
 
 ref: serverlesstechnology/cqrs persistence/postgres-es/src/view_repository.rs (version CAS;
 this adapter retains effect, receipt and checkpoint in its own single transaction)

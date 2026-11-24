@@ -165,7 +165,7 @@ fn big_registry(d: Definition) -> Result<Registry, Error> {
         )?
         .finish())
 }
-async fn seed_entries(
+pub(super) async fn seed_entries(
     store: &PgStore,
     owner: &PgPool,
     s: Scope,

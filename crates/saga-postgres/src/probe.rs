@@ -3,8 +3,12 @@ mod functions;
 use crate::{Error, sql_error};
 use sqlx::{PgConnection, PgPool, Row as _};
 pub(super) async fn validate(pool: &PgPool) -> Result<(), Error> {
-    let mut connection = pool.acquire().await.map_err(sql_error)?;
-    let conn = &mut *connection;
+    let mut transaction = pool.begin().await.map_err(sql_error)?;
+    let conn = &mut *transaction;
+    sqlx::query("SET LOCAL search_path TO pg_catalog")
+        .execute(&mut *conn)
+        .await
+        .map_err(sql_error)?;
     let ok: Option<bool> = sqlx::query_scalar(
         r#"
 WITH reachable AS (
@@ -18,7 +22,7 @@ SELECT current_user=session_user AND NOT o.rolsuper AND NOT o.rolbypassrls
         WHERE r.oid=n.nspowner OR has_schema_privilege(r.oid,n.oid,'CREATE'))
     AND NOT EXISTS(SELECT FROM aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a
         WHERE a.grantee=0)
-    AND obj_description(n.oid,'pg_namespace')='rss-saga-postgres:3'
+    AND obj_description(n.oid,'pg_namespace')='rss-saga-postgres:4'
 FROM pg_namespace n JOIN pg_roles o ON o.oid=n.nspowner WHERE n.nspname='rss_saga'
 "#,
     )
@@ -30,9 +34,11 @@ FROM pg_namespace n JOIN pg_roles o ON o.oid=n.nspowner WHERE n.nspname='rss_sag
         return Err(Error::new(rss_saga::ErrorKind::Integrity));
     }
     tables(conn).await?;
+    definition_columns(conn).await?;
     functions::validate(conn).await?;
     constraints(conn).await?;
-    triggers(conn).await
+    triggers(conn).await?;
+    transaction.commit().await.map_err(sql_error)
 }
 async fn tables(conn: &mut PgConnection) -> Result<(), Error> {
     let rows=sqlx::query(r#"
@@ -41,7 +47,11 @@ WITH reachable AS (
 )
 SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity,c.relowner=n.nspowner AS owned,
     c.relpersistence='p' AND has_table_privilege(current_user,c.oid,'SELECT')
+        AND NOT EXISTS(SELECT FROM pg_inherits WHERE inhrelid=c.oid OR inhparent=c.oid)
         AND NOT EXISTS(SELECT FROM pg_rewrite WHERE ev_class=c.oid)
+        -- The named keys and their actions are checked below. No other outgoing FK may write these rows.
+        AND (SELECT count(*) FROM pg_constraint fk WHERE fk.conrelid=c.oid AND fk.contype='f')
+            = CASE WHEN c.relname='definitions' THEN 0 ELSE 1 END
         AND NOT EXISTS(SELECT FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
             WHERE a.grantee=0)
         AND NOT EXISTS(SELECT FROM pg_attribute col,
@@ -55,10 +65,10 @@ SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity,c.relowner=n.nspowner AS
 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 WHERE n.nspname='rss_saga' AND c.relkind='r' ORDER BY c.relname
 "#).fetch_all(&mut *conn).await.map_err(sql_error)?;
-    if rows.len() != 2 {
+    if rows.len() != 3 {
         return Err(Error::new(rss_saga::ErrorKind::Integrity));
     }
-    for (row, name) in rows.iter().zip(["instances", "journal"]) {
+    for (row, name) in rows.iter().zip(["definitions", "instances", "journal"]) {
         if row.try_get::<String, _>("relname").map_err(sql_error)? != name
             || !row
                 .try_get::<bool, _>("relrowsecurity")
@@ -78,7 +88,7 @@ WHERE n.nspname='rss_saga' AND c.relkind='r' ORDER BY c.relname
 WITH tenant_predicate(value) AS (VALUES ($predicate$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$predicate$)),
 expected AS (
     SELECT to_regclass('rss_saga.' || name) AS relation FROM
-        unnest(ARRAY['instances','journal']) AS name
+        unnest(ARRAY['definitions','instances','journal']) AS name
 ), actual AS (
     SELECT p.* FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid
     JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='rss_saga'
@@ -93,8 +103,35 @@ FROM expected e FULL JOIN actual p ON p.polrelid=e.relation AND p.polname='tenan
     .fetch_all(&mut *conn)
     .await
     .map_err(sql_error)?;
-    if policies.len() != 2 || policies.iter().any(|valid| *valid != Some(true)) {
+    if policies.len() != 3 || policies.iter().any(|valid| *valid != Some(true)) {
         return Err(Error::new(rss_saga::ErrorKind::Integrity));
+    }
+    Ok(())
+}
+/// The registry key is derived from the stored body. Every instance must bind both parts.
+async fn definition_columns(conn: &mut PgConnection) -> Result<(), Error> {
+    let valid: bool = sqlx::query_scalar(r#"
+WITH expected(rel,col,typ,coll,expr) AS (VALUES
+    ('definitions','definition','jsonb',0::oid,NULL::text),
+    ('definitions','contract','text','pg_catalog."C"'::regcollation::oid,$expr$(definition #>> '{identity,contract}'::text[])$expr$),
+    ('definitions','version','text','pg_catalog."C"'::regcollation::oid,$expr$(definition #>> '{identity,version}'::text[])$expr$),
+    ('instances','contract','text','pg_catalog."C"'::regcollation::oid,NULL::text),
+    ('instances','version','text','pg_catalog."C"'::regcollation::oid,NULL::text)
+)
+SELECT NOT EXISTS (
+    SELECT FROM expected e
+    LEFT JOIN pg_attribute a ON a.attrelid=to_regclass('rss_saga.'||e.rel) AND a.attname=e.col AND NOT a.attisdropped
+    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+    WHERE a.attnotnull IS DISTINCT FROM true OR a.atttypid<>to_regtype(e.typ) OR a.attcollation<>e.coll
+       OR a.attgenerated<>CASE WHEN e.expr IS NULL THEN '' ELSE 's' END::"char"
+       OR pg_get_expr(d.adbin,d.adrelid) IS DISTINCT FROM e.expr
+) AND NOT EXISTS (
+    SELECT FROM pg_index WHERE indrelid='rss_saga.definitions'::regclass
+       AND (indisunique OR indisexclusion) AND NOT indisprimary
+)
+"#).fetch_one(conn).await.map_err(sql_error)?;
+    if !valid {
+        return Err(rss_saga::ErrorKind::StorageContract.into());
     }
     Ok(())
 }
@@ -107,20 +144,33 @@ async fn triggers(conn: &mut PgConnection) -> Result<(), Error> {
 }
 
 async fn constraints(conn: &mut PgConnection) -> Result<(), Error> {
-    for (table, name, expression) in [
+    for (table, name, procedure, expression) in [
+        (
+            "definitions",
+            "saga_definition",
+            "rss_saga.valid_definition(jsonb)",
+            "valid_definition(definition)",
+        ),
         (
             "instances",
             "saga_history_instance",
-            "valid_instance(definition, progress, revision, history_encoded_bytes, history_entry_limit, history_byte_limit)",
+            "rss_saga.valid_instance(jsonb,bigint,bigint,bigint,bigint)",
+            "valid_instance(progress, revision, history_encoded_bytes, history_entry_limit, history_byte_limit)",
         ),
         (
             "journal",
             "saga_history_journal",
+            "rss_saga.valid_journal(text,bigint,bigint,bytea,jsonb,bigint)",
             "valid_journal(kind, seq, attempt, effect_key, protected, encoded_bytes)",
         ),
     ] {
-        let actual: Option<String> = sqlx::query_scalar("SELECT pg_get_expr(conbin,conrelid) FROM pg_constraint WHERE conrelid=to_regclass('rss_saga.'||$1) AND conname=$2 AND contype='c' AND convalidated AND NOT connoinherit")
-            .bind(table).bind(name).fetch_optional(&mut *conn).await.map_err(sql_error)?;
+        let actual: Option<String> = sqlx::query_scalar(r#"
+SELECT pg_get_expr(c.conbin,c.conrelid) FROM pg_constraint c
+WHERE c.conrelid=to_regclass('rss_saga.'||$1) AND c.conname=$2 AND c.contype='c' AND c.convalidated AND NOT c.connoinherit
+  AND EXISTS(SELECT FROM pg_depend d WHERE d.classid='pg_constraint'::regclass AND d.objid=c.oid
+             AND d.refclassid='pg_proc'::regclass AND d.refobjid=to_regprocedure($3))
+"#)
+            .bind(table).bind(name).bind(procedure).fetch_optional(&mut *conn).await.map_err(sql_error)?;
         if actual
             .as_deref()
             .is_none_or(|value| value.strip_prefix("rss_saga.").unwrap_or(value) != expression)
@@ -129,6 +179,16 @@ async fn constraints(conn: &mut PgConnection) -> Result<(), Error> {
         }
     }
     for (table, name, definition) in [
+        (
+            "definitions",
+            "definitions_pkey",
+            "PRIMARY KEY (tenant_id, contract, version)",
+        ),
+        (
+            "instances",
+            "instance_definition",
+            "FOREIGN KEY (tenant_id, contract, version) REFERENCES rss_saga.definitions(tenant_id, contract, version)",
+        ),
         (
             "instances",
             "instances_pkey",
@@ -145,7 +205,7 @@ async fn constraints(conn: &mut PgConnection) -> Result<(), Error> {
             "FOREIGN KEY (tenant_id, saga_id) REFERENCES rss_saga.instances(tenant_id, saga_id)",
         ),
     ] {
-        let actual: Option<String> = sqlx::query_scalar("SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c JOIN pg_index i ON i.indexrelid=c.conindid WHERE c.conrelid=to_regclass('rss_saga.'||$1) AND c.conname=$2 AND c.convalidated AND i.indisvalid AND i.indisready")
+        let actual: Option<String> = sqlx::query_scalar("SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c JOIN pg_index i ON i.indexrelid=c.conindid WHERE c.conrelid=to_regclass('rss_saga.'||$1) AND c.conname=$2 AND c.convalidated AND i.indisvalid AND i.indisready AND NOT EXISTS(SELECT FROM pg_trigger t WHERE t.tgconstraint=c.oid AND t.tgenabled<>'O')")
             .bind(table).bind(name).fetch_optional(&mut *conn).await.map_err(sql_error)?;
         if actual.as_deref() != Some(definition) {
             return Err(rss_saga::ErrorKind::StorageContract.into());

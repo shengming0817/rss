@@ -313,14 +313,25 @@ impl Fixture {
                 .await,
         )
     }
-    async fn recover_exact(&self, name: &str, s: Scope) -> anyhow::Result<Option<Command>> {
-        let id = CommandId::parse(name)?;
+    async fn recover_exact(
+        &self,
+        names: &[&str],
+        s: Scope,
+    ) -> anyhow::Result<Vec<Option<Command>>> {
+        let ids = names
+            .iter()
+            .map(|name| CommandId::parse(name))
+            .collect::<Result<Vec<_>, _>>()?;
+        let page = ExactCommandIds::new(&ids)?;
         let store = self.store.clone();
         committed(
             self.runtime
-                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.recover_exact(tx, s, &id).await })
-                })
+                .local_tx_with_context(
+                    crate::execution(s.tenant(), 1),
+                    budget()?,
+                    page,
+                    move |ids, tx| Box::pin(async move { store.recover_exact(tx, s, *ids).await }),
+                )
                 .await,
         )
     }
@@ -390,6 +401,7 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
         scenarios::late_controls(&fixture).await?;
         Box::pin(scenarios::delayed_publication_read(&fixture)).await?;
         Box::pin(scenarios::exact::recovery(&fixture)).await?;
+        Box::pin(scenarios::candidates::owner_pages(&fixture)).await?;
         scenarios::catalog_drift(&fixture).await?;
         scenarios::closed_catalog(&fixture).await?;
         scenarios::diagnostic_classes(&fixture).await?;

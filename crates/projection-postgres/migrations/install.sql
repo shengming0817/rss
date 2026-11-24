@@ -1,21 +1,97 @@
--- One-way v2 -> v3. Execute outside another transaction as the dedicated migration owner.
--- No legacy generation adoption: any physical checkpoint row aborts the entire upgrade.
--- ref: serverlesstechnology/cqrs persistence/postgres-es/src/view_repository.rs (version CAS).
+-- Fresh schema. Execute as a dedicated NOSUPERUSER NOBYPASSRLS owner.
+-- ref: baseline 5b63e10 adapters/postgres/migrations/0040_projection_events_funnel_and_projection_dlx.sql: commit-ordered append.
+-- Production migration execution and runtime grants belong to the application.
 BEGIN;
-LOCK TABLE rss_projection.checkpoints IN ACCESS EXCLUSIVE MODE;
-DO $$ BEGIN
-    IF (SELECT obj_description('rss_projection'::regnamespace,'pg_namespace')) IS DISTINCT FROM 'rss-projection-postgres:2' THEN
-        RAISE EXCEPTION 'expected projection storage revision 2';
+CREATE SCHEMA rss_projection;
+CREATE TABLE rss_projection.sources (
+    tenant_id uuid NOT NULL,
+    source_id text NOT NULL CHECK (octet_length(source_id) BETWEEN 1 AND 255 AND (source_id COLLATE "C") !~ '[^A-Za-z0-9_.:-]'),
+    next_position bigint NOT NULL DEFAULT 0 CHECK (next_position >= 0),
+    PRIMARY KEY (tenant_id, source_id)
+);
+CREATE TABLE rss_projection.events (
+    tenant_id uuid NOT NULL,
+    source_id text NOT NULL,
+    position bigint NOT NULL CHECK (position >= 0),
+    event_id text NOT NULL CHECK (event_id ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+    payload bytea NOT NULL CHECK (octet_length(payload) <= 1048576),
+    PRIMARY KEY (tenant_id, source_id, position),
+    UNIQUE (tenant_id, source_id, event_id),
+    FOREIGN KEY (tenant_id, source_id) REFERENCES rss_projection.sources
+);
+CREATE TABLE rss_projection.checkpoints (
+    tenant_id uuid NOT NULL,
+    source_id text NOT NULL CHECK (octet_length(source_id) BETWEEN 1 AND 255 AND (source_id COLLATE "C") !~ '[^A-Za-z0-9_.:-]'),
+    projection_id text NOT NULL CHECK (octet_length(projection_id) BETWEEN 1 AND 255 AND (projection_id COLLATE "C") !~ '[^A-Za-z0-9_.:-]'),
+    generation text NOT NULL CHECK (generation ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+    start_position bigint CHECK (start_position >= 0),
+    position bigint CHECK (position >= 0),
+    replay boolean NOT NULL,
+    end_position bigint CHECK (end_position >= 0),
+    epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0),
+    worker_token uuid,
+    definition_identity bytea NOT NULL CONSTRAINT definition_identity_length CHECK (octet_length(definition_identity) = 32),
+    PRIMARY KEY (tenant_id, source_id, projection_id, generation),
+    CHECK (NOT replay OR start_position IS NULL OR (end_position IS NOT NULL AND start_position <= end_position)),
+    CHECK (replay OR end_position IS NULL)
+);
+CREATE TABLE rss_projection.receipts (
+    tenant_id uuid NOT NULL,
+    source_id text NOT NULL,
+    projection_id text NOT NULL,
+    generation text NOT NULL,
+    event_id text NOT NULL CHECK (event_id ~ '^[A-Za-z0-9_.:-]{1,128}$'),
+    fingerprint bytea NOT NULL CHECK (octet_length(fingerprint) = 32),
+    baseline boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (tenant_id, source_id, projection_id, generation, event_id),
+    FOREIGN KEY (tenant_id, source_id, projection_id, generation) REFERENCES rss_projection.checkpoints
+);
+ALTER TABLE rss_projection.sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rss_projection.sources FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope ON rss_projection.sources
+    USING (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid);
+ALTER TABLE rss_projection.events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rss_projection.events FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope ON rss_projection.events
+    USING (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid);
+ALTER TABLE rss_projection.checkpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rss_projection.checkpoints FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope ON rss_projection.checkpoints
+    USING (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid);
+ALTER TABLE rss_projection.receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rss_projection.receipts FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope ON rss_projection.receipts
+    USING (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid);
+
+CREATE FUNCTION rss_projection.assert_tenant(t uuid) RETURNS void
+LANGUAGE plpgsql SET search_path = pg_catalog, rss_projection AS $$
+BEGIN
+    IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id', true), '')::uuid THEN
+        RAISE EXCEPTION 'projection scope mismatch' USING ERRCODE = 'P1001';
     END IF;
 END $$;
-ALTER TABLE rss_projection.checkpoints ADD COLUMN definition_identity bytea;
--- DDL validates every physical row, including rows hidden by FORCE RLS.
-ALTER TABLE rss_projection.checkpoints ALTER COLUMN definition_identity SET NOT NULL;
-ALTER TABLE rss_projection.checkpoints ADD CONSTRAINT definition_identity_length CHECK (octet_length(definition_identity) = 32);
-DROP FUNCTION rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea);
-DROP FUNCTION rss_projection.lock_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea);
-DROP FUNCTION rss_projection.takeover(uuid,text,text,text,uuid);
-DROP FUNCTION rss_projection.initialize(uuid,text,text,text,bigint,boolean,bigint,text[],bytea[]);
+
+CREATE FUNCTION rss_projection.append_event(t uuid, s text, e text, bytes bytea) RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, rss_projection AS $$
+DECLARE n bigint; old rss_projection.events;
+BEGIN
+    PERFORM rss_projection.assert_tenant(t);
+    INSERT INTO rss_projection.sources(tenant_id, source_id) VALUES(t,s) ON CONFLICT DO NOTHING;
+    SELECT next_position INTO STRICT n FROM rss_projection.sources WHERE tenant_id=t AND source_id=s FOR UPDATE;
+    SELECT * INTO old FROM rss_projection.events WHERE tenant_id=t AND source_id=s AND event_id=e;
+    IF FOUND THEN
+        IF old.payload IS DISTINCT FROM bytes THEN RAISE EXCEPTION 'projection fact conflict' USING ERRCODE='P1003'; END IF;
+        RETURN old.position;
+    END IF;
+    INSERT INTO rss_projection.events VALUES(t,s,n,e,bytes);
+    UPDATE rss_projection.sources SET next_position=n+1 WHERE tenant_id=t AND source_id=s;
+    RETURN n;
+END $$;
+
 CREATE FUNCTION rss_projection.initialize(t uuid, s text, p text, g text, start_at bigint, is_replay boolean, end_at bigint, ids text[], digests bytea[], definition bytea) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, rss_projection AS $$
 DECLARE c rss_projection.checkpoints; created boolean;
@@ -100,5 +176,6 @@ BEGIN
     UPDATE rss_projection.checkpoints SET position=at_position WHERE tenant_id=t AND source_id=s AND projection_id=p AND generation=g;
 END $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_projection FROM PUBLIC;
-COMMENT ON SCHEMA rss_projection IS 'rss-projection-postgres:3';
+REVOKE ALL ON ALL TABLES IN SCHEMA rss_projection FROM PUBLIC;
+COMMENT ON SCHEMA rss_projection IS 'rss-projection-postgres:4';
 COMMIT;
