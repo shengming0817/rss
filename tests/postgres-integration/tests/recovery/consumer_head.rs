@@ -80,7 +80,7 @@ pub(super) async fn run(
     for (key, protected) in [("receipt-head", false), ("protected-head", true)] {
         let original = message_in_partition(&format!("{key}-a"), key);
         let successor = message_in_partition(&format!("{key}-b"), key);
-        reject_after_takeover(config, &original, &successor, protected).await?;
+        reject_after_takeover(owner, config, &original, &successor, protected).await?;
         let restarted = connect(config).await?;
         let count = Count(AtomicUsize::new(0));
         assert_blocked(&restarted, &original, &successor, key, &count).await?;
@@ -100,6 +100,7 @@ fn rejected() -> ProcessingDisposition {
     ProcessingDisposition::Duplicate(TerminalDisposition::Rejected(RejectKind::Permanent))
 }
 async fn reject_after_takeover(
+    owner: &sqlx::PgPool,
     config: &PgConfig,
     original: &MessageEnvelope<Vec<u8>>,
     successor: &MessageEnvelope<Vec<u8>>,
@@ -110,49 +111,130 @@ async fn reject_after_takeover(
     let holder = inbox(&first)?;
     let verified = binding(original)?;
     let contender = inbox(&other)?;
-    let successor_binding = binding(successor)?;
     let IdempotencyDisposition::Acquired(initial) = holder.claim(&verified, deadline()).await?
     else {
-        anyhow::bail!("first claim")
+        anyhow::bail!("original claim")
     };
-    assert!(matches!(
-        contender.claim(&successor_binding, deadline()).await?,
-        IdempotencyDisposition::PartitionBlocked
-    ));
+    let different =
+        MessageEnvelope::new(original.id().clone(), original.metadata().clone(), vec![99]);
+    let count = Count(AtomicUsize::new(0));
+    assert_eq!(
+        deliver(&other, different, &count).await?,
+        (
+            ProcessingDisposition::Rejected(EnvelopeValidationFailure::FingerprintConflict),
+            vec![SettlementKind::Reject]
+        )
+    );
     holder.release(initial, deadline()).await?;
-    assert!(matches!(
-        contender.claim(&successor_binding, deadline()).await?,
-        IdempotencyDisposition::PartitionBlocked
-    ));
+    let before = message_in_partition(
+        &format!("{}-before", original.id().as_str()),
+        original
+            .metadata()
+            .partition()
+            .context("partition")?
+            .key()
+            .as_str(),
+    );
+    assert_eq!(
+        deliver(&other, before, &count).await?.0,
+        ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
+    );
     let IdempotencyDisposition::Acquired(head) = contender.claim(&verified, deadline()).await?
     else {
         anyhow::bail!("head reclaim")
     };
-    let status = reject(&other, &head, original, &verified, protected).await?;
-    assert_eq!(status, TransactionalMessagingTransactionStatus::Committed);
+    reject_while_waiting(owner, &first, &other, &head, original, successor, protected).await?;
     first.close().await;
     other.close().await;
     Ok(())
 }
-async fn reject(
+struct HeldReject {
+    entered: tokio::sync::mpsc::Sender<i32>,
+    release: Arc<tokio::sync::Notify>,
+}
+impl PgConsumerEffect<Vec<u8>> for HeldReject {
+    async fn apply(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        msg: &MessageEnvelope<Vec<u8>>,
+        deadline: OperationDeadline,
+    ) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
+        let pid = tx
+            .with_connection(|connection| {
+                Box::pin(async move {
+                    sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                        .fetch_one(connection)
+                        .await
+                })
+            })
+            .await
+            .map_err(PgConsumerEffectFailure::infrastructure)?;
+        self.entered
+            .send(pid)
+            .await
+            .map_err(PgConsumerEffectFailure::infrastructure)?;
+        self.release.notified().await;
+        Reject.apply(tx, msg, deadline).await
+    }
+}
+async fn reject_while_waiting(
+    owner: &sqlx::PgPool,
+    first: &Arc<PgRuntime>,
     other: &Arc<PgRuntime>,
     head: &PgInboxClaim,
     original: &MessageEnvelope<Vec<u8>>,
-    verified: &VerifiedConsumerBinding,
+    successor: &MessageEnvelope<Vec<u8>>,
     protected: bool,
-) -> anyhow::Result<TransactionalMessagingTransactionStatus> {
-    Ok(if protected {
-        let capture = PgRecoveryCapture::new(other.clone(), Arc::new(Key(1)), deadline()).await?;
-        PgConsumerTx::with_recovery(Reject, capture)
-            .execute(head, original, verified.receipt_intent(), deadline())
-            .await
-            .status()
-    } else {
-        PgConsumerTx::receipt_only(other.clone(), Reject)
-            .execute(head, original, verified.receipt_intent(), deadline())
-            .await
-            .status()
-    })
+) -> anyhow::Result<()> {
+    let (entered, mut started) = tokio::sync::mpsc::channel(1);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let effect = HeldReject {
+        entered,
+        release: release.clone(),
+    };
+    let reject = async {
+        let intent = binding(original)?.receipt_intent();
+        let status = if protected {
+            let capture =
+                PgRecoveryCapture::new(other.clone(), Arc::new(Key(1)), deadline()).await?;
+            PgConsumerTx::with_recovery(effect, capture)
+                .execute(head, original, intent, deadline())
+                .await
+                .status()
+        } else {
+            PgConsumerTx::receipt_only(other.clone(), effect)
+                .execute(head, original, intent, deadline())
+                .await
+                .status()
+        };
+        anyhow::ensure!(
+            status == TransactionalMessagingTransactionStatus::Committed,
+            "reject commit {status:?}"
+        );
+        anyhow::Ok(())
+    };
+    let compete = async {
+        let pid = started.recv().await.context("handler started")?;
+        let count = Count(AtomicUsize::new(0));
+        let witness = async {
+            waiter(owner, pid).await?;
+            assert_eq!(count.0.load(Ordering::SeqCst), 0);
+            release.notify_one();
+            anyhow::Ok(())
+        };
+        let (delivery, ()) = tokio::try_join!(deliver(first, successor.clone(), &count), witness)?;
+        assert_eq!(
+            delivery,
+            (
+                ProcessingDisposition::PartitionBlocked,
+                vec![SettlementKind::Requeue]
+            )
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        anyhow::Ok(())
+    };
+    tokio::try_join!(reject, compete)?;
+    Ok(())
 }
 async fn assert_blocked(
     restarted: &Arc<PgRuntime>,
@@ -263,6 +345,20 @@ async fn runtime_permissions(
     sqlx::query("SET LOCAL ROLE recovery_runtime")
         .execute(&mut *tx)
         .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target','01010101010101010101010101010101',true),set_config('rss.storage_lineage','02020202020202020202020202020202',true),set_config('rss.execution_epoch','1',true)").bind(tenant().to_string()).execute(&mut *tx).await?;
+    let visible: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_transactional_messaging.inbox WHERE message_id=$1 AND partition_key IS NOT NULL AND resolved_by IS NULL)").bind(message.id().as_str()).fetch_one(&mut *tx).await?;
+    assert!(visible);
+    let pending = format!("{}-pending", message.id().as_str());
+    sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint) SELECT tenant_id,$2,consumer_group,contract,gen_random_uuid(),clock_timestamp(),fingerprint FROM rss_transactional_messaging.inbox WHERE message_id=$1")
+        .bind(message.id().as_str()).bind(&pending).execute(&mut *tx).await?;
+    assert_eq!(
+        sqlx::query("DELETE FROM rss_transactional_messaging.inbox WHERE message_id=$1")
+            .bind(&pending)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+        1
+    );
     assert_eq!(
         sqlx::query("DELETE FROM rss_transactional_messaging.inbox WHERE message_id=$1")
             .bind(message.id().as_str())

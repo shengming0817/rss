@@ -18,4 +18,4 @@ error: cannot construct `VerifiedConsumerBinding` with struct literal syntax due
 6 |         fingerprint: panic!(),
   |         --------------------- private field
   |
-  = note: ...and other private fields `partition` and `execution` that were not provided
+  = note: ...and other private field `execution` that was not provided

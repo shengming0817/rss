@@ -470,7 +470,6 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         IdempotencyDisposition::Acquired(claim) => claim,
         _ => return Err("release fixture must acquire".into()),
     };
-    releasable.release(claim, deadline(&clock)?).await?;
     let unkeyed = envelope_in_partition(
         message.id().as_str(),
         b"payload",
@@ -478,14 +477,11 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         None,
     )?;
     let altered = verified(&unkeyed, "orders-worker")?;
-    assert_eq!(
-        releasable
-            .claim(&altered, deadline(&clock)?)
-            .await
-            .err()
-            .map(|e| e.kind()),
-        Some(MessagingErrorKind::Conflict)
-    );
+    assert!(matches!(
+        releasable.claim(&altered, deadline(&clock)?).await?,
+        IdempotencyDisposition::Conflict(_)
+    ));
+    releasable.release(claim, deadline(&clock)?).await?;
     assert!(matches!(
         releasable.claim(&binding, deadline(&clock)?).await?,
         IdempotencyDisposition::Acquired(_)
@@ -505,12 +501,6 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         IdempotencyDisposition::Acquired(_)
     ));
 
-    // A different message in this group's occupied partition must wait.
-    let successor = verified(&envelope("later", b"payload")?, "a")?;
-    assert!(matches!(
-        collision_store.claim(&successor, deadline(&clock)?).await?,
-        IdempotencyDisposition::PartitionBlocked
-    ));
     Ok(())
 }
 

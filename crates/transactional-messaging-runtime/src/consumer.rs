@@ -96,6 +96,12 @@ impl<'a, V, R, E> ConsumerExecution<'a, V, R, E> {
         self.policy
     }
 
+    fn contention_interval(&self) -> Duration {
+        let budget = self.policy.budget();
+        ((budget.total() - budget.settlement_reserve()) / 4)
+            .clamp(Duration::from_millis(1), Duration::from_millis(250))
+    }
+
     fn deadlines(&self) -> Result<ExecutionDeadlines, MessagingError>
     where
         R: ExecutionTimer,
@@ -129,12 +135,12 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let prepared = PreparedDelivery::valid(execution, delivery, execution.deadlines()?);
+    let prepared = PreparedDelivery::valid(execution, Box::new(delivery), execution.deadlines()?);
     process_prepared(inbox, transaction, execution, prepared).await
 }
 
 enum Ingress<P, S> {
-    Verified(Box<(Delivery<P, S>, VerifiedConsumerBinding)>),
+    Verified(Box<Delivery<P, S>>, VerifiedConsumerBinding),
     Rejected(EnvelopeValidationFailure, SettlementDecision, S),
 }
 
@@ -146,7 +152,7 @@ struct PreparedDelivery<P, S> {
 impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
     fn valid<V: IngressValidator<P>, R, E>(
         execution: &ConsumerExecution<'_, V, R, E>,
-        delivery: Delivery<P, S>,
+        delivery: Box<Delivery<P, S>>,
         deadlines: ExecutionDeadlines,
     ) -> Self {
         let ingress = match verify_ingress(
@@ -155,7 +161,7 @@ impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
             execution.subscription,
             delivery.message(),
         ) {
-            Ok(binding) => Ingress::Verified(Box::new((delivery, binding))),
+            Ok(binding) => Ingress::Verified(delivery, binding),
             Err(rejection) => Ingress::Rejected(
                 rejection.reason(),
                 rejection.into_decision(),
@@ -171,7 +177,7 @@ impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
         deadlines: ExecutionDeadlines,
     ) -> Self {
         match item {
-            IncomingDelivery::Valid(delivery) => Self::valid(execution, *delivery, deadlines),
+            IncomingDelivery::Valid(delivery) => Self::valid(execution, delivery, deadlines),
             IncomingDelivery::Invalid(invalid) => {
                 let (rejection, settlement) = invalid.into_parts();
                 PreparedDelivery {
@@ -188,7 +194,7 @@ impl<P: AsRef<[u8]>, S> PreparedDelivery<P, S> {
 
     fn partition(&self) -> Option<&PartitionIdentity> {
         match &self.ingress {
-            Ingress::Verified(verified) => verified.1.partition(),
+            Ingress::Verified(delivery, _) => delivery.message().metadata().partition(),
             Ingress::Rejected(..) => None,
         }
     }
@@ -211,10 +217,7 @@ where
     let PreparedDelivery { ingress, deadlines } = prepared;
     let ((message, settlement), binding) =
         match ingress {
-            Ingress::Verified(verified) => {
-                let (delivery, binding) = *verified;
-                (delivery.into_parts(), binding)
-            }
+            Ingress::Verified(delivery, binding) => (delivery.into_parts(), binding),
             Ingress::Rejected(failure, decision, settlement) => {
                 execution.emitter.emit(
                     TransactionalMessagingObservation::ConsumerIngressRejected { reason: failure },
@@ -236,11 +239,7 @@ where
         };
     let claim = wait_for_claim(inbox, execution, &binding, deadlines.operation()).await;
     match claim {
-        Ok(
-            busy @ (IdempotencyDisposition::CapacityBusy
-            | IdempotencyDisposition::InProgress
-            | IdempotencyDisposition::PartitionBlocked),
-        ) => {
+        Ok(busy @ (IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::InProgress)) => {
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
@@ -249,11 +248,26 @@ where
                 execution.emitter,
             )
             .await?;
-            Ok(match busy {
-                IdempotencyDisposition::CapacityBusy => ProcessingDisposition::CapacityBusy,
-                IdempotencyDisposition::InProgress => ProcessingDisposition::InProgress,
-                _ => ProcessingDisposition::PartitionBlocked,
+            Ok(if matches!(busy, IdempotencyDisposition::CapacityBusy) {
+                ProcessingDisposition::CapacityBusy
+            } else {
+                ProcessingDisposition::InProgress
             })
+        }
+        Ok(IdempotencyDisposition::Conflict(rejection)) => {
+            let reason = rejection.reason();
+            execution
+                .emitter
+                .emit(TransactionalMessagingObservation::ConsumerIngressRejected { reason });
+            settle_observed(
+                settlement,
+                rejection.into_decision(),
+                deadlines.settlement(),
+                execution.timer,
+                execution.emitter,
+            )
+            .await?;
+            Ok(ProcessingDisposition::Rejected(reason))
         }
         Err(error) => {
             emit_runtime_failure(
@@ -330,9 +344,7 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
-    let budget = execution.policy.budget();
-    let interval = ((budget.total() - budget.settlement_reserve()) / 4)
-        .clamp(Duration::from_millis(1), Duration::from_millis(250));
+    let interval = execution.contention_interval();
     let mut capacity_wait = None;
     let result = loop {
         let claim = within(execution.timer, cutoff, |deadline| {
@@ -350,12 +362,6 @@ where
             Ok(IdempotencyDisposition::InProgress) => execution
                 .emitter
                 .emit(TransactionalMessagingObservation::ConsumerClaimInProgress),
-            Ok(IdempotencyDisposition::PartitionBlocked) => {
-                execution
-                    .emitter
-                    .emit(TransactionalMessagingObservation::ConsumerPartitionBlocked);
-                break claim;
-            }
             _ => break claim,
         }
         let wake = cutoff.capped(execution.timer, interval);
@@ -698,6 +704,17 @@ where
             )
             .await?;
             Ok(ProcessingDisposition::Committed(disposition))
+        }
+        FoldedOutcome::NotStarted(FailureClass::PartitionBlocked)
+        | FoldedOutcome::RolledBack(FailureClass::PartitionBlocked) => {
+            let cutoff = state.deadlines.operation();
+            let wake = cutoff.capped(execution.timer, execution.contention_interval());
+            let _ = within(execution.timer, cutoff, |_| {
+                execution.timer.sleep_until(wake)
+            })
+            .await;
+            release_or_abandon(inbox, execution, state).await?;
+            Ok(ProcessingDisposition::PartitionBlocked)
         }
         FoldedOutcome::NotStarted(_class) | FoldedOutcome::RolledBack(_class) => {
             release_or_abandon(inbox, execution, state).await?;

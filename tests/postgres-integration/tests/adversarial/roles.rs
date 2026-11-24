@@ -34,6 +34,7 @@ pub(super) async fn run(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::Resu
         eprintln!("relay-role attribute={damage} expected_rejection={result:?}");
         results.push((damage, result));
     }
+    maintenance_membership(owner, config).await?;
     let membership_result = memberships(owner, config).await;
     for (attribute, result) in results {
         result.map_err(|e| anyhow::anyhow!("relay attribute {attribute}: {e}"))?;
@@ -74,6 +75,13 @@ async fn rejected(config: &PgConfig, category: PgStorageContractFailure) -> anyh
         );
     }
     Ok(())
+}
+
+async fn maintenance_membership(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::Result<()> {
+    sqlx::raw_sql("CREATE ROLE inbox_maintenance NOLOGIN; GRANT UPDATE(resolved_by) ON rss_transactional_messaging.inbox TO inbox_maintenance; GRANT inbox_maintenance TO tmsg_runtime WITH INHERIT FALSE, SET TRUE").execute(owner).await?;
+    rejected(config, PgStorageContractFailure::RuntimeAcl).await?;
+    sqlx::raw_sql("REVOKE inbox_maintenance FROM tmsg_runtime; DROP OWNED BY inbox_maintenance; DROP ROLE inbox_maintenance").execute(owner).await?;
+    accepted(config).await
 }
 
 async fn memberships(owner: &sqlx::PgPool, config: &PgConfig) -> anyhow::Result<()> {

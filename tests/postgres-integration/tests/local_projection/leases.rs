@@ -112,8 +112,9 @@ async fn takeover(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Re
 
 async fn inbox_contention(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> anyhow::Result<()> {
     let id = "lease-contended";
-    f.append(id, "orders").await?;
-    let message = message(id, "orders")?;
+    let key = "lease-contended-key";
+    super::batch::append(f, vec![(id.into(), key.into())]).await?;
+    let message = message_partition(id, "orders", Some(PartitionKey::parse(key)?))?;
     let meta = message.metadata();
     let verified = verify_ingress(
         &Validator,
@@ -135,7 +136,9 @@ async fn inbox_contention(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> an
     };
     assert!(matches!(project(p).await?, PgProjectionOutcome::InProgress));
     assert_eq!(f.state(id).await?, (0, 0, None, "pending".into()));
-    other.release(held, deadline()).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp() WHERE message_id=$1")
+        .bind(id).execute(&f.owner).await?;
+    drop(held);
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp() WHERE message_id=$1").bind(id).execute(&f.owner).await?;
     committed_projection(project(p).await?)?;
     Ok(())

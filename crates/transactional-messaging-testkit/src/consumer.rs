@@ -299,6 +299,7 @@ const fn status_label(status: TransactionalMessagingTransactionStatus) -> &'stat
         }
         TransactionalMessagingTransactionStatus::RollbackFailed => "rollback-failed",
         TransactionalMessagingTransactionStatus::CommitUnknown => "commit-unknown",
+        TransactionalMessagingTransactionStatus::PartitionBlocked => "partition-blocked",
         TransactionalMessagingTransactionStatus::Fenced => "fenced",
     }
 }

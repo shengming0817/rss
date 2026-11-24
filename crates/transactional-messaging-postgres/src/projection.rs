@@ -308,7 +308,6 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             .inbox
             .claim_with_access(
                 &binding,
-                None, // This transaction settles its source Outbox partition head.
                 remaining(self, cutoff),
                 crate::transaction::PoolAccess::Ordinary,
             )
@@ -319,8 +318,19 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         let claim = match acquired {
             IdempotencyDisposition::Acquired(claim) => claim,
             // Projection waits for admission before the durable claim query.
-            IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::PartitionBlocked => {
+            IdempotencyDisposition::CapacityBusy => {
                 return Err(PgError::invariant());
+            }
+            IdempotencyDisposition::Conflict(rejection) => {
+                self.outbox
+                    .settle(
+                        source,
+                        OutboxSettlement::DeadLetter,
+                        remaining(self, cutoff),
+                    )
+                    .await
+                    .map_err(pg)?;
+                return Ok(PgProjectionOutcome::Rejected(rejection.reason()));
             }
             IdempotencyDisposition::InProgress => {
                 self.outbox

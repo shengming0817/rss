@@ -5,7 +5,7 @@ use rss_request_context::Clock as _;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     inbox::{ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
-    message::{ContractIdentity, MessageFingerprint, PartitionIdentity},
+    message::{ContractIdentity, MessageFingerprint},
     policy::{LeaseRenewalPolicy, OperationDeadline},
     transaction::{RejectKind, TerminalDisposition, TerminalReceipt, VerifiedConsumerBinding},
 };
@@ -24,7 +24,6 @@ pub struct PgInboxClaim {
     slot: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     pub(crate) identity: ConsumerIdentity,
     pub(crate) fingerprint: MessageFingerprint,
-    ordered: bool,
     pub(crate) token: String,
     pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
 }
@@ -125,7 +124,7 @@ async fn read(
     transaction: &mut PgTransaction<'_>,
     identity: &ConsumerIdentity,
 ) -> Result<Option<PgRow>, PgError> {
-    Ok(sqlx::query("SELECT contract, fingerprint, disposition,domain,partition_key FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3")
+    Ok(sqlx::query("SELECT contract, fingerprint, disposition FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3")
         .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str())
         .fetch_optional(&mut *transaction.connection).await?)
 }
@@ -134,7 +133,6 @@ impl PgInboxStore {
     pub(crate) async fn claim_with_access(
         &self,
         verified: &VerifiedConsumerBinding,
-        partition: Option<&PartitionIdentity>,
         deadline: OperationDeadline,
         access: PoolAccess<'_>,
     ) -> Result<IdempotencyDisposition<PgInboxClaim>, MessagingError> {
@@ -145,14 +143,12 @@ impl PgInboxStore {
                 .transaction_with_access(
                     verified.execution(),
                     cutoff,
-                    (verified, partition),
+                    verified,
                     true,
                     access,
                     #[cfg(feature = "integration")]
                     None,
-                    move |(verified, partition), tx| {
-                        Box::pin(claim_in(tx, verified, *partition, lease_ms))
-                    },
+                    move |verified, tx| Box::pin(claim_in(tx, verified, lease_ms)),
                 )
                 .await,
         )
@@ -163,25 +159,12 @@ impl PgInboxStore {
 async fn claim_in(
     tx: &mut PgTransaction<'_>,
     verified: &VerifiedConsumerBinding,
-    partition: Option<&PartitionIdentity>,
     lease_ms: i64,
 ) -> Result<IdempotencyDisposition<PgInboxClaim>, PgError> {
     let identity = verified.identity();
     let tenant = identity.tenant_id().to_string();
     let message = identity.message_id().as_str();
     let group = identity.group().as_str();
-    let domain = partition.map(|p| p.domain().as_str());
-    let key = partition.map(|p| p.key().as_str());
-    let acquired = |token| {
-        IdempotencyDisposition::Acquired(PgInboxClaim {
-            slot: std::sync::Mutex::new(None),
-            identity: identity.clone(),
-            fingerprint: verified.fingerprint(),
-            ordered: partition.is_some(),
-            binding: verified.execution(),
-            token,
-        })
-    };
     let token = sqlx::query_scalar(CLAIM_SQL)
         .bind(&tenant)
         .bind(message)
@@ -189,44 +172,28 @@ async fn claim_in(
         .bind(contract_key(identity.contract())?)
         .bind(lease_ms)
         .bind(verified.fingerprint().as_bytes().as_slice())
-        .bind(domain)
-        .bind(key)
         .fetch_optional(&mut *tx.connection)
         .await?;
     if let Some(token) = token {
-        return Ok(acquired(token));
+        return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
+            slot: std::sync::Mutex::new(None),
+            identity: identity.clone(),
+            fingerprint: verified.fingerprint(),
+            binding: verified.execution(),
+            token,
+        }));
     }
-    // A fresh READ COMMITTED statement sees the row whose insertion won either unique index.
     let Some(row) = read(tx, identity).await? else {
-        return Ok(if partition.is_some() {
-            IdempotencyDisposition::PartitionBlocked
-        } else {
-            IdempotencyDisposition::InProgress
-        });
+        return Ok(IdempotencyDisposition::InProgress);
     };
-    if let Some(terminal) = receipt(&row, identity)? {
-        return Ok(IdempotencyDisposition::Terminal(terminal));
-    }
-    if fingerprint(row.try_get("fingerprint")?)? != verified.fingerprint()
-        || row.try_get::<Option<&str>, _>("domain")? != domain
-        || row.try_get::<Option<&str>, _>("partition_key")? != key
+    if let Err(rejection) = verified.validate_fingerprint(fingerprint(row.try_get("fingerprint")?)?)
     {
-        return Err(PgError::classified(
-            MessagingErrorKind::Conflict,
-            std::io::Error::other("Inbox admission identity conflict"),
-        ));
+        return Ok(IdempotencyDisposition::Conflict(rejection));
     }
-    let token = sqlx::query_scalar(RECLAIM_SQL)
-        .bind(&tenant)
-        .bind(message)
-        .bind(group)
-        .bind(lease_ms)
-        .bind(verified.fingerprint().as_bytes().as_slice())
-        .bind(domain)
-        .bind(key)
-        .fetch_optional(&mut *tx.connection)
-        .await?;
-    Ok(token.map_or(IdempotencyDisposition::InProgress, acquired))
+    Ok(receipt(&row, identity)?.map_or(
+        IdempotencyDisposition::InProgress,
+        IdempotencyDisposition::Terminal,
+    ))
 }
 pub(crate) async fn lock_identity(
     tx: &mut PgTransaction<'_>,
@@ -292,12 +259,7 @@ impl InboxStore for PgInboxStore {
             return Ok(IdempotencyDisposition::CapacityBusy);
         };
         let outcome = self
-            .claim_with_access(
-                verified,
-                verified.partition(),
-                deadline,
-                PoolAccess::Reserved(&permit),
-            )
+            .claim_with_access(verified, deadline, PoolAccess::Reserved(&permit))
             .await?;
         if let IdempotencyDisposition::Acquired(claim) = &outcome {
             claim.return_slot(permit);
@@ -397,12 +359,7 @@ impl InboxStore for PgInboxStore {
         let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
         settled(self.runtime.transaction_with_access(claim.binding, cutoff, (), true, access, #[cfg(feature="integration")] None, move |_,tx| Box::pin(async move {
             lock_identity(tx, &claim.identity).await?;
-            let statement = if claim.ordered {
-                "UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp() WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()"
-            } else {
-                "DELETE FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()"
-            };
-            let count = sqlx::query(statement)
+            let count = sqlx::query("DELETE FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp()")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(claim.token)
                 .execute(&mut *tx.connection).await?.rows_affected();
             if count == 1 { Ok(()) } else { Err(PgError::lost()) }
@@ -411,17 +368,14 @@ impl InboxStore for PgInboxStore {
 }
 
 // DB time is sampled at the write; an expired claim is never resurrected by renew/release.
-const CLAIM_SQL: &str = "INSERT INTO rss_transactional_messaging.inbox
- (tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint,domain,partition_key)
- VALUES ($1::uuid,$2,$3,$4,gen_random_uuid(),clock_timestamp()+($5::bigint * interval '1 millisecond'),$6,$7,$8)
- ON CONFLICT DO NOTHING RETURNING lease_token::text";
-
-const RECLAIM_SQL: &str = "UPDATE rss_transactional_messaging.inbox
- SET lease_token=gen_random_uuid(), lease_until=clock_timestamp()+($4::bigint * interval '1 millisecond'), receive_count=receive_count+1
- WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND disposition IS NULL AND fingerprint=$5
- AND domain IS NOT DISTINCT FROM $6 AND partition_key IS NOT DISTINCT FROM $7
- AND (lease_until<=clock_timestamp() OR claim_epoch<>current_setting('rss.execution_epoch')::bigint
- OR claim_lineage IS DISTINCT FROM decode(current_setting('rss.storage_lineage'),'hex'))
+const CLAIM_SQL: &str = "INSERT INTO rss_transactional_messaging.inbox AS i
+ (tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint)
+ VALUES ($1::uuid,$2,$3,$4,gen_random_uuid(),clock_timestamp()+($5::bigint * interval '1 millisecond'),$6)
+ ON CONFLICT (tenant_id,message_id,consumer_group) DO UPDATE
+ SET lease_token=EXCLUDED.lease_token, lease_until=clock_timestamp()+($5::bigint * interval '1 millisecond'),receive_count=i.receive_count+1
+ WHERE i.disposition IS NULL AND i.contract=EXCLUDED.contract AND i.fingerprint=EXCLUDED.fingerprint
+ AND (i.lease_until<=clock_timestamp() OR i.claim_epoch<>current_setting('rss.execution_epoch')::bigint
+ OR i.claim_lineage IS DISTINCT FROM decode(current_setting('rss.storage_lineage'),'hex'))
  RETURNING lease_token::text";
 
 #[cfg(test)]

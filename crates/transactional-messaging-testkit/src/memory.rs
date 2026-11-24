@@ -538,7 +538,7 @@ mod consumer {
     use rss_transactional_messaging::inbox::{
         ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
     };
-    use rss_transactional_messaging::message::{MessageFingerprint, PartitionIdentity};
+    use rss_transactional_messaging::message::MessageFingerprint;
     use rss_transactional_messaging::policy::OperationDeadline;
     use rss_transactional_messaging::transaction::{
         SettlementDecision, SettlementKind, TerminalDisposition, TerminalReceipt,
@@ -558,7 +558,6 @@ mod consumer {
 
     struct InboxRecord {
         identity: ConsumerIdentity,
-        partition: Option<PartitionIdentity>,
         fingerprint: MessageFingerprint,
         status: InboxStatus,
     }
@@ -627,7 +626,6 @@ mod consumer {
                 state.records.push(InboxRecord {
                     identity,
                     fingerprint,
-                    partition: None,
                     status: InboxStatus::Terminal(disposition),
                 });
             }
@@ -678,33 +676,17 @@ mod consumer {
                 if let Some(receipt) = row.terminal() {
                     return Ok(IdempotencyDisposition::Terminal(receipt));
                 }
-                if row.fingerprint != verified.fingerprint() {
-                    return Err(MessagingError::new(
-                        MessagingErrorKind::Conflict,
-                        MemoryConsumerError,
-                    ));
+                if let Err(rejection) = verified.validate_fingerprint(row.fingerprint) {
+                    return Ok(IdempotencyDisposition::Conflict(rejection));
                 }
                 if matches!(row.status, InboxStatus::Pending(Some(_))) {
                     return Ok(IdempotencyDisposition::InProgress);
                 }
                 row.status = InboxStatus::Pending(Some(epoch));
             } else {
-                if verified.partition().is_some()
-                    && state.records.iter().any(|row| {
-                        row.identity.group() == identity.group()
-                            && row.partition.as_ref() == verified.partition()
-                            && !matches!(
-                                row.status,
-                                InboxStatus::Terminal(TerminalDisposition::Succeeded)
-                            )
-                    })
-                {
-                    return Ok(IdempotencyDisposition::PartitionBlocked);
-                }
                 state.records.push(InboxRecord {
                     identity: identity.clone(),
                     fingerprint: verified.fingerprint(),
-                    partition: verified.partition().cloned(),
                     status: InboxStatus::Pending(Some(epoch)),
                 });
             }
@@ -771,11 +753,7 @@ mod consumer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let index = state.records.iter().position(|row| row.identity == claim.0 && matches!(row.status, InboxStatus::Pending(Some(epoch)) if epoch == claim.1))
                 .ok_or_else(|| MessagingError::new(MessagingErrorKind::OwnershipLost, MemoryConsumerError))?;
-            if state.records[index].partition.is_some() {
-                state.records[index].status = InboxStatus::Pending(None);
-            } else {
-                state.records.swap_remove(index);
-            }
+            state.records.swap_remove(index);
             Ok(())
         }
     }

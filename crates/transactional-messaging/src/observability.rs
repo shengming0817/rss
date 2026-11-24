@@ -65,6 +65,8 @@ pub enum TransactionalMessagingTransactionStatus {
     HandlerTransient,
     /// Infrastructure failure requires broker redelivery.
     InfrastructureTransient,
+    /// A committed business rejection blocks this ordered effect.
+    PartitionBlocked,
     /// A transaction failed permanently before starting or after rollback; no broker Reject is implied.
     RejectedPermanent,
     /// Commit acknowledgement was ambiguous.
@@ -83,6 +85,7 @@ impl TransactionalMessagingTransactionStatus {
             Self::Committed => "committed",
             Self::HandlerTransient => "handler_transient",
             Self::InfrastructureTransient => "infrastructure_transient",
+            Self::PartitionBlocked => "partition_blocked",
             Self::RejectedPermanent => "rejected_permanent",
             Self::CommitUnknown => "commit_unknown",
             Self::RollbackFailed => "rollback_failed",
@@ -238,8 +241,6 @@ pub enum TransactionalMessagingObservation {
     InboxBacklogUnavailable,
     /// An in-progress claim was observed.
     ConsumerClaimInProgress,
-    /// Another message holds the verified partition head.
-    ConsumerPartitionBlocked,
     /// Ordinary execution capacity was occupied before a durable claim started.
     ConsumerClaimCapacityBusy,
     /// Elapsed time from the first capacity refusal to the final claim result or cutoff.
@@ -293,7 +294,6 @@ impl TransactionalMessagingObservation {
             Self::InboxBacklog { .. } => TransactionalMessagingEvent::InboxBacklog,
             Self::InboxBacklogUnavailable => TransactionalMessagingEvent::InboxBacklogUnavailable,
             Self::ConsumerClaimInProgress => TransactionalMessagingEvent::ConsumerClaimInProgress,
-            Self::ConsumerPartitionBlocked => TransactionalMessagingEvent::ConsumerPartitionBlocked,
             Self::ConsumerCapacityWait { .. } => TransactionalMessagingEvent::ConsumerCapacityWait,
             Self::ConsumerClaimCapacityBusy => {
                 TransactionalMessagingEvent::ConsumerClaimCapacityBusy
@@ -462,8 +462,6 @@ pub enum TransactionalMessagingEvent {
     InboxBacklogUnavailable,
     /// A consumer claim that is already in progress.
     ConsumerClaimInProgress,
-    /// Another message holds the verified partition head.
-    ConsumerPartitionBlocked,
     /// Ordinary execution capacity was occupied before a durable claim started.
     ConsumerClaimCapacityBusy,
     /// Completion of a delivery capacity wait.
@@ -486,7 +484,7 @@ pub enum TransactionalMessagingEvent {
 
 impl TransactionalMessagingEvent {
     /// Complete event inventory in stable order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 18] = [
         Self::RuntimeFailure,
         Self::OutboxPublish,
         Self::OutboxPublishFailure,
@@ -496,7 +494,6 @@ impl TransactionalMessagingEvent {
         Self::InboxBacklog,
         Self::InboxBacklogUnavailable,
         Self::ConsumerClaimInProgress,
-        Self::ConsumerPartitionBlocked,
         Self::ConsumerClaimCapacityBusy,
         Self::ConsumerCapacityWait,
         Self::ConsumerIngressRejected,
@@ -521,7 +518,6 @@ impl TransactionalMessagingEvent {
             Self::InboxBacklog => "transactional_messaging.inbox.backlog",
             Self::InboxBacklogUnavailable => "transactional_messaging.inbox.backlog_unavailable",
             Self::ConsumerClaimInProgress => "transactional_messaging.consumer.claim_in_progress",
-            Self::ConsumerPartitionBlocked => "transactional_messaging.consumer.partition_blocked",
             Self::ConsumerCapacityWait => "transactional_messaging.consumer.capacity_wait",
             Self::ConsumerClaimCapacityBusy => {
                 "transactional_messaging.consumer.claim_capacity_busy"
@@ -558,7 +554,6 @@ impl TransactionalMessagingEvent {
             Self::OutboxBacklogUnavailable
             | Self::InboxBacklogUnavailable
             | Self::ConsumerClaimInProgress
-            | Self::ConsumerPartitionBlocked
             | Self::ConsumerClaimCapacityBusy
             | Self::ConsumerLeaseLost
             | Self::RelayLeaseLost

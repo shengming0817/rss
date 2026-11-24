@@ -3132,12 +3132,9 @@ async fn provider_panic_maps_to_typed_worker_failure() {
     ));
 }
 
-enum TestAdmission {
-    Available,
-    HeadHeld(&'static str),
-}
+struct UnlimitedInbox;
 
-impl InboxStore for TestAdmission {
+impl InboxStore for UnlimitedInbox {
     fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
         rss_transactional_messaging::policy::LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))
             .expect("test lease")
@@ -3146,17 +3143,10 @@ impl InboxStore for TestAdmission {
 
     async fn claim(
         &self,
-        verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+        _verified: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
         _deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-        Ok(
-            if matches!(self, Self::HeadHeld(blocked) if verified.identity().message_id().as_str() == *blocked)
-            {
-                IdempotencyDisposition::PartitionBlocked
-            } else {
-                IdempotencyDisposition::Acquired(Claim)
-            },
-        )
+        Ok(IdempotencyDisposition::Acquired(Claim))
     }
 
     async fn read_terminal(
@@ -3233,63 +3223,6 @@ impl DeliverySource<Vec<u8>> for TwoDeliverySource {
 }
 
 #[tokio::test]
-async fn blocked_successor_keeps_subscription_open_for_redelivered_head() {
-    let settled = Arc::new(AtomicUsize::new(0));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let head = envelope(|m| m.id = "original");
-    let sub = subscription(&head);
-    let deliveries = [
-        envelope(|m| m.id = "successor"),
-        head,
-        envelope(|m| {
-            m.id = "independent";
-            m.partition = Some((TENANT_A, "orders", "other"));
-        }),
-    ]
-    .into_iter()
-    .map(|msg| {
-        IncomingDelivery::Valid(Box::new(Delivery::new(
-            msg,
-            BlockingSettlement {
-                gate: None,
-                settled: settled.clone(),
-            },
-        )))
-    })
-    .collect();
-    let worker = ConsumerWorker::new(
-        std::num::NonZeroU16::new(3).expect("window"),
-        Arc::new(TwoDeliverySource {
-            deliveries: Mutex::new(deliveries),
-        }),
-        Arc::new(TestAdmission::HeadHeld("successor")),
-        Arc::new(FakeTx {
-            calls: calls.clone(),
-            disposition: TerminalDisposition::Succeeded,
-        }),
-        ConsumerGroup::parse("ordered").expect("group"),
-        Arc::new(TrustedIngress),
-        sub,
-        Arc::new(ManualTimer::new()),
-        consumer_policy(),
-        Arc::new(NoopEmitter),
-        SubscriptionBackoffPolicy::STANDARD,
-    );
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(worker.run(cancel.clone()));
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while settled.load(Ordering::SeqCst) != 3 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("all three deliveries settle on the first subscription");
-    cancel.cancel();
-    support::join_worker(task).await.expect("graceful stop");
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
 async fn consumer_does_not_process_the_next_delivery_before_settlement() {
     let first = envelope(|fixture| fixture.id = "message-backpressure-1");
     let second = envelope(|fixture| fixture.id = "message-backpressure-2");
@@ -3317,7 +3250,7 @@ async fn consumer_does_not_process_the_next_delivery_before_settlement() {
                 ))),
             ]),
         }),
-        Arc::new(TestAdmission::Available),
+        Arc::new(UnlimitedInbox),
         Arc::new(FakeTx {
             calls: Arc::clone(&calls),
             disposition: TerminalDisposition::Succeeded,
@@ -3443,7 +3376,7 @@ async fn assert_subscription_delays(steps: Vec<RecoveryStep>, expected_delays: &
         Arc::new(RecoverySource {
             steps: Mutex::new(steps.into()),
         }),
-        Arc::new(TestAdmission::Available),
+        Arc::new(UnlimitedInbox),
         Arc::new(FakeTx {
             calls: Arc::new(AtomicUsize::new(0)),
             disposition: TerminalDisposition::Succeeded,
@@ -3706,7 +3639,7 @@ struct ScopedInbox(Mutex<Vec<rss_transactional_messaging::fence::ExecutionBindin
 impl InboxStore for ScopedInbox {
     type Claim = Claim;
     fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
-        TestAdmission::Available.lease_policy()
+        UnlimitedInbox.lease_policy()
     }
     async fn claim(
         &self,
@@ -3714,7 +3647,7 @@ impl InboxStore for ScopedInbox {
         deadline: OperationDeadline,
     ) -> Result<IdempotencyDisposition<Claim>, MessagingError> {
         self.0.lock().expect("scopes").push(verified.execution());
-        TestAdmission::Available.claim(verified, deadline).await
+        UnlimitedInbox.claim(verified, deadline).await
     }
     async fn read_terminal(
         &self,
@@ -3722,7 +3655,7 @@ impl InboxStore for ScopedInbox {
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> Result<Option<TerminalReceipt>, MessagingError> {
-        TestAdmission::Available
+        UnlimitedInbox
             .read_terminal(binding, identity, deadline)
             .await
     }
@@ -3731,14 +3664,14 @@ impl InboxStore for ScopedInbox {
         claim: &Claim,
         deadline: OperationDeadline,
     ) -> Result<LeaseStatus, MessagingError> {
-        TestAdmission::Available.extend(claim, deadline).await
+        UnlimitedInbox.extend(claim, deadline).await
     }
     async fn release(
         &self,
         claim: Claim,
         deadline: OperationDeadline,
     ) -> Result<(), MessagingError> {
-        TestAdmission::Available.release(claim, deadline).await
+        UnlimitedInbox.release(claim, deadline).await
     }
 }
 struct ScopedIngress;

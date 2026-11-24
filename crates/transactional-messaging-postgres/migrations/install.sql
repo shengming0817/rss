@@ -28,8 +28,8 @@ CREATE TABLE rss_transactional_messaging.inbox (
   CONSTRAINT inbox_receipt_shape CHECK (
     (disposition IS NULL OR disposition IN ('succeeded','rejected_permanent','rejected_invariant'))
     AND ((domain IS NULL) = (partition_key IS NULL))
-    AND (resolved_by IS NULL OR (partition_key IS NOT NULL AND disposition IS NOT NULL
-         AND disposition IN ('rejected_permanent','rejected_invariant')))
+    AND (partition_key IS NULL OR (disposition IS NOT NULL AND disposition IN ('rejected_permanent','rejected_invariant')))
+    AND (resolved_by IS NULL OR partition_key IS NOT NULL)
   ),
  claim_epoch bigint NOT NULL DEFAULT 0, claim_lineage bytea
 );
@@ -37,7 +37,9 @@ CREATE TABLE rss_transactional_messaging.inbox (
 -- Only ordinary ordered input participates. Projection already owns its source Outbox head.
 CREATE UNIQUE INDEX inbox_partition_head ON rss_transactional_messaging.inbox
  (tenant_id,consumer_group,domain,partition_key)
- WHERE partition_key IS NOT NULL AND disposition IS DISTINCT FROM 'succeeded' AND resolved_by IS NULL;
+ WHERE partition_key IS NOT NULL AND resolved_by IS NULL;
+CREATE INDEX inbox_unresolved_list ON rss_transactional_messaging.inbox (tenant_id,message_id,consumer_group)
+ WHERE partition_key IS NOT NULL AND resolved_by IS NULL;
 
 CREATE TABLE rss_transactional_messaging.outbox (
   seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -974,7 +976,7 @@ DECLARE member dr_members;
 BEGIN
  PERFORM check_execution();
  IF TG_OP='UPDATE' AND OLD.disposition IS NOT NULL THEN
-  IF NEW.disposition IS DISTINCT FROM OLD.disposition THEN
+  IF (NEW.disposition,NEW.domain,NEW.partition_key) IS DISTINCT FROM (OLD.disposition,OLD.domain,OLD.partition_key) THEN
    RAISE EXCEPTION 'immutable Inbox receipt' USING ERRCODE='42501';
   END IF;
   RETURN NEW;
@@ -1019,11 +1021,12 @@ CREATE POLICY outbox_partition_tenant ON rss_transactional_messaging.outbox_part
 
 CREATE POLICY inbox_consumer_scope ON rss_transactional_messaging.inbox AS RESTRICTIVE
  USING(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group) AND
- (domain IS NULL OR (SELECT rss_transactional_messaging.consumer_scope_domain()) IS NULL OR
-  (disposition IS NOT NULL AND domain=(SELECT rss_transactional_messaging.consumer_scope_domain()))));
+   ((domain=(SELECT rss_transactional_messaging.consumer_scope_domain())) IS NOT FALSE))
+ WITH CHECK(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group) AND
+   (domain IS NULL OR (SELECT rss_transactional_messaging.consumer_scope_domain()) IS NULL));
 
 CREATE POLICY inbox_release ON rss_transactional_messaging.inbox AS RESTRICTIVE FOR DELETE
- USING (partition_key IS NULL AND disposition IS NULL);
+ USING (disposition IS NULL);
 
 CREATE POLICY dead_letter_consumer_scope ON rss_transactional_messaging.consumer_dead_letter AS RESTRICTIVE
  USING(rss_transactional_messaging.consumer_inbox_allowed(tenant_id,message_id,consumer_group))

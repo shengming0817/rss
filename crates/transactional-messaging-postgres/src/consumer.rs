@@ -3,7 +3,10 @@ use crate::{PgInboxClaim, PgRuntime, PgTransaction, transaction::stage};
 use rss_redact::RedactedSource;
 use rss_request_context::{Clock, Deadline};
 use rss_transactional_messaging::{
-    message::{MessageEnvelope, MessageFingerprint},
+    inbox::ConsumerGroup,
+    message::{
+        MessageEnvelope, MessageFingerprint, MessagingDomain, PartitionIdentity, PartitionKey,
+    },
     policy::{OperationDeadline, within},
     transaction::{
         ConsumerTx, FailureClass, LocalTxDeadlineStage, ReceiptIntent, TerminalDisposition,
@@ -174,8 +177,11 @@ pub(crate) async fn execute_transaction<
         };
     let mut tx = PgTransaction::new(transaction.connection(), claim.binding, cutoff, runtime);
     let body = within(timer, cutoff, |_| async {
-        let disposition = effect_body(effect, mode, &mut tx, claim, message, &intent).await?;
-        if let (Some(disposition), Some((store, source))) = (disposition, source) {
+        let partition = message.metadata().partition().filter(|_| source.is_none());
+        let disposition =
+            effect_body(effect, mode, &mut tx, claim, message, partition, &intent).await?;
+        if let (EffectResult::Terminal(disposition), Some((store, source))) = (disposition, source)
+        {
             store
                 .settle_local_in(&mut tx, source, disposition)
                 .await
@@ -215,45 +221,53 @@ fn matches_message<P: AsRef<[u8]>>(
         && claim.identity.contract() == message.metadata().contract()
 }
 
+#[derive(Clone, Copy)]
+enum EffectResult {
+    Terminal(TerminalDisposition),
+    Fenced,
+    PartitionBlocked,
+}
+
 async fn finish(
     transaction: crate::transaction::BorrowedTransaction<'_>,
-    body: Result<Option<TerminalDisposition>, PgConsumerEffectFailure>,
+    body: Result<EffectResult, PgConsumerEffectFailure>,
     intent: ReceiptIntent,
     timer: &crate::transaction::PgTimer,
     cutoff: Deadline,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
-    match body {
-        Ok(Some(disposition)) => match stage(
-            timer,
-            cutoff,
-            LocalTxDeadlineStage::Commit,
-            transaction.commit(),
-        )
-        .await
-        {
-            Ok(()) => acknowledged_commit(intent, disposition),
-            _ => TransactionOutcome::commit_unknown(),
-        },
-        other => {
-            let failure = other.err();
-            if let Some(error) = &failure {
-                tracing::warn!(error = ?error, "consumer transaction rolled back");
-            }
-            match stage(
+    let rollback = match body {
+        Ok(EffectResult::Terminal(disposition)) => {
+            return match stage(
                 timer,
                 cutoff,
-                LocalTxDeadlineStage::Rollback,
-                transaction.rollback(),
+                LocalTxDeadlineStage::Commit,
+                transaction.commit(),
             )
             .await
             {
-                Ok(()) => match failure {
-                    Some(error) => TransactionOutcome::rolled_back(error.class()),
-                    None => TransactionOutcome::fenced(),
-                },
-                _ => TransactionOutcome::rollback_failed(),
-            }
+                Ok(()) => acknowledged_commit(intent, disposition),
+                _ => TransactionOutcome::commit_unknown(),
+            };
         }
+        Ok(EffectResult::Fenced) => TransactionOutcome::fenced(),
+        Ok(EffectResult::PartitionBlocked) => {
+            TransactionOutcome::rolled_back(FailureClass::PartitionBlocked)
+        }
+        Err(error) => {
+            tracing::warn!(error = ?error, "consumer transaction rolled back");
+            TransactionOutcome::rolled_back(error.class())
+        }
+    };
+    match stage(
+        timer,
+        cutoff,
+        LocalTxDeadlineStage::Rollback,
+        transaction.rollback(),
+    )
+    .await
+    {
+        Ok(()) => rollback,
+        _ => TransactionOutcome::rollback_failed(),
     }
 }
 
@@ -271,21 +285,71 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
     tx: &mut PgTransaction<'_>,
     claim: &PgInboxClaim,
     message: &MessageEnvelope<P>,
+    partition: Option<&PartitionIdentity>,
     intent: &ReceiptIntent,
-) -> Result<Option<TerminalDisposition>, PgConsumerEffectFailure> {
+) -> Result<EffectResult, PgConsumerEffectFailure> {
+    if partition.is_some() {
+        // Read the winner's receipt in a fresh snapshot after the partition lock is granted.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx.connection)
+            .await
+            .map_err(PgConsumerEffectFailure::infrastructure)?;
+    }
     if let Err(error) = tx.setup().await {
         if error.kind() == rss_transactional_messaging::error::MessagingErrorKind::OwnershipLost {
-            return Ok(None);
+            return Ok(EffectResult::Fenced);
         }
         return Err(PgConsumerEffectFailure::infrastructure(error));
+    }
+    if let Some(partition) = partition {
+        lock_partition(
+            tx,
+            claim.identity.group(),
+            partition.domain(),
+            partition.key(),
+        )
+        .await
+        .map_err(PgConsumerEffectFailure::infrastructure)?;
+        let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND consumer_group=$2 AND domain=$3 AND partition_key=$4 AND resolved_by IS NULL)")
+            .bind(tx.tenant_id().to_string()).bind(claim.identity.group().as_str()).bind(partition.domain().as_str()).bind(partition.key().as_str())
+            .fetch_one(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?;
+        if blocked {
+            return Ok(EffectResult::PartitionBlocked);
+        }
     }
     // No row lock across the handler: independent renewal must remain able to update Inbox.
     let held: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND disposition IS NULL AND lease_until>clock_timestamp())")
                 .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(&claim.token)
                 .fetch_one(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?;
     if !held {
-        return Ok(None);
+        return Ok(EffectResult::Fenced);
     }
+    let disposition = apply_effect(effect, mode, tx, claim, message, intent).await?;
+    // Sample lease expiry after acquiring the row lock.
+    crate::inbox::lock_identity(tx, &claim.identity)
+        .await
+        .map_err(PgConsumerEffectFailure::infrastructure)?;
+    let rejected = partition.filter(|_| matches!(disposition, TerminalDisposition::Rejected(_)));
+    let count = sqlx::query("UPDATE rss_transactional_messaging.inbox SET disposition=$6,domain=$7,partition_key=$8 WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND fingerprint=$5 AND disposition IS NULL AND lease_until>clock_timestamp()")
+                .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(&claim.token)
+                .bind(intent.fingerprint().as_bytes().as_slice()).bind(disposition.as_label())
+                .bind(rejected.map(|p| p.domain().as_str())).bind(rejected.map(|p| p.key().as_str()))
+                .execute(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?.rows_affected();
+    Ok(if count == 1 {
+        EffectResult::Terminal(disposition)
+    } else {
+        EffectResult::Fenced
+    })
+}
+
+async fn apply_effect<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerRecoveryMode<P>>(
+    effect: &H,
+    mode: &M,
+    tx: &mut PgTransaction<'_>,
+    claim: &PgInboxClaim,
+    message: &MessageEnvelope<P>,
+    intent: &ReceiptIntent,
+) -> Result<TerminalDisposition, PgConsumerEffectFailure> {
     sqlx::query("SAVEPOINT rss_tmsg_effect")
         .execute(&mut *tx.connection)
         .await
@@ -310,16 +374,19 @@ async fn effect_body<P: AsRef<[u8]> + Sync, H: PgConsumerEffect<P>, M: ConsumerR
     if matches!(disposition, TerminalDisposition::Rejected(_)) {
         mode.record(tx, claim, message, intent, disposition).await?;
     }
-    // Acquire the row lock only after effect completion; sample expiry in the next statement
-    // so time spent waiting for another writer cannot authorize an expired commit.
-    sqlx::query("SELECT 1 FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 FOR UPDATE")
-                .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str())
-                .execute(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?;
-    let count = sqlx::query("UPDATE rss_transactional_messaging.inbox SET disposition=$6 WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3 AND lease_token=$4::uuid AND fingerprint=$5 AND disposition IS NULL AND lease_until>clock_timestamp()")
-                .bind(claim.identity.tenant_id().to_string()).bind(claim.identity.message_id().as_str()).bind(claim.identity.group().as_str()).bind(&claim.token)
-                .bind(intent.fingerprint().as_bytes().as_slice()).bind(disposition.as_label())
-                .execute(&mut *tx.connection).await.map_err(PgConsumerEffectFailure::infrastructure)?.rows_affected();
-    Ok::<_, PgConsumerEffectFailure>((count == 1).then_some(disposition))
+    Ok(disposition)
+}
+
+pub(crate) async fn lock_partition(
+    tx: &mut PgTransaction<'_>,
+    group: &ConsumerGroup,
+    domain: &MessagingDomain,
+    key: &PartitionKey,
+) -> Result<(), crate::PgError> {
+    // The hash only selects a transaction lock. Receipt lookups always use all four exact coordinates.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('rss.inbox', $1::uuid, $2::text, $3::text, $4::text)::text, 0))")
+        .bind(tx.tenant_id().to_string()).bind(group.as_str()).bind(domain.as_str()).bind(key.as_str()).execute(&mut *tx.connection).await?;
+    Ok(())
 }
 
 /// Explicit receipt-only composition; application DLQ persistence is not selected.

@@ -46,7 +46,7 @@ impl PgConsumerEffect<Vec<u8>> for BatchEffect {
         Ok(TerminalDisposition::Succeeded)
     }
 }
-async fn append(f: &Fixture, entries: Vec<(String, String)>) -> anyhow::Result<()> {
+pub(super) async fn append(f: &Fixture, entries: Vec<(String, String)>) -> anyhow::Result<()> {
     let writer = PgOutboxWriter::new(f.producer.clone(), domain()?);
     let messages = entries
         .into_iter()

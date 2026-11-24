@@ -896,8 +896,10 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("ROLLBACK TO SAVEPOINT forbidden_inbox")
         .execute(&mut *tx)
         .await?;
-    let error = sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint,domain,partition_key) VALUES($1::uuid,'atomic-success','projection','orders',gen_random_uuid(),clock_timestamp(),decode(repeat('00',32),'hex'),'other','lane')")
-        .bind(tenant().to_string()).execute(&mut *tx).await.expect_err("fixed projection cannot write ordinary queue heads");
+    sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint) SELECT tenant_id,message_id,'projection','orders',gen_random_uuid(),clock_timestamp(),fingerprint FROM rss_transactional_messaging.outbox WHERE message_id='atomic-expired' ON CONFLICT DO NOTHING")
+        .execute(&mut *tx).await?;
+    let error = sqlx::query("UPDATE rss_transactional_messaging.inbox SET disposition='rejected_permanent',domain='orders',partition_key='lane' WHERE message_id='atomic-expired' AND disposition IS NULL")
+        .execute(&mut *tx).await.expect_err("fixed projection cannot create an ordinary partition blocker");
     assert_eq!(
         error.as_database_error().and_then(|e| e.code()).as_deref(),
         Some("42501")
@@ -906,7 +908,7 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
     // Keep the source domain valid and vary only consumer_group, with table ACLs admitted.
-    let granted: bool = sqlx::query_scalar("SELECT (SELECT bool_and(has_column_privilege(current_user,'rss_transactional_messaging.inbox',col,'INSERT')) FROM unnest(ARRAY['tenant_id','message_id','consumer_group','contract','lease_token','lease_until','fingerprint','domain','partition_key']) col) AND has_table_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','INSERT')")
+    let granted: bool = sqlx::query_scalar("SELECT (SELECT bool_and(has_column_privilege(current_user,'rss_transactional_messaging.inbox',col,'INSERT')) FROM unnest(ARRAY['tenant_id','message_id','consumer_group','contract','lease_token','lease_until','fingerprint']) col) AND has_table_privilege(current_user,'rss_transactional_messaging.consumer_dead_letter','INSERT')")
         .fetch_one(&mut *tx).await?;
     assert!(granted);
     sqlx::query("SAVEPOINT wrong_group")

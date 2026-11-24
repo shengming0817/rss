@@ -309,11 +309,12 @@ Capture occurs only after verified ingress and rollback of a rejected business e
 transaction as the terminal Inbox receipt. Protection/storage failure prevents terminal commit.
 Configure an `rss-data-protection::Aead` implementation with external key ownership; no default key
 or identity provider is installed. Capture roles need SELECT/INSERT on `consumer_dead_letter`.
-For ordinary ordered input, the first verified claim occupies its tenant/group/domain/partition in
-the Inbox. Lease loss or release permits the same message and fingerprint to resume. A business
-rejection blocks other messages until authorized gap acceptance, including in receipt-only mode.
-A replay uses a new ID and also waits. The protected capsule is optional for resolution.
-Local projections use their source Outbox head.
+Ordinary keyed effects take a transaction-scoped lock for the tenant, group, domain and partition key.
+After acquiring it, the transaction checks for an unresolved business rejection before entering the handler.
+A committed rejection stores its partition on the original Inbox receipt until authorized gap acceptance.
+A confirmed rollback releases the partition; another admitted message may execute before the original retry.
+Duplicate deliveries follow their original receipt. The operator can resolve receipt-only rejections without payload access.
+Local projections share the per-message Inbox lease and settle their source Outbox head in the effect transaction.
 
 Create the opaque operator store with `PgRecoveryStore::connect(config, timer, storage, protector)` after
 provisioning its privileges. Each query, mutation and receipt read supplies its own explicit

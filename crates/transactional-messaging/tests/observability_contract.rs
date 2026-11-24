@@ -8,6 +8,8 @@ fn descriptor_closes_metric_and_event_exact_sets() {
     let descriptor = transactional_messaging_observability_descriptor();
     assert_eq!(descriptor.metrics(), &TransactionalMessagingMetric::ALL);
     assert_eq!(descriptor.events(), &TransactionalMessagingEvent::ALL);
+    assert_eq!(TransactionalMessagingMetric::ALL.len(), 19);
+    assert_eq!(TransactionalMessagingEvent::ALL.len(), 18);
 
     assert_eq!(
         TransactionalMessagingMetric::ALL.map(TransactionalMessagingMetric::name),
@@ -64,7 +66,6 @@ fn descriptor_closes_metric_and_event_exact_sets() {
             "transactional_messaging.inbox.backlog",
             "transactional_messaging.inbox.backlog_unavailable",
             "transactional_messaging.consumer.claim_in_progress",
-            "transactional_messaging.consumer.partition_blocked",
             "transactional_messaging.consumer.claim_capacity_busy",
             "transactional_messaging.consumer.capacity_wait",
             "transactional_messaging.consumer.ingress_rejected",

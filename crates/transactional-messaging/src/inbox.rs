@@ -117,8 +117,8 @@ pub enum IdempotencyDisposition<C> {
     Acquired(C),
     /// Another live attempt owns the record; do not execute the handler.
     InProgress,
-    /// Another message holds this ordered partition, including an unresolved rejection.
-    PartitionBlocked,
+    /// Verified content differs from the durable identity. Reject only this delivery.
+    Conflict(crate::transaction::IngressRejection),
     /// A durable terminal result exists; validate it against verified ingress before settlement.
     Terminal(TerminalReceipt),
 }
@@ -158,9 +158,7 @@ pub trait InboxStore: Send + Sync {
     fn lease_policy(&self) -> crate::policy::LeaseRenewalPolicy;
 
     /// Acquire exclusive ownership, or return the existing live or terminal state for the full
-    /// identity. The first admitted ordered message owns its tenant/group/domain/partition
-    /// until success or authorized resolution of a rejection. Return `PartitionBlocked` for
-    /// other messages while it owns that partition. A terminal duplicate returns its receipt.
+    /// identity. Report content conflicts without granting a lease or changing the original row.
     fn claim(
         &self,
         verified: &crate::transaction::VerifiedConsumerBinding,
@@ -184,8 +182,7 @@ pub trait InboxStore: Send + Sync {
         deadline: OperationDeadline,
     ) -> impl Future<Output = Result<LeaseStatus, MessagingError>> + Send;
 
-    /// End this lease. Keep an ordered head bound to its original message and fingerprint
-    /// for redelivery, and preserve every durable terminal result.
+    /// End this message lease without removing any committed terminal receipt.
     fn release(
         &self,
         claim: Self::Claim,

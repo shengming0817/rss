@@ -54,7 +54,7 @@
 ## Ordering
 
 - 需要顺序的 contract 必须声明 typed partition key；consumer 同 partition 串行，不同 partition 可并发。
-- 普通有序 Consumer 以首次验证并成功领取的消息为队首，按租户、组、域与分区键隔离。业务拒绝阻塞后继，直到 recovery 对精确队首授权接受缺口；重投、重启、接管和新 ID replay 均保留原拒绝事实。
+- 普通 PG Consumer 按租户、组、域和分区键在业务事务内串行执行。已提交的业务拒绝持续阻塞同分区后续效果，直到精确授权接受缺口；已确认回滚则释放互斥，原消息可按同一身份重投。
 - 源端尚未送达的前驱没有普通 ingress 顺序证据。同库投影继续使用源 Outbox 的持久队首。
 - 顺序保证不等于 exactly-once，也不替代业务 fencing。
 
