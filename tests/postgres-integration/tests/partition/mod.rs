@@ -1,4 +1,6 @@
 //! INVARIANT: OUTBOX-PARTITION-ORDER-01 — public Rust and independent SQL callers.
+mod confirmed_settlement;
+mod heads;
 mod wire_contract;
 use super::{Timer, binding, deadline, fence_fixture, message, outbox_budget};
 use rss_request_context::TenantId;
@@ -106,9 +108,14 @@ fn transport(message: &MessageEnvelope<Vec<u8>>) -> serde_json::Value {
 
 async fn sql_tx(pool: &PgPool, tenant: TenantId) -> anyhow::Result<Transaction<'static, Postgres>> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target','01010101010101010101010101010101',true),set_config('rss.storage_lineage','02020202020202020202020202020202',true),set_config('rss.execution_epoch','1',true),set_config('statement_timeout','3s',true)")
-        .bind(tenant.to_string()).execute(&mut *tx).await?;
+    sql_scope(&mut tx, tenant).await?;
     Ok(tx)
+}
+
+async fn sql_scope(connection: &mut PgConnection, tenant: TenantId) -> anyhow::Result<()> {
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target','01010101010101010101010101010101',true),set_config('rss.storage_lineage','02020202020202020202020202020202',true),set_config('rss.execution_epoch','1',true),set_config('statement_timeout','3s',true)")
+        .bind(tenant.to_string()).execute(connection).await?;
+    Ok(())
 }
 
 async fn sql_prepare(
@@ -164,6 +171,7 @@ pub(super) async fn run(
     raw: &PgPool,
     config: PgConfig,
 ) -> anyhow::Result<()> {
+    Box::pin(heads::handoff(runtime.clone(), raw, owner)).await?;
     Box::pin(sql_digest_integrity(raw)).await?;
     Box::pin(wire_contract::run(runtime.clone(), raw)).await?;
     Box::pin(sql_protocol(raw)).await?;
@@ -176,8 +184,7 @@ pub(super) async fn run(
     Box::pin(timed_out_preparation(runtime.clone(), owner, raw)).await?;
     Box::pin(rejected_effect(runtime.clone(), owner)).await?;
     Box::pin(cached_row_ids(runtime.clone(), owner, raw)).await?;
-    Box::pin(permission_drift(owner, config)).await?;
-    Ok(())
+    Box::pin(permission_drift(owner, config)).await
 }
 
 #[allow(clippy::cognitive_complexity)] // reason: real SQL protocol cases keep rejected statements adjacent to rollback and error-code evidence.
@@ -670,7 +677,31 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
             ))
         ));
     }
+    let trigger:String = sqlx::query_scalar("SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid='rss_transactional_messaging.outbox'::regclass AND tgname='refresh_outbox_head'").fetch_one(owner).await?;
+    let altered = trigger.replace("UPDATE OF status", "UPDATE OF payload");
+    assert_ne!(trigger, altered);
+    for definition in [&altered, &trigger] {
+        sqlx::query("DROP TRIGGER refresh_outbox_head ON rss_transactional_messaging.outbox")
+            .execute(owner)
+            .await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(definition.clone()))
+            .execute(owner)
+            .await?;
+        if definition == &altered {
+            assert!(matches!(
+                PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage()).await,
+                Err(PgError::IncompatibleStorageContract(
+                    PgStorageContractFailure::Functions
+                ))
+            ));
+        }
+    }
     for (change, restore, expected) in [
+        (
+            "ALTER FUNCTION rss_transactional_messaging.refresh_outbox_head() STABLE",
+            "ALTER FUNCTION rss_transactional_messaging.refresh_outbox_head() VOLATILE",
+            PgStorageContractFailure::Functions,
+        ),
         (
             "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.decode_outbox_message(bytea) TO tmsg_runtime",
             "REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.decode_outbox_message(bytea) FROM tmsg_runtime",
@@ -682,8 +713,8 @@ async fn permission_drift(owner: &PgPool, config: PgConfig) -> anyhow::Result<()
             PgStorageContractFailure::Functions,
         ),
         (
-            "CREATE FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea) RETURNS text LANGUAGE sql AS 'SELECT NULL::text'",
-            "DROP FUNCTION rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)",
+            "CREATE FUNCTION rss_transactional_messaging.append_outbox(integer) RETURNS text LANGUAGE sql AS 'SELECT NULL::text'",
+            "DROP FUNCTION rss_transactional_messaging.append_outbox(integer)",
             PgStorageContractFailure::Functions,
         ),
         (

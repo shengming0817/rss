@@ -5,6 +5,7 @@ use rss_diag_context::CorrelationId;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::message::*;
 use serde::Deserialize;
+use sqlx::{Row, postgres::PgRow};
 use std::collections::BTreeMap;
 
 #[derive(Deserialize)]
@@ -24,11 +25,11 @@ pub(crate) struct Envelope {
     attributes: BTreeMap<String, String>,
     trace: Option<String>,
     tenant_authority: Option<String>,
-    payload: Vec<u8>,
 }
 impl Envelope {
-    pub(crate) fn decode(raw: &str) -> Result<MessageEnvelope<Vec<u8>>, PgError> {
-        let value: Self = serde_json::from_str(raw).map_err(|_| PgError::invariant())?;
+    pub(crate) fn decode(row: &PgRow) -> Result<MessageEnvelope<Vec<u8>>, PgError> {
+        let value: Self =
+            serde_json::from_str(row.try_get("envelope")?).map_err(|_| PgError::invariant())?;
         let invalid = |_| PgError::invariant();
         let contract = ContractIdentity::new(
             ContractId::parse(&value.contract).map_err(invalid)?,
@@ -66,7 +67,7 @@ impl Envelope {
         Ok(MessageEnvelope::new(
             MessageId::parse(&value.id).map_err(|_| PgError::invariant())?,
             MessageMetadata::new(required, extensions),
-            value.payload,
+            row.try_get("payload")?,
         )
         .with_transport_context(TransportContext::new(value.trace, value.tenant_authority)))
     }

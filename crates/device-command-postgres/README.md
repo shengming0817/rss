@@ -19,14 +19,17 @@ login must have the same component privileges; callers cannot inherit or SET ROL
 Additional ACL principals, effective access by undeclared roles (including NOLOGIN bridges and
 mixed SET/INHERIT and role-administration paths), and extra functions are rejected. Database administrators remain product-owned trusted operators.
 Admission checks exact policy predicates, roles and function signatures/ACLs, and rejects
-additional permissive policies or changed function search paths. All five function definitions
+additional permissive policies or changed function search paths. All component function definitions
 are derived from the bundled migration: admission verifies their bodies, parameter names/types,
-return types, SQL language and execution attributes, including CALLED ON NULL INPUT. Tables must
+return types, function language and execution attributes, including CALLED ON NULL INPUT. Tables must
 be ordinary permanent relations with no non-internal triggers or rewrite rules. These checks
 run on the supplied transaction connection and never invoke a business function or repair DDL.
 Restore the version-matched definitions before retrying; no compatibility bypass is provided.
 Trusted administrator DDL after construction remains outside the admission guarantee. The owner must
 not be reachable through SET ROLE. Products provision roles and execute migrations.
+
+The batch function `save_page` requires EXECUTE for each declared caller. It raises a fencing error
+when any version fails the scalar CAS, rolling back the page in the caller’s transaction.
 
 Install the separately versioned messaging schema with its own documented runtime grants. New
 component installations never read, modify, migrate or adopt historical `device_commands` rows.
@@ -68,7 +71,7 @@ between payload and command intent remain product responsibilities.
   transaction partition set before command/authority mutations; repositories do not add locks incrementally.
 - Outbox append and command admission commit together. Broker publish itself is outside this
   transaction and remains at-least-once. Never mint a new message ID for an ambiguous attempt.
-- `recover` and `recover_exact` share the same lifecycle implementation and call the messaging owner's `is_published` for the persisted domain/message/fingerprint. A scope may contain commands
+- `recover` and `recover_exact` share the same lifecycle implementation. The messaging adapter checks each selected dispatch's persisted domain, message ID and fingerprint using one publication query per page. A scope may contain commands
   from several messaging domains; recovery never substitutes the current relay domain. Pending,
   in-flight and dead-lettered delivery are not device rejection. Missing dispatch or changed
   identity is an error. `published_at` is the database time this component observes durable

@@ -233,39 +233,20 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     } else {
         "slow-confirm"
     };
-    let request = CommandSpec::new(
-        s,
-        CommandId::parse(name)?,
-        c,
-        StateDigest::from_bytes([7; 32]),
-        expires,
-    );
-    let msg = message(name, s.tenant())?;
-    let store = f.store.clone();
-    committed(
-        f.runtime
-            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.queue(tx, request, msg).await })
-            })
-            .await,
-    )?;
-    f.publish().await?;
+    prepare_waiting_page(&f, s, c, name, expires, exact).await?;
     let mut lock = f.owner.begin().await?;
     sqlx::query("LOCK TABLE rss_transactional_messaging.outbox IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *lock)
         .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await?;
     let release = async {
-        let ready=tokio::time::timeout(Duration::from_secs(3),async {
-            loop {
-                let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'SELECT domain,fingerprint,status FROM rss_transactional_messaging.outbox%')").fetch_one(&f.owner).await?;
-                if blocked { return Ok::<(),anyhow::Error>(()); }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await;
+        let ready = super::advance::wait_for_blocked(&f, pid).await;
         let seen = clock.now();
         clock.advance_to(expires)?;
         lock.rollback().await?;
-        ready??;
+        ready?;
         assert!(
             seen < expires,
             "the publication read must start before deadline"
@@ -276,7 +257,10 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
         if exact {
             Ok::<_, anyhow::Error>(f.recover_exact(name, s).await?.map(|c| c.status()))
         } else {
-            Ok(f.recover(s).await?.commands.first().map(Command::status))
+            let page = f.recover(s).await?;
+            assert_eq!(page.commands.len(), 2);
+            assert!(page.commands.iter().all(|c| c.status() == Status::TimedOut));
+            Ok(page.commands.first().map(Command::status))
         }
     };
     let (recovered, released) = tokio::join!(recover, release);
@@ -285,6 +269,56 @@ async fn delayed_confirmation(f: &Fixture, exact: bool) -> anyhow::Result<()> {
     f.runtime.close().await;
     Ok(())
 }
+async fn prepare_waiting_page(
+    f: &Fixture,
+    s: Scope,
+    c: Coordinate,
+    name: &str,
+    expires: i64,
+    exact: bool,
+) -> anyhow::Result<()> {
+    queue_expiring(f, s, c, name, expires).await?;
+    if !exact {
+        queue_expiring(f, s, c, "slow-confirm-z", expires).await?;
+    }
+    f.publish().await?;
+    if !exact {
+        assert_eq!(
+            f.recover_exact("slow-confirm-z", s)
+                .await?
+                .map(|c| c.status()),
+            Some(Status::Published)
+        );
+    }
+    Ok(())
+}
+
+async fn queue_expiring(
+    f: &Fixture,
+    s: Scope,
+    coordinate: Coordinate,
+    id: &str,
+    expires: i64,
+) -> anyhow::Result<()> {
+    let request = CommandSpec::new(
+        s,
+        CommandId::parse(id)?,
+        coordinate,
+        StateDigest::from_bytes([7; 32]),
+        expires,
+    );
+    let msg = message(id, s.tenant())?;
+    let store = f.store.clone();
+    committed(
+        f.runtime
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move { store.queue(tx, request, msg).await })
+            })
+            .await,
+    )?;
+    Ok(())
+}
+
 pub(crate) async fn catalog_drift(f: &Fixture) -> anyhow::Result<()> {
     super::admission::executable_contract(f).await?;
     for (change, restore) in [

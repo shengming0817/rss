@@ -31,7 +31,7 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
  OR pg_get_expr(p.polqual,p.polrelid) IS DISTINCT FROM e.predicate OR pg_get_expr(p.polwithcheck,p.polrelid) IS DISTINCT FROM e.predicate)
 
  AND NOT EXISTS(SELECT FROM (VALUES
-  ('rss_transactional_messaging.outbox_candidates(uuid,text)',$5::text,false,'s','sql',NULL::text[]),
+  ('rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)',$5::text,false,'s','sql',NULL::text[]),
   ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)',$6::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp'])
  ) f(signature,body,definer,volatility,language,config)
  LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)

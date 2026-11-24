@@ -68,6 +68,12 @@ async fn relation_drift(f: &Fixture) -> anyhow::Result<()> {
         "revision",
     )
     .await?;
+    reject(
+        f,
+        r#"DROP INDEX rss_device_command.command_active_page; CREATE INDEX command_active_page ON rss_device_command.commands USING brin(tenant_id,device_id,command_id COLLATE "C") WHERE terminal_at IS NULL"#,
+        r#"DROP INDEX rss_device_command.command_active_page; CREATE INDEX command_active_page ON rss_device_command.commands(tenant_id,device_id,command_id COLLATE "C") WHERE terminal_at IS NULL"#,
+        "relations",
+    ).await?;
     // Keep the trigger helper outside the component so the relation guard is the rejecting check.
     sqlx::raw_sql("CREATE FUNCTION public.swallow_command_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").execute(&f.owner).await?;
     let triggers = async {

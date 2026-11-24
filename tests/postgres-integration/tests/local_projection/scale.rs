@@ -96,11 +96,14 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
 // A fixed read-only query runs with the exact login scope and effective relay role of claim.
 // No generic SQL execution or broader table grants are exposed to the consumer fixture.
 async fn install_explain(f: &Fixture) -> anyhow::Result<()> {
-    let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_candidates(uuid,text)'::regprocedure").fetch_one(&f.owner).await?;
+    let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)'::regprocedure").fetch_one(&f.owner).await?;
     let query = format!(
         "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT src.seq FROM ({}) c JOIN rss_transactional_messaging.outbox src ON src.seq=c.source_seq WHERE c.eligible_at<=clock_timestamp() ORDER BY src.seq FOR UPDATE OF src SKIP LOCKED",
         body.replace("p_tenant", "$1::uuid")
             .replace("p_domain", "$2")
+            .replace("p_after", "NULL::timestamptz")
+            .replace("p_through", "statement_timestamp()")
+            .replace("p_take", "NULL::integer")
     );
     let ddl = format!(
         "GRANT CREATE ON SCHEMA public TO rss_tmsg_relay; CREATE FUNCTION public.explain_heads(p_tenant uuid,p_domain text) RETURNS json LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $explain$ DECLARE plan json; BEGIN EXECUTE '{}' INTO plan USING p_tenant,p_domain; RETURN plan; END $explain$; ALTER FUNCTION public.explain_heads(uuid,text) OWNER TO rss_tmsg_relay; REVOKE ALL ON FUNCTION public.explain_heads(uuid,text) FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.explain_heads(uuid,text) TO projection_worker; REVOKE CREATE ON SCHEMA public FROM rss_tmsg_relay;",

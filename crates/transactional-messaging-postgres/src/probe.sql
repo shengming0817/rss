@@ -13,9 +13,9 @@ columns(relation, name, type, nullable) AS (VALUES
  ('inbox','receive_count','bigint',false), ('inbox','fingerprint','bytea',true), ('inbox','disposition','text',true),
  ('outbox_partitions','tenant_id','uuid',false), ('outbox_partitions','domain','text',false),
  ('outbox_partitions','partition_key','text',false), ('outbox_partitions','last_sequence','bigint',false),
- ('outbox_partitions','prepared_by','xid8',false), ('outbox','partition_seq','bigint',true),
- ('outbox','seq','bigint',false), ('outbox','tenant_id','uuid',false), ('outbox','message_id','text',false),
- ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false),
+ ('outbox_partitions','prepared_by','xid8',false), ('outbox_partitions','declared','boolean',false), ('outbox','partition_seq','bigint',true),
+ ('outbox','partition_head','boolean',false), ('outbox','seq','bigint',false), ('outbox','tenant_id','uuid',false), ('outbox','message_id','text',false),
+ ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false), ('outbox','payload','bytea',false),
  ('outbox','fingerprint','bytea',false), ('outbox','status','text',false), ('outbox','retry_count','integer',false),
  ('outbox','retry_after','timestamp with time zone',false), ('outbox','lease_token','uuid',true),
  ('outbox','lease_until','timestamp with time zone',true), ('outbox','automatic_retry_deadline','timestamp with time zone',true), ('outbox','recovery_version','bigint',false)),
@@ -42,6 +42,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('inbox', 'inbox_receipt_shape', 'CHECK ((((fingerprint IS NULL) AND (disposition IS NULL)) OR ((fingerprint IS NOT NULL) AND (octet_length(fingerprint) = 32) AND (disposition IS NOT NULL) AND (disposition = ANY (ARRAY[''succeeded''::text, ''rejected_permanent''::text, ''rejected_invariant''::text])))))'),
  ('inbox', 'inbox_receive_count_check', 'CHECK ((receive_count > 0))'),
  ('outbox', 'outbox_fingerprint_length', 'CHECK ((octet_length(fingerprint) = 32))'),
+ ('outbox', 'outbox_publishing_lineage', 'CHECK (((status <> ''publishing''::text) OR (claim_lineage IS NOT NULL)))'),
  ('outbox', 'outbox_lease_shape', 'CHECK (((status = ''publishing''::text) = ((lease_token IS NOT NULL) AND (lease_until IS NOT NULL))))'),
  ('outbox', 'outbox_recovery_version_check', 'CHECK ((recovery_version > 0))'),
  ('outbox_partitions', 'outbox_partitions_pkey', 'PRIMARY KEY (tenant_id, domain, partition_key)'),
@@ -57,25 +58,38 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('policy', 'policy_revision_check', 'CHECK ((revision = 1))'),
  ('policy', 'policy_safety_seconds_check', 'CHECK ((safety_seconds = 86400))')
 ), expected_defaults(relation, name, expression) AS (VALUES
- ('outbox_partitions','last_sequence','0'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
+ ('outbox_partitions','last_sequence','0'), ('outbox_partitions','declared','true'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
  ('outbox','retry_count','0'), ('outbox','retry_after','clock_timestamp()')
-), head_indexes(name,columns,predicate) AS (VALUES
- ('outbox_unfinished_partition',ARRAY['tenant_id','domain','partition_key','partition_seq']::name[],'((partition_key IS NOT NULL) AND (status <> ALL (ARRAY[''published''::text, ''resolved''::text])))'),
- ('outbox_unpartitioned_candidates',ARRAY['tenant_id','domain','seq']::name[],'((partition_key IS NULL) AND (status = ANY (ARRAY[''pending''::text, ''publishing''::text])))')
+), head_indexes(name,keys,predicate,unique_head) AS (VALUES
+ ('outbox_unfinished_partition',ARRAY['tenant_id','domain','partition_key','partition_seq'],'((partition_key IS NOT NULL) AND (status <> ALL (ARRAY[''published''::text, ''resolved''::text])))',false),
+ ('outbox_one_head',ARRAY['tenant_id','domain','partition_key'],'partition_head',true),
+ ('outbox_pending_due',ARRAY['tenant_id','domain','retry_after'],'((partition_head OR (partition_key IS NULL)) AND (status = ''pending''::text))',false),
+ ('outbox_lease_due',ARRAY['tenant_id','domain','claim_epoch','claim_lineage','greatest(retry_after, lease_until)'],'((partition_head OR (partition_key IS NULL)) AND (status = ''publishing''::text))',false),
+ ('outbox_stale_retry',ARRAY['tenant_id','domain','claim_epoch','claim_lineage','retry_after'],'((partition_head OR (partition_key IS NULL)) AND (status = ''publishing''::text))',false)
 ), checks(reason, valid) AS (VALUES
  ('constraints', NOT EXISTS(SELECT FROM head_indexes e LEFT JOIN pg_index i
    ON i.indexrelid=to_regclass('rss_transactional_messaging.'||e.name)
   LEFT JOIN pg_class c ON c.oid=i.indexrelid
   WHERE i.indexrelid IS NULL OR i.indrelid<>'rss_transactional_messaging.outbox'::regclass
-   OR NOT i.indisvalid OR NOT i.indisready OR i.indisunique
+   OR NOT i.indisvalid OR NOT i.indisready OR i.indisunique<>e.unique_head
    OR c.relam<>(SELECT oid FROM pg_am WHERE amname='btree')
    OR pg_get_expr(i.indpred,i.indrelid) IS DISTINCT FROM e.predicate
-   OR (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(num,ord)
-       JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num) IS DISTINCT FROM e.columns)),
+   OR ARRAY(SELECT lower(pg_get_indexdef(i.indexrelid,k,true)) FROM generate_series(1,i.indnatts) k)<>e.keys)),
+ ('functions', EXISTS(SELECT FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+  WHERE t.tgrelid='rss_transactional_messaging.outbox'::regclass AND t.tgname='refresh_outbox_head'
+   AND t.tgenabled='O' AND t.tgtype=17 AND NOT t.tgisinternal AND t.tgqual IS NULL
+   AND t.tgattr::text=(SELECT attnum::text FROM pg_attribute WHERE attrelid=t.tgrelid AND attname='status')
+   AND p.prosrc=$4::text AND p.provolatile='v' AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+   AND p.oid=to_regprocedure('rss_transactional_messaging.refresh_outbox_head()')
+   AND p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
+   AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
+   AND NOT has_function_privilege(current_user,p.oid,'EXECUTE'))),
  ('functions', pg_get_function_result(to_regprocedure('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'))
-   IS NOT DISTINCT FROM 'TABLE(seq bigint, tenant_id uuid, message_id text, domain text, partition_key text, lease_token uuid, lease_until timestamp with time zone, envelope jsonb, fingerprint bytea, dr_operation uuid, remaining_us bigint, delivery_us bigint)'),
- ('functions', to_regprocedure('rss_transactional_messaging.append_outbox(text,text,text,jsonb,bytea)') IS NULL),
- ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text)')
+   IS NOT DISTINCT FROM 'TABLE(seq bigint, tenant_id uuid, message_id text, domain text, partition_key text, lease_token uuid, lease_until timestamp with time zone, envelope jsonb, payload bytea, fingerprint bytea, dr_operation uuid, remaining_us bigint, delivery_us bigint)'),
+ ('functions', NOT EXISTS(SELECT FROM pg_proc p
+  WHERE p.pronamespace='rss_transactional_messaging'::regnamespace AND p.proname='append_outbox'
+  AND p.oid IS DISTINCT FROM to_regprocedure('rss_transactional_messaging.append_outbox(bytea,jsonb)'))),
+ ('functions', EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)')
    AND NOT p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
    AND p.proconfig IS NULL AND p.provolatile='s'
    AND NOT EXISTS(SELECT FROM pg_roles r WHERE pg_has_role(current_user,r.oid,'SET') AND has_function_privilege(r.oid,p.oid,'EXECUTE'))
@@ -83,7 +97,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
 
  ('functions', NOT EXISTS (SELECT 1 FROM (VALUES
   ('rss_transactional_messaging.read_outbox_frame(bytea,integer,integer)','record'::regtype,true),
-  ('rss_transactional_messaging.decode_outbox_message(bytea)','jsonb'::regtype,false)) f(signature,result,retset)
+  ('rss_transactional_messaging.decode_outbox_message(bytea)','record'::regtype,true)) f(signature,result,retset)
   LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
   WHERE p.oid IS NULL OR p.prorettype<>f.result OR p.proretset<>f.retset OR p.provolatile<>'i' OR p.prosecdef
    OR p.proowner<>(SELECT oid FROM relay_role)

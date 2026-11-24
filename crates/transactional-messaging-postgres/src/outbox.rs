@@ -4,11 +4,11 @@ use crate::{
     envelope::Envelope,
     inbox::{fingerprint, milliseconds},
 };
-use rss_request_context::{Clock, Deadline};
+use rss_request_context::{Clock, Deadline, ExecutionTimer};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     fence::ExecutionBinding,
-    message::MessagingDomain,
+    message::{MessageFingerprint, MessageId, MessagingDomain},
     outbox::*,
     policy::{DeliveryBudget, OperationDeadline, within},
 };
@@ -88,6 +88,25 @@ pub(crate) struct SourceWindow {
     pub(crate) delivery: Duration,
 }
 impl PgOutboxClaim {
+    async fn settle_in(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        lease: i64,
+        disposition: &str,
+    ) -> Result<String, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
+        )
+        .bind(self.binding.tenant().to_string())
+        .bind(self.seq)
+        .bind(&self.token)
+        .bind(lease)
+        .bind(disposition)
+        .bind(&self.dr_operation)
+        .fetch_one(connection)
+        .await
+    }
+
     pub(crate) async fn lease_in(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -228,27 +247,55 @@ impl<R> PgOutboxStore<R> {
         message_id: &rss_transactional_messaging::message::MessageId,
         expected: rss_transactional_messaging::message::MessageFingerprint,
     ) -> Result<bool, PgError> {
+        self.publication_states(tx, &[(domain, message_id, expected)])
+            .await?
+            .pop()
+            .ok_or_else(PgError::invariant)
+    }
+
+    /// Verify each exact dispatch in the borrowed transaction, in request order.
+    /// Missing rows are invariant failures even if another request in the batch matches.
+    pub async fn publication_states(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        expected: &[(&MessagingDomain, &MessageId, MessageFingerprint)],
+    ) -> Result<Vec<bool>, PgError> {
         self.validate_transaction(tx)?;
+        if expected.is_empty() {
+            return Ok(Vec::new());
+        }
         let tenant = tx.tenant_id().to_string();
-        let id = message_id.as_str().to_owned();
-        let row = tx.with_connection(move |connection| Box::pin(async move {
-            sqlx::query("SELECT domain,fingerprint,status FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2")
-                .bind(tenant).bind(id).fetch_optional(connection).await
-        })).await?.ok_or_else(PgError::invariant)?;
-        let digest: Vec<u8> = row.try_get("fingerprint")?;
-        if row.try_get::<String, _>("domain")? != domain.as_str()
-            || fingerprint(digest)? != expected
-        {
-            return Err(PgError::classified(
-                MessagingErrorKind::Conflict,
-                std::io::Error::other("dispatch identity conflict"),
-            ));
-        }
-        match row.try_get::<String, _>("status")?.as_str() {
-            "published" => Ok(true),
-            "pending" | "publishing" | "dead_letter" | "resolved" => Ok(false),
-            _ => Err(PgError::invariant()),
-        }
+        let ids: Vec<_> = expected
+            .iter()
+            .map(|(_, id, _)| id.as_str().to_owned())
+            .collect();
+        let rows = tx.with_connection(move |connection| Box::pin(async move {
+            sqlx::query("SELECT o.domain,o.fingerprint,o.status
+                FROM unnest($2::text[]) WITH ORDINALITY requested(id,ordinal)
+                LEFT JOIN rss_transactional_messaging.outbox o ON o.tenant_id=$1::uuid AND o.message_id=requested.id
+                ORDER BY requested.ordinal")
+                .bind(tenant).bind(ids).fetch_all(connection).await
+        })).await?;
+        rows.iter()
+            .zip(expected)
+            .map(|(row, (domain, _, digest))| {
+                let actual = row
+                    .try_get::<Option<&str>, _>("domain")?
+                    .ok_or_else(PgError::invariant)?;
+                if actual != domain.as_str() || fingerprint(row.try_get("fingerprint")?)? != *digest
+                {
+                    return Err(PgError::classified(
+                        MessagingErrorKind::Conflict,
+                        std::io::Error::other("dispatch identity conflict"),
+                    ));
+                }
+                match row.try_get::<&str, _>("status")? {
+                    "published" => Ok(true),
+                    "pending" | "publishing" | "dead_letter" | "resolved" => Ok(false),
+                    _ => Err(PgError::invariant()),
+                }
+            })
+            .collect()
     }
     fn valid_claim(&self, claim: &PgOutboxClaim) -> bool {
         self.writer.domain == *claim.message.envelope().metadata().domain()
@@ -298,6 +345,14 @@ impl<R> PgOutboxStore<R> {
     }
 }
 
+fn settlement_status(result: &str) -> Result<(), PgError> {
+    match result {
+        "settled" => Ok(()),
+        "expired" | "lost_lease" => Err(PgError::lost()),
+        _ => Err(PgError::invariant()),
+    }
+}
+
 impl PgOutboxStore<()> {
     /// Private composition: only the consumer transaction owner may stage a local terminal result.
     pub(crate) async fn settle_local_in(
@@ -317,22 +372,7 @@ impl PgOutboxStore<()> {
                 "dead_letter"
             }
         };
-        let result: String = sqlx::query_scalar(
-            "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
-        )
-        .bind(tx.tenant_id().to_string())
-        .bind(claim.seq)
-        .bind(&claim.token)
-        .bind(*lease)
-        .bind(disposition)
-        .bind(&claim.dr_operation)
-        .fetch_one(&mut *tx.connection)
-        .await?;
-        match result.as_str() {
-            "settled" => Ok(()),
-            "expired" | "lost_lease" => Err(PgError::lost()),
-            _ => Err(PgError::invariant()),
-        }
+        settlement_status(&claim.settle_in(tx.connection, *lease, disposition).await?)
     }
 }
 impl<R> OutboxWriter<Vec<u8>> for PgOutboxStore<R> {
@@ -366,10 +406,10 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         #[cfg(feature = "recovery")]
         let started = self.writer.runtime.timer.now();
         let batch = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
-                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
+                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, payload, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
                     .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(connection).await?;
                 rows.into_iter().map(|row| {
-                    let message = PendingMessage::new(Envelope::decode(&row.try_get::<String,_>("envelope")?)?);
+                    let message = PendingMessage::new(Envelope::decode(&row)?);
                     if message.fingerprint() != fingerprint(row.try_get("fingerprint")?)? { return Err(PgError::invariant()); }
                     let envelope = message.envelope();
                     if row.try_get::<String,_>("tenant_id")? != envelope.metadata().tenant_id().to_string()
@@ -412,45 +452,64 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
     }
     async fn settle(
         &self,
-        claim: Self::Claim,
+        mut claim: Self::Claim,
         settlement: OutboxSettlement<R>,
         deadline: OperationDeadline,
     ) -> Result<(), MessagingError> {
         if !self.valid_claim(&claim) {
             return Err(PgError::lost().port());
         }
-        let tenant = claim.message.envelope().metadata().tenant_id();
-        let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
-            .map_err(|_| PgError::invariant().port())?;
+        let runtime = &self.writer.runtime;
+        let cutoff = runtime.cutoff(deadline).map_err(PgError::port)?;
         let disposition = match settlement {
             OutboxSettlement::Published(_) => "published",
             OutboxSettlement::Retry => "retry",
             OutboxSettlement::DeadLetter => "dead_letter",
         };
-        let lease = claim.lease_us.into_inner();
-        self.writer.runtime
-            .relay(claim.binding, cutoff, move |connection| {
-                Box::pin(async move {
-                    let result: String = sqlx::query_scalar(
-                        "SELECT rss_transactional_messaging.settle_outbox($1::uuid,$2,$3::uuid,$4,$5,$6::uuid)",
-                    )
-                    .bind(tenant.to_string())
-                    .bind(claim.seq)
-                    .bind(claim.token)
-                    .bind(lease)
-                    .bind(disposition)
-                    .bind(claim.dr_operation)
-                    .fetch_one(connection)
-                    .await?;
-                    match result.as_str() {
-                        "settled" => Ok(()),
-                        "expired" | "lost_lease" => Err(PgError::lost()),
-                        _ => Err(PgError::invariant()),
-                    }
-                })
-            })
-            .await
-            .map_err(PgError::port)
+        // No other task can renew this move-only claim after settlement starts.
+        let lease = *claim.lease_us.get_mut();
+        let mut delay = Duration::from_millis(5);
+        loop {
+            let mut allocator_busy = false;
+            let attempt = runtime
+                .transaction_until(
+                    claim.binding,
+                    cutoff,
+                    (&claim, &mut allocator_busy),
+                    true,
+                    #[cfg(feature = "integration")]
+                    None,
+                    |(claim, allocator_busy), tx| {
+                        Box::pin(async move {
+                            let result = claim.settle_in(tx.connection, lease, disposition).await;
+                            if let Err(sqlx::Error::Database(error)) = &result {
+                                **allocator_busy = error.code().as_deref() == Some("55P03")
+                                    && error.constraint() == Some("outbox_head_allocator");
+                            }
+                            settlement_status(&result?)
+                        })
+                    },
+                )
+                .await;
+            // The SQL error alone cannot authorize a retry: rollback must be acknowledged.
+            let retry = attempt
+                .fold(
+                    |()| Ok(false),
+                    Err,
+                    |e| if allocator_busy { Ok(true) } else { Err(e) },
+                    Err,
+                    Err,
+                    Err,
+                )
+                .map_err(PgError::port)?;
+            if !retry {
+                return Ok(());
+            }
+            let wake = Deadline::from_timeout(&runtime.timer, delay)
+                .map_err(|_| PgError::invariant().port())?;
+            within(&runtime.timer, cutoff, |_| runtime.timer.sleep_until(wake)).await?;
+            delay = (delay * 2).min(Duration::from_millis(100));
+        }
     }
 }
 

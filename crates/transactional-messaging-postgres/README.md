@@ -38,8 +38,9 @@ tenant and configured domain. Hosts query other tenants separately when composin
 DR state. The deadline uses the injected runtime clock and is anchored before database I/O, so the
 query cannot extend the wait. Due work may be locked or claimed concurrently: bound immediate rescans
 and retain a recovery scan. These hints do not claim, settle, prove delivery or grant tenant access.
+The fresh schema stores message metadata in `envelope` and the complete payload in `payload bytea`, including after settlement.
 The external migrator grants `next_outbox_wakeup(uuid,text)` to relay/consumer roles; private
-`outbox_candidates(uuid,text)` remains accessible only to the relay function owner.
+`outbox_candidates(uuid,text,timestamptz,timestamptz,integer)` remains accessible only to the relay function owner.
 
 A producer that only commits business state and appends/reads Outbox uses
 `PgRuntime::connect_producer(config, timer, storage)`. Grant schema USAGE, policy/Outbox SELECT,
@@ -94,6 +95,14 @@ error. Transaction stages log only the phase, classification and redacted source
 
 Every ordered writer first calls `tx.prepare_outbox_partitions(&partitions)` with its complete
 `PartitionIdentity` set, including identities used by other writers/domains in the same transaction.
+A SQL transaction that both appends ordered output and releases an ordered source head must include
+the source in this set and prepare before locking the source. An incomplete declaration rejects the
+handoff with PZ002. A standalone handoff takes its allocator without waiting while holding the source. Contention
+rolls the transaction back with PostgreSQL 55P03 (transient). Retry with the original token and
+deadline, or recovery version. A successful standalone handoff closes ordered admission in
+that transaction. The Rust relay retains the original claim and retries only the database settlement
+after a confirmed rollback caused by this contention, within the original operation deadline.
+A combined operation can wait for all its allocators up front through prepare.
 Prepare before companion business locks when those identities are known. An empty set acquires
 nothing; one nonempty set may be declared per tenant transaction. Duplicate entries are deduplicated;
 repeated or expanded declarations and undeclared ordered append fail closed. Unordered messages

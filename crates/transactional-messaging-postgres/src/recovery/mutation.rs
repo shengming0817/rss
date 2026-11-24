@@ -225,12 +225,12 @@ async fn validate_evidence(
     request: &Mutation,
     evidence: &MessageId,
 ) -> Result<(), PgError> {
-    let row = sqlx::query("SELECT status,envelope::text,fingerprint FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2 FOR SHARE")
+    let row = sqlx::query("SELECT status,envelope::text,payload,fingerprint FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2 FOR SHARE")
         .bind(request.tenant().to_string()).bind(evidence.as_str()).fetch_optional(&mut *tx.connection).await?.ok_or(Error::Evidence)?;
     if row.try_get::<&str, _>("status")? != "published" {
         return Err(Error::Evidence.into());
     }
-    let envelope = crate::envelope::Envelope::decode(&row.try_get::<String, _>("envelope")?)?;
+    let envelope = crate::envelope::Envelope::decode(&row)?;
     let digest: Vec<u8> = row.try_get("fingerprint")?;
     if envelope.id() != evidence
         || envelope.metadata().tenant_id() != request.tenant()

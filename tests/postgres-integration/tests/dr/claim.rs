@@ -39,7 +39,7 @@ pub async fn check(
         .bind(other.to_string())
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO rss_transactional_messaging.outbox(tenant_id,message_id,domain,envelope,fingerprint) SELECT $1::uuid,message_id,domain,'{}'::jsonb,fingerprint FROM rss_transactional_messaging.outbox WHERE message_id='partial-claim'").bind(other.to_string()).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.outbox(tenant_id,message_id,domain,envelope,payload,fingerprint) SELECT $1::uuid,message_id,domain,'{}'::jsonb,payload,fingerprint FROM rss_transactional_messaging.outbox WHERE message_id='partial-claim'").bind(other.to_string()).execute(&mut *tx).await?;
     tx.commit().await?;
     let limit = std::num::NonZeroUsize::new(2).ok_or_else(|| anyhow::anyhow!("limit"))?;
     let batch = outbox

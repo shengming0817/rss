@@ -37,47 +37,66 @@ impl<R: Send> PgStore<R> {
         self.outbox.validate_transaction(tx)?;
         self.clock.now(tx).await
     }
-    async fn recover_stored(
+    async fn recover_rows(
         &self,
         tx: &mut PgTransaction<'_>,
+        scope: Scope,
         current: Coordinate,
-        mut row: Stored,
-    ) -> Result<Command, PgError> {
-        // reason: terminal snapshots remain immutable even after authority advances.
-        if row.command.status().is_terminal() {
-            return Ok(row.command);
+        rows: Vec<Stored>,
+    ) -> Result<Vec<Command>, PgError> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
         }
-        let previous = row.command.version();
-        let mut time = self.now(tx).await?;
-        let event = if current != row.command.spec().coordinate() {
-            Event::Supersede
-        } else if time >= row.command.spec().deadline() {
-            Event::Expire
-        } else if row.command.status() == Status::Queued {
-            let published = self
-                .outbox
-                .is_published(tx, &row.domain, &row.message_id, row.fingerprint)
-                .await?;
-            // Confirmation can block across expiry. The reducer receives the final
-            // provider sample, never the pre-confirmation time.
-            time = self.now(tx).await?;
-            if published {
-                Event::Published
+        let observed = self.now(tx).await?;
+        let needs_confirmation = |row: &Stored| {
+            row.command.status() == Status::Queued
+                && row.command.spec().coordinate() == current
+                && observed < row.command.spec().deadline()
+        };
+        let requested: Vec<_> = rows
+            .iter()
+            .filter(|row| needs_confirmation(row))
+            .map(|row| (&row.domain, &row.message_id, row.fingerprint))
+            .collect();
+        let mut facts = self
+            .outbox
+            .publication_states(tx, &requested)
+            .await?
+            .into_iter();
+        // Confirmation may wait on storage across the command deadline.
+        let confirmed_at = if facts.len() > 0 {
+            self.now(tx).await?
+        } else {
+            observed
+        };
+        let mut changes = PageChanges::default();
+        let mut commands = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event = if needs_confirmation(&row) {
+                let published = facts.next().ok_or_else(|| error(Error::InvalidSnapshot))?;
+                if published {
+                    Event::Published
+                } else {
+                    Event::Expire
+                }
+            } else if current != row.command.spec().coordinate() {
+                Event::Supersede
             } else {
                 Event::Expire
+            };
+            let mut command = row.command;
+            let previous = command.version();
+            let outcome = command
+                .transition(event, current, confirmed_at)
+                .map_err(error)?;
+            if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
+                return Err(error(Error::InvalidSnapshot));
             }
-        } else {
-            Event::Expire
-        }; // reason: Expire before the deadline is the reducer's explicit no-op.
-        let outcome = row
-            .command
-            .transition(event, current, time)
-            .map_err(error)?;
-        if matches!(outcome, Outcome::OutOfOrder | Outcome::Late) {
-            return Err(error(Error::InvalidSnapshot));
+            changes.push(&command, previous);
+            commands.push(command);
         }
-        save(tx, &row.command, previous).await?;
-        Ok(row.command)
+        changes.save(tx, scope).await?;
+        Ok(commands)
     }
     async fn mutate(
         &self,
@@ -306,10 +325,7 @@ impl<R: Send> Store for PgStore<R> {
             .into_iter()
             .map(decode)
             .collect::<Result<Vec<_>, _>>()?;
-        let mut commands = Vec::with_capacity(rows.len());
-        for row in rows {
-            commands.push(self.recover_stored(tx, current, row).await?);
-        }
+        let commands = self.recover_rows(tx, s, current, rows).await?;
         let after = commands.last().map(|c| c.spec().id().clone());
         Ok(RecoveryPage { commands, after })
     }
@@ -322,7 +338,8 @@ impl<R: Send> Store for PgStore<R> {
         self.outbox.validate_transaction(tx)?;
         let current = authority(tx, s).await?;
         match read(tx, s, id).await? {
-            Some(row) => self.recover_stored(tx, current, row).await.map(Some),
+            Some(row) if row.command.status().is_terminal() => Ok(Some(row.command)),
+            Some(row) => Ok(self.recover_rows(tx, s, current, vec![row]).await?.pop()),
             // reason: an absent identity is distinct from an invalid scope or corrupt snapshot.
             None => Ok(None),
         }

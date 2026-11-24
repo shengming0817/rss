@@ -20,7 +20,7 @@ pub(super) async fn query(
     let result = runtime.local_tx_with_context(binding, deadline, request, |request, tx| Box::pin(async move {
         let sql = match request.source() {
             Source::Consumer => "SELECT capsule IS NOT NULL AS hot_available, id::text AS key, message_id, recovery_version, false AS resolved, consumer_group,contract,contract_version,schema_digest,reason,(extract(epoch FROM created_at)*1000000)::bigint AS captured_at, (SELECT count(*) FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed') AS replay_count, (SELECT replay_message_id FROM rss_transactional_messaging.recovery_operations o WHERE o.tenant_id=d.tenant_id AND o.target_kind='consumer' AND o.target_key=d.id::text AND o.outcome='replayed' ORDER BY created_at DESC,operation_id DESC LIMIT 1) AS last_replay FROM rss_transactional_messaging.consumer_dead_letter d WHERE tenant_id=$1::uuid AND ($2::text IS NULL OR id::text COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR id::text=$3) ORDER BY id::text COLLATE \"C\" LIMIT $4",
-            Source::Outbox => "SELECT message_id AS key, message_id, recovery_version, status='resolved' AS resolved, envelope::text,fingerprint,(extract(epoch FROM automatic_retry_deadline)*1000000)::bigint AS deadline, automatic_retry_deadline<=clock_timestamp() AS expired FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND status IN ('dead_letter','resolved') AND ($2::text IS NULL OR message_id COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR message_id=$3) ORDER BY message_id COLLATE \"C\" LIMIT $4",
+            Source::Outbox => "SELECT message_id AS key, message_id, recovery_version, status='resolved' AS resolved, envelope::text,payload,fingerprint,(extract(epoch FROM automatic_retry_deadline)*1000000)::bigint AS deadline, automatic_retry_deadline<=clock_timestamp() AS expired FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND status IN ('dead_letter','resolved') AND ($2::text IS NULL OR message_id COLLATE \"C\" > $2 COLLATE \"C\") AND ($3::text IS NULL OR message_id=$3) ORDER BY message_id COLLATE \"C\" LIMIT $4",
         };
         let rows = sqlx::query(sql).bind(request.tenant().to_string()).bind(request.after()).bind(request.target().map(Target::key)).bind(i64::from(request.limit())+1).fetch_all(&mut *tx.connection).await?;
         let has_more = rows.len() > usize::from(request.limit());
@@ -81,8 +81,7 @@ fn details(row: &sqlx::postgres::PgRow, request: &Query) -> Result<Details, PgEr
             }))
         }
         Source::Outbox => {
-            let envelope =
-                crate::envelope::Envelope::decode(&row.try_get::<String, _>("envelope")?)?;
+            let envelope = crate::envelope::Envelope::decode(row)?;
             let fingerprint: Vec<u8> = row.try_get("fingerprint")?;
             if envelope.metadata().tenant_id() != request.tenant()
                 || envelope.id().as_str() != row.try_get::<&str, _>("message_id")?

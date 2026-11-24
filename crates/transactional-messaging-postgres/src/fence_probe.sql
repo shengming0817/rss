@@ -2,7 +2,10 @@
 SELECT to_regclass('rss_transactional_messaging.storage_lineage') IS NOT NULL
  AND to_regclass('rss_transactional_messaging.tenant_epoch') IS NOT NULL
  AND to_regclass('rss_transactional_messaging.dr_members') IS NOT NULL
- AND to_regprocedure('rss_transactional_messaging.claim_outbox(text,integer,bigint)') IS NULL
+ AND NOT EXISTS(SELECT FROM (VALUES ('claim_outbox','uuid,text,integer,bigint'),
+  ('outbox_lease','uuid,bigint,uuid,bigint,bigint,uuid'),('settle_outbox','uuid,bigint,uuid,bigint,text,uuid')
+ ) f(name,arguments) LEFT JOIN pg_proc p ON p.pronamespace='rss_transactional_messaging'::regnamespace AND p.proname=f.name
+ WHERE p.oid IS NULL OR p.oid IS DISTINCT FROM to_regprocedure('rss_transactional_messaging.'||f.name||'('||f.arguments||')'))
  AND has_function_privilege(current_user,'rss_transactional_messaging.check_execution()','EXECUTE')
  AND has_table_privilege('rss_tmsg_relay','rss_transactional_messaging.storage_lineage','SELECT')
  AND has_column_privilege('rss_tmsg_relay','rss_transactional_messaging.storage_lineage','singleton','UPDATE')
@@ -27,8 +30,6 @@ SELECT to_regclass('rss_transactional_messaging.storage_lineage') IS NOT NULL
  AND NOT pg_has_role(current_user,'rss_tmsg_relay','MEMBER')
  AND NOT has_schema_privilege(current_user,'rss_transactional_messaging','CREATE')
  AND (NOT $1 OR (has_function_privilege(current_user,'rss_transactional_messaging.apply_dr(uuid,bytea,text,jsonb,jsonb,bigint)','EXECUTE') AND has_function_privilege(current_user,'rss_transactional_messaging.read_dr(uuid,bytea)','EXECUTE')))
- AND to_regprocedure('rss_transactional_messaging.outbox_lease(bigint,uuid,bigint,bigint)') IS NULL
- AND to_regprocedure('rss_transactional_messaging.settle_outbox(bigint,uuid,bigint,text)') IS NULL
  AND NOT EXISTS(SELECT 1 FROM (VALUES
  ('storage_lineage','singleton','boolean'),('storage_lineage','target','bytea'),('storage_lineage','lineage','bytea'),
  ('tenant_epoch','tenant_id','uuid'),('tenant_epoch','epoch','bigint'),
