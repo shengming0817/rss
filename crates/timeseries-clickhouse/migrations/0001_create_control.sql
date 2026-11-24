@@ -3,12 +3,14 @@
 CREATE SCHEMA rss_ts_ch;
 CREATE TABLE rss_ts_ch.installation (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 2 CHECK(version=2),
+ id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 3 CHECK(version=3),
  max_pending_batches integer NOT NULL DEFAULT 1 CHECK(max_pending_batches BETWEEN 1 AND 16)
 );
 INSERT INTO rss_ts_ch.installation DEFAULT VALUES;
 CREATE TABLE rss_ts_ch.namespaces (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
+ fence_epoch bigint NOT NULL DEFAULT 0 CHECK(fence_epoch>=0),
+ summary_epoch bigint NOT NULL DEFAULT 0 CHECK(summary_epoch>=0),
  allocated bigint NOT NULL DEFAULT 0 CHECK(allocated>=published),
  published bigint NOT NULL DEFAULT 0 CHECK(published>=0),
  revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
@@ -72,6 +74,10 @@ CREATE TABLE rss_ts_ch.fences (
  PRIMARY KEY(tenant_id,namespace,id),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );
+CREATE INDEX visible_fences ON rss_ts_ch.fences
+ (tenant_id,namespace,(coalesce(selection#>>'{series,subject}',selection->>'subject')),
+  (coalesce(selection#>>'{series,resource}',selection->>'resource')),lo,hi)
+ WHERE kind='pruned' OR (kind='delete' AND NOT restored);
 CREATE TABLE rss_ts_ch.plans (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
  binding bytea NOT NULL CHECK(octet_length(binding)=32), state bytea NOT NULL,
@@ -89,6 +95,7 @@ CREATE TABLE rss_ts_ch.summaries (
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );
+CREATE INDEX page_summary_refs ON rss_ts_ch.summaries(tenant_id,namespace,semantics,lo,hi);
 CREATE INDEX clean_series_summaries ON rss_ts_ch.summaries(tenant_id,namespace,source,generation,series,hi) WHERE dirty_from IS NULL;
 CREATE TABLE rss_ts_ch.ranges (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, spec_digest bytea NOT NULL,

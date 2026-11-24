@@ -54,14 +54,14 @@ async fn simple(
     c: &mut PgConnection,
     r: &MaintenanceRequest,
     time: i64,
-    max: u32,
+    limits: &crate::Limits,
 ) -> Result<Step, Error> {
     match r.action() {
         MaintenanceAction::AdvanceCutoff { selection, before } => {
             if before.micros() == 0 {
                 return Ok(Step::Done(0));
             }
-            let fs = control::fences(c, r.scope(), max).await?;
+            let fs = control::fences(c, r.scope(), limits.max_fences.get()).await?;
             if fs.iter().any(|f| {
                 f.kind == "cutoff"
                     && control::covers(&f.selection, selection)
@@ -77,7 +77,7 @@ async fn simple(
                 selection,
                 Interval::new(Timestamp::new(0)?, *before)?,
                 None,
-                max,
+                limits.max_fences.get(),
             )
             .await?;
         }
@@ -96,10 +96,18 @@ async fn simple(
                 selection,
                 *window,
                 Some(restore_until.micros()),
-                max,
+                limits.max_fences.get(),
             )
             .await?;
-            control::invalidate(c, r.scope(), selection, window.start().micros(), max).await?;
+            control::fence_changed(c, r.scope()).await?;
+            control::invalidate(
+                c,
+                r.scope(),
+                selection,
+                window.start().micros(),
+                limits.max_points.get(),
+            )
+            .await?;
         }
         MaintenanceAction::Restore {
             selection,
@@ -111,7 +119,15 @@ async fn simple(
             if rows != 1 {
                 return Err(Error::HistoryExpired);
             }
-            control::invalidate(c, r.scope(), selection, window.start().micros(), max).await?;
+            control::fence_changed(c, r.scope()).await?;
+            control::invalidate(
+                c,
+                r.scope(),
+                selection,
+                window.start().micros(),
+                limits.max_points.get(),
+            )
+            .await?;
         }
         MaintenanceAction::CloseStream { stream } => {
             sqlx::query("INSERT INTO rss_ts_ch.streams(tenant_id,namespace,source,generation,closed) VALUES($1::text::uuid,$2,$3,$4,true) ON CONFLICT(tenant_id,namespace,source,generation) DO UPDATE SET closed=true")
@@ -222,7 +238,7 @@ impl<C: Clock> Operation<'_, C> {
                     )
                     .await?
                 }
-                _ => simple(tx.connection(), r, time, self.limits.max_points.get()).await?,
+                _ => simple(tx.connection(), r, time, self.limits).await?,
             };
             let complete = matches!(step, Step::Done(_));
             let progress = match step {

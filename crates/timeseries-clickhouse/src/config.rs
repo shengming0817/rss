@@ -116,6 +116,10 @@ fn authenticated(base: &clickhouse::Client, credentials: &Credentials) -> clickh
 /// Explicit host caps; there are no unlimited/default budgets.
 #[derive(Clone, Debug)]
 pub struct Limits {
+    /// Maximum simultaneous admitted calls across all tenants.
+    pub max_in_flight: NonZeroU32,
+    /// Maximum stored namespace fences and matched fences per request.
+    pub max_fences: NonZeroU32,
     /// Weighted admission capacity shared by all tenants on one owner.
     pub operation_permits: NonZeroU32,
     /// Permits and maximum execution threads for each public read.

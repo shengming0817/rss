@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 mod aggregate;
+mod capacity;
 mod config;
 mod control;
 mod control_probe;
@@ -9,6 +10,7 @@ mod definition;
 mod install;
 mod lifecycle;
 mod maintain;
+mod page;
 mod probe;
 mod projection;
 mod read;

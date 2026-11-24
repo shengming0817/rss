@@ -60,6 +60,21 @@ enum Admission {
     Verified,
     Prepared(Prepared),
 }
+#[derive(clickhouse::Row, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectionProof {
+    series: String,
+    source: String,
+    generation: String,
+    observed_at: i64,
+    sequence: u64,
+    sample_id: String,
+    digest: String,
+    received_at: i64,
+    subject: String,
+    resource: String,
+    metric_key: String,
+    payload_hash: String,
+}
 struct Prepared {
     rows: Vec<Raw>,
     revision: i64,
@@ -161,7 +176,7 @@ impl<C: Clock> Operation<'_, C> {
         if closed {
             return Err(Error::HistoryExpired);
         }
-        let fences = control::fences(c, scope, self.limits.max_points.get()).await?;
+        let fences = control::fences(c, scope, self.limits.max_fences.get()).await?;
         let received = now(c).await?;
         let rows = admission::admit(
             c,
@@ -200,14 +215,41 @@ impl<C: Clock> Operation<'_, C> {
         p: &Prepared,
         deadline: Deadline,
     ) -> Result<(), Error> {
-        let rows=self.ch_query(&self.reader,"SELECT sample_id,digest,received_at FROM rss_ts_ch.raw FINAL WHERE tenant=? AND namespace=? AND revision=? ORDER BY sample_id",deadline)?
-            .bind(self.tenant.to_string()).bind(b.stream().scope().namespace().as_str()).bind(p.revision).fetch_all::<(String,String,i64)>().await.map_err(|e|projection::provider_error("projection-verification",e))?;
+        // These columns complete the raw sorting key after the fixed tenant, namespace and
+        // revision. Only exact retries collapse; a conflicting digest or receipt survives merges.
+        use sha2::{Digest, Sha256};
+        let sql="SELECT DISTINCT series,source,generation,observed_at,sequence,sample_id,digest,received_at,
+                    subject,resource,metric_key,lower(hex(SHA256(payload))) AS payload_hash
+                 FROM rss_ts_ch.raw WHERE tenant=? AND namespace=? AND revision=? LIMIT ?";
+        let mut rows = self
+            .ch_query(self.reader.query(sql), deadline)?
+            .bind(self.tenant.to_string())
+            .bind(b.stream().scope().namespace().as_str())
+            .bind(p.revision)
+            .bind(p.rows.len() as u64 + 1)
+            .fetch_all::<ProjectionProof>()
+            .await
+            .map_err(|e| projection::provider_error("projection-verification", e))?;
         let mut expected = p
             .rows
             .iter()
-            .map(|r| (r.sample_id.clone(), r.digest.clone(), r.received_at))
+            .map(|r| ProjectionProof {
+                series: r.series.clone(),
+                source: r.source.clone(),
+                generation: r.generation.clone(),
+                observed_at: r.observed_at,
+                sequence: r.sequence,
+                sample_id: r.sample_id.clone(),
+                digest: r.digest.clone(),
+                received_at: r.received_at,
+                subject: r.subject.clone(),
+                resource: r.resource.clone(),
+                metric_key: r.metric_key.clone(),
+                payload_hash: projection::hex(&Sha256::digest(r.payload.as_bytes())),
+            })
             .collect::<Vec<_>>();
-        expected.sort();
+        rows.sort_unstable();
+        expected.sort_unstable();
         if rows != expected {
             return Err(Error::Invariant);
         }

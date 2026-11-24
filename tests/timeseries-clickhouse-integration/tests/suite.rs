@@ -31,6 +31,8 @@ fn id(s: &str) -> anyhow::Result<Id> {
 }
 fn limits() -> anyhow::Result<Limits> {
     Ok(Limits {
+        max_in_flight: NonZeroU32::new(16).ok_or(Error::InvalidInput)?,
+        max_fences: NonZeroU32::new(100).ok_or_else(|| anyhow::anyhow!("positive"))?,
         operation_permits: NonZeroU32::new(16).ok_or(Error::InvalidInput)?,
         query_threads: NonZeroU32::MIN,
         max_points: NonZeroU32::new(100).ok_or_else(|| anyhow::anyhow!("positive"))?,

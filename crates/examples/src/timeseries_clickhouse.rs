@@ -65,6 +65,8 @@ pub async fn run(input: Input) -> anyhow::Result<()> {
     let n = |v| NonZeroU32::new(v).ok_or(Error::InvalidInput);
     let m = |v| NonZeroU64::new(v).ok_or(Error::InvalidInput);
     let limits = Limits {
+        max_in_flight: n(4)?,
+        max_fences: n(100)?,
         operation_permits: n(4)?,
         query_threads: n(1)?,
         max_points: n(100)?,
