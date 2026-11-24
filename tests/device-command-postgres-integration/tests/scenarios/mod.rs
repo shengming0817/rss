@@ -1,4 +1,5 @@
 mod advance;
+pub(super) mod candidates;
 pub(super) use advance::atomic_handoff;
 use rss_transactional_messaging::policy::OperationDeadline;
 mod admission;

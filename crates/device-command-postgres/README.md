@@ -80,7 +80,10 @@ between payload and command intent remain product responsibilities.
   Only `Committed(page)` advances the cursor to `page.after`; all other outcomes retain the
   original cursor. The example accepts that explicit cursor instead of restarting every page.
   Consumers with their own durable candidates may instead call `recover_exact` inside that same
-  transaction. Only the selected identity is examined; terminal snapshots are returned unchanged.
+  transaction with an `ExactCommandIds` page. One authority lock and one tenant-local lookup
+  cover the page. Results follow request order; missing IDs yield empty slots and a command on
+  another device rejects the transaction. Terminal snapshots retain their persisted milestones.
+  Only changed rows enter the single version-checked page save.
   After commit ACK loss, reload exact commands/authority before deciding to retry. Preserve
   all `LocalTxAttempt` variants, including CommitUnknown and RollbackFailed. Dropped mutating
   futures quarantine their unresolved connection through the existing transaction owner.

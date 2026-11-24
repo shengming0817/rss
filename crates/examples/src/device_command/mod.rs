@@ -203,17 +203,23 @@ async fn scenario(
             .settle(claim, OutboxSettlement::Published(()), budget()?)
             .await?;
     }
-    // The application already owns this exact durable command identity.
+    // The product owns the candidate order and decides how to handle a missing slot.
     let selected = store.clone();
-    let id = CommandId::parse("example")?;
+    let ids = [CommandId::parse("missing")?, CommandId::parse("example")?];
     let recovered = committed(
         runtime
-            .local_tx(binding, budget()?, move |tx| {
-                Box::pin(async move { selected.recover_exact(tx, s, &id).await })
-            })
+            .local_tx_with_context(
+                binding,
+                budget()?,
+                ExactCommandIds::new(&ids)?,
+                move |page, tx| Box::pin(async move { selected.recover_exact(tx, s, *page).await }),
+            )
             .await,
     )?;
-    anyhow::ensure!(recovered.is_some(), "queued command disappeared");
+    anyhow::ensure!(
+        matches!(recovered.as_slice(), [None, Some(command)] if command.spec().id() == &ids[1] && command.status() == Status::Published),
+        "unexpected exact recovery page"
+    );
     anyhow::ensure!(
         load(runtime, binding, store.clone(), s, "example")
             .await?

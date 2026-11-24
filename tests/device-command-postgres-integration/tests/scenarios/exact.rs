@@ -10,7 +10,10 @@ pub(crate) async fn recovery(f: &Fixture) -> anyhow::Result<()> {
     f.initialize(s, coordinate).await?;
     let expiring = queued_expiry(&f, s, coordinate).await?;
     let queued = f.queue("exact-published", s, coordinate).await?;
-    assert_eq!(f.recover_exact("exact-published", s).await?, Some(queued));
+    assert_eq!(
+        f.recover_exact(&["exact-published"], s).await?,
+        [Some(queued)]
+    );
     f.publish().await?;
     clock.advance_to(100)?;
     selected_only(&f, s, expiring).await?;
@@ -40,22 +43,25 @@ async fn queued_expiry(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow:
 }
 
 async fn selected_only(f: &Fixture, s: Scope, expiring: Command) -> anyhow::Result<()> {
-    let published = f
-        .recover_exact("exact-published", s)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("missing exact publication"))?;
+    let page = f
+        .recover_exact(&["exact-published", "exact-missing"], s)
+        .await?;
+    let [Some(published), None] = page.as_slice() else {
+        anyhow::bail!("expected a published and a missing slot")
+    };
     assert_eq!(published.status(), Status::Published);
-    // Returning a filtered page after recovering the entire scope must fail this assertion.
     assert_eq!(f.load("exact-expiry", s).await?, Some(expiring));
-    let expired = f
-        .recover_exact("exact-expiry", s)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("missing exact expiry"))?;
+    let page = f.recover_exact(&["exact-expiry"], s).await?;
+    let [Some(expired)] = page.as_slice() else {
+        anyhow::bail!("missing expired command")
+    };
     assert_eq!(expired.status(), Status::TimedOut);
     assert_eq!(expired.record().terminal_at, Some(100));
-    assert_eq!(f.recover_exact("exact-expiry", s).await?, Some(expired));
-    assert_eq!(f.recover_exact("exact-missing", s).await?, None);
-    assert_eq!(f.load("exact-published", s).await?, Some(published));
+    assert_eq!(f.recover_exact(&["exact-expiry"], s).await?, page);
+    assert_eq!(
+        f.load("exact-published", s).await?.as_ref(),
+        Some(published)
+    );
     Ok(())
 }
 
@@ -66,22 +72,22 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
     );
     f.initialize(other_device, coordinate).await?;
     assert!(
-        f.recover_exact("exact-published", other_device)
+        f.recover_exact(&["exact-missing", "exact-published"], other_device)
             .await
             .is_err()
     );
     let foreign_scope = Scope::new(TenantId::parse(OTHER)?, s.device());
     f.initialize(foreign_scope, coordinate).await?;
     assert_eq!(
-        f.recover_exact("exact-published", foreign_scope).await?,
-        None
+        f.recover_exact(&["exact-published"], foreign_scope).await?,
+        [None]
     );
-    let id = CommandId::parse("exact-published")?;
+    let empty = ExactCommandIds::new(&[])?;
     let store = f.store.clone();
     let attempt = f
         .runtime
         .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-            Box::pin(async move { store.recover_exact(tx, foreign_scope, &id).await })
+            Box::pin(async move { store.recover_exact(tx, foreign_scope, empty).await })
         })
         .await;
     assert_eq!(
@@ -94,19 +100,16 @@ async fn isolation(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Res
         s.tenant(),
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440043")?,
     );
-    assert!(
-        f.recover_exact("exact-missing", absent_scope)
-            .await
-            .is_err()
-    );
+    assert!(f.recover_exact(&[], absent_scope).await.is_err());
+    assert!(f.recover_exact(&[], s).await?.is_empty());
     let (foreign, _) = f.controlled().await?;
     let store = foreign.store.clone();
-    let id = CommandId::parse("exact-published")?;
+    let empty = ExactCommandIds::new(&[])?;
     assert!(
         committed(
             f.runtime
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.recover_exact(tx, s, &id).await })
+                    Box::pin(async move { store.recover_exact(tx, s, empty).await })
                 })
                 .await
         )
@@ -125,20 +128,28 @@ async fn settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Re
 async fn rollback(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
     let original = f.queue("exact-rollback", s, coordinate).await?;
     f.publish().await?;
-    let id = CommandId::parse("exact-rollback")?;
+    let ids = [CommandId::parse("exact-rollback")?];
+    let page = ExactCommandIds::new(&ids)?;
     let marker = spec("exact-rollback-marker", s, coordinate)?;
     let msg = message("exact-rollback-marker", s.tenant())?;
     let store = f.store.clone();
     let attempt = f
         .runtime
-        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-            Box::pin(async move {
-                let recovered = store.recover_exact(tx, s, &id).await?;
-                assert_eq!(recovered.map(|c| c.status()), Some(Status::Published));
-                store.queue(tx, marker, msg).await?;
-                Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
-            })
-        })
+        .local_tx_with_context(
+            crate::execution(s.tenant(), 1),
+            budget()?,
+            page,
+            move |page, tx| {
+                Box::pin(async move {
+                    let recovered = store.recover_exact(tx, s, *page).await?;
+                    assert!(
+                        matches!(recovered.as_slice(), [Some(c)] if c.status() == Status::Published)
+                    );
+                    store.queue(tx, marker, msg).await?;
+                    Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
+                })
+            },
+        )
         .await;
     assert_eq!(status(attempt), "rolled-back");
     assert_eq!(f.load("exact-rollback", s).await?, Some(original));
@@ -166,7 +177,7 @@ async fn supersession(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::
         expected.as_ref().map(Command::status),
         Some(Status::Superseded)
     );
-    assert_eq!(f.recover_exact("exact-rollback", s).await?, expected);
+    assert_eq!(f.recover_exact(&["exact-rollback"], s).await?, [expected]);
     assert_eq!(
         f.load("exact-published", s).await?.map(|c| c.status()),
         Some(Status::Superseded)
@@ -180,12 +191,16 @@ async fn unknown_settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> an
     f.runtime
         .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
     let store = f.store.clone();
-    let id = CommandId::parse("exact-unknown")?;
+    let ids = [CommandId::parse("exact-unknown")?];
+    let page = ExactCommandIds::new(&ids)?;
     let attempt = f
         .runtime
-        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-            Box::pin(async move { store.recover_exact(tx, s, &id).await })
-        })
+        .local_tx_with_context(
+            crate::execution(s.tenant(), 1),
+            budget()?,
+            page,
+            move |page, tx| Box::pin(async move { store.recover_exact(tx, s, *page).await }),
+        )
         .await;
     assert_eq!(status(attempt), "unknown");
     f.runtime.close().await;
@@ -207,15 +222,17 @@ async fn unknown_settlement(f: &Fixture, s: Scope, coordinate: Coordinate) -> an
         durable.as_ref().map(Command::status),
         Some(Status::Published)
     );
-    let id = CommandId::parse("exact-unknown")?;
     let repeated = committed(
         runtime
-            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.recover_exact(tx, s, &id).await })
-            })
+            .local_tx_with_context(
+                crate::execution(s.tenant(), 1),
+                budget()?,
+                page,
+                move |page, tx| Box::pin(async move { store.recover_exact(tx, s, *page).await }),
+            )
             .await,
     )?;
-    assert_eq!(repeated, durable);
+    assert_eq!(repeated, [durable]);
     assert_eq!(f.count("outbox", "dispatch.exact-unknown").await?, 1);
     runtime.close().await;
     Ok(())

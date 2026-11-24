@@ -174,7 +174,8 @@ async fn assert_rolled_back(
 }
 
 pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
-    partial_recovery(f).await?;
+    partial_recovery(f, ["cas-page-a", "cas-page-z"], false).await?;
+    partial_recovery(f, ["cas-exact-a", "cas-exact-z"], true).await?;
     let s = Scope::new(
         scope(TENANT)?.tenant(),
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440066")?,
@@ -196,31 +197,50 @@ pub(crate) async fn atomic_handoff(f: &Fixture) -> anyhow::Result<()> {
     queue_race(f, s, next).await
 }
 
-async fn partial_recovery(f: &Fixture) -> anyhow::Result<()> {
+async fn partial_recovery(f: &Fixture, names: [&str; 2], exact: bool) -> anyhow::Result<()> {
     let scope = Scope::new(
         scope(TENANT)?.tenant(),
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440068")?,
     );
     let current = Coordinate::new(1, 1)?;
     f.initialize(scope, current).await?;
-    let first = f.queue("cas-page-a", scope, current).await?;
-    f.queue("cas-page-z", scope, current).await?;
+    let first = f.queue(names[0], scope, current).await?;
+    f.queue(names[1], scope, current).await?;
     // Only the competing version commits. The earlier successful save in this page rolls back.
-    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE tenant_id=$1::uuid AND message_id IN ('dispatch.cas-page-a','dispatch.cas-page-z')")
-        .bind(scope.tenant().to_string()).execute(&f.owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE tenant_id=$1::uuid AND message_id=ANY($2::text[])")
+        .bind(scope.tenant().to_string()).bind(names.map(|id| format!("dispatch.{id}"))).execute(&f.owner).await?;
     let mut competing = f.owner.begin().await?;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *competing)
         .await?;
-    sqlx::query("UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1 WHERE tenant_id=$1::uuid AND command_id='cas-page-z' AND version=1")
-        .bind(scope.tenant().to_string()).execute(&mut *competing).await?;
+    sqlx::query("UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1 WHERE tenant_id=$1::uuid AND command_id=$2 AND version=1")
+        .bind(scope.tenant().to_string()).bind(names[1]).execute(&mut *competing).await?;
     let recover = async {
         let store = f.store.clone();
+        let ids = [CommandId::parse(names[0])?, CommandId::parse(names[1])?];
+        let page = ExactCommandIds::new(&ids)?;
+        let marker = spec("cas-marker", scope, current)?;
+        let dispatch = message("cas-marker", scope.tenant())?;
         let result = f
             .runtime
-            .local_tx(crate::execution(scope.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.recover(tx, scope, BatchLimit::default(), None).await })
-            })
+            .local_tx_with_context(
+                crate::execution(scope.tenant(), 1),
+                budget()?,
+                page,
+                move |page, tx| {
+                    Box::pin(async move {
+                        store.queue(tx, marker, dispatch).await?;
+                        if exact {
+                            store.recover_exact(tx, scope, *page).await?;
+                        } else {
+                            let _page = store
+                                .recover(tx, scope, BatchLimit::default(), None)
+                                .await?;
+                        }
+                        Ok(())
+                    })
+                },
+            )
             .await;
         assert_eq!(
             result.fold(
@@ -241,13 +261,15 @@ async fn partial_recovery(f: &Fixture) -> anyhow::Result<()> {
         anyhow::Ok(())
     };
     tokio::try_join!(recover, release)?;
-    assert_eq!(f.load("cas-page-a", scope).await?, Some(first));
+    assert_eq!(f.load(names[0], scope).await?, Some(first));
     assert_eq!(
-        f.load("cas-page-z", scope)
+        f.load(names[1], scope)
             .await?
             .map(|c| (c.version(), c.status())),
         Some((2, Status::Published))
     );
+    assert_eq!(f.count("commands", "cas-marker").await?, 0);
+    assert_eq!(f.count("outbox", "dispatch.cas-marker").await?, 0);
     Ok(())
 }
 
@@ -305,7 +327,7 @@ async fn replay_after_unknown(
             (expected_version, Status::Superseded),
             "{id}"
         );
-        assert_eq!(f.recover_exact(id, s).await?, Some(command));
+        assert_eq!(f.recover_exact(&[id], s).await?, [Some(command)]);
         assert_eq!(f.count("outbox", &format!("dispatch.{id}")).await?, 1);
     }
     Ok(())
