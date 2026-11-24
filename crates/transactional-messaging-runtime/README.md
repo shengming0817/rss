@@ -10,7 +10,8 @@ as individual claims finish settlement, polling active work even while a claim r
 `RelayConfig::new(claim_limit, max_in_flight, idle_scan_interval, error_backoff)` controls each
 request size, total admitted work, empty-scan interval and recoverable-error delay. Both delays
 must be at least 100ms. A completion can wake an idle scan. A recoverable infrastructure failure
-holds further requests until the error delay elapses. Cancellation or a fatal error stops new
+holds further requests until the error delay elapses. A durably settled Retry follows the store's
+per-record eligibility delay so other due partitions can progress. Cancellation or a fatal error stops new
 requests and drains every admitted claim, including the reply to a request already in progress.
 Every relay store/publisher future passes through the core-owned absolute-deadline race. Publish
 timeout is conservatively ambiguous and is settled as a same-`MessageId` retry; claim, lease and

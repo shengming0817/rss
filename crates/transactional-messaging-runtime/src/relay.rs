@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt as _;
 use futures::stream::{self, FuturesUnordered, StreamExt as _};
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::fence::ExecutionBinding;
@@ -422,6 +423,12 @@ where
         let clock = self.clock.as_ref();
         let emitter = self.emitter.as_ref();
         let store = self.store.as_ref();
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        for delay in [self.config.idle_scan_interval, self.config.error_backoff] {
+            absolute_deadline(clock, delay, emitter)?;
+        }
         let budget = store.delivery_budget();
         let mut active = FuturesUnordered::new();
         let mut admission = Admission::Ready;
@@ -431,6 +438,14 @@ where
             if let Some(limit) = NonZeroUsize::new(free.min(self.config.claim_limit.get()))
                 && matches!(admission, Admission::Ready)
             {
+                // Start ready work before a synchronous store can fill the whole window.
+                if let Some(Some(result)) = active.next().now_or_never() {
+                    admission.completed(result, &self.config, clock, emitter);
+                    continue;
+                }
+                if token.is_cancelled() {
+                    break;
+                }
                 // A claim can already be durable while its reply is pending. Finish this
                 // one request even if cancellation or a fatal settlement stops admission.
                 let scan = claim_heads(binding, store, clock, budget, emitter, limit);

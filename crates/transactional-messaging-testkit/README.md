@@ -19,7 +19,8 @@ deadline covers the complete suite, so a provider cannot reset the budget betwee
 | `producer` | `outbox`, `MemoryOutboxStore`, `MemoryPublisher`, publisher transport conformance |
 
 Both features are enabled by default. Memory stores are non-durable test doubles and make no
-production guarantee.
+production guarantee. A retry remains at its partition head. Advance the memory outbox's
+`clock()` by one second to make that record eligible again.
 
 ```rust
 use rss_transactional_messaging::policy::ExecutionBudget;

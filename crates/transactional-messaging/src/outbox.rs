@@ -342,7 +342,8 @@ pub trait OutboxRelayStore<P>: Send + Sync {
     /// Consume a claim and atomically persist its resolution using a fencing compare-and-set.
     /// `Published` marks confirmed publication durably before unblocking a successor; it does not
     /// require receipt persistence. `Retry` keeps the original identity and content; `DeadLetter`
-    /// keeps an ordered successor blocked.
+    /// keeps an ordered successor blocked. The store schedules the next eligibility of a retry:
+    /// give other due heads a turn and defer a failing record so immediate scans cannot hot-loop.
     fn settle(
         &self,
         claim: Self::Claim,
