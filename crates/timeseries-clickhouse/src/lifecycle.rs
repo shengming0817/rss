@@ -1,5 +1,5 @@
 //! One resource owner, independently revocable tenant capabilities, borrowed operations.
-use crate::capacity::{Capacity, Permit};
+use crate::capacity::{AdmissionClass, Capacity, Permit};
 use crate::{ConnectionConfig, Credentials, CursorKey, Limits, config::Connections, probe};
 use rss_request_context::{Clock, Deadline, TenantId};
 use rss_timeseries::{Atomicity, Error, Guarantees, Scope};
@@ -99,7 +99,7 @@ impl<C: Clock> ChOwner<C> {
         Ok(Self {
             inner: Arc::new(Shared {
                 clock: Arc::new(clock),
-                capacity: Capacity::new(limits.max_in_flight.get(), limits.operation_permits.get()),
+                capacity: Capacity::new(limits.max_in_flight.get(), limits.operation_permits.get(), limits.query_threads, limits.max_waiters),
                 limits,
                 instance,
                 closed: AtomicBool::new(false),
@@ -119,7 +119,7 @@ impl<C: Clock> ChOwner<C> {
         deadline: Deadline,
     ) -> Result<ChStore<C>, Error> {
         bounded(self.inner.clock.as_ref(), deadline, async {
-            let (_capacity, resources) = self.inner.enter(NonZeroU32::MIN).await?;
+            let (_capacity, resources) = self.inner.enter(AdmissionClass::Unit).await?;
             if resources.ch.users.contains(&reader.user) {
                 return Err(Error::Unauthorized);
             }
@@ -187,10 +187,10 @@ impl<C> Shared<C> {
     }
     async fn enter(
         &self,
-        weight: NonZeroU32,
+        class: AdmissionClass,
     ) -> Result<(Permit<'_>, RwLockReadGuard<'_, Resources>), Error> {
         self.open()?;
-        let capacity = self.capacity.acquire(weight.get()).await?;
+        let capacity = self.capacity.acquire(class).await?;
         let resources = self.resources.read().await;
         self.open()?;
         let resources =
@@ -205,7 +205,7 @@ impl<C: Clock> Shared<C> {
         scope: &Scope,
         deadline: Deadline,
     ) -> Result<Operation<'a, C>, Error> {
-        self.admit_operation(store, scope, NonZeroU32::MIN, deadline)
+        self.admit_operation(store, scope, AdmissionClass::Unit, deadline)
             .await
     }
     pub(crate) async fn read_operation<'a>(
@@ -214,19 +214,19 @@ impl<C: Clock> Shared<C> {
         scope: &Scope,
         deadline: Deadline,
     ) -> Result<Operation<'a, C>, Error> {
-        self.admit_operation(store, scope, self.limits.query_threads, deadline)
+        self.admit_operation(store, scope, AdmissionClass::Read, deadline)
             .await
     }
     async fn admit_operation<'a>(
         &'a self,
         store: &'a ChStore<C>,
         scope: &Scope,
-        threads: NonZeroU32,
+        class: AdmissionClass,
         deadline: Deadline,
     ) -> Result<Operation<'a, C>, Error> {
         store.admit(scope)?;
         bounded(self.clock.as_ref(), deadline, async {
-            let (capacity, resources) = self.enter(threads).await?;
+            let (capacity, resources) = self.enter(class).await?;
             let material = store.material.read().await;
             self.open()?;
             store.admit(scope)?;
@@ -236,7 +236,7 @@ impl<C: Clock> Shared<C> {
                 reader: resources.ch.reader(&material.reader),
                 material,
                 resources,
-                threads,
+                threads: class.units(self.limits.query_threads),
                 _capacity: capacity,
                 clock: self.clock.as_ref(),
                 limits: &self.limits,
