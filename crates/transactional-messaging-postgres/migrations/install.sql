@@ -670,13 +670,13 @@ LANGUAGE sql STABLE AS $f$
    AND p.epoch=nullif(current_setting('rss.execution_epoch',true),'')::bigint
    AND p.lineage=decode(current_setting('rss.storage_lineage',true),'hex')
  ), heads AS MATERIALIZED (
-  (SELECT seq,NULL::uuid AS op,retry_after AS at,0 AS lane,true AS runnable
+  (SELECT seq,NULL::uuid AS op,retry_after AS at,0 AS lane,true AS runnable,partition_key,partition_seq
    FROM rss_transactional_messaging.outbox
    WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='pending'
     AND (retry_after,seq)>=(p_at,p_seq) AND (retry_after,seq,0)>(p_at,p_seq,p_lane)
     AND retry_after<=p_through ORDER BY retry_after,seq LIMIT p_take)
   UNION ALL
-  (SELECT seq,NULL::uuid,greatest(retry_after,lease_until),1,true
+  (SELECT seq,NULL::uuid,greatest(retry_after,lease_until),1,true,partition_key,partition_seq
    FROM rss_transactional_messaging.outbox
    WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='publishing'
     AND claim_epoch=nullif(current_setting('rss.execution_epoch',true),'')::bigint
@@ -686,24 +686,25 @@ LANGUAGE sql STABLE AS $f$
     AND greatest(retry_after,lease_until)<=p_through ORDER BY greatest(retry_after,lease_until),seq LIMIT p_take)
   UNION ALL
   (SELECT seq,NULL::uuid,retry_after,2,
-    (claim_epoch,claim_lineage) IS DISTINCT FROM (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex'))
+    (claim_epoch,claim_lineage) IS DISTINCT FROM (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex')),partition_key,partition_seq
    FROM rss_transactional_messaging.outbox
    WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='publishing'
     AND (retry_after,seq)>=(p_at,p_seq) AND (retry_after,seq,2)>(p_at,p_seq,p_lane)
     AND retry_after<=p_through ORDER BY retry_after,seq LIMIT p_take)
   UNION ALL
-  (SELECT d.outbox_seq,d.operation_id,greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END),3,true
+  (SELECT d.outbox_seq,d.operation_id,greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END),3,true,d.partition_key,d.partition_seq
    FROM current_dr d WHERE d.status IN ('pending','publishing')
     AND (greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END),d.outbox_seq,3)>(p_at,p_seq,p_lane)
     AND greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END)<=p_through
     AND NOT EXISTS(SELECT FROM current_dr earlier WHERE earlier.partition_key=d.partition_key AND earlier.partition_seq<d.partition_seq)
-    AND NOT EXISTS(SELECT FROM rss_transactional_messaging.outbox earlier WHERE earlier.tenant_id=p_tenant AND earlier.domain=p_domain
-     AND earlier.partition_key=d.partition_key AND earlier.partition_head AND earlier.partition_seq<d.partition_seq)
+    -- Keep the unique partition-head lookup correlated; an anti-join may scan every active head.
+    AND ((SELECT earlier.partition_seq FROM rss_transactional_messaging.outbox earlier WHERE earlier.tenant_id=p_tenant AND earlier.domain=p_domain
+     AND earlier.partition_key=d.partition_key AND earlier.partition_head LIMIT 1)<d.partition_seq) IS NOT TRUE
    ORDER BY 3,1 LIMIT p_take)
  ), scan_window AS MATERIALIZED (SELECT * FROM heads ORDER BY at,seq,lane LIMIT p_take)
  SELECT w.seq,w.op,w.at,w.lane,w.runnable AND (w.op IS NOT NULL OR NOT EXISTS(
-  SELECT FROM current_dr d JOIN rss_transactional_messaging.outbox src ON src.seq=w.seq
-  WHERE d.outbox_seq=w.seq OR (d.partition_key=src.partition_key AND d.partition_seq<src.partition_seq)))
+  SELECT FROM current_dr d
+  WHERE d.outbox_seq=w.seq OR (d.partition_key=w.partition_key AND d.partition_seq<w.partition_seq)))
  FROM scan_window w ORDER BY w.at,w.seq,w.lane
 $f$;
 ALTER FUNCTION rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer) OWNER TO rss_tmsg_relay;
@@ -715,7 +716,7 @@ DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(curren
  observed timestamptz; progress outbox_scan; examined integer:=0; owns_progress boolean; wrapped boolean:=false;
  scan_limit integer:=greatest(64,least(p_limit::bigint*4,1024))::integer;
  candidates NO SCROLL CURSOR FOR
-  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit);
+  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit-examined) ORDER BY source_seq,lane;
 BEGIN
  PERFORM check_execution();
  IF p_domain IS NULL OR octet_length(p_domain) NOT BETWEEN 1 AND 255 OR (p_domain COLLATE "C") ~ '[^A-Za-z0-9_.:-]' OR p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
@@ -733,10 +734,10 @@ BEGIN
  IF progress.eligible_at='-infinity'::timestamptz THEN progress.through_at:=observed; END IF;
  OPEN candidates;
  LOOP
-  EXIT WHEN used>=p_limit;
+  EXIT WHEN used>=p_limit OR examined>=scan_limit;
   FETCH NEXT FROM candidates INTO r;
   IF NOT FOUND THEN
-   IF examined=0 AND NOT wrapped AND progress.eligible_at<>'-infinity'::timestamptz THEN
+   IF examined<scan_limit AND NOT wrapped AND progress.eligible_at<>'-infinity'::timestamptz THEN
     CLOSE candidates;
     progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; progress.through_at:=observed; wrapped:=true;
     OPEN candidates;
@@ -745,7 +746,9 @@ BEGIN
    EXIT;
   END IF;
   examined:=examined+1;
-  progress.eligible_at:=r.eligible_at; progress.source_seq:=r.source_seq; progress.lane:=r.lane;
+  IF (r.eligible_at,r.source_seq,r.lane)>(progress.eligible_at,progress.source_seq,progress.lane) THEN
+   progress.eligible_at:=r.eligible_at; progress.source_seq:=r.source_seq; progress.lane:=r.lane;
+  END IF;
   IF NOT r.runnable THEN CONTINUE; END IF;
   SELECT * INTO o FROM outbox src WHERE src.seq=r.source_seq AND src.tenant_id=p_tenant
    AND src.domain=p_domain FOR UPDATE SKIP LOCKED;
@@ -770,7 +773,7 @@ BEGIN
    greatest(0,(extract(epoch FROM o.automatic_retry_deadline-n)*1000000)::bigint);
  END LOOP;
  CLOSE candidates;
- IF used<p_limit AND examined<scan_limit THEN
+ IF used>0 OR examined<scan_limit THEN
   progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0;
  END IF;
  IF owns_progress THEN

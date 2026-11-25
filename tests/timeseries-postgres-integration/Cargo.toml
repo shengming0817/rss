@@ -7,6 +7,7 @@ publish = false
 [lints]
 workspace = true
 [dev-dependencies]
+tracing-subscriber.workspace = true
 rss-examples = { path = "../../crates/examples", features = ["timeseries-timescaledb"] }
 rss-timeseries.workspace = true
 rss-timeseries-postgres = { workspace = true, features = ["integration", "timescaledb"] }

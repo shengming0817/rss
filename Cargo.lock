@@ -3109,6 +3109,7 @@ dependencies = [
  "testkit",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5144,6 +5145,7 @@ dependencies = [
  "sqlx",
  "testkit",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

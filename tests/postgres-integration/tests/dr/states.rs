@@ -266,6 +266,19 @@ pub async fn run(
         .await?;
     let unchanged:bool=sqlx::query_scalar("SELECT o.status='published' AND o.envelope=r.envelope AND o.payload=r.payload AND o.fingerprint=r.fingerprint AND o.automatic_retry_deadline=r.automatic_retry_deadline FROM rss_transactional_messaging.outbox o CROSS JOIN public.dr_original r WHERE o.message_id='published'").fetch_one(owner).await?;
     assert!(unchanged);
+    // Roll back the fixture's clock reversal so subsequent DR scenarios retain their source.
+    let mut retired = owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.execution_epoch','6',true)")
+        .execute(&mut *retired)
+        .await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 day' WHERE message_id='published'").execute(&mut *retired).await?;
+    sqlx::query("SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024)").execute(&mut *retired).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE message_id='published'").execute(&mut *retired).await?;
+    let rejected=sqlx::query("SELECT rss_transactional_messaging.apply_dr(gen_random_uuid(),sha256('clock-reversal'::bytea),'database','{}',jsonb_build_array(jsonb_build_object('message',message_id,'fingerprint',encode(fingerprint,'hex'),'version',recovery_version)),6) FROM rss_transactional_messaging.outbox WHERE message_id='published'").execute(&mut *retired).await;
+    assert!(
+        matches!(rejected,Err(sqlx::Error::Database(ref e)) if e.code().as_deref()==Some("PZ004"))
+    );
+    retired.rollback().await?;
     r4.close().await;
     store3.close().await;
     store4.close().await;

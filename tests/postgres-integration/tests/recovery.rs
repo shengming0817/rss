@@ -331,6 +331,33 @@ async fn run() -> anyhow::Result<()> {
             .await
             .is_err()
     );
+    sqlx::raw_sql("CREATE ROLE body_excess NOLOGIN; GRANT body_excess TO body_operator WITH INHERIT FALSE, SET TRUE; GRANT CREATE ON SCHEMA rss_transactional_messaging TO body_excess;").execute(&owner).await?;
+    assert!(
+        PgPublishedBodyMaintenance::connect(
+            body_config.clone(),
+            Timer::new(),
+            fence_fixture::storage()
+        )
+        .await
+        .is_err()
+    );
+    sqlx::raw_sql("REVOKE CREATE ON SCHEMA rss_transactional_messaging FROM body_excess; REVOKE body_excess FROM body_operator;").execute(&owner).await?;
+    let body_index:String=sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE schemaname='rss_transactional_messaging' AND indexname='outbox_published_body'").fetch_one(&owner).await?;
+    sqlx::query("DROP INDEX rss_transactional_messaging.outbox_published_body")
+        .execute(&owner)
+        .await?;
+    assert!(
+        PgPublishedBodyMaintenance::connect(
+            body_config.clone(),
+            Timer::new(),
+            fence_fixture::storage()
+        )
+        .await
+        .is_err()
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(body_index))
+        .execute(&owner)
+        .await?;
     let maintenance =
         PgPublishedBodyMaintenance::connect(body_config, Timer::new(), fence_fixture::storage())
             .await?;
@@ -1174,6 +1201,10 @@ async fn replay_conflicts(
     assert_eq!(current.entries[0].version, other.version);
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Keep the original compensation fact and retirement fault assertions adjacent in one real transaction scenario."
+)]
 async fn compensated(
     runtime: Arc<PgRuntime>,
     store: Arc<PgRecoveryStore<Key>>,
@@ -1403,6 +1434,17 @@ async fn compensated(
         )?)),
     )
     .await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET fingerprint=decode(repeat('00',32),'hex') WHERE message_id='compensation-evidence'").execute(owner).await?;
+    assert_eq!(
+        failure(
+            store
+                .mutate(crate::execution(tenant(), 1), &req, deadline())
+                .await
+        ),
+        Some(Error::Evidence)
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET fingerprint=$1 WHERE message_id='compensation-evidence'")
+        .bind(MessageFingerprint::of(&evidence).as_bytes().as_slice()).execute(owner).await?;
     committed(
         store
             .mutate(

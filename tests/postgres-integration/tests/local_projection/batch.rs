@@ -486,6 +486,8 @@ async fn index_admission(f: &Fixture) -> anyhow::Result<()> {
         "outbox_pending_due",
         "outbox_lease_due",
         "outbox_stale_retry",
+        "outbox_publishing_retry",
+        "outbox_published_body",
     ] {
         let original:String=sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE schemaname='rss_transactional_messaging' AND indexname=$1").bind(name).fetch_one(&f.owner).await?;
         let drop = format!("DROP INDEX rss_transactional_messaging.{name}");
@@ -513,8 +515,8 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
         ),
         (
             "rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)",
-            "FOR UPDATE OF src SKIP LOCKED",
-            "FOR UPDATE OF src",
+            "FOR UPDATE SKIP LOCKED",
+            "FOR UPDATE",
         ),
     ] {
         let original: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")

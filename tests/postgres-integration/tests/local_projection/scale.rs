@@ -79,6 +79,9 @@ async fn prepare(f: &Fixture) -> anyhow::Result<()> {
 }
 
 pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
+    if std::env::var_os("RSS_PG_WORK_PROFILE_ONLY").is_some() {
+        return profile_populations(f).await;
+    }
     prepare(f).await?;
     for limit in [32usize, 1] {
         if limit == 1 {
@@ -89,7 +92,23 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     append(f, "scale-wide", 0, 1_000, 1_000).await?;
     append(f, "scale-null", 0, 1_000, 0).await?;
     explain(f, "1,000 active / 1,000 unpartitioned").await?;
+    if std::env::var_os("RSS_PG_WORK_PROFILE").is_some() {
+        nested_profiles(f).await?;
+    }
     drain(f, 32, 2_000).await?;
+    Ok(())
+}
+
+async fn profile_populations(f: &Fixture) -> anyhow::Result<()> {
+    install_explain(f).await?;
+    append(f, "profile-history", 0, 512, 512).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id LIKE 'profile-history-%'").execute(&f.owner).await?;
+    for (start, count) in [(0, 1000), (1000, 9000)] {
+        append(f, "scale-wide", start, count, start + count).await?;
+        append(f, "scale-null", start, count, 0).await?;
+        println!("claim-profile population={}", 2 * (start + count));
+        nested_profiles(f).await?;
+    }
     Ok(())
 }
 
@@ -291,6 +310,10 @@ impl Progress {
     }
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "The lock window, arrivals and revisit assertions form one sequential provider scenario."
+)]
 pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
     append(f, "window", 0, 130, 0).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=statement_timestamp()-interval '1 day' WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
@@ -342,5 +365,85 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
         "a frozen sweep revisits unlocked prefixes despite continuous arrivals"
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE 'window-%' OR message_id LIKE 'arrival-%'").execute(&f.owner).await?;
+    Ok(())
+}
+
+// Compare production claim bodies on identical rows/indexes. The baseline gets the
+// candidate indexes too, so this isolates SQL work rather than attributing index gains.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "Measure the same controlled provider states with both installed claim bodies, restoring the candidate afterward."
+)]
+async fn nested_profiles(f: &Fixture) -> anyhow::Result<()> {
+    use sqlx::Connection as _;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("sqlx::postgres::notice=info")
+        .with_ansi(false)
+        .try_init();
+    let original=tokio::process::Command::new("/usr/bin/git").args(["show","d87fa3ab555483f2cb40dad371423d0ae5cdf773:crates/transactional-messaging-postgres/migrations/install.sql"]).output().await?;
+    anyhow::ensure!(original.status.success());
+    let baseline = String::from_utf8(original.stdout)?;
+    let candidate:String=sqlx::query_scalar("SELECT pg_get_functiondef('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'::regprocedure)").fetch_one(&f.owner).await?;
+    let body = baseline
+        .split_once("CREATE FUNCTION rss_transactional_messaging.claim_outbox(")
+        .ok_or_else(|| anyhow::anyhow!("baseline claim"))?
+        .1
+        .split_once("ALTER FUNCTION rss_transactional_messaging.claim_outbox")
+        .ok_or_else(|| anyhow::anyhow!("baseline end"))?
+        .0;
+    let old = format!("CREATE OR REPLACE FUNCTION rss_transactional_messaging.claim_outbox({body}");
+    for scenario in ["wide", "leases-dr"] {
+        if scenario == "leases-dr" {
+            sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 minute',automatic_retry_deadline=clock_timestamp()+interval '1 day',retry_after=clock_timestamp()-interval '1 hour' WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'scale-null-%' ORDER BY seq LIMIT 192)").execute(&f.owner).await?;
+            sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE status='publishing' ORDER BY seq LIMIT 64)").execute(&f.owner).await?;
+            sqlx::query("UPDATE rss_transactional_messaging.outbox SET claim_epoch=0 WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE status='publishing' ORDER BY seq OFFSET 128 LIMIT 64)").execute(&f.owner).await?;
+            sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE status='published'").execute(&f.owner).await?;
+            sqlx::query("INSERT INTO rss_transactional_messaging.dr_plans(tenant_id,operation_id,request_digest,lineage,epoch,kind,evidence) VALUES($1::uuid,'00000000-0000-0000-0000-000000003281',sha256('profile'::bytea),decode(repeat('02',16),'hex'),1,'database','{}')").bind(tenant().to_string()).execute(&f.owner).await?;
+            sqlx::query("INSERT INTO rss_transactional_messaging.dr_members(tenant_id,operation_id,ordinal,message_id,consumer_group,fingerprint,outbox_seq,status) SELECT tenant_id,'00000000-0000-0000-0000-000000003281',(row_number() OVER(ORDER BY seq)-1)::integer,message_id,'',fingerprint,seq,'pending' FROM rss_transactional_messaging.outbox WHERE status='published' AND payload IS NOT NULL ORDER BY seq LIMIT 512").execute(&f.owner).await?;
+            explain(f, "512 current DR / mixed leases").await?;
+        }
+        for (name, sql) in [("baseline", old.clone()), ("candidate", candidate.clone())] {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&f.owner)
+                .await?;
+            for limit in [1, 32] {
+                let mut plain =
+                    sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
+                sqlx::query("SET SESSION AUTHORIZATION projection_worker")
+                    .execute(&mut plain)
+                    .await?;
+                let timer = Timer::new();
+                let mut latency = Vec::new();
+                for attempt in 0..11 {
+                    let at = timer.now();
+                    let mut tx = plain.begin().await?;
+                    let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,60000)").bind(tenant().to_string()).bind(limit).fetch_all(&mut *tx).await?;
+                    assert_eq!(rows.len(), limit as usize);
+                    tx.rollback().await?;
+                    if attempt > 0 {
+                        latency.push((timer.now() - at).as_micros());
+                    }
+                }
+                distribution(
+                    &format!("claim-transaction-{name}-{scenario}"),
+                    limit as usize,
+                    &mut latency,
+                );
+                plain.close().await?;
+                let mut c =
+                    sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
+                sqlx::raw_sql("LOAD 'auto_explain'; SET auto_explain.log_min_duration=0; SET auto_explain.log_nested_statements=on; SET auto_explain.log_analyze=on; SET auto_explain.log_buffers=on; SET auto_explain.log_timing=off; SET auto_explain.log_format=json; SET auto_explain.log_level=notice; SET SESSION AUTHORIZATION projection_worker;").execute(&mut c).await?;
+                println!("claim-profile revision={name} scenario={scenario} limit={limit}");
+                let mut tx = c.begin().await?;
+                let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,60000)").bind(tenant().to_string()).bind(limit).fetch_all(&mut *tx).await?;
+                assert_eq!(rows.len(), limit as usize);
+                tx.rollback().await?;
+                c.close().await?;
+            }
+        }
+    }
+    sqlx::query("DELETE FROM rss_transactional_messaging.dr_members WHERE operation_id='00000000-0000-0000-0000-000000003281'").execute(&f.owner).await?;
+    sqlx::query("DELETE FROM rss_transactional_messaging.dr_plans WHERE operation_id='00000000-0000-0000-0000-000000003281'").execute(&f.owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='pending',lease_token=NULL,lease_until=NULL,claim_epoch=1,retry_after=clock_timestamp() WHERE message_id LIKE 'scale-null-%' AND status='publishing'").execute(&f.owner).await?;
     Ok(())
 }

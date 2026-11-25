@@ -571,12 +571,16 @@ its default remains 64 and it does not alter request authorization or digest ide
 
 ### Bounded claim work and Published body retention
 
-A claim scans at most `max(64, min(4 * limit, 1024))` metadata candidates, using
-indexed time/sequence windows. Filtering and source locking happen after the window is
-bounded. A committed tenant/domain cursor advances past locked, stale or DR-blocked
-candidates and wraps after exhaustion. Each sweep fixes its upper eligibility time so continuous arrivals cannot starve skipped prefixes. Contention on cursor progress permits repeated
-metadata scans without serializing source claims. Cross-partition selection follows
-eligibility time then sequence; partition order and DR barriers remain authoritative.
+A claim examines at most `max(64, min(4 * limit, 1024))` admitted candidate headers.
+Each indexed lane reads at most the remaining budget before the merged window is capped;
+the current DR plan has its separate 1024-member bound. A call may wrap once using its
+remaining budget. Filtering and source locking happen after admission. A committed
+tenant/domain cursor advances past locked, stale or DR-blocked candidates and revisits
+the earliest candidates after successful work or exhaustion. Each sweep fixes its upper
+eligibility time so continuous arrivals cannot starve skipped prefixes. Contention on
+cursor progress permits repeated metadata scans without serializing source claims.
+Windows advance by eligibility time and sequence; source locks within a window follow
+source sequence. Partition order and DR barriers remain authoritative.
 An empty batch can be a bounded unsuccessful scan. Hosts continue bounded polling using
 `next_wakeup`; an empty result is not proof that all eligible work has drained.
 
