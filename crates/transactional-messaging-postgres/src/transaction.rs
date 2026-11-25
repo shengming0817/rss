@@ -310,6 +310,7 @@ pub enum PgTransactionFault {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Profile {
     Runtime,
+    BodyMaintenance,
     Producer,
     Consumer,
     Recovery,
@@ -426,6 +427,9 @@ impl PgRuntime {
                 )
                 .await?;
                 return Ok(());
+            }
+            if profile == Profile::BodyMaintenance {
+                return crate::body_maintenance::check(&runtime, cutoff).await;
             }
             let recovery_operator = profile == Profile::Recovery;
             let refresh_head = crate::consumer_profile::function_body(

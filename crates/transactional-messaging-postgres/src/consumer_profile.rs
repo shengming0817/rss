@@ -12,6 +12,8 @@ pub(crate) async fn verify_scope(
     let dr = function_body(original, "local_projection_dr_status")?;
     let candidates = function_body(crate::MIGRATION_SQL, "outbox_candidates")?;
     let claim = function_body(crate::MIGRATION_SQL, "claim_outbox")?;
+    let window = function_body(original, "outbox_claim_window")?;
+    let retention = function_body(original, "reclaim_published_bodies")?;
     let valid = rss_transactional_messaging::policy::within(&runtime.timer, cutoff, |_| async {
         sqlx::query_scalar::<_, bool>(include_str!("consumer_scope_probe.sql"))
             .bind(scope)
@@ -20,6 +22,8 @@ pub(crate) async fn verify_scope(
             .bind(dr)
             .bind(candidates)
             .bind(claim)
+            .bind(window)
+            .bind(retention)
             .fetch_one(&runtime.pool)
             .await
     })

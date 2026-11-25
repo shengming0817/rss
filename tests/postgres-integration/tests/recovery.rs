@@ -317,7 +317,25 @@ async fn run() -> anyhow::Result<()> {
         .context("outbox scenarios")?;
     capture_failures(runtime.clone(), &owner).await?;
     replay_conflicts(runtime.clone(), store.clone(), &owner).await?;
-    compensated(runtime.clone(), store.clone(), &owner).await?;
+    sqlx::raw_sql("CREATE ROLE body_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT USAGE ON SCHEMA rss_transactional_messaging TO body_operator; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution(),rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer) TO body_operator;").execute(&owner).await?;
+    let body_config = PgConfig::new(
+        &params.host,
+        params.port,
+        &params.database,
+        "body_operator",
+        PgPassword::new("fixture-only"),
+        PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
+    );
+    assert!(
+        PgRuntime::connect(body_config.clone(), Timer::new(), fence_fixture::storage())
+            .await
+            .is_err()
+    );
+    let maintenance =
+        PgPublishedBodyMaintenance::connect(body_config, Timer::new(), fence_fixture::storage())
+            .await?;
+    compensated(runtime.clone(), store.clone(), &owner, &maintenance).await?;
+    maintenance.close().await;
     privilege_failures(runtime.clone(), &operator_config, &owner).await?;
     schema_failures(&operator_config, &owner).await?;
     Box::pin(replay_partition_race(
@@ -1160,6 +1178,7 @@ async fn compensated(
     runtime: Arc<PgRuntime>,
     store: Arc<PgRecoveryStore<Key>>,
     owner: &sqlx::PgPool,
+    maintenance: &PgPublishedBodyMaintenance,
 ) -> anyhow::Result<()> {
     let outbox = PgOutboxStore::<()>::new(
         runtime.clone(),
@@ -1171,6 +1190,7 @@ async fn compensated(
             Duration::from_secs(10),
         )?,
     )?;
+    let mut evidence_fact = None;
     for id in ["compensated-head", "compensation-evidence"] {
         let mut authored = message(id);
         if id == "compensation-evidence" {
@@ -1190,8 +1210,20 @@ async fn compensated(
                     Default::default(),
                 ),
             );
-            authored =
-                MessageEnvelope::new(authored.id().clone(), metadata, authored.payload().clone());
+            authored = MessageEnvelope::new(
+                authored.id().clone(),
+                metadata,
+                (0..2048u32)
+                    .flat_map(|i| {
+                        ring::digest::digest(&ring::digest::SHA256, &i.to_le_bytes())
+                            .as_ref()
+                            .to_vec()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        if id == "compensation-evidence" {
+            evidence_fact = Some(authored.clone());
         }
         committed(
             runtime
@@ -1229,6 +1261,120 @@ async fn compensated(
     }
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='dead_letter',automatic_retry_deadline=clock_timestamp()-interval '1 second' WHERE message_id='compensated-head'").execute(owner).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE message_id='compensation-evidence'").execute(owner).await?;
+    let after_seq:i64=sqlx::query_scalar("SELECT seq-1 FROM rss_transactional_messaging.outbox WHERE message_id='compensation-evidence'").fetch_one(owner).await?;
+    let cutoff: i64 =
+        sqlx::query_scalar("SELECT (extract(epoch FROM clock_timestamp())*1000000)::bigint")
+            .fetch_one(owner)
+            .await?;
+    let before = committed(
+        maintenance
+            .reclaim(
+                crate::execution(tenant(), 1),
+                PublishedBodyRetention::new(cutoff, after_seq, 1024)?,
+                deadline(),
+            )
+            .await,
+    )?;
+    assert_eq!(
+        before.reclaimed, 0,
+        "no deadline cannot prove delivery closure"
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 day' WHERE message_id='compensation-evidence'").execute(owner).await?;
+    let mut fence = owner.begin().await?;
+    sqlx::query("SELECT epoch FROM rss_transactional_messaging.tenant_epoch WHERE tenant_id=$1::uuid FOR UPDATE")
+        .bind(tenant().to_string()).fetch_one(&mut *fence).await?;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            maintenance.reclaim(
+                crate::execution(tenant(), 1),
+                PublishedBodyRetention::new(cutoff, after_seq, 1)?,
+                deadline()
+            )
+        )
+        .await
+        .is_err()
+    );
+    fence.rollback().await?;
+    let retained:bool=sqlx::query_scalar("SELECT payload IS NOT NULL FROM rss_transactional_messaging.outbox WHERE message_id='compensation-evidence'").fetch_one(owner).await?;
+    assert!(retained, "cancelled admission cannot release body");
+    let other = rss_request_context::TenantId::parse("22222222-2222-2222-2222-222222222222")?;
+    let cross = committed(
+        maintenance
+            .reclaim(
+                crate::execution(other, 1),
+                PublishedBodyRetention::new(cutoff, 0, 1024)?,
+                deadline(),
+            )
+            .await,
+    )?;
+    assert_eq!(cross.reclaimed, 0);
+    let physical_before: i64 = sqlx::query_scalar(
+        "SELECT pg_total_relation_size('rss_transactional_messaging.outbox')::bigint",
+    )
+    .fetch_one(owner)
+    .await?;
+    let released = committed(
+        maintenance
+            .reclaim(
+                crate::execution(tenant(), 1),
+                PublishedBodyRetention::new(cutoff, after_seq, 1024)?,
+                deadline(),
+            )
+            .await,
+    )?;
+    assert_eq!(released.reclaimed, 1);
+    let physical_after: i64 = sqlx::query_scalar(
+        "SELECT pg_total_relation_size('rss_transactional_messaging.outbox')::bigint",
+    )
+    .fetch_one(owner)
+    .await?;
+    sqlx::query("VACUUM rss_transactional_messaging.outbox")
+        .execute(owner)
+        .await?;
+    let physical_vacuum: i64 = sqlx::query_scalar(
+        "SELECT pg_total_relation_size('rss_transactional_messaging.outbox')::bigint",
+    )
+    .fetch_one(owner)
+    .await?;
+    println!(
+        "published-body physical before={physical_before} after={physical_after} vacuum={physical_vacuum}"
+    );
+    assert!(released.released_bytes > 0);
+    let duplicate = committed(
+        maintenance
+            .reclaim(
+                crate::execution(tenant(), 1),
+                PublishedBodyRetention::new(cutoff, after_seq, 1024)?,
+                deadline(),
+            )
+            .await,
+    )?;
+    assert_eq!(duplicate.reclaimed, 0);
+    let evidence = evidence_fact.ok_or_else(|| anyhow::anyhow!("evidence"))?;
+    let replay: String =
+        sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+            .bind(evidence.canonical_bytes())
+            .bind(serde_json::json!({"trace":null,"tenant_authority":null}))
+            .fetch_one(owner)
+            .await?;
+    assert_eq!(replay, "already_present");
+    let conflict = MessageEnvelope::new(
+        evidence.id().clone(),
+        evidence.metadata().clone(),
+        vec![9u8],
+    );
+    let replay: String =
+        sqlx::query_scalar("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+            .bind(conflict.canonical_bytes())
+            .bind(serde_json::json!({"trace":null,"tenant_authority":null}))
+            .fetch_one(owner)
+            .await?;
+    assert_eq!(replay, "conflict");
+    println!(
+        "published-body released={} bytes={} scanned={}",
+        released.reclaimed, released.released_bytes, released.scanned
+    );
     let target = Target::Outbox(MessageId::parse("compensated-head")?);
     let entry = page(&store, Query::inspect(tenant(), target.clone()))
         .await?

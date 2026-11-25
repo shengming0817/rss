@@ -568,3 +568,35 @@ Inbox/Outbox lease TTLs accept positive whole milliseconds representable in Post
 Per-operation statement/lock timeouts separately require at most i32::MAX milliseconds.
 `PgArchiveRepository::with_retired_scan_limit(1..=1024)` selects the expired-generation scan budget;
 its default remains 64 and it does not alter request authorization or digest identity.
+
+### Bounded claim work and Published body retention
+
+A claim scans at most `max(64, min(4 * limit, 1024))` metadata candidates, using
+indexed time/sequence windows. Filtering and source locking happen after the window is
+bounded. A committed tenant/domain cursor advances past locked, stale or DR-blocked
+candidates and wraps after exhaustion. Contention on cursor progress permits repeated
+metadata scans without serializing source claims. Cross-partition selection follows
+eligibility time then sequence; partition order and DR barriers remain authoritative.
+An empty batch can be a bounded unsuccessful scan. Hosts continue bounded polling using
+`next_wakeup`; an empty result is not proof that all eligible work has drained.
+
+`PgPublishedBodyMaintenance` owns a separate private pool. The host explicitly authorizes
+the tenant and retention policy, chooses the original-deadline cutoff and schedules sweeps.
+Grant its dedicated login schema USAGE and EXECUTE on `check_execution()` and
+`reclaim_published_bodies(bigint,bigint,integer)` only (the installation's public scope
+helpers remain available). Ordinary runtime, producer, consumer and recovery profiles
+reject this capability. Do not grant table writes or role-owner membership.
+
+Call `reclaim(binding, PublishedBodyRetention::new(before_us, after_seq, limit)?, deadline)`
+with 1–1024 candidates; start at sequence zero, continue from `next_seq`, and restart a
+later sweep at zero to revisit skipped rows. A short page ends the current sweep. The
+shared execution fence, original deadline and current unfinished DR members restrict
+release even when the host's cutoff allows it. Successful release clears only the body.
+Fingerprints, authored metadata, terminal state, original deadline, recovery version and
+coordinates remain available for same-ID replay/conflict checks, projection readback and
+compensation evidence. No body is restored by duplicate append.
+
+Counts describe this committed transaction, not a durable operation receipt. Cancellation
+or uncertain commit does not prove rollback; repeat the same page safely without treating
+its counts as an exactly-once accounting total. Logical release does not immediately
+shrink PostgreSQL files: VACUUM and storage reuse remain the external database owner's job.

@@ -27,9 +27,26 @@ pub(crate) struct Envelope {
     tenant_authority: Option<String>,
 }
 impl Envelope {
+    #[cfg(feature = "recovery")]
+    pub(crate) fn cold_evidence(
+        row: &PgRow,
+        tenant: TenantId,
+        id: &MessageId,
+        cause: &str,
+    ) -> Result<bool, PgError> {
+        let value: Self =
+            serde_json::from_str(row.try_get("envelope")?).map_err(|_| PgError::invariant())?;
+        Ok(value.tenant == tenant.to_string()
+            && value.id == id.as_str()
+            && value.causation.as_deref() == Some(cause))
+    }
     pub(crate) fn decode(row: &PgRow) -> Result<MessageEnvelope<Vec<u8>>, PgError> {
         let value: Self =
             serde_json::from_str(row.try_get("envelope")?).map_err(|_| PgError::invariant())?;
+        value.with_payload(row.try_get("payload")?)
+    }
+    fn with_payload(self, payload: Vec<u8>) -> Result<MessageEnvelope<Vec<u8>>, PgError> {
+        let value = self;
         let invalid = |_| PgError::invariant();
         let contract = ContractIdentity::new(
             ContractId::parse(&value.contract).map_err(invalid)?,
@@ -67,7 +84,7 @@ impl Envelope {
         Ok(MessageEnvelope::new(
             MessageId::parse(&value.id).map_err(|_| PgError::invariant())?,
             MessageMetadata::new(required, extensions),
-            row.try_get("payload")?,
+            payload,
         )
         .with_transport_context(TransportContext::new(value.trace, value.tenant_authority)))
     }

@@ -417,6 +417,7 @@ async fn source_scenarios(f: &Fixture, scale_only: bool) -> anyhow::Result<()> {
         Box::pin(batch::history_and_policy(f)).await?;
         Box::pin(scale::run(f)).await?;
     } else {
+        Box::pin(scale::bounded_windows(f)).await?;
         Box::pin(leases::run(f)).await?;
         Box::pin(batch::run(f)).await?;
         Box::pin(success_and_duplicate(f)).await?;
@@ -740,6 +741,10 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
         f.state("atomic-unknown").await?,
         (1, 1, Some("succeeded".into()), "published".into())
     );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 day' WHERE message_id='atomic-unknown'").execute(&f.owner).await?;
+    sqlx::query("SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024)").execute(&f.owner).await?;
+    let cold:bool=sqlx::query_scalar("SELECT payload IS NULL FROM rss_transactional_messaging.outbox WHERE message_id='atomic-unknown'").fetch_one(&f.owner).await?;
+    assert!(cold);
     let receipt = p
         .resolve(&pending, deadline())
         .await?

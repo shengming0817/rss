@@ -230,6 +230,20 @@ async fn validate_evidence(
     if row.try_get::<&str, _>("status")? != "published" {
         return Err(Error::Evidence.into());
     }
+    if row.try_get::<Option<Vec<u8>>, _>("payload")?.is_none() {
+        // Only the maintenance definer can retire a Published body. Its immutable
+        // append-validated metadata and fingerprint retain the authored evidence.
+        return if crate::envelope::Envelope::cold_evidence(
+            &row,
+            request.tenant(),
+            evidence,
+            request.target().key().as_str(),
+        )? {
+            Ok(())
+        } else {
+            Err(Error::Evidence.into())
+        };
+    }
     let envelope = crate::envelope::Envelope::decode(&row)?;
     let digest: Vec<u8> = row.try_get("fingerprint")?;
     if envelope.id() != evidence

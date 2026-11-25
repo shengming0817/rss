@@ -84,3 +84,6 @@ SELECT to_regclass('rss_transactional_messaging.storage_lineage') IS NOT NULL
  AND NOT EXISTS(SELECT 1 FROM (VALUES ('dr_plans','target_operation','uuid'),('dr_plans','target_digest','bytea'),('dr_plans','evidence','jsonb'),('dr_members','block_reason','text')) e(relation,column_name,type_name)
  LEFT JOIN pg_attribute a ON a.attrelid=to_regclass('rss_transactional_messaging.'||e.relation) AND a.attname=e.column_name AND NOT a.attisdropped
  WHERE a.attnum IS NULL OR format_type(a.atttypid,a.atttypmod)<>e.type_name OR a.attnotnull)
+
+ AND ($2 OR NOT EXISTS(SELECT FROM pg_roles r WHERE (pg_has_role(current_user,r.oid,'SET') OR pg_has_role(current_user,r.oid,'USAGE'))
+  AND has_function_privilege(r.oid,'rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer)','EXECUTE')))

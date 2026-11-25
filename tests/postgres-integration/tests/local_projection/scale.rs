@@ -96,14 +96,16 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
 // A fixed read-only query runs with the exact login scope and effective relay role of claim.
 // No generic SQL execution or broader table grants are exposed to the consumer fixture.
 async fn install_explain(f: &Fixture) -> anyhow::Result<()> {
-    let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)'::regprocedure").fetch_one(&f.owner).await?;
+    let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer)'::regprocedure").fetch_one(&f.owner).await?;
     let query = format!(
-        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT src.seq FROM ({}) c JOIN rss_transactional_messaging.outbox src ON src.seq=c.source_seq WHERE c.eligible_at<=clock_timestamp() ORDER BY src.seq FOR UPDATE OF src SKIP LOCKED",
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
         body.replace("p_tenant", "$1::uuid")
             .replace("p_domain", "$2")
-            .replace("p_after", "NULL::timestamptz")
+            .replace("p_at", "'-infinity'::timestamptz")
+            .replace("p_seq", "0::bigint")
+            .replace("p_lane", "0::integer")
             .replace("p_through", "statement_timestamp()")
-            .replace("p_take", "NULL::integer")
+            .replace("p_take", "64::integer")
     );
     let ddl = format!(
         "GRANT CREATE ON SCHEMA public TO rss_tmsg_relay; CREATE FUNCTION public.explain_heads(p_tenant uuid,p_domain text) RETURNS json LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $explain$ DECLARE plan json; BEGIN EXECUTE '{}' INTO plan USING p_tenant,p_domain; RETURN plan; END $explain$; ALTER FUNCTION public.explain_heads(uuid,text) OWNER TO rss_tmsg_relay; REVOKE ALL ON FUNCTION public.explain_heads(uuid,text) FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.explain_heads(uuid,text) TO projection_worker; REVOKE CREATE ON SCHEMA public FROM rss_tmsg_relay;",
@@ -139,10 +141,7 @@ async fn explain(f: &Fixture, label: &str) -> anyhow::Result<f64> {
     tx.rollback().await?;
     let rows = examined(&plan[0]["Plan"]);
     println!("head-plan {label}: examined={rows} {plan}");
-    assert!(
-        rows < 15_000.0,
-        "heads must not inspect every hot successor"
-    );
+    assert!(rows < 1024.0, "heads must not inspect every hot successor");
     Ok(rows)
 }
 async fn capacity(f: &Fixture) -> anyhow::Result<()> {
@@ -203,7 +202,9 @@ async fn drain(f: &Fixture, limit: usize, expected: usize) -> anyhow::Result<()>
             .await?;
         claims.push((timer.now() - at).as_micros());
         if batch.is_empty() {
-            assert!(!wake.due_now());
+            if wake.due_now() {
+                continue;
+            }
             break;
         }
         assert!(wake.due_now());
@@ -288,4 +289,40 @@ impl Progress {
         assert!(self.seen.insert(id.to_owned()), "no duplicate settlement");
         Ok(())
     }
+}
+
+pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
+    append(f, "window", 0, 130, 0).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=statement_timestamp()-interval '1 day' WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
+    let mut held = f.owner.begin().await?;
+    let locked:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'window-%' ORDER BY seq LIMIT 128 FOR UPDATE")
+        .fetch_all(&mut *held).await?;
+    for _ in 0..2 {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
+        )
+        .bind(tenant().to_string())
+        .fetch_all(&f.raw_worker)
+        .await?;
+        assert!(
+            rows.is_empty(),
+            "each locked window is a bounded empty page"
+        );
+    }
+    let mut claim = f.raw_worker.begin().await?;
+    let rows: Vec<i64> = sqlx::query_scalar(
+        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
+    )
+    .bind(tenant().to_string())
+    .fetch_all(&mut *claim)
+    .await?;
+    assert_eq!(rows.len(), 1, "third call reaches the unlocked suffix");
+    assert!(!locked.contains(&rows[0]));
+    let unlocked:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'window-%' AND seq<>ALL($1) FOR UPDATE SKIP LOCKED")
+        .bind(&locked).fetch_all(&mut *held).await?;
+    assert_eq!(unlocked.len(), 1, "lookahead is not locked");
+    claim.rollback().await?;
+    held.rollback().await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
+    Ok(())
 }

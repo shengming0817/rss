@@ -15,7 +15,7 @@ columns(relation, name, type, nullable) AS (VALUES
  ('outbox_partitions','partition_key','text',false), ('outbox_partitions','last_sequence','bigint',false),
  ('outbox_partitions','prepared_by','xid8',false), ('outbox_partitions','declared','boolean',false), ('outbox','partition_seq','bigint',true),
  ('outbox','partition_head','boolean',false), ('outbox','seq','bigint',false), ('outbox','tenant_id','uuid',false), ('outbox','message_id','text',false),
- ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false), ('outbox','payload','bytea',false),
+ ('outbox','domain','text',false), ('outbox','partition_key','text',true), ('outbox','envelope','jsonb',false), ('outbox','payload','bytea',true),
  ('outbox','fingerprint','bytea',false), ('outbox','status','text',false), ('outbox','retry_count','integer',false),
  ('outbox','retry_after','timestamp with time zone',false), ('outbox','lease_token','uuid',true),
  ('outbox','lease_until','timestamp with time zone',true), ('outbox','automatic_retry_deadline','timestamp with time zone',true), ('outbox','recovery_version','bigint',false)),
@@ -41,6 +41,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('inbox', 'inbox_pkey', 'PRIMARY KEY (tenant_id, message_id, consumer_group)'),
  ('inbox', 'inbox_receipt_shape', 'CHECK ((((fingerprint IS NULL) AND (disposition IS NULL)) OR ((fingerprint IS NOT NULL) AND (octet_length(fingerprint) = 32) AND (disposition IS NOT NULL) AND (disposition = ANY (ARRAY[''succeeded''::text, ''rejected_permanent''::text, ''rejected_invariant''::text])))))'),
  ('inbox', 'inbox_receive_count_check', 'CHECK ((receive_count > 0))'),
+ ('outbox', 'outbox_body_shape', 'CHECK (((payload IS NOT NULL) OR (status = ''published''::text)))'),
  ('outbox', 'outbox_fingerprint_length', 'CHECK ((octet_length(fingerprint) = 32))'),
  ('outbox', 'outbox_publishing_lineage', 'CHECK (((status <> ''publishing''::text) OR (claim_lineage IS NOT NULL)))'),
  ('outbox', 'outbox_lease_shape', 'CHECK (((status = ''publishing''::text) = ((lease_token IS NOT NULL) AND (lease_until IS NOT NULL))))'),
@@ -63,8 +64,8 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
 ), head_indexes(name,keys,predicate,unique_head) AS (VALUES
  ('outbox_unfinished_partition',ARRAY['tenant_id','domain','partition_key','partition_seq'],'((partition_key IS NOT NULL) AND (status <> ALL (ARRAY[''published''::text, ''resolved''::text])))',false),
  ('outbox_one_head',ARRAY['tenant_id','domain','partition_key'],'partition_head',true),
- ('outbox_pending_due',ARRAY['tenant_id','domain','retry_after'],'((partition_head OR (partition_key IS NULL)) AND (status = ''pending''::text))',false),
- ('outbox_lease_due',ARRAY['tenant_id','domain','claim_epoch','claim_lineage','greatest(retry_after, lease_until)'],'((partition_head OR (partition_key IS NULL)) AND (status = ''publishing''::text))',false),
+ ('outbox_pending_due',ARRAY['tenant_id','domain','retry_after','seq'],'((partition_head OR (partition_key IS NULL)) AND (status = ''pending''::text))',false),
+ ('outbox_lease_due',ARRAY['tenant_id','domain','claim_epoch','claim_lineage','greatest(retry_after, lease_until)','seq'],'((partition_head OR (partition_key IS NULL)) AND (status = ''publishing''::text))',false),
  ('outbox_stale_retry',ARRAY['tenant_id','domain','claim_epoch','claim_lineage','retry_after'],'((partition_head OR (partition_key IS NULL)) AND (status = ''publishing''::text))',false)
 ), checks(reason, valid) AS (VALUES
  ('constraints', NOT EXISTS(SELECT FROM head_indexes e LEFT JOIN pg_index i

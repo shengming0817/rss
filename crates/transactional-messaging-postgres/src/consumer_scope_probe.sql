@@ -32,10 +32,23 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
 
  AND NOT EXISTS(SELECT FROM (VALUES
   ('rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)',$5::text,false,'s','sql',NULL::text[]),
-  ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)',$6::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp'])
+  ('rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer)',$8::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']),
+ ('rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer)',$7::text,false,'s','sql',NULL::text[]),
+ ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)',$6::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp'])
  ) f(signature,body,definer,volatility,language,config)
  LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
  WHERE p.oid IS NULL OR p.prosrc IS DISTINCT FROM f.body OR p.prosecdef<>f.definer
   OR p.provolatile::text<>f.volatility OR p.prolang<>(SELECT oid FROM pg_language WHERE lanname=f.language)
   OR p.proconfig IS DISTINCT FROM f.config OR p.proowner<>'rss_tmsg_relay'::regrole
   OR p.prorettype<>'record'::regtype OR NOT p.proretset)
+
+ AND NOT EXISTS(SELECT FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer)')
+  AND (has_function_privilege(current_user,p.oid,'EXECUTE') OR EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) WHERE grantee=0 AND privilege_type='EXECUTE')))
+ AND EXISTS(SELECT FROM pg_class c JOIN pg_policy p ON p.polrelid=c.oid
+  WHERE c.oid=to_regclass('rss_transactional_messaging.outbox_scan') AND c.relrowsecurity AND c.relforcerowsecurity
+   AND p.polname='scan_tenant' AND p.polcmd='*' AND p.polpermissive AND p.polroles=ARRAY[0]::oid[]
+   AND pg_get_expr(p.polqual,c.oid)=$p$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$p$
+   AND pg_get_expr(p.polwithcheck,c.oid)=$p$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$p$)
+ AND NOT EXISTS(SELECT FROM pg_roles r WHERE (pg_has_role(current_user,r.oid,'SET') OR pg_has_role(current_user,r.oid,'USAGE'))
+  AND (has_table_privilege(r.oid,'rss_transactional_messaging.outbox_scan','INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
+   OR has_any_column_privilege(r.oid,'rss_transactional_messaging.outbox_scan','INSERT,UPDATE')))

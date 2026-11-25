@@ -3,6 +3,8 @@
 //! Schema installation and role provisioning belong to the external migrator.
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
+mod body_maintenance;
+pub use body_maintenance::{PgPublishedBodyMaintenance, PublishedBodyPage, PublishedBodyRetention};
 mod config;
 mod consumer;
 mod consumer_profile;

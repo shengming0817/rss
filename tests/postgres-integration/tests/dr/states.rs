@@ -223,6 +223,12 @@ pub async fn run(
         status(&store5, &expired).await?,
         vec![MemberStatus::Blocked(BlockReason::DeadlineExpired)]
     );
+    fixture_sql(owner,5,"SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024)").await?;
+    let retained:bool=sqlx::query_scalar("SELECT payload IS NOT NULL FROM rss_transactional_messaging.outbox WHERE message_id='published'").fetch_one(owner).await?;
+    assert!(
+        retained,
+        "blocked current DR retains body after original deadline"
+    );
     fixture_sql(owner,5,"UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=(SELECT automatic_retry_deadline FROM public.dr_original) WHERE message_id='published'").await?;
     let completed = plan("published", 5, OperationId::new()).await?;
     committed(store5.apply(&completed, deadline()).await)?;
