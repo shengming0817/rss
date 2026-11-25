@@ -38,20 +38,34 @@ impl<C: Clock> ObservationMaintenance for PgMaintenance<C> {
         let scope = grant.scope().encode()?;
         let cutoff = grant.cutoff();
         let through = grant.release_through();
-        self.0.transact(grant.scope().tenant(),deadline,self.0.take_fault(),move |connection,progress|Box::pin(async move {
-            progress.set(Stage::Effects);
-            let row=sqlx::query("SELECT last_examined::text,scanned,reclaimed,released_bytes FROM rss_observation.reclaim($1,$2,$3,$4::numeric,$5)")
-                .bind(scope).bind(cutoff).bind(through).bind(window.after().map(|v|v.to_string())).bind(i32::from(window.limit()))
-                .fetch_one(connection).await.map_err(sql_error)?;
-            let scanned:i32=row.try_get("scanned").map_err(sql_error)?;
-            let reclaimed:i32=row.try_get("reclaimed").map_err(sql_error)?;
-            let bytes:i64=row.try_get("released_bytes").map_err(sql_error)?;
-            let last:Option<String>=row.try_get("last_examined").map_err(sql_error)?;
-            Ok(RetentionPage {
-                last_examined:last.map(|v|v.parse().map_err(|_|ErrorKind::Invariant)).transpose()?,
-                finished:scanned<i32::from(window.limit()), scanned:scanned.try_into().map_err(|_|ErrorKind::Invariant)?,
-                reclaimed:reclaimed.try_into().map_err(|_|ErrorKind::Invariant)?, released_bytes:bytes.try_into().map_err(|_|ErrorKind::Invariant)?,
+        self.0.transact(
+            grant.scope().tenant(), deadline, self.0.take_fault(), move |connection, progress| Box::pin(async move {
+                progress.set(Stage::Effects);
+                let row = sqlx::query("SELECT last_examined::text, scanned, reclaimed, released_bytes FROM rss_observation.reclaim($1,$2,$3,$4::numeric,$5)")
+                    .bind(scope)
+                    .bind(cutoff)
+                    .bind(through)
+                    .bind(window.after().map(|seq| seq.to_string()))
+                    .bind(i32::from(window.limit()))
+                    .fetch_one(connection)
+                    .await.map_err(sql_error)?;
+                decode_page(row, window)
             })
-        })).await
+        ).await
     }
+}
+fn decode_page(row: sqlx::postgres::PgRow, window: ScanWindow) -> Result<RetentionPage, Error> {
+    let scanned: i32 = row.try_get("scanned").map_err(sql_error)?;
+    let reclaimed: i32 = row.try_get("reclaimed").map_err(sql_error)?;
+    let bytes: i64 = row.try_get("released_bytes").map_err(sql_error)?;
+    let last: Option<String> = row.try_get("last_examined").map_err(sql_error)?;
+    Ok(RetentionPage {
+        last_examined: last
+            .map(|v| v.parse().map_err(|_| ErrorKind::Invariant))
+            .transpose()?,
+        finished: scanned < i32::from(window.limit()),
+        scanned: scanned.try_into().map_err(|_| ErrorKind::Invariant)?,
+        reclaimed: reclaimed.try_into().map_err(|_| ErrorKind::Invariant)?,
+        released_bytes: bytes.try_into().map_err(|_| ErrorKind::Invariant)?,
+    })
 }

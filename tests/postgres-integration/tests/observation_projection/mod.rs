@@ -5,6 +5,7 @@ mod fixture;
 mod installer;
 mod journal;
 mod process;
+mod retention;
 mod scenarios;
 use fixture::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
