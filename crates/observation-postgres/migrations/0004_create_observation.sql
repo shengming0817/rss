@@ -159,7 +159,7 @@ CREATE FUNCTION rss_observation.reclaim(p_scope text,p_cutoff bigint,p_through b
 RETURNS TABLE(last_examined numeric,scanned integer,reclaimed integer,released_bytes bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_observation AS $$
 DECLARE t uuid := (p_scope::jsonb->>'tenant')::uuid;
- s rss_observation.streams; candidate record; policy_json jsonb; duration_key text; minimum_age numeric; floor_position bigint := 0;
+ s rss_observation.streams; candidate record; first_key bigint; latest_revision numeric; policy_json json; duration_key text; minimum_age numeric; floor_position bigint := 0;
 BEGIN
  IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN
   RAISE EXCEPTION USING ERRCODE='OB007',MESSAGE='maintenance scope mismatch';
@@ -170,10 +170,14 @@ BEGIN
  END IF;
  SELECT * INTO s FROM rss_observation.streams WHERE tenant_id=t AND scope=p_scope FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='OB006',MESSAGE='unknown stream'; END IF;
- IF EXISTS (SELECT FROM rss_observation.objects WHERE tenant_id=t AND object_id=s.object_id AND registration_id=s.registration_id)
-    AND NOT EXISTS (SELECT FROM rss_observation.streams WHERE tenant_id=t AND object_id=s.object_id AND registration_id=s.registration_id
-     AND source_id=s.source_id AND dataset_id=s.dataset_id AND activation_revision>s.activation_revision) THEN
-  RAISE EXCEPTION USING ERRCODE='OB003',MESSAGE='stream is active';
+ IF EXISTS (SELECT FROM rss_observation.objects WHERE tenant_id=t AND object_id=s.object_id AND registration_id=s.registration_id) THEN
+  SELECT activation_revision INTO STRICT latest_revision FROM rss_observation.streams
+   WHERE tenant_id=t AND object_id=s.object_id AND registration_id=s.registration_id
+    AND source_id=s.source_id AND dataset_id=s.dataset_id
+   ORDER BY activation_revision DESC LIMIT 1;
+  IF latest_revision=s.activation_revision THEN
+   RAISE EXCEPTION USING ERRCODE='OB003',MESSAGE='stream is active';
+  END IF;
  END IF;
  IF p_through>coalesce((SELECT last_position FROM rss_observation.journals WHERE tenant_id=t),0) THEN
   RAISE EXCEPTION USING ERRCODE='OB005',MESSAGE='uncommitted release position';
@@ -182,15 +186,17 @@ BEGIN
  IF NOT (s.policy IS JSON OBJECT WITH UNIQUE KEYS) THEN
   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention policy';
  END IF;
- policy_json:=s.policy::jsonb;
- IF policy_json->'version' IS DISTINCT FROM '1'::jsonb OR policy_json->>'version'<>'1'
-    OR (policy_json-ARRAY['version','retrySeconds','safetySeconds','baselineSeconds'])<>'{}'::jsonb THEN
+ -- json preserves numeric tokens; jsonb would normalize exponent forms rejected by PolicyWire.
+ policy_json:=s.policy::json;
+ IF (policy_json->'version')::text IS DISTINCT FROM '1'
+    OR (SELECT count(*) FROM json_object_keys(policy_json))<>4 THEN
   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention policy';
  END IF;
  FOREACH duration_key IN ARRAY ARRAY['retrySeconds','safetySeconds','baselineSeconds'] LOOP
-  IF jsonb_typeof(policy_json->duration_key) IS DISTINCT FROM 'number'
-     OR (policy_json->>duration_key) !~ '^[1-9][0-9]{0,18}$'
-     OR (policy_json->>duration_key)::numeric>9223372036854775807 THEN
+  IF coalesce((policy_json->duration_key)::text,'') !~ '^[1-9][0-9]{0,18}$' THEN
+   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention duration';
+  END IF;
+  IF (policy_json->>duration_key)::numeric>9223372036854775807 THEN
    RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention duration';
   END IF;
  END LOOP;
@@ -198,10 +204,13 @@ BEGIN
  IF minimum_age>9223372036854775807 THEN
   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention horizon';
  END IF;
+ -- Keep numeric conversion outside the RLS scan, including in a cached generic plan.
+ IF p_after IS DISTINCT FROM 18446744073709551615 THEN
+  first_key:=(coalesce(p_after,-1)+1-9223372036854775808)::bigint;
+ END IF;
  scanned:=0; reclaimed:=0; released_bytes:=0;
  FOR candidate IN SELECT sequence,batch_id,received_at,log_position,policy,octet_length(raw) AS bytes
-  FROM rss_observation.batches WHERE tenant_id=t AND scope=p_scope AND sequence_key >=
-   CASE WHEN p_after<18446744073709551615 OR p_after IS NULL THEN (coalesce(p_after,-1)+1-9223372036854775808)::bigint END
+  FROM rss_observation.batches WHERE tenant_id=t AND scope=p_scope AND sequence_key >= first_key
   ORDER BY sequence_key LIMIT p_limit
  LOOP
   scanned:=scanned+1; last_examined:=candidate.sequence;

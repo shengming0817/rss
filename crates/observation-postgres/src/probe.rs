@@ -2,7 +2,7 @@ use rss_observation::{Error, ErrorKind};
 use sqlx::PgConnection;
 // PostgreSQL 16 canonical columns/constraints/indexes/policies/functions. A change requires a
 // new component storage revision and a matching fresh-install proof, never a bypass.
-const CATALOG: &str = "12aeaaccabd0c053731e841fb01f4fbb";
+const CATALOG: &str = "4fbeb6389b48913b97d573959806e00c";
 pub(crate) async fn validate(
     connection: &mut PgConnection,
     maintenance: bool,

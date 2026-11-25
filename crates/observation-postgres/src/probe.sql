@@ -1,8 +1,13 @@
 -- current_user is intentionally included: has_table_privilege/has_schema_privilege compute
 -- effective inherited privileges even for memberships with INHERIT TRUE and SET FALSE.
--- SET-reachable roles additionally cover permissions the login can gain by switching roles.
-WITH reachable AS (
- SELECT * FROM pg_roles WHERE rolname=current_user OR pg_has_role(current_user,oid,'SET')
+-- Follow roles the login can assume or administer, including through another reachable role.
+WITH RECURSIVE accessible(oid) AS (
+ SELECT oid FROM pg_roles WHERE rolname=current_user
+ UNION
+ SELECT target.oid FROM accessible a CROSS JOIN pg_roles target
+ WHERE pg_has_role(a.oid,target.oid,'SET') OR pg_has_role(a.oid,target.oid,'MEMBER WITH ADMIN OPTION')
+), reachable AS (
+ SELECT r.* FROM pg_roles r JOIN accessible USING (oid)
 ), relations AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='rss_observation' AND c.relname IN ('objects','streams','batches','journals','admissions')

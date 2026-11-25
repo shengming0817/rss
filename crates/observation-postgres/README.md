@@ -24,7 +24,8 @@ GRANT EXECUTE ON FUNCTION rss_observation.activate(text,numeric,text,text), rss_
 
 Install `MIGRATION_SQL` in a fresh schema as one transaction. Runtime admission verifies storage
 revision 4, its catalog definitions and effective privileges, including those on the tenant
-admission and journal tables.
+admission and journal tables. Both pool constructors check roles the login can assume or administer,
+including indirect membership administration grants.
 
 ## Transaction and recovery
 

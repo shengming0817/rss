@@ -11,9 +11,9 @@ use rss_projection::{
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 
-const EXPIRY: i64 = 100 + 86400 + 3600;
+pub(super) const EXPIRY: i64 = 100 + 86400 + 3600;
 
-async fn maintenance_role(f: &Fixture) -> anyhow::Result<PgPool> {
+pub(super) async fn maintenance_role(f: &Fixture) -> anyhow::Result<PgPool> {
     sqlx::raw_sql("CREATE ROLE obs_maint LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOBYPASSRLS;
       GRANT USAGE ON SCHEMA rss_observation TO obs_maint;
       GRANT EXECUTE ON FUNCTION rss_observation.reclaim(text,bigint,bigint,numeric,integer) TO obs_maint")
@@ -65,6 +65,33 @@ async fn maintenance_permissions_and_tenant_isolation() -> anyhow::Result<()> {
             ErrorKind::Unauthorized
         );
     }
+    // Validate membership configuration at pool admission, in both directions.
+    sqlx::raw_sql(
+        "CREATE ROLE obs_manager NOLOGIN;
+        GRANT obs_manager TO handoff_runtime WITH SET TRUE, INHERIT FALSE;
+        GRANT obs_maint TO obs_manager WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+    )
+    .execute(&f.admin)
+    .await?;
+    assert!(
+        PgStore::new(f.pool.clone(), Clock, deadline())
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql(
+        "REVOKE obs_manager FROM handoff_runtime;
+        GRANT handoff_runtime TO obs_maint WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+    )
+    .execute(&f.admin)
+    .await?;
+    assert!(
+        PgMaintenance::new(maint_pool.clone(), Clock, deadline())
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql("REVOKE handoff_runtime FROM obs_maint")
+        .execute(&f.admin)
+        .await?;
     let (permitted,raw_write):(bool,bool)=sqlx::query_as("SELECT has_function_privilege(current_user,'rss_observation.reclaim(text,bigint,bigint,numeric,integer)','EXECUTE'),has_table_privilege(current_user,'rss_observation.batches','UPDATE')").fetch_one(&f.pool).await?;
     assert_eq!((permitted, raw_write), (false, false));
     let mut tx = maint_pool.begin().await?;
@@ -252,13 +279,22 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     for damaged in [
         original.replace("\"version\":1", "\"version\":2"),
         original.replace("\"retrySeconds\":86400", "\"retrySeconds\":-1"),
+        original.replace(":86400", ":864e2"),
+        original.replace("\"version\":1", "\"version\":1e0"),
     ] {
-        assert_ne!(damaged, original);
+        assert!(Policy::decode(&damaged).is_err());
         sqlx::query("UPDATE rss_observation.streams SET policy=$1 WHERE scope=$2")
-            .bind(damaged)
+            .bind(&damaged)
             .bind(b.encode()?)
             .execute(&f.admin)
             .await?;
+        sqlx::query(
+            "UPDATE rss_observation.batches SET policy=$1 WHERE scope=$2 AND raw IS NOT NULL",
+        )
+        .bind(&damaged)
+        .bind(b.encode()?)
+        .execute(&f.admin)
+        .await?;
         assert_eq!(
             maint
                 .reclaim(grant(&b, EXPIRY, 2)?, w, deadline())
@@ -268,9 +304,22 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
                 .kind(),
             ErrorKind::Invariant
         );
+        let intact: bool = sqlx::query_scalar(
+            "SELECT raw IS NOT NULL FROM rss_observation.batches WHERE scope=$1 AND batch_id=$2",
+        )
+        .bind(b.encode()?)
+        .bind(old.batch().id().as_str())
+        .fetch_one(&f.admin)
+        .await?;
+        assert!(intact);
         assert_eq!(source.bounds(&control).await?.expired_through, None);
     }
     sqlx::query("UPDATE rss_observation.streams SET policy=$1 WHERE scope=$2")
+        .bind(&original)
+        .bind(b.encode()?)
+        .execute(&f.admin)
+        .await?;
+    sqlx::query("UPDATE rss_observation.batches SET policy=$1 WHERE scope=$2 AND raw IS NOT NULL")
         .bind(original)
         .bind(b.encode()?)
         .execute(&f.admin)
@@ -619,91 +668,4 @@ async fn settlement_and_competing_pages() -> anyhow::Result<()> {
             .is_empty()
     );
     Ok(())
-}
-
-#[tokio::test]
-async fn bounded_candidate_scan() -> anyhow::Result<()> {
-    let f = Fixture::new().await?;
-    let store = f.store().await?;
-    let maint = PgMaintenance::new(maintenance_role(&f).await?, Clock, deadline()).await?;
-    // Inspect the same header selection used inside the installed maintenance function.
-    let body:String=sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_observation.reclaim(text,bigint,bigint,numeric,integer)'::regprocedure")
-        .fetch_one(&f.admin).await?;
-    let (_, candidate) = body
-        .split_once("FOR candidate IN ")
-        .context("candidate cursor")?;
-    let (candidate, _) = candidate.split_once(" LOOP").context("candidate body")?;
-    let explain = format!(
-        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
-        candidate
-            .replace("tenant_id=t", "tenant_id=$1::uuid")
-            .replace("scope=p_scope", "scope=$2")
-            .replace("p_after", "$3::numeric")
-            .replace("p_limit", "$4")
-    );
-    for (tenant, total) in [(OTHER, 1024_u32), (TENANT, 128), (TENANT, 2048)] {
-        let object = format!("history-{total}");
-        let s = scope(tenant, &object, "r", "s", "old")?;
-        activate(&store, &s, None).await?;
-        // A long prefix of already expired identities plus a final live body.
-        // Retention must visit exactly the window even when most pages release nothing.
-        sqlx::query("INSERT INTO rss_observation.batches(tenant_id,scope,batch_id,sequence,fingerprint,received_at,applicable)
-          SELECT $1::uuid,$2,n::text,n,sha256(convert_to(n::text,'utf8')),100,false FROM generate_series(0,$3-1) n")
-            .bind(tenant).bind(s.encode()?).bind(i32::try_from(total)?).execute(&f.admin).await?;
-        let last = batch(&s, "final", u64::from(total), "all", Body::Partial(vec![]))?;
-        f.stage(&last).await?.0.commit().await?;
-        activate(&store, &scope(tenant, &object, "r", "s", "new")?, Some(1)).await?;
-        sqlx::query("ANALYZE rss_observation.batches")
-            .execute(&f.admin)
-            .await?;
-        let after = u64::from(total - 4);
-        let mut tx = f.owner.begin().await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(tenant)
-            .execute(&mut *tx)
-            .await?;
-        let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain.as_str()))
-            .bind(tenant)
-            .bind(s.encode()?)
-            .bind(after.to_string())
-            .bind(4_i32)
-            .fetch_one(&mut *tx)
-            .await?;
-        tx.rollback().await?;
-        let nodes = &plan[0]["Plan"];
-        let visited = candidate_rows(nodes);
-        let g = || grant(&s, EXPIRY, 0);
-        let empty = maint
-            .reclaim(g()?, ScanWindow::new(None, 4)?, deadline())
-            .await?;
-        assert_eq!(
-            (empty.scanned, empty.reclaimed, empty.last_examined),
-            (4, 0, Some(3))
-        );
-        let w = ScanWindow::new(Some(after), 4)?;
-        let page = maint.reclaim(g()?, w, deadline()).await?;
-        println!(
-            "retired history size={total} examined={visited} scanned={} released={} bytes={} shared_hits={}",
-            page.scanned, page.reclaimed, page.released_bytes, nodes["Shared Hit Blocks"]
-        );
-        assert!((1.0..=4.0).contains(&visited), "{nodes}");
-        assert_eq!(
-            (page.scanned, page.reclaimed, page.released_bytes),
-            (4, 1, last.batch().encode().len() as u64)
-        );
-        assert_eq!(maint.reclaim(g()?, w, deadline()).await?.reclaimed, 0);
-    }
-    Ok(())
-}
-fn candidate_rows(node: &serde_json::Value) -> f64 {
-    let rows = if node["Relation Name"] == "batches" {
-        (node["Actual Rows"].as_f64().unwrap_or(0.0)
-            + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
-            * node["Actual Loops"].as_f64().unwrap_or(1.0)
-    } else {
-        0.0
-    };
-    rows + node["Plans"]
-        .as_array()
-        .map_or(0.0, |nodes| nodes.iter().map(candidate_rows).sum())
 }
