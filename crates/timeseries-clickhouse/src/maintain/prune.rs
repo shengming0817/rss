@@ -3,7 +3,6 @@ use crate::{projection::literal, read::selection};
 #[derive(Serialize, Deserialize)]
 pub(super) struct Cleanup {
     raw_limit: i64,
-    drained: bool,
     pending_summaries: Vec<String>,
 }
 async fn safe_limit<C: Clock>(
@@ -125,7 +124,6 @@ pub(super) async fn step<C: Clock>(
         }
         state.cleanup = Some(Cleanup {
             raw_limit: limit,
-            drained: false,
             pending_summaries: Vec::new(),
         });
         return Ok(Step::More(0));
@@ -134,15 +132,14 @@ pub(super) async fn step<C: Clock>(
     if cleanup.raw_limit > limit {
         return Ok(Step::Blocked(MaintenanceBlock::DirtySummary));
     }
-    if !cleanup.drained {
-        let ids=sqlx::query_scalar::<_,String>("SELECT query_id::text FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND NOT allowed AND NOT drained ORDER BY id LIMIT $3")
+    let ids=sqlx::query_scalar::<_,String>("SELECT query_id::text FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND NOT allowed AND NOT drained ORDER BY id LIMIT $3")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(i64::from(r.budget().rows.get())).fetch_all(&mut *c).await.map_err(sql_error)?;
+    if !ids.is_empty() {
         store.drain(&ids, deadline).await?;
         sqlx::query("UPDATE rss_ts_ch.attempts SET drained=true WHERE tenant_id=$1::text::uuid AND namespace=$2 AND query_id::text=ANY($3) AND NOT allowed")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(&ids).execute(&mut *c).await.map_err(sql_error)?;
         sqlx::query("DELETE FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND target='raw' AND query_id::text=ANY($3) AND NOT allowed AND drained")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(&ids).execute(&mut *c).await.map_err(sql_error)?;
-        cleanup.drained = ids.len() < r.budget().rows.get() as usize;
         return Ok(Step::More(
             u32::try_from(ids.len()).map_err(|_| Error::Invariant)?,
         ));
