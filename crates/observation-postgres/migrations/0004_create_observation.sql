@@ -37,6 +37,9 @@ CREATE TABLE rss_observation.journals (
 CREATE TABLE rss_observation.batches (
  tenant_id uuid NOT NULL, scope text NOT NULL, batch_id text NOT NULL,
  sequence numeric(20,0) NOT NULL CHECK (sequence BETWEEN 0 AND 18446744073709551615),
+ -- PG16 can push bigint range predicates through forced RLS. Bias the full u64 domain
+ -- monotonically so the maintenance cursor seeks directly to its first candidate.
+ sequence_key bigint GENERATED ALWAYS AS ((sequence-9223372036854775808)::bigint) STORED,
  raw bytea CHECK (octet_length(raw) BETWEEN 1 AND 4194304),
  fingerprint bytea NOT NULL CHECK (octet_length(fingerprint)=32),
  received_at bigint NOT NULL CHECK (received_at>=0),
@@ -48,7 +51,7 @@ CREATE TABLE rss_observation.batches (
   applicable=(log_position IS NOT NULL) AND (log_position IS NULL OR log_position>0)
  ),
  PRIMARY KEY (tenant_id,scope,batch_id),
- UNIQUE (tenant_id,scope,sequence),
+ UNIQUE (tenant_id,scope,sequence_key),
  FOREIGN KEY (tenant_id,scope) REFERENCES rss_observation.streams
 );
 CREATE UNIQUE INDEX observation_log ON rss_observation.batches (tenant_id,log_position) WHERE applicable;
@@ -197,8 +200,9 @@ BEGIN
  END IF;
  scanned:=0; reclaimed:=0; released_bytes:=0;
  FOR candidate IN SELECT sequence,batch_id,received_at,log_position,policy,octet_length(raw) AS bytes
-  FROM rss_observation.batches WHERE tenant_id=t AND scope=p_scope AND sequence>coalesce(p_after,-1)
-  ORDER BY sequence LIMIT p_limit
+  FROM rss_observation.batches WHERE tenant_id=t AND scope=p_scope AND sequence_key >=
+   CASE WHEN p_after<18446744073709551615 OR p_after IS NULL THEN (coalesce(p_after,-1)+1-9223372036854775808)::bigint END
+  ORDER BY sequence_key LIMIT p_limit
  LOOP
   scanned:=scanned+1; last_examined:=candidate.sequence;
   IF candidate.bytes IS NOT NULL AND candidate.policy IS DISTINCT FROM s.policy THEN

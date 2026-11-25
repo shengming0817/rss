@@ -96,7 +96,7 @@ impl ReceiveOutcome {
 #[derive(Debug)]
 pub enum LookupOutcome {
     /// Original immutable receipt and complete body.
-    Found(Record),
+    Found(Box<Record>),
     /// The identity exists and authorized maintenance released its content.
     Expired,
     /// No durable identity was visible at this snapshot.

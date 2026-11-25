@@ -164,7 +164,8 @@ async fn faults(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<()> {
         ));
         assert_eq!(cursor(store, scope).await?, Some(1));
     }
-    commit_faults(store, scope).await
+    commit_faults(store, scope).await?;
+    pending_commit_timeout(store, scope).await
 }
 async fn commit_faults(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<()> {
     store.inject_next_fault(Fault::CommitAckLost);
@@ -197,6 +198,9 @@ async fn commit_faults(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<
         Some(7)
     );
     assert_eq!(cursor(store, scope).await?, Some(8));
+    Ok(())
+}
+async fn pending_commit_timeout(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<()> {
     store.inject_next_fault(Fault::CommitPending);
     let short = Deadline::at(Timer.now() + Duration::from_millis(100));
     assert_eq!(
@@ -373,11 +377,11 @@ async fn role_checks(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
     schema_checks(admin, pool).await
 }
 async fn schema_checks(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN sequence TYPE numeric(21,0)")
+    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN received_at DROP NOT NULL")
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_err());
-    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN sequence TYPE numeric(20,0)")
+    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN received_at SET NOT NULL")
         .execute(admin)
         .await?;
     sqlx::query("COMMENT ON SCHEMA rss_observation IS 'unknown-version'")

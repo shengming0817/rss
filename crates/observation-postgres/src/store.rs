@@ -414,7 +414,7 @@ fn replay(record: Record, batch: &Batch) -> Result<ReceiveOutcome, Error> {
     Ok(ReceiveOutcome::Replay(record))
 }
 enum StoredBatch {
-    Found(Record),
+    Found(Box<Record>),
     Expired([u8; 32]),
     Missing,
 }
@@ -429,7 +429,7 @@ impl StoredBatch {
     fn retry(self, batch: &Batch, fingerprint: &[u8; 32]) -> Result<Option<ReceiveOutcome>, Error> {
         match self {
             Self::Missing => Ok(None),
-            Self::Found(record) => replay(record, batch).map(Some),
+            Self::Found(record) => replay(*record, batch).map(Some),
             Self::Expired(original) if &original == fingerprint => {
                 Err(ErrorKind::HistoryExpired.into())
             }
@@ -448,7 +448,9 @@ async fn read(connection: &mut PgConnection, scope: &Scope, id: &Id) -> Result<S
                 fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?,
             ))
         }
-        Some(row) => restore(row, scope, id).map(StoredBatch::Found),
+        Some(row) => restore(row, scope, id)
+            .map(Box::new)
+            .map(StoredBatch::Found),
     }
 }
 pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {

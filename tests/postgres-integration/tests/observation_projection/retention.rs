@@ -546,19 +546,20 @@ async fn settlement_and_competing_pages() -> anyhow::Result<()> {
     let next = scope(TENANT, "obj", "r", "s", "new")?;
     activate(&store, &old, None).await?;
     let report = batch(&old, "snapshot", 0, "all", Body::Snapshot(vec![]))?;
-    let (pending, pid) = f.stage(&report).await?;
-    let other = store.clone();
-    let activation = tokio::spawn(async move { activate(&other, &next, Some(1)).await });
-    f.wait_for_blocked(pid, 1).await?;
-    let activating:i32=sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND usename='handoff_runtime'")
-        .bind(pid).fetch_one(&f.admin).await?;
-    // The retry sees Missing before the original receive commits, then queues behind retirement.
+    // Stage both the batch and a lifecycle switch on the same connection. The
+    // object UPDATE lock makes the retry wait *after* it has observed Missing.
+    let (mut pending, pid) = f.stage(&report).await?;
+    sqlx::query("SELECT rss_observation.activate($1,1,$2,$3)")
+        .bind(next.encode()?)
+        .bind(Policy::new(86400, 3600, 3600)?.encode()?)
+        .bind(rss_observation::State::initial().encode()?)
+        .execute(&mut *pending)
+        .await?;
     let retry_store = store.clone();
     let retry = batch(&old, "snapshot", 0, "all", Body::Snapshot(vec![]))?;
     let retry_task = tokio::spawn(async move { retry_store.receive(&retry, deadline()).await });
-    f.wait_for_blocked(activating, 1).await?;
+    f.wait_for_blocked(pid, 1).await?;
     pending.commit().await?;
-    activation.await??;
     assert!(matches!(
         retry_task.await??,
         rss_observation::ReceiveOutcome::Replay(_)
