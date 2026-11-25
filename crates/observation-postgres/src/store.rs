@@ -213,14 +213,7 @@ impl<C: Clock> PgStore<C> {
         }
         .await;
         #[cfg(feature = "integration")]
-        let result = if matches!(
-            fault,
-            Some(Fault::BeforeCommit | Fault::RollbackAckLost | Fault::RollbackPending(_))
-        ) {
-            Err(Error::new(ErrorKind::Storage).into())
-        } else {
-            result
-        };
+        let result = Fault::before_settlement(fault.as_ref(), result);
         match result {
             Ok(value) => {
                 progress.set(Stage::Effects);

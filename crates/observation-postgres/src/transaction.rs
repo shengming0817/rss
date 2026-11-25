@@ -75,6 +75,19 @@ impl Fault {
     }
 
     #[cfg(feature = "integration")]
+    pub(crate) fn before_settlement<T, E: From<Error>>(
+        fault: Option<&Self>,
+        result: Result<T, E>,
+    ) -> Result<T, E> {
+        match fault {
+            Some(Self::BeforeCommit | Self::RollbackAckLost | Self::RollbackPending(_)) => {
+                Err(Error::new(ErrorKind::Storage).into())
+            }
+            _ => result,
+        }
+    }
+
+    #[cfg(feature = "integration")]
     pub(crate) async fn hold_rollback(entered: Option<futures::channel::oneshot::Sender<()>>) -> ! {
         if let Some(entered) = entered {
             let _ = entered.send(());
