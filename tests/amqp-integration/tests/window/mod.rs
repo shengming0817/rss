@@ -206,7 +206,7 @@ async fn busy_redelivery(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> 
     let mut stream = subscriber
         .deliveries(&subscription, NonZeroU16::MIN)
         .await?;
-    let store = MemoryInboxStore::new();
+    let store = MemoryInboxStore::new(TokioClock::new());
     let group = ConsumerGroup::parse("busy")?;
     let holder = claim_original(&store, &group, &subscription, &message).await?;
     assert!(matches!(

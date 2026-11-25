@@ -63,7 +63,7 @@ Queued and busy deliveries count toward the same window and keep their original 
 A delivery waiting for ordinary capacity holds its unsettled handle and wakes when its permit transfers.
 For a live remote claim, the first probe waits 2.5–5 ms. Subsequent randomized intervals double up
 to 1–2 s; a short provider lease estimate can advance the probe by one tier. Each wait ends at the
-original operation cutoff. A known busy timeout requeues once; a durable claim error abandons.
+original operation cutoff. When the final probe falls within the current backoff tier, it runs with\none quarter of the original operation budget (up to 250 ms) still available for I/O. A known busy timeout requeues once; a durable claim error abandons.
 The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.
 The same loop
 runs on an application's Tokio host or through the optional RSS lifecycle bridge.

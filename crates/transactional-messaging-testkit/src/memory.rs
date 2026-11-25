@@ -595,23 +595,19 @@ mod consumer {
     #[derive(Clone)]
     pub struct MemoryInboxStore {
         inner: Arc<Mutex<InboxState>>,
+        clock: Arc<dyn rss_request_context::Clock>,
         lease: Duration,
     }
 
-    impl Default for MemoryInboxStore {
-        fn default() -> Self {
+    impl MemoryInboxStore {
+        /// Construct an empty store in the supplied monotonic time domain.
+        #[must_use]
+        pub fn new(clock: impl rss_request_context::Clock + 'static) -> Self {
             Self {
                 inner: Arc::new(Mutex::new(InboxState::default())),
+                clock: Arc::new(clock),
                 lease: Duration::from_secs(30),
             }
-        }
-    }
-
-    impl MemoryInboxStore {
-        /// Construct an empty store.
-        #[must_use]
-        pub fn new() -> Self {
-            Self::default()
         }
 
         /// Persist a terminal receipt as if it committed atomically with a handler effect.
@@ -652,6 +648,7 @@ mod consumer {
     /// A validated in-memory claim reservation tied to the creating store.
     pub struct MemoryClaimPermit {
         store: Arc<Mutex<InboxState>>,
+        cutoff: rss_request_context::Deadline,
         identity: ConsumerIdentity,
     }
 
@@ -670,7 +667,7 @@ mod consumer {
             &self,
             binding: rss_transactional_messaging::fence::ExecutionBinding,
             identity: &ConsumerIdentity,
-            _deadline: OperationDeadline,
+            deadline: OperationDeadline,
         ) -> Result<ClaimAdmission<'_, Self::Permit>, MessagingError> {
             if binding.tenant() != identity.tenant_id() {
                 return Err(MessagingError::new(
@@ -678,7 +675,19 @@ mod consumer {
                     std::io::Error::other("fixture execution tenant mismatch"),
                 ));
             }
+            if deadline.timeout().is_zero() {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::DeadlineElapsed,
+                    MemoryConsumerError,
+                ));
+            }
+            let cutoff = rss_request_context::Deadline::from_timeout(
+                self.clock.as_ref(),
+                deadline.timeout(),
+            )
+            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
             Ok(ClaimAdmission::Ready(MemoryClaimPermit {
+                cutoff,
                 store: self.inner.clone(),
                 identity: identity.clone(),
             }))
@@ -700,6 +709,12 @@ mod consumer {
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if permit.cutoff.is_expired(self.clock.now()) {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::DeadlineElapsed,
+                    MemoryConsumerError,
+                ));
+            }
             match state.records.get(&key) {
                 Some(InboxRecord::Claimed { .. }) => {
                     Ok(IdempotencyDisposition::InProgress { retry_after: None })

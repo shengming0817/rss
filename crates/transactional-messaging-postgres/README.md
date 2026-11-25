@@ -15,7 +15,10 @@ ownership and same-ID delivery expiry. No legacy schema is read, migrated or ado
 
 Consumer-capable runtimes share one pool across workers and reserve one connection for
 Inbox and local-projection renewal. Constructing an Inbox requires at least two connections.
-Before claim SQL, occupied ordinary capacity is reported separately from a live durable claim.
+Direct callers use `reserve_claim`, await `acquire`, and pass the single-use permit to `claim`
+on the same runtime. Dropping a pending wait withdraws it from the ordinary-capacity queue.
+A transferred permit holds its slot until consumed or dropped, including after its original
+I/O cutoff. Drop an unused permit promptly to make capacity available to another worker.
 An acquired claim holds its same-pool slot through handoff to the effect. Direct callers must drive
 or release their claims; dropping a claim returns its local capacity and leaves durable lease expiry authoritative.
 

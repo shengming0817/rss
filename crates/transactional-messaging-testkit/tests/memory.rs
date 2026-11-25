@@ -342,13 +342,32 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
 #[tokio::test]
 async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResult {
     let clock = FakeClock::new();
-    let store = MemoryInboxStore::new();
+    let store = MemoryInboxStore::new(clock.clone());
     let message = envelope("message-inbox", b"payload")?;
     let identity = ConsumerIdentity::new(
         message.metadata().tenant_id(),
         ConsumerGroup::parse("orders-worker")?,
         message.id().clone(),
         message.metadata().contract().clone(),
+    );
+    let execution = crate::execution(identity.tenant_id(), 1);
+    let zero = OperationDeadline::from_remaining(Duration::ZERO);
+    assert_eq!(
+        store
+            .reserve_claim(execution, &identity, zero)
+            .err()
+            .map(|e| e.kind()),
+        Some(MessagingErrorKind::DeadlineElapsed)
+    );
+    let short = OperationDeadline::from_remaining(Duration::from_millis(1));
+    let expired = store
+        .reserve_claim(execution, &identity, short)?
+        .acquire()
+        .await?;
+    clock.advance(short.timeout())?;
+    assert_eq!(
+        store.claim(expired).await.err().map(|e| e.kind()),
+        Some(MessagingErrorKind::DeadlineElapsed)
     );
     let claim = match store
         .claim(
@@ -522,7 +541,7 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         IdempotencyDisposition::Terminal(_)
     ));
 
-    let releasable = MemoryInboxStore::new();
+    let releasable = MemoryInboxStore::new(clock.clone());
     let claim = match releasable
         .claim(
             releasable
@@ -556,7 +575,7 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         IdempotencyDisposition::Acquired(_)
     ));
 
-    let collision_store = MemoryInboxStore::new();
+    let collision_store = MemoryInboxStore::new(clock.clone());
     let first_message = envelope("c", b"payload")?;
     let first_identity = ConsumerIdentity::new(
         first_message.metadata().tenant_id(),

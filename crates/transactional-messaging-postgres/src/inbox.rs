@@ -127,13 +127,26 @@ pub(crate) fn receipt(
         })
         .transpose()
 }
+const READ_RECEIPT: &str =
+    "SELECT contract, fingerprint, disposition FROM rss_transactional_messaging.inbox
+    WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3";
+const READ_CONFLICT: &str = "SELECT contract, fingerprint, disposition,
+    CASE WHEN disposition IS NULL AND isfinite(lease_until) THEN
+        GREATEST(0, extract(epoch FROM lease_until) - extract(epoch FROM clock_timestamp()))::float8
+    END AS retry_seconds FROM rss_transactional_messaging.inbox
+    WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3";
+
 async fn read(
     transaction: &mut PgTransaction<'_>,
     identity: &ConsumerIdentity,
+    query: &'static str,
 ) -> Result<Option<PgRow>, PgError> {
-    Ok(sqlx::query("SELECT contract, fingerprint, disposition, GREATEST(0, (extract(epoch FROM lease_until - clock_timestamp()) * 1000000)::bigint) AS lease_remaining_us FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3")
-        .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str())
-        .fetch_optional(&mut *transaction.connection).await?)
+    Ok(sqlx::query(query)
+        .bind(identity.tenant_id().to_string())
+        .bind(identity.message_id().as_str())
+        .bind(identity.group().as_str())
+        .fetch_optional(&mut *transaction.connection)
+        .await?)
 }
 
 impl PgInboxStore {
@@ -180,15 +193,18 @@ impl PgInboxStore {
                                 ));
                             }
                             let observed = tx.timer.now();
-                            let row = read(tx, &identity).await?.ok_or_else(PgError::invariant)?;
+                            let row = read(tx, &identity, READ_CONFLICT)
+                                .await?
+                                .ok_or_else(PgError::invariant)?;
                             Ok((
                                 match receipt(&row, &identity)? {
                                     Some(value) => IdempotencyDisposition::Terminal(value),
                                     None => IdempotencyDisposition::InProgress {
-                                        retry_after: Some(Duration::from_micros(
-                                            row.try_get::<i64, _>("lease_remaining_us")?
-                                                .unsigned_abs(),
-                                        )),
+                                        retry_after: row
+                                            .try_get::<Option<f64>, _>("retry_seconds")?
+                                            .and_then(|seconds| {
+                                                Duration::try_from_secs_f64(seconds).ok()
+                                            }),
                                     },
                                 },
                                 observed,
@@ -327,7 +343,7 @@ impl InboxStore for PgInboxStore {
             self.runtime
                 .local_tx(binding, deadline, move |tx| {
                     Box::pin(async move {
-                        read(tx, &identity)
+                        read(tx, &identity, READ_RECEIPT)
                             .await?
                             .map(|row| receipt(&row, &identity))
                             .transpose()

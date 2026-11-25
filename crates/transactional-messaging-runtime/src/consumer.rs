@@ -321,6 +321,11 @@ where
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
+    let budget = execution.policy.budget();
+    let probe_reserve =
+        ((budget.total() - budget.settlement_reserve()) / 4).min(Duration::from_millis(250));
+    // Both cutoffs were minted from the same original operation budget.
+    let last_probe = Deadline::at(cutoff.instant() - probe_reserve);
     let mut capacity_wait = None;
     let mut backoff = None;
     let mut known_busy = None;
@@ -353,10 +358,15 @@ where
         execution
             .emitter
             .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
-        let delay = backoff
-            .get_or_insert_with(ClaimBackoff::new)
-            .next(retry_after);
-        let wake = cutoff.capped(execution.timer, delay);
+        let wake = match last_probe.remaining(execution.timer.now()) {
+            Some(left) if !left.is_zero() => {
+                let delay = backoff
+                    .get_or_insert_with(ClaimBackoff::new)
+                    .next(retry_after, left);
+                last_probe.capped(execution.timer, delay)
+            }
+            _ => cutoff,
+        };
         if within(execution.timer, cutoff, |_| {
             execution.timer.sleep_until(wake)
         })
@@ -438,13 +448,17 @@ impl ClaimBackoff {
         }
     }
 
-    fn next(&mut self, hint: Option<Duration>) -> Duration {
+    fn next(&mut self, hint: Option<Duration>, until_final: Duration) -> Duration {
         use std::hash::BuildHasher as _;
         // One earlier tier for a near expiry; a constantly renewed short lease still backs off.
         let lower = hint
             .unwrap_or(self.base)
             .clamp((self.base / 2).max(Self::FIRST), self.base);
         self.base = (self.base * 2).min(Duration::from_secs(1));
+        // When the last useful probe is inside this tier, do it once with I/O headroom.
+        if until_final <= lower * 2 {
+            return until_final;
+        }
         let sample = self.random.hash_one(self.probe);
         self.probe = self.probe.wrapping_add(1);
         lower + Duration::from_nanos(sample % (lower.as_nanos() as u64))
@@ -454,6 +468,14 @@ impl ClaimBackoff {
 #[cfg(test)]
 mod claim_backoff_tests {
     use super::*;
+
+    #[test]
+    fn last_probe_keeps_the_available_io_window_once_the_tier_reaches_it() {
+        let mut backoff = ClaimBackoff::new();
+        backoff.base = Duration::from_secs(1);
+        let latest = Duration::from_millis(1250);
+        assert_eq!(backoff.next(Some(Duration::from_secs(1)), latest), latest);
+    }
 
     #[test]
     fn lease_hint_recovers_one_tier_and_jitter_continues_at_the_cap() {
@@ -468,7 +490,7 @@ mod claim_backoff_tests {
                 } else {
                     base
                 };
-                let delay = backoff.next(hint);
+                let delay = backoff.next(hint, Duration::MAX);
                 assert!((floor..floor * 2).contains(&delay));
                 if index > 10 {
                     assert!(delay >= Duration::from_millis(cap_floor));

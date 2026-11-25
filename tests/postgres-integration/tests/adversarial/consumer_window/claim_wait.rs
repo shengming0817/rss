@@ -1,5 +1,5 @@
 use super::*;
-use rss_request_context::{Clock, Deadline, ExecutionTimer};
+
 use rss_transactional_messaging_runtime::consumer::{
     ConsumerExecution, ProcessingDisposition, consume_once,
 };
@@ -69,24 +69,6 @@ pub(super) async fn cancel_waiter(
     Ok(())
 }
 
-// Poll the delivery and this observer on one task. After an InProgress observation
-// the delivery has registered its probe sleep before control returns to the driver.
-struct ProbeClock {
-    timer: FakeClock,
-    wake: Mutex<Option<Deadline>>,
-}
-impl Clock for ProbeClock {
-    fn now(&self) -> std::time::Instant {
-        self.timer.now()
-    }
-}
-impl ExecutionTimer for ProbeClock {
-    async fn sleep_until(&self, deadline: Deadline) {
-        *self.wake.lock().expect("probe deadline") = Some(deadline);
-        self.timer.sleep_until(deadline).await;
-    }
-}
-
 struct RemoteBusy(Notify);
 impl TransactionalMessagingEmitter for RemoteBusy {
     fn emit(&self, observation: TransactionalMessagingObservation) {
@@ -133,6 +115,37 @@ async fn verify_row_hint(
     Ok(())
 }
 
+async fn verify_unbounded_lease(
+    owner: &sqlx::PgPool,
+    inbox: &PgInboxStore,
+    binding: &VerifiedConsumerBinding,
+    terminal: bool,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE rss_transactional_messaging.inbox SET lease_until='infinity' WHERE message_id=$1",
+    )
+    .bind(binding.identity().message_id().as_str())
+    .execute(owner)
+    .await?;
+    let receipt = inbox
+        .read_terminal(binding.execution(), binding.identity(), deadline())
+        .await?;
+    assert_eq!(receipt.is_some(), terminal);
+    let permit = inbox
+        .reserve_claim(binding.execution(), binding.identity(), deadline())?
+        .acquire()
+        .await?;
+    match (inbox.claim(permit).await?, receipt) {
+        (IdempotencyDisposition::Terminal(duplicate), Some(read)) => {
+            assert!(binding.validate_terminal(read).is_ok());
+            assert!(binding.validate_terminal(duplicate).is_ok());
+        }
+        (IdempotencyDisposition::InProgress { retry_after: None }, None) => {}
+        _ => anyhow::bail!("unbounded lease changed durable disposition"),
+    }
+    Ok(())
+}
+
 pub(super) async fn remote_cases(
     config: PgConfig,
     holder_runtime: Arc<PgRuntime>,
@@ -149,6 +162,7 @@ pub(super) async fn remote_cases(
     let policy = LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?;
     let holder = Peer::new(holder_runtime, policy)?;
     let waiting = Peer::new(waiter.clone(), policy)?;
+    row_hint_cases(owner, &holder, &waiting.inbox).await?;
     for (id, action) in [
         ("window-remote-held", OwnerAction::Hold),
         ("window-remote-released", OwnerAction::Release),
@@ -158,6 +172,24 @@ pub(super) async fn remote_cases(
     }
     waiter.close().await;
     Ok(())
+}
+
+async fn row_hint_cases(
+    owner: &sqlx::PgPool,
+    holder: &Peer,
+    waiting: &PgInboxStore,
+) -> anyhow::Result<()> {
+    let msg = message("window-hint");
+    let binding = binding(&msg);
+    let claim = holder.acquire(&binding).await?;
+    verify_unbounded_lease(owner, waiting, &binding, false).await?;
+    verify_row_hint(owner, waiting, &binding).await?;
+    let committed = holder
+        .tx
+        .execute(&claim, &msg, binding.receipt_intent(), deadline())
+        .await;
+    assert_eq!(committed.status(), rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
+    verify_unbounded_lease(owner, waiting, &binding, true).await
 }
 
 struct Peer {
@@ -194,13 +226,12 @@ impl Peer {
         binding: &VerifiedConsumerBinding,
     ) -> anyhow::Result<()> {
         match action {
-            OwnerAction::Hold => {}
             OwnerAction::Release if probes == 10 => {
                 self.inbox
                     .release(claim.take().expect("single release"), deadline())
                     .await?
             }
-            OwnerAction::Commit => {
+            OwnerAction::Commit if probes == 12 => {
                 let committed = self
                     .tx
                     .execute(
@@ -212,7 +243,7 @@ impl Peer {
                     .await;
                 assert_eq!(committed.status(), rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
             }
-            OwnerAction::Release => {}
+            _ => {}
         }
         Ok(())
     }
@@ -229,15 +260,10 @@ async fn remote_delivery(
     let binding = binding(&msg);
     let sub = subscription(&msg);
     let claimed = holder.acquire(&binding).await?;
-    if matches!(action, OwnerAction::Hold) {
-        verify_row_hint(owner, &waiting.inbox, &binding).await?;
-    }
     let mut claim = Some(claimed);
     let before = claim_count(owner).await?;
-    let clock = ProbeClock {
-        timer: FakeClock::new(),
-        wake: Mutex::new(None),
-    };
+    let clock = FakeClock::new();
+    let origin = clock.now();
     let emitter = RemoteBusy(Notify::new());
     let execution = ConsumerExecution::new(
         ConsumerGroup::parse("suite")?,
@@ -266,18 +292,30 @@ async fn remote_delivery(
         holder
             .on_probe(action, probes, &mut claim, &msg, &binding)
             .await?;
-        let wake = clock
-            .wake
-            .lock()
-            .expect("probe clock")
-            .take()
-            .expect("registered probe");
-        clock
-            .timer
-            .advance(wake.remaining(clock.now()).unwrap_or_default())?;
+        // Step to the upper edge of each jitter window. The last SQL always has
+        // 250 ms of provider budget; the final busy sleep consumes only logical time.
+        advance_probe(&clock, origin, probes)?;
     };
     let claims = claim_count(owner).await? - before;
     check_result(action, claims, count(owner, id).await, outcome, &recorder);
+    Ok(())
+}
+
+fn advance_probe(
+    clock: &FakeClock,
+    origin: std::time::Instant,
+    probes: usize,
+) -> anyhow::Result<()> {
+    let elapsed = clock.now().saturating_duration_since(origin);
+    let last_probe = Duration::from_millis(7750);
+    let next = if elapsed < last_probe {
+        let upper =
+            (Duration::from_millis(5) * (1 << (probes - 1).min(9))).min(Duration::from_secs(2));
+        (elapsed + upper).min(last_probe)
+    } else {
+        Duration::from_secs(8)
+    };
+    clock.advance(next - elapsed)?;
     Ok(())
 }
 
@@ -290,7 +328,7 @@ fn check_result(
 ) {
     let expected = match action {
         OwnerAction::Hold => {
-            assert!((12..=16).contains(&claims));
+            assert_eq!(claims, 13);
             assert_eq!(effects, 0);
             assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
             ProcessingDisposition::InProgress
@@ -301,7 +339,7 @@ fn check_result(
                 if matches!(action, OwnerAction::Release) {
                     11
                 } else {
-                    2
+                    13
                 }
             );
             assert_eq!(effects, 1);

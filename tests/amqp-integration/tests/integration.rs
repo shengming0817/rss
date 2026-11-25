@@ -451,13 +451,13 @@ async fn consume_ambiguous_retries(
     deliveries: &mut ManagedDeliveryStream<AmqpDeliveries>,
     subscription: &SubscriptionIdentity,
 ) -> Result<usize, LiveConformanceFailure> {
-    let store = MemoryInboxStore::new();
+    let timer = FakeClock::new();
+    let store = MemoryInboxStore::new(timer.clone());
     let effects = Arc::new(AtomicUsize::new(0));
     let transaction = RecordingInboxTx {
         store: store.clone(),
         effects: Arc::clone(&effects),
     };
-    let timer = FakeClock::new();
     let emitter = NoopEmitter;
     let execution = ConsumerExecution::new(
         ConsumerGroup::parse("ambiguous-consumer").expect("group"),
