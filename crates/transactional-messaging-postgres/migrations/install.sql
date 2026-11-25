@@ -795,7 +795,7 @@ CREATE FUNCTION rss_transactional_messaging.reclaim_published_bodies(p_before_us
 RETURNS TABLE(scanned integer,reclaimed integer,released_bytes bigint,next_seq bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid;
- r record; o outbox; cutoff_us bigint; current_operation uuid;
+ r record; o outbox; cutoff_us bigint; current_operation uuid; member_source bigint; member_status text;
 BEGIN
  PERFORM check_execution();
  IF p_before_us IS NULL OR p_before_us<0 OR p_after IS NULL OR p_after<0 OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1024 THEN
@@ -815,9 +815,13 @@ BEGIN
    AND src.status='published' AND src.payload IS NOT NULL AND extract(epoch FROM src.automatic_retry_deadline)*1000000<=cutoff_us
    FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN CONTINUE; END IF;
-  IF current_operation IS NOT NULL AND EXISTS(SELECT FROM dr_members d
-   WHERE d.tenant_id=t AND d.operation_id=current_operation AND d.message_id=o.message_id
-    AND d.consumer_group='' AND d.outbox_seq=o.seq AND d.status<>'completed') THEN CONTINUE; END IF;
+  IF current_operation IS NOT NULL THEN
+   -- Admit exactly one member by its unique identity before evaluating source/state.
+   -- Keeping outbox_seq out of this query prevents a history-sized source-index scan.
+   SELECT d.outbox_seq,d.status INTO member_source,member_status FROM dr_members d
+    WHERE d.tenant_id=t AND d.operation_id=current_operation AND d.message_id=o.message_id AND d.consumer_group='';
+   IF FOUND AND member_source=o.seq AND member_status<>'completed' THEN CONTINUE; END IF;
+  END IF;
   IF o.body_digest IS DISTINCT FROM sha256(o.payload) OR o.authored_evidence IS DISTINCT FROM
    sha256(convert_to('rss-outbox-evidence-v1','UTF8')||convert_to((o.envelope-ARRAY['trace','tenant_authority'])::text,'UTF8')||o.fingerprint||o.body_digest) THEN
    RAISE EXCEPTION 'published evidence mismatch' USING ERRCODE='PZ002';

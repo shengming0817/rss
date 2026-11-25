@@ -229,5 +229,19 @@ async fn ambiguous_tiles_reuse_the_batched_probe() -> anyhow::Result<()> {
         "complex covers must share bounded header and payload queries: {} SELECTs",
         after.0 - before.0
     );
+    let mut maximum = limits()?;
+    maximum.max_points = NonZeroU32::MAX;
+    let maximum = PgStore::new(
+        f.profile.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        Timer,
+        maximum,
+        CursorKey::new([17; 32]),
+        deadline()?,
+    )
+    .await?;
+    let page = aggregate(&maximum, spec(&d, 33)?, 0, 33 * 12).await?;
+    assert_eq!(page.buckets.len(), 12);
+    assert_eq!(page.buckets.iter().map(|b| b.valid_samples).sum::<u64>(), 1);
     Ok(())
 }

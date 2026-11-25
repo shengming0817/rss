@@ -113,7 +113,7 @@ pub(super) async fn resolve(
         let count = buckets
             .iter()
             .take_while(|b| b.expand)
-            .take((HEADER_BUDGET / (per_bucket + 1)).max(1))
+            .take((HEADER_BUDGET / per_bucket.saturating_add(1)).max(1))
             .count();
         let expanded =
             plan_with_limit(c, q, buckets[0].window.start(), count, limits, per_bucket).await?;
