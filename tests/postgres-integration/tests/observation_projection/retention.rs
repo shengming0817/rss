@@ -595,7 +595,7 @@ async fn bounded_candidate_scan() -> anyhow::Result<()> {
             .bind(tenant)
             .execute(&mut *tx)
             .await?;
-        let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(&explain))
+        let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain.as_str()))
             .bind(tenant)
             .bind(s.encode()?)
             .bind(after.to_string())
