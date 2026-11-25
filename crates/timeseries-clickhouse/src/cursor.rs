@@ -41,25 +41,20 @@ impl Position {
 }
 /// Separate domains prevent raw, aggregate and maintenance token substitution.
 impl CursorKey {
-    /// Opaque equality proof for control facts outside the authorized selection.
+    /// Opaque equality proof for the request's control dependencies.
     pub(crate) fn page_state(
         &self,
         domain: &[u8],
         binding: Digest,
         instance: &str,
-        fence: i64,
-        aggregate: Option<(i64, i64)>,
+        dependencies: &impl Serialize,
     ) -> Result<[u8; 32], Error> {
         let mut mac = self.mac()?;
         mac.update(b"rss.timeseries.clickhouse.page-state.v1");
         mac.update(domain);
         mac.update(binding.as_bytes());
         mac.update(instance.as_bytes());
-        mac.update(&fence.to_be_bytes());
-        if let Some((published, summaries)) = aggregate {
-            mac.update(&published.to_be_bytes());
-            mac.update(&summaries.to_be_bytes());
-        }
+        mac.update(&crate::transaction::bytes(dependencies)?);
         Ok(mac.finalize().into_bytes().into())
     }
     pub(crate) fn seal<T: Serialize>(

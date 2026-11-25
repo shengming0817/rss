@@ -10,7 +10,6 @@ INSERT INTO rss_ts_ch.installation DEFAULT VALUES;
 CREATE TABLE rss_ts_ch.namespaces (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
  fence_epoch bigint NOT NULL DEFAULT 0 CHECK(fence_epoch>=0),
- summary_epoch bigint NOT NULL DEFAULT 0 CHECK(summary_epoch>=0),
  allocated bigint NOT NULL DEFAULT 0 CHECK(allocated>=published),
  published bigint NOT NULL DEFAULT 0 CHECK(published>=0),
  revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
@@ -77,7 +76,7 @@ CREATE TABLE rss_ts_ch.fences (
 CREATE INDEX visible_fences ON rss_ts_ch.fences
  (tenant_id,namespace,(coalesce(selection#>>'{series,subject}',selection->>'subject')),
   (coalesce(selection#>>'{series,resource}',selection->>'resource')),lo,hi)
- WHERE kind='pruned' OR (kind='delete' AND NOT restored);
+ WHERE kind IN ('pruned','delete');
 CREATE TABLE rss_ts_ch.plans (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
  binding bytea NOT NULL CHECK(octet_length(binding)=32), state bytea NOT NULL,
@@ -91,6 +90,7 @@ CREATE TABLE rss_ts_ch.summaries (
  source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
  series text COLLATE "C" NOT NULL CHECK(length(series)=64),
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
+ max_input_revision bigint NOT NULL CHECK(max_input_revision>=0),
  object_id uuid NOT NULL, dirty_from bigint CHECK(dirty_from>=0),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces

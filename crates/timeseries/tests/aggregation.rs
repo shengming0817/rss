@@ -210,3 +210,21 @@ fn serialized_fold_resumes_large_gauge_and_same_time_state_without_recounting() 
     assert_eq!(v.covered_micros, 9);
     Ok(())
 }
+
+#[test]
+fn predecessor_cut_before_or_at_bucket_start_does_not_create_an_empty_interval() -> anyhow::Result<()> {
+    let s = spec(Metric::Bool, CoveragePolicy::ObservedOnly)?;
+    for at in [8, 10] {
+        let mut builder = SummaryBuilder::new(s.clone(), w(10, 20)?)?;
+        builder.push(sample(&s, 5, Reading::Valid(Value::Bool(true)), None)?, 10)?;
+        builder.interrupt(t(at)?)?;
+        builder.push(sample(&s, 15, Reading::Valid(Value::Bool(false)), None)?, 10)?;
+        let actual = builder.finish(10)?.project(AggregateOp::Transitions)?;
+        let expected = Summary::compute(&s, w(10, 20)?, &[
+            sample(&s, 15, Reading::Valid(Value::Bool(false)), None)?,
+        ], 10)?.project(AggregateOp::Transitions)?;
+        assert_eq!(actual.value, expected.value);
+        assert!(actual.completeness.contains(&Completeness::Gaps));
+    }
+    Ok(())
+}

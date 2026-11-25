@@ -449,9 +449,14 @@ impl SummaryBuilder {
     /// Explicit unavailable time cuts temporal continuity without inventing a producer sample.
     pub fn interrupt(&mut self, at: Timestamp) -> Result<(), Error> {
         let full = self.summary.window;
-        self.summary.window = Interval::new(full.start(), at.max(full.start()).min(full.end()))?;
-        self.flush(None)?;
-        self.summary.window = full;
+        if at > full.start() {
+            self.summary.window = Interval::new(full.start(), at.min(full.end()))?;
+            self.flush(None)?;
+            self.summary.window = full;
+        } else {
+            // A cut in the predecessor halo has no in-window interval to flush.
+            self.pending = None;
+        }
         self.previous = None;
         self.summary.defects.insert(Completeness::Gaps);
         Ok(())

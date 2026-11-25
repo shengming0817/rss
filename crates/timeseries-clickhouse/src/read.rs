@@ -2,7 +2,7 @@ use crate::{
     ChStore, Operation,
     control::{self, Fence},
     cursor::Position,
-    page::{Request, View},
+    page::{Dependencies, Request, View},
     projection::{RAW_FIELDS, Raw, hex, literal},
 };
 use rss_request_context::{Clock, Deadline};
@@ -80,6 +80,11 @@ fn position(p: &Position, latest: bool) -> String {
         )
     }
 }
+pub(crate) struct ReadRow {
+    pub sample: Sample,
+    pub received_at: Timestamp,
+    pub revision: i64,
+}
 impl<C: Clock> Operation<'_, C> {
     pub(crate) async fn raw_rows(
         &self,
@@ -87,7 +92,7 @@ impl<C: Clock> Operation<'_, C> {
         order: &str,
         limit: u32,
         deadline: Deadline,
-    ) -> Result<Vec<ObservedSample>, Error> {
+    ) -> Result<Vec<ReadRow>, Error> {
         let sql = format!(
             "SELECT {RAW_FIELDS} FROM rss_ts_ch.raw FINAL WHERE {condition} ORDER BY {order} LIMIT {}",
             u64::from(limit) + 1
@@ -99,7 +104,7 @@ impl<C: Clock> Operation<'_, C> {
         sql: &str,
         limit: u32,
         deadline: Deadline,
-    ) -> Result<Vec<ObservedSample>, Error> {
+    ) -> Result<Vec<ReadRow>, Error> {
         let mut cursor = self
             .ch_query(self.reader.query_raw(sql), deadline)?
             .fetch::<Raw>()
@@ -113,7 +118,8 @@ impl<C: Clock> Operation<'_, C> {
             if size > self.limits.max_bytes.get() as usize || rows.len() > limit as usize {
                 return Err(Error::BudgetExceeded);
             }
-            rows.push(ObservedSample {
+            rows.push(ReadRow {
+                revision: row.revision,
                 sample: row.sample()?,
                 received_at: Timestamp::new(row.received_at)?,
             });
@@ -126,15 +132,25 @@ impl Request for Query {
     type Metadata = ();
     type Page = Page;
     const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.history.v2";
-    const AGGREGATE: bool = false;
+    const INVALIDATED: Error = Error::HistoryExpired;
     fn query(&self) -> &Query {
         self
     }
     fn binding(&self) -> Result<Digest, Error> {
         self.binding()
     }
-    fn fence_start(&self) -> i64 {
-        self.window().start().micros()
+    async fn dependencies<C: Clock>(
+        &self, store: &Operation<'_, C>, c: &mut sqlx::PgConnection, fence: i64,
+    ) -> Result<Dependencies, Error> {
+        Ok(Dependencies {
+            fences: control::visible_fences(c, self, self.window().start().micros(), store.limits, false).await?,
+            tag: store.material.key.page_state(Self::DOMAIN, self.binding()?, store.instance, &fence)?,
+        })
+    }
+    async fn valid<C: Clock>(
+        &self, _: &Operation<'_, C>, _: &mut sqlx::PgConnection, _: &(), _: i64,
+    ) -> Result<bool, Error> {
+        Ok(true) // reason: raw reads have no mutable summary references to recheck.
     }
     async fn metadata<C: Clock>(
         &self,
@@ -148,7 +164,7 @@ impl Request for Query {
         &self,
         store: &Operation<'_, C>,
         view: View<Position>,
-        (): (),
+        _: &mut (),
         deadline: Deadline,
     ) -> Result<(Page, Option<Position>), Error> {
         let q = self;
@@ -211,6 +227,9 @@ impl Request for Query {
         };
         let more = more_groups || rows.len() > limit as usize;
         rows.truncate(limit as usize);
+        let rows: Vec<_> = rows.into_iter().map(|row| ObservedSample {
+            sample: row.sample, received_at: row.received_at,
+        }).collect();
         q.validate_page(&rows)?;
         let next = if more {
             Some(Position::of(&rows.last().ok_or(Error::Invariant)?.sample)?)

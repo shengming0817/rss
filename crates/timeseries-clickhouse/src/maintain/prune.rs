@@ -68,7 +68,7 @@ async fn safe_limit<C: Clock>(
                 .predecessor(&spec, raw_before, boundary, &fences, deadline)
                 .await?
         {
-            limit = limit.min(prior.input().observed_at.micros());
+            limit = limit.min(prior.sample.input().observed_at.micros());
         }
         let lo = row
             .try_get::<i64, _>("lo")
@@ -265,7 +265,6 @@ async fn prune_summaries<C: Clock>(
     if !ids.is_empty() {
         sqlx::query("DELETE FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND object_id::text=ANY($3)")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(&ids).execute(&mut *c).await.map_err(sql_error)?;
-        control::summary_changed(c, r.scope()).await?;
         cleanup.pending_summaries = ids.clone();
         return Ok(Step::More(
             u32::try_from(ids.len()).map_err(|_| Error::Invariant)?,

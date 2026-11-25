@@ -9,6 +9,7 @@ pub(super) struct Fold {
     at: Timestamp,
     revision: i64,
     builder: Option<SummaryBuilder>,
+    max_input_revision: i64,
     last: Option<(i64, u64, String)>,
 }
 #[derive(Serialize, Deserialize)]
@@ -17,6 +18,7 @@ pub(super) struct Publication {
     query: String,
     digest: String,
     row: SummaryRow,
+    max_input_revision: i64,
     revision: i64,
 }
 pub(super) async fn step<C: Clock>(
@@ -59,17 +61,16 @@ pub(super) async fn step<C: Clock>(
             at: window.start(),
             revision,
             builder: None,
+            max_input_revision: 0,
             last: None,
         });
     }
     let fold = state.fold.as_mut().ok_or(Error::Invariant)?;
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
-        fold.builder = Some(
-            store
-                .builder(spec, bucket, boundary, &fences, deadline)
-                .await?,
-        );
+        let (builder, max_input_revision) = store.builder(spec, bucket, boundary, &fences, deadline).await?;
+        fold.builder = Some(builder);
+        fold.max_input_revision = max_input_revision;
     }
     let last = fold.last.as_ref().map_or(String::new(), |(time, seq, id)| {
         format!(
@@ -96,6 +97,7 @@ pub(super) async fn step<C: Clock>(
     let more = rows.len() > r.budget().rows.get() as usize;
     let mut processed = 0;
     for row in rows.into_iter().take(r.budget().rows.get() as usize) {
+        fold.max_input_revision = fold.max_input_revision.max(row.revision);
         let sample = row.sample;
         let input = sample.input();
         fold.last = Some((
@@ -110,7 +112,7 @@ pub(super) async fn step<C: Clock>(
     }
     if !more {
         let mut builder = fold.builder.take().ok_or(Error::Invariant)?;
-        aggregate::mask(&mut builder, &fences, spec, bucket.end())?;
+        aggregate::mask_end(&mut builder, &fences, spec, bucket)?;
         let summary = builder.finish(store.limits.max_points.get() as usize)?;
         let payload = bytes(&summary)?;
         if payload.len() > store.limits.max_bytes.get() as usize {
@@ -134,6 +136,7 @@ pub(super) async fn step<C: Clock>(
             query: a.query,
             digest,
             row,
+            max_input_revision: fold.max_input_revision,
             revision,
         });
     }
@@ -178,9 +181,8 @@ async fn publish<C: Clock>(
     if bytes(&summary)? != p.row.payload.as_bytes() {
         return Err(Error::Invariant);
     }
-    sqlx::query("INSERT INTO rss_ts_ch.summaries(tenant_id,namespace,spec_digest,semantics,spec,lo,hi,object_id,source,generation,series) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7,$8::text::uuid,$9,$10,$11) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET object_id=excluded.object_id,hi=excluded.hi,dirty_from=NULL")
-            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(spec.semantics()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(p.row.lo).bind(p.row.hi).bind(&p.row.object_id).bind(spec.stream().source().as_str()).bind(spec.stream().generation().as_str()).bind(projection::hex(spec.series().digest()?.as_bytes())).execute(&mut *c).await.map_err(sql_error)?;
-    control::summary_changed(c, r.scope()).await?;
+    sqlx::query("INSERT INTO rss_ts_ch.summaries(tenant_id,namespace,spec_digest,semantics,spec,lo,hi,object_id,source,generation,series,max_input_revision) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7,$8::text::uuid,$9,$10,$11,$12) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET object_id=excluded.object_id,hi=excluded.hi,dirty_from=NULL,max_input_revision=excluded.max_input_revision")
+            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(spec.semantics()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(p.row.lo).bind(p.row.hi).bind(&p.row.object_id).bind(spec.stream().source().as_str()).bind(spec.stream().generation().as_str()).bind(projection::hex(spec.series().digest()?.as_bytes())).bind(p.max_input_revision).execute(&mut *c).await.map_err(sql_error)?;
     sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE id=$1::text::uuid")
         .bind(&p.attempt)
         .execute(&mut *c)
