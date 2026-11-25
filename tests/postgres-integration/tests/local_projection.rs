@@ -418,6 +418,7 @@ async fn source_scenarios(f: &Fixture, scale_only: bool) -> anyhow::Result<()> {
         Box::pin(scale::run(f)).await?;
     } else {
         Box::pin(scale::bounded_windows(f)).await?;
+        Box::pin(scale::worker_continuation(f)).await?;
         Box::pin(leases::run(f)).await?;
         Box::pin(batch::run(f)).await?;
         Box::pin(success_and_duplicate(f)).await?;

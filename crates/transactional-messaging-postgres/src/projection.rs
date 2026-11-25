@@ -15,7 +15,7 @@ use rss_transactional_messaging::{
     fence::ExecutionBinding,
     inbox::{ConsumerGroup, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
     message::{MessageEnvelope, MessageFingerprint, MessagingDomain, SubscriptionIdentity},
-    outbox::{OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement},
+    outbox::{OutboxLeaseStatus, OutboxRelayStore, OutboxScanProgress, OutboxSettlement},
     policy::{DeliveryBudget, LeaseRenewalPolicy, OperationDeadline, within},
     transaction::{
         EnvelopeValidationFailure, FailureClass, IngressValidator, ReceiptIntent,
@@ -25,9 +25,30 @@ use rss_transactional_messaging::{
 use sqlx::Row;
 use std::{
     num::NonZeroUsize,
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
+
+/// Completion stream and scheduling progress from one bounded local claim.
+pub struct PgProjectionBatch<S> {
+    pending: S,
+    progress: OutboxScanProgress,
+}
+impl<S> PgProjectionBatch<S> {
+    /// Empty `More` batches need bounded continuation rather than a full idle wait.
+    #[must_use]
+    pub const fn scan_progress(&self) -> OutboxScanProgress {
+        self.progress
+    }
+}
+impl<S: Stream + Unpin> Stream for PgProjectionBatch<S> {
+    type Item = S::Item;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().pending).poll_next(cx)
+    }
+}
 
 /// A local terminal result, minted only from acknowledged commit or matching durable facts.
 pub struct PgProjectionReceipt {
@@ -216,7 +237,8 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         limit: NonZeroUsize,
         claim_deadline: OperationDeadline,
         execution_budget: Duration,
-    ) -> Result<impl Stream<Item = PgProjectionItem> + Send + 'a, PgError> {
+    ) -> Result<PgProjectionBatch<impl Stream<Item = PgProjectionItem> + Send + Unpin + 'a>, PgError>
+    {
         self.runtime.validate_binding(binding)?;
         if execution_budget.is_zero() {
             return Err(PgError::invariant());
@@ -244,6 +266,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             .await
             .map_err(pg)?;
         permits.truncate(claims.len());
+        let progress = claims.scan_progress();
         let pending = FuturesUnordered::new();
         for (source, permit) in claims.into_iter().zip(permits) {
             pending.push(async move {
@@ -261,7 +284,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
                 }
             });
         }
-        Ok(pending)
+        Ok(PgProjectionBatch { pending, progress })
     }
 
     async fn project_claimed<V: IngressValidator<Vec<u8>>>(

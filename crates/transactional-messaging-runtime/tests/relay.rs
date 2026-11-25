@@ -108,8 +108,12 @@ impl OutboxRelayStore<Vec<u8>> for Store {
         } else {
             NonZeroUsize::MAX
         };
-        OutboxClaimBatch::try_from_provider(claims.drain(..count).collect(), provider_limit)
-            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
+        OutboxClaimBatch::try_from_provider(
+            claims.drain(..count).collect(),
+            provider_limit,
+            rss_transactional_messaging::outbox::OutboxScanProgress::Complete,
+        )
+        .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
     }
 
     async fn extend(
@@ -375,8 +379,12 @@ impl OutboxRelayStore<Vec<u8>> for AuditedStore {
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
         let mut claims = self.claims.lock().expect("claims");
         let count = limit.get().min(claims.len());
-        OutboxClaimBatch::try_from_provider(claims.drain(..count).collect(), limit)
-            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
+        OutboxClaimBatch::try_from_provider(
+            claims.drain(..count).collect(),
+            limit,
+            rss_transactional_messaging::outbox::OutboxScanProgress::Complete,
+        )
+        .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
     }
 
     async fn extend(
@@ -896,8 +904,12 @@ impl OutboxRelayStore<Vec<u8>> for PendingStore {
         }
         let mut claims = self.claims.lock().expect("claims");
         let count = limit.get().min(claims.len());
-        OutboxClaimBatch::try_from_provider(claims.drain(..count).collect(), limit)
-            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
+        OutboxClaimBatch::try_from_provider(
+            claims.drain(..count).collect(),
+            limit,
+            rss_transactional_messaging::outbox::OutboxScanProgress::Complete,
+        )
+        .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
     }
 
     async fn extend(

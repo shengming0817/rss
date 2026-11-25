@@ -21,6 +21,7 @@ pub(super) struct Bucket {
 
 // Batched planning bounds candidate metadata independently of per-bucket work.
 const TILE_PROBE: usize = 32;
+const HEADER_BUDGET: usize = 4096;
 pub(super) async fn plan(
     c: &mut PgConnection,
     q: &AggregateQuery,
@@ -78,7 +79,7 @@ async fn plan_with_limit(
     let mut result = Vec::new();
     for (window, tiles) in windows.into_iter().zip(candidates) {
         // A whole tile is conclusive even when the small metadata probe truncates.
-        // Ambiguous covers are resolved only one bucket at a time with its own cap.
+        // Ambiguous covers are expanded in a separate bounded metadata group.
         let complete = tiles.first().is_some_and(|t| {
             t.identity.1 == window.start().micros()
                 && t.end == window.end().micros()
@@ -104,23 +105,24 @@ async fn plan_with_limit(
 pub(super) async fn resolve(
     c: &mut PgConnection,
     q: &AggregateQuery,
-    bucket: &mut Bucket,
+    buckets: &mut [Bucket],
     limits: &Limits,
 ) -> Result<(), Error> {
-    if bucket.expand {
-        bucket.cover = plan_with_limit(
-            c,
-            q,
-            bucket.window.start(),
-            1,
-            limits,
-            limits.max_points.get() as usize,
-        )
-        .await?
-        .pop()
-        .ok_or(Error::Invariant)?
-        .cover;
-        bucket.expand = false;
+    if buckets[0].expand {
+        let per_bucket = limits.max_points.get() as usize;
+        let count = buckets
+            .iter()
+            .take_while(|b| b.expand)
+            .take((HEADER_BUDGET / (per_bucket + 1)).max(1))
+            .count();
+        let expanded =
+            plan_with_limit(c, q, buckets[0].window.start(), count, limits, per_bucket).await?;
+        if expanded.len() != count {
+            return Err(Error::Invariant);
+        }
+        for (bucket, resolved) in buckets.iter_mut().zip(expanded) {
+            *bucket = resolved;
+        }
     }
     Ok(())
 }

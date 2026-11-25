@@ -581,8 +581,10 @@ eligibility time so continuous arrivals cannot starve skipped prefixes. Contenti
 cursor progress permits repeated metadata scans without serializing source claims.
 Windows advance by eligibility time and sequence; source locks within a window follow
 source sequence. Partition order and DR barriers remain authoritative.
-An empty batch can be a bounded unsuccessful scan. Hosts continue bounded polling using
-`next_wakeup`; an empty result is not proof that all eligible work has drained.
+An empty batch can be a bounded unsuccessful scan. `OutboxClaimBatch::scan_progress()`
+retains `More` when the scan budget runs out; the default worker continues after 100ms.
+Caller-driven relay and `PgProjectionBatch` callers retain the same state before consuming
+the batch. `next_wakeup` remains a time hint; an empty result alone does not prove drainage.
 
 `PgPublishedBodyMaintenance` owns a separate private pool. The host explicitly authorizes
 the tenant and retention policy, chooses the original-deadline cutoff and schedules sweeps.

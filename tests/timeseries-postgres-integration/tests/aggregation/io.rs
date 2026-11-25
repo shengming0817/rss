@@ -214,8 +214,9 @@ async fn ambiguous_tiles_reuse_the_batched_probe() -> anyhow::Result<()> {
     assert_eq!(page.buckets.len(), 12);
     assert_eq!(page.buckets.iter().map(|b| b.valid_samples).sum::<u64>(), 1);
     assert!(
-        after.0 - before.0 < 40,
-        "already-probed suffixes must not be fetched repeatedly"
+        after.0 - before.0 <= 10,
+        "complex covers must share bounded header and payload queries: {} SELECTs",
+        after.0 - before.0
     );
     Ok(())
 }

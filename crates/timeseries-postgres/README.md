@@ -276,5 +276,6 @@ Raw aggregate and recomputation reads use adaptive keyset blocks: a 512-header p
 adjusts to observed record size, up to 4096 headers plus one payload-free lookahead.
 Transfer bytes and each bucket's row/byte limits remain separate from page output and
 absolute operation deadlines. Cache planning probes up to 128 bucket headers with at
-most 33 tile candidates each; ambiguous covers expand one bucket under its configured
-candidate budget before planning proceeds.
+most 33 tile candidates each. Ambiguous covers expand together within 4096 candidate
+headers (or one bucket's configured budget when larger), then share a byte-bounded
+payload fetch. Per-bucket row and byte limits still apply independently.

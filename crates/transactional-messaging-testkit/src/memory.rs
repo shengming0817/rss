@@ -370,8 +370,12 @@ mod producer {
                     claims.push((Arc::clone(&entry.message), *next_attempt));
                 }
             }
-            OutboxClaimBatch::try_from_provider(claims, limit)
-                .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
+            OutboxClaimBatch::try_from_provider(
+                claims,
+                limit,
+                rss_transactional_messaging::outbox::OutboxScanProgress::Complete,
+            )
+            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))
         }
 
         async fn extend(

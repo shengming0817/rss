@@ -126,7 +126,7 @@ impl<C: Clock> Read<'_, C> {
         mut buckets: &mut [Bucket],
     ) -> Result<bool, Error> {
         while !buckets.is_empty() {
-            cache::resolve(c, self.q, &mut buckets[0], self.limits).await?;
+            cache::resolve(c, self.q, buckets, self.limits).await?;
             let first = &buckets[0];
             check(self.clock, self.deadline)?;
             let n = if first.cover.as_ref().map_err(|e| *e)?.is_some() {

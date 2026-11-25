@@ -216,6 +216,17 @@ impl<P> PendingMessage<P> {
 /// Provider-returned claim batch whose size was checked against the requested hard bound.
 pub struct OutboxClaimBatch<C> {
     claims: Vec<C>,
+    progress: OutboxScanProgress,
+}
+
+/// Scheduling hint from one bounded scan; neither state proves future queue emptiness.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OutboxScanProgress {
+    /// This scan completed. An empty batch permits the host's normal idle wait.
+    #[default]
+    Complete,
+    /// The scan stopped at its work bound. Continue with bounded pacing, even if empty.
+    More,
 }
 
 /// A provider returned more durable claims than the caller admitted.
@@ -247,8 +258,9 @@ impl<C> OutboxClaimBatch<C> {
     pub fn try_from_provider(
         claims: Vec<C>,
         limit: NonZeroUsize,
+        progress: OutboxScanProgress,
     ) -> Result<Self, OutboxClaimBatchError> {
-        let batch = Self { claims };
+        let batch = Self { claims, progress };
         batch.validate_limit(limit)?;
         Ok(batch)
     }
@@ -274,6 +286,12 @@ impl<C> OutboxClaimBatch<C> {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.claims.is_empty()
+    }
+
+    /// Retain this hint before consuming the claims; empty `More` batches require continuation.
+    #[must_use]
+    pub const fn scan_progress(&self) -> OutboxScanProgress {
+        self.progress
     }
 }
 
@@ -327,7 +345,8 @@ pub trait OutboxRelayStore<P>: Send + Sync {
 
     /// Claim only the unresolved head of each `(tenant, domain, partition key)` sequence. An
     /// unresolved dead-letter head is not eligible and must continue blocking its successor.
-    /// Atomically lease at most `limit` records; an empty batch means no eligible work was found.
+    /// Atomically lease at most `limit` records. An empty `More` batch exhausted a scan budget;
+    /// callers must continue with bounded pacing instead of inferring that the queue is idle.
     fn claim_partition_heads(
         &self,
         binding: crate::fence::ExecutionBinding,

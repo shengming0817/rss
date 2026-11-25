@@ -1,3 +1,5 @@
+#[path = "recovery/body_retention.rs"]
+mod body_retention;
 use rss_request_context::Deadline;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
@@ -1301,7 +1303,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(cutoff, after_seq, 1024)?,
+                PublishedBodyRetention::new(i64::MAX, after_seq, 1024)?,
                 deadline(),
             )
             .await,
@@ -1310,7 +1312,20 @@ async fn compensated(
         before.reclaimed, 0,
         "no deadline cannot prove delivery closure"
     );
-    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 day' WHERE message_id='compensation-evidence'").execute(owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=timestamptz 'epoch'+interval '1 second' WHERE message_id='compensation-evidence'").execute(owner).await?;
+    let below = committed(
+        maintenance
+            .reclaim(
+                crate::execution(tenant(), 1),
+                PublishedBodyRetention::new(999_999, after_seq, 1)?,
+                deadline(),
+            )
+            .await,
+    )?;
+    assert_eq!(
+        below.reclaimed, 0,
+        "cutoff must retain the next microsecond"
+    );
     let mut fence = owner.begin().await?;
     sqlx::query("SELECT epoch FROM rss_transactional_messaging.tenant_epoch WHERE tenant_id=$1::uuid FOR UPDATE")
         .bind(tenant().to_string()).fetch_one(&mut *fence).await?;
@@ -1355,6 +1370,7 @@ async fn compensated(
             .fold(|_| false, |_| true, |_| true, |_| true, |_| true, |_| true)
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET payload=substring(payload FROM 1 FOR octet_length(payload)-1) WHERE message_id='compensation-evidence'").execute(owner).await?;
+    body_retention::historical_work(owner, after_seq).await?;
     let physical_before: i64 = sqlx::query_scalar(
         "SELECT pg_total_relation_size('rss_transactional_messaging.outbox')::bigint",
     )
@@ -1364,7 +1380,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(cutoff, after_seq, 1024)?,
+                PublishedBodyRetention::new(1_000_000, after_seq, 1024)?,
                 deadline(),
             )
             .await,

@@ -260,7 +260,7 @@ ALTER TABLE rss_transactional_messaging.outbox_partitions FORCE ROW LEVEL SECURI
 GRANT USAGE,CREATE ON SCHEMA rss_transactional_messaging TO rss_tmsg_relay;
 
 GRANT SELECT, UPDATE ON rss_transactional_messaging.outbox TO rss_tmsg_relay;
-GRANT SELECT,INSERT,UPDATE ON rss_transactional_messaging.outbox_scan TO rss_tmsg_relay;
+GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.outbox_scan TO rss_tmsg_relay;
 
 GRANT SELECT,UPDATE(singleton) ON rss_transactional_messaging.storage_lineage TO rss_tmsg_relay;
 
@@ -720,15 +720,14 @@ DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(curren
 BEGIN
  PERFORM check_execution();
  IF p_domain IS NULL OR octet_length(p_domain) NOT BETWEEN 1 AND 255 OR (p_domain COLLATE "C") ~ '[^A-Za-z0-9_.:-]' OR p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
+ -- Transaction-local result metadata, read by the private adapter before commit.
+ PERFORM set_config('rss.outbox_scan_more','false',true);
  IF consumer_scope_domain() IS NOT NULL AND consumer_scope_domain()<>p_domain THEN RETURN; END IF;
  -- FETCH NEXT avoids PL/pgSQL FOR's prefetch locks and never reopens an exhausted scan.
  -- ref: PostgreSQL REL_17_6 src/pl/plpgsql/src/pl_exec.c exec_stmt_fetch/exec_for_query.
  observed:=clock_timestamp();
  -- Contention may repeat metadata work, but never serializes relay transactions.
  owns_progress:=pg_try_advisory_xact_lock(hashtextextended('rss-tmsg-claim:'||p_tenant::text||':'||p_domain,0));
- IF owns_progress THEN
-  INSERT INTO outbox_scan(tenant_id,domain) VALUES(p_tenant,p_domain) ON CONFLICT DO NOTHING;
- END IF;
  SELECT * INTO progress FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
  IF NOT FOUND THEN progress.through_at:=observed; progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
  IF progress.eligible_at='-infinity'::timestamptz THEN progress.through_at:=observed; END IF;
@@ -773,12 +772,19 @@ BEGIN
    greatest(0,(extract(epoch FROM o.automatic_retry_deadline-n)*1000000)::bigint);
  END LOOP;
  CLOSE candidates;
+ PERFORM set_config('rss.outbox_scan_more',(examined>=scan_limit OR used>=p_limit)::text,true);
  IF used>0 OR examined<scan_limit THEN
   progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0;
  END IF;
  IF owns_progress THEN
-  UPDATE outbox_scan s SET through_at=progress.through_at,eligible_at=progress.eligible_at,source_seq=progress.source_seq,lane=progress.lane
-   WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
+  IF progress.eligible_at='-infinity'::timestamptz THEN
+   DELETE FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
+  ELSE
+   INSERT INTO outbox_scan AS s(tenant_id,domain,through_at,eligible_at,source_seq,lane)
+    VALUES(p_tenant,p_domain,progress.through_at,progress.eligible_at,progress.source_seq,progress.lane)
+    ON CONFLICT(tenant_id,domain) DO UPDATE SET through_at=excluded.through_at,eligible_at=excluded.eligible_at,source_seq=excluded.source_seq,lane=excluded.lane
+    WHERE (s.through_at,s.eligible_at,s.source_seq,s.lane) IS DISTINCT FROM (excluded.through_at,excluded.eligible_at,excluded.source_seq,excluded.lane);
+  END IF;
  END IF;
 END $f$;
 
@@ -789,13 +795,16 @@ CREATE FUNCTION rss_transactional_messaging.reclaim_published_bodies(p_before_us
 RETURNS TABLE(scanned integer,reclaimed integer,released_bytes bigint,next_seq bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid;
- r record; o outbox; cutoff timestamptz;
+ r record; o outbox; cutoff_us bigint; current_operation uuid;
 BEGIN
  PERFORM check_execution();
- IF p_before_us IS NULL OR p_after IS NULL OR p_after<0 OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1024 THEN
+ IF p_before_us IS NULL OR p_before_us<0 OR p_after IS NULL OR p_after<0 OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1024 THEN
   RAISE EXCEPTION 'invalid body retention' USING ERRCODE='22023';
  END IF;
- cutoff:=least(clock_timestamp(),timestamptz 'epoch'+p_before_us*interval '1 microsecond');
+ cutoff_us:=least(p_before_us,(extract(epoch FROM clock_timestamp())*1000000)::bigint);
+ SELECT operation_id INTO current_operation FROM dr_plans WHERE tenant_id=t
+  AND epoch=current_setting('rss.execution_epoch')::bigint
+  AND lineage=decode(current_setting('rss.storage_lineage'),'hex');
  scanned:=0; reclaimed:=0; released_bytes:=0; next_seq:=p_after;
  -- Bound candidate work before retention and DR filtering. A skipped row can be
  -- revisited in the host's next sweep; advancing does not claim it was reclaimed.
@@ -803,13 +812,12 @@ BEGIN
   AND src.payload IS NOT NULL AND src.seq>p_after ORDER BY src.seq LIMIT p_limit LOOP
   scanned:=scanned+1; next_seq:=r.seq;
   SELECT * INTO o FROM outbox src WHERE src.seq=r.seq AND src.tenant_id=t
-   AND src.status='published' AND src.payload IS NOT NULL AND src.automatic_retry_deadline<=cutoff
+   AND src.status='published' AND src.payload IS NOT NULL AND extract(epoch FROM src.automatic_retry_deadline)*1000000<=cutoff_us
    FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN CONTINUE; END IF;
-  IF EXISTS(SELECT FROM dr_members d JOIN dr_plans p USING(tenant_id,operation_id)
-   WHERE d.tenant_id=t AND d.outbox_seq=o.seq AND d.status<>'completed'
-    AND p.epoch=current_setting('rss.execution_epoch')::bigint
-    AND p.lineage=decode(current_setting('rss.storage_lineage'),'hex')) THEN CONTINUE; END IF;
+  IF current_operation IS NOT NULL AND EXISTS(SELECT FROM dr_members d
+   WHERE d.tenant_id=t AND d.operation_id=current_operation AND d.message_id=o.message_id
+    AND d.consumer_group='' AND d.outbox_seq=o.seq AND d.status<>'completed') THEN CONTINUE; END IF;
   IF o.body_digest IS DISTINCT FROM sha256(o.payload) OR o.authored_evidence IS DISTINCT FROM
    sha256(convert_to('rss-outbox-evidence-v1','UTF8')||convert_to((o.envelope-ARRAY['trace','tenant_authority'])::text,'UTF8')||o.fingerprint||o.body_digest) THEN
    RAISE EXCEPTION 'published evidence mismatch' USING ERRCODE='PZ002';
