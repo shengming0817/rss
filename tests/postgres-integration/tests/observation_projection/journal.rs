@@ -1,6 +1,7 @@
 use super::fixture::*;
 use rss_observation::{
-    Body, ErrorKind, Id, ObservationStore, ReadGrant, ReceiveOutcome, State, VerifiedBatch,
+    Body, ErrorKind, Id, LookupOutcome, ObservationStore, ReadGrant, ReceiveOutcome, State,
+    VerifiedBatch,
 };
 use rss_observation_postgres::PgStore;
 use rss_projection::Source;
@@ -70,10 +71,12 @@ async fn report_commits_while_allocator_is_locked() -> anyhow::Result<()> {
         anyhow::bail!("expected first admission");
     };
     let grant = ReadGrant::verify(&Trusted, partial.scope().clone())?;
-    let record = store
+    let LookupOutcome::Found(record) = store
         .lookup(&grant, partial.batch().id(), deadline())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("missing partial report"))?;
+    else {
+        anyhow::bail!("missing partial report")
+    };
     assert_same_record(&record, &accepted);
     assert_eq!(record.batch().encode(), partial.batch().encode());
     assert_eq!(
@@ -128,12 +131,10 @@ async fn assert_rejected(
 ) -> anyhow::Result<()> {
     assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Invariant));
     let grant = ReadGrant::verify(&Trusted, input.scope().clone())?;
-    assert!(
-        store
-            .lookup(&grant, input.batch().id(), deadline())
-            .await?
-            .is_none()
-    );
+    assert!(matches!(
+        store.lookup(&grant, input.batch().id(), deadline()).await?,
+        LookupOutcome::NotFound
+    ));
     assert_eq!(store.state(&grant, deadline()).await?, State::initial());
     Ok(())
 }
@@ -171,10 +172,10 @@ async fn last_commit_closes_current_and_future_streams() -> anyhow::Result<()> {
     .await?;
     assert_eq!(position(&f, &last).await?, Some(i64::MAX));
     let grant = ReadGrant::verify(&Trusted, last.scope().clone())?;
-    let saved = store
-        .lookup(&grant, last.batch().id(), deadline())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("missing final receipt"))?;
+    let LookupOutcome::Found(saved) = store.lookup(&grant, last.batch().id(), deadline()).await?
+    else {
+        anyhow::bail!("missing final receipt")
+    };
     let ReceiveOutcome::Replay(replayed) = store.receive(&last, deadline()).await? else {
         anyhow::bail!("expected exact replay at exhaustion");
     };
@@ -215,12 +216,10 @@ async fn last_rollback_releases_admission_and_position() -> anyhow::Result<()> {
     received?;
     assert_eq!(position(&f, &pending).await?, None);
     let grant = ReadGrant::verify(&Trusted, last.scope().clone())?;
-    assert!(
-        store
-            .lookup(&grant, last.batch().id(), deadline())
-            .await?
-            .is_none()
-    );
+    assert!(matches!(
+        store.lookup(&grant, last.batch().id(), deadline()).await?,
+        LookupOutcome::NotFound
+    ));
     assert_eq!(store.state(&grant, deadline()).await?, State::initial());
     store.receive(&retry, deadline()).await?;
     assert_eq!(position(&f, &retry).await?, Some(i64::MAX));

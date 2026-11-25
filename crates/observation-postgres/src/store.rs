@@ -3,8 +3,8 @@ use crate::{
     transaction::{Fault, Lease, Progress, Stage, runtime_budget, sql_error, watchdog, within},
 };
 use rss_observation::{
-    Batch, Clock, Decision, Error, ErrorKind, Id, LifecycleGrant, LookupOutcome, ObservationStore, Policy,
-    ReadGrant, ReceiveOutcome, Record, Scope, State, VerifiedBatch,
+    Batch, Clock, Decision, Error, ErrorKind, Id, LifecycleGrant, LookupOutcome, ObservationStore,
+    Policy, ReadGrant, ReceiveOutcome, Record, Scope, State, VerifiedBatch,
 };
 use rss_request_context::{Deadline, TenantId};
 use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgRow};
@@ -361,7 +361,9 @@ impl<C: Clock> ObservationStore for PgStore<C> {
                     )
                     .await;
                 match found {
-                    Ok(identity) => identity.retry(input.batch(), &input.fingerprint())?.ok_or(error),
+                    Ok(identity) => identity
+                        .retry(input.batch(), &input.fingerprint())?
+                        .ok_or(error),
                     Err(e) if matches!(e.kind(), ErrorKind::Invariant | ErrorKind::Conflict) => {
                         Err(e)
                     }
@@ -383,7 +385,9 @@ impl<C: Clock> ObservationStore for PgStore<C> {
             grant.scope().tenant(),
             deadline,
             self.take_fault(),
-            move |connection, _| Box::pin(async move { Ok(read(connection, &scope, &id).await?.lookup()) }),
+            move |connection, _| {
+                Box::pin(async move { Ok(read(connection, &scope, &id).await?.lookup()) })
+            },
         )
         .await
     }
@@ -417,26 +421,26 @@ impl StoredBatch {
     fn retry(self, batch: &Batch, fingerprint: &[u8; 32]) -> Result<Option<ReceiveOutcome>, Error> {
         match self {
             Self::Missing => Ok(None),
-            Self::Found(record) => replay(record,batch).map(Some),
-            Self::Expired(original) if &original == fingerprint => Err(ErrorKind::HistoryExpired.into()),
+            Self::Found(record) => replay(record, batch).map(Some),
+            Self::Expired(original) if &original == fingerprint => {
+                Err(ErrorKind::HistoryExpired.into())
+            }
             Self::Expired(_) => Err(ErrorKind::Conflict.into()),
         }
     }
 }
-async fn read(
-    connection: &mut PgConnection,
-    scope: &Scope,
-    id: &Id,
-) -> Result<StoredBatch, Error> {
+async fn read(connection: &mut PgConnection, scope: &Scope, id: &Id) -> Result<StoredBatch, Error> {
     let row=sqlx::query("SELECT raw IS NULL AS expired,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND scope=$2 AND batch_id=$3")
         .bind(scope.tenant().to_string()).bind(scope.encode()?).bind(id.as_str()).fetch_optional(connection).await.map_err(sql_error)?;
     match row {
         None => Ok(StoredBatch::Missing),
         Some(row) if row.try_get("expired").map_err(sql_error)? => {
             let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(sql_error)?;
-            Ok(StoredBatch::Expired(fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?))
+            Ok(StoredBatch::Expired(
+                fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?,
+            ))
         }
-        Some(row) => restore(row,scope,id).map(StoredBatch::Found),
+        Some(row) => restore(row, scope, id).map(StoredBatch::Found),
     }
 }
 pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {

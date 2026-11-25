@@ -4,7 +4,7 @@
 #[cfg(feature = "projection")]
 mod projection;
 #[cfg(feature = "projection")]
-pub use projection::PgSource;
+pub use projection::{JournalBounds, PgSource};
 mod maintenance;
 pub use maintenance::PgMaintenance;
 mod probe;
