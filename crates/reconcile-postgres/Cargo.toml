@@ -18,6 +18,7 @@ thiserror.workspace = true
 rss-reconcile.workspace = true
 rss-request-context.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+url.workspace = true # Security floor for the transitive dependency above.
 uuid = { workspace = true, features = ["v4"] }
 futures = { workspace = true, features = ["std"] }
 

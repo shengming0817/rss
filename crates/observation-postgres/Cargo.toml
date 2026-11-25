@@ -12,6 +12,7 @@ publish = ["crates-io"]
 rss-observation.workspace = true
 rss-request-context.workspace = true
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+url.workspace = true # Security floor for the transitive dependency above.
 futures = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["time"] }
 rss-projection = { workspace = true, optional = true }

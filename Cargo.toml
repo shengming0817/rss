@@ -185,7 +185,8 @@ secrecy = { version = "0.10" }
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 opentelemetry_sdk = "0.32"
-url = "2"
+# RUSTSEC-2026-0592: the floor also applies to adapters that expose sqlx/AWS dependency closures.
+url = "2.5.9"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 syn = { version = "2", features = ["full", "parsing"] }
 quote = "1"

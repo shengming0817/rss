@@ -28,6 +28,7 @@ rss-request-context.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "any", "migrate", "json"] }
+url.workspace = true # Security floor for the transitive dependency above.
 thiserror = { workspace = true }
 tracing.workspace = true
 zeroize.workspace = true
