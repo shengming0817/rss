@@ -197,7 +197,7 @@ pub(super) async fn collect<C: Clock>(
         bytes: 0,
     };
     while page.at < q.query().window().end() {
-        let count = (q.query().budget().max_points.get() as usize - page.points).min(16);
+        let count = (q.query().budget().max_points.get() as usize - page.points).min(128);
         let buckets = cache::plan(c, q, page.at, count, limits).await?;
         if !read.block(c, &mut page, &buckets).await? {
             break;

@@ -271,3 +271,10 @@ Timescale shared and Timescale dedicated separately; actual publication remains 
 ref: timescale/timescaledb b0977bf2d3a5014ee870247be09bc19d3e9f7a5f
 ref: tsl/src/continuous_aggs/common.c, tsl/src/continuous_aggs/refresh.c,
 tsl/src/compression/create.c, src/compat/compat.h and LICENSE at 2.30.2
+
+Raw aggregate and recomputation reads use adaptive keyset blocks: a 512-header probe
+adjusts to observed record size, up to 4096 headers plus one payload-free lookahead.
+Transfer bytes and each bucket's row/byte limits remain separate from page output and
+absolute operation deadlines. Cache planning probes up to 128 bucket headers with at
+most 33 tile candidates each; ambiguous covers expand one bucket under its configured
+candidate budget before planning proceeds.

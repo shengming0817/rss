@@ -5,7 +5,10 @@ use sqlx::{Postgres, QueryBuilder};
 use std::collections::VecDeque;
 
 pub(crate) type Key = (Timestamp, u64, Id);
-const CHUNK: usize = 64;
+// Metadata and payload transfer have independent bounds. Start with a modest
+// probe, then use observed density to amortize small-record round trips.
+const INITIAL_CHUNK: usize = 512;
+const MAX_CHUNK: usize = 4096;
 
 pub(crate) struct Scan<'a> {
     spec: &'a SummarySpec,
@@ -18,6 +21,7 @@ pub(crate) struct Scan<'a> {
     bucket: Option<Interval>,
     bytes: usize,
     rows: usize,
+    chunk: usize,
 }
 impl<'a> Scan<'a> {
     pub(crate) fn new(
@@ -37,6 +41,7 @@ impl<'a> Scan<'a> {
             bucket: None,
             bytes: 0,
             rows: 0,
+            chunk: INITIAL_CHUNK,
         })
     }
     pub(crate) fn more(&self) -> bool {
@@ -52,7 +57,7 @@ impl<'a> Scan<'a> {
         limits: &Limits,
     ) -> Result<Option<Sample>, Error> {
         if self.ready.is_empty() && !self.exhausted {
-            self.fill(c, remaining.min(CHUNK), limits).await?;
+            self.fill(c, remaining.min(self.chunk), limits).await?;
         }
         if self.ready.front().is_none_or(|(at, _)| *at >= end) {
             return Ok(None);
@@ -146,6 +151,8 @@ impl<'a> Scan<'a> {
             block_bytes += size;
         }
         if !ids.is_empty() {
+            let average = block_bytes.div_ceil(ids.len()).max(1);
+            self.chunk = (limits.max_bytes.get() as usize / average).clamp(1, MAX_CHUNK);
             let mut payloads = QueryBuilder::new("SELECT observed_at,raw");
             self.scoped(&mut payloads);
             payloads
