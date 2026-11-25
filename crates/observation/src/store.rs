@@ -92,6 +92,16 @@ impl ReceiveOutcome {
         }
     }
 }
+/// Exact durable lookup. An expired identity still fences admission.
+#[derive(Debug)]
+pub enum LookupOutcome {
+    /// Original immutable receipt and complete body.
+    Found(Record),
+    /// The identity exists and authorized maintenance released its content.
+    Expired,
+    /// No durable identity was visible at this snapshot.
+    NotFound,
+}
 /// Capability-owned atomic persistence port. All mutating outcomes require settlement evidence.
 /// There is no public raw CRUD or caller-controlled transition write operation.
 pub trait ObservationStore: Send + Sync {
@@ -116,14 +126,14 @@ pub trait ObservationStore: Send + Sync {
         deadline: Deadline,
     ) -> impl Future<Output = Result<ReceiveOutcome, Error>> + Send;
     /// Read the original record under exact scope/batch identity, including retired epochs.
-    /// None means no visible durable record was found; it is not proof that an unknown attempt
+    /// NotFound means no visible durable identity was found; it is not proof that an unknown attempt
     /// rolled back. The same absolute deadline covers all provider work.
     fn lookup(
         &self,
         grant: &ReadGrant,
         id: &Id,
         deadline: Deadline,
-    ) -> impl Future<Output = Result<Option<Record>, Error>> + Send;
+    ) -> impl Future<Output = Result<LookupOutcome, Error>> + Send;
     /// Read historical stream state; return UnknownStream when no activation exists.
     fn state(
         &self,

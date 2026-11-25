@@ -20,6 +20,9 @@ pub enum ErrorKind {
     #[error("observation stream does not exist")]
     /// No activation exists for the requested historical state lookup.
     UnknownStream,
+    /// Authorized maintenance released the original receipt.
+    #[error("observation history expired")]
+    HistoryExpired,
     #[error("observation storage unavailable")]
     /// Provider access failed; this classification alone is not evidence of settlement.
     Storage,
