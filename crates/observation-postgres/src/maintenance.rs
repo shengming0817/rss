@@ -31,7 +31,7 @@ impl<C: Clock> PgMaintenance<C> {
 impl<C: Clock> ObservationMaintenance for PgMaintenance<C> {
     async fn reclaim(
         &self,
-        grant: &MaintenanceGrant,
+        grant: MaintenanceGrant,
         window: ScanWindow,
         deadline: Deadline,
     ) -> Result<RetentionPage, Error> {

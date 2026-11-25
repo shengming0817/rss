@@ -22,7 +22,7 @@ pub fn source<C: Clock>(
 }
 pub async fn reclaim<C: Clock>(
     maintenance: &rss_observation_postgres::PgMaintenance<C>,
-    grant: &rss_observation::MaintenanceGrant,
+    grant: rss_observation::MaintenanceGrant,
     window: rss_observation::ScanWindow,
     deadline: Deadline,
 ) -> Result<rss_observation::RetentionPage, Error> {

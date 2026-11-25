@@ -147,7 +147,7 @@ BEGIN
   END IF;
  END IF;
  INSERT INTO rss_observation.batches(tenant_id,scope,batch_id,sequence,raw,fingerprint,received_at,policy,decision,applicable,log_position)
- VALUES(t,p_scope,p_id,p_sequence,p_raw,p_fingerprint,p_received,p_policy,p_decision,p_applicable,position);
+ VALUES(t,p_scope,p_id,p_sequence,p_raw,p_fingerprint,p_received,current_stream.policy,p_decision,p_applicable,position);
  UPDATE rss_observation.streams SET state=(p_decision::jsonb->'after')::text WHERE tenant_id=t AND scope=p_scope;
 END $$;
 -- ref: etcd-io/etcd server/storage/mvcc/kvstore_compaction.go@f5d605a93abe2fdfa13880aab0f1f3a4203628dd
@@ -156,7 +156,7 @@ CREATE FUNCTION rss_observation.reclaim(p_scope text,p_cutoff bigint,p_through b
 RETURNS TABLE(last_examined numeric,scanned integer,reclaimed integer,released_bytes bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_observation AS $$
 DECLARE t uuid := (p_scope::jsonb->>'tenant')::uuid;
- s rss_observation.streams; candidate record; minimum_age numeric; floor_position bigint := 0;
+ s rss_observation.streams; candidate record; policy_json jsonb; duration_key text; minimum_age numeric; floor_position bigint := 0;
 BEGIN
  IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN
   RAISE EXCEPTION USING ERRCODE='OB007',MESSAGE='maintenance scope mismatch';
@@ -175,17 +175,35 @@ BEGIN
  IF p_through>coalesce((SELECT last_position FROM rss_observation.journals WHERE tenant_id=t),0) THEN
   RAISE EXCEPTION USING ERRCODE='OB005',MESSAGE='uncommitted release position';
  END IF;
- -- Lifecycle policy is immutable; commit_batch checks the captured batch policy against it.
- minimum_age:=(s.policy::jsonb->>'retrySeconds')::numeric+(s.policy::jsonb->>'safetySeconds')::numeric;
- IF minimum_age IS NULL OR minimum_age NOT BETWEEN 2 AND 9223372036854775807 THEN
+ -- Validate the durable V1 policy before using it to authorize irreversible release.
+ IF NOT (s.policy IS JSON OBJECT WITH UNIQUE KEYS) THEN
   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention policy';
  END IF;
+ policy_json:=s.policy::jsonb;
+ IF policy_json->'version' IS DISTINCT FROM '1'::jsonb OR policy_json->>'version'<>'1'
+    OR (policy_json-ARRAY['version','retrySeconds','safetySeconds','baselineSeconds'])<>'{}'::jsonb THEN
+  RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention policy';
+ END IF;
+ FOREACH duration_key IN ARRAY ARRAY['retrySeconds','safetySeconds','baselineSeconds'] LOOP
+  IF jsonb_typeof(policy_json->duration_key) IS DISTINCT FROM 'number'
+     OR (policy_json->>duration_key) !~ '^[1-9][0-9]{0,18}$'
+     OR (policy_json->>duration_key)::numeric>9223372036854775807 THEN
+   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention duration';
+  END IF;
+ END LOOP;
+ minimum_age:=(policy_json->>'retrySeconds')::numeric+(policy_json->>'safetySeconds')::numeric;
+ IF minimum_age>9223372036854775807 THEN
+  RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention horizon';
+ END IF;
  scanned:=0; reclaimed:=0; released_bytes:=0;
- FOR candidate IN SELECT sequence,batch_id,received_at,log_position,octet_length(raw) AS bytes
+ FOR candidate IN SELECT sequence,batch_id,received_at,log_position,policy,octet_length(raw) AS bytes
   FROM rss_observation.batches WHERE tenant_id=t AND scope=p_scope AND sequence>coalesce(p_after,-1)
   ORDER BY sequence LIMIT p_limit
  LOOP
   scanned:=scanned+1; last_examined:=candidate.sequence;
+  IF candidate.bytes IS NOT NULL AND candidate.policy IS DISTINCT FROM s.policy THEN
+   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='batch policy differs from stream';
+  END IF;
   IF candidate.bytes IS NOT NULL AND candidate.received_at+minimum_age<=p_cutoff
      AND (candidate.log_position IS NULL OR candidate.log_position<=p_through) THEN
    UPDATE rss_observation.batches SET raw=NULL,policy=NULL,decision=NULL

@@ -91,7 +91,7 @@ async fn maintenance_permissions_and_tenant_isolation() -> anyhow::Result<()> {
     let w = ScanWindow::new(None, 4)?;
     assert_eq!(
         maint
-            .reclaim(&grant(&s, EXPIRY, 0)?, w, deadline())
+            .reclaim(grant(&s, EXPIRY, 0)?, w, deadline())
             .await
             .err()
             .context("expected operation to fail")?
@@ -108,7 +108,7 @@ async fn maintenance_permissions_and_tenant_isolation() -> anyhow::Result<()> {
     }
     assert_eq!(
         maint
-            .reclaim(&grant(&s, EXPIRY, 1)?, w, deadline())
+            .reclaim(grant(&s, EXPIRY, 1)?, w, deadline())
             .await
             .err()
             .context("expected operation to fail")?
@@ -118,7 +118,7 @@ async fn maintenance_permissions_and_tenant_isolation() -> anyhow::Result<()> {
     for tenant in [TENANT, OTHER] {
         activate(&store, &scope(tenant, "obj", "r2", "src", "new")?, Some(1)).await?;
     }
-    maint.reclaim(&grant(&s, EXPIRY, 1)?, w, deadline()).await?;
+    maint.reclaim(grant(&s, EXPIRY, 1)?, w, deadline()).await?;
     assert!(matches!(
         store
             .lookup(
@@ -146,7 +146,8 @@ async fn maintenance_permissions_and_tenant_isolation() -> anyhow::Result<()> {
 async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     let store = f.store().await?;
-    let maint = PgMaintenance::new(maintenance_role(&f).await?, Clock, deadline()).await?;
+    let pool = maintenance_role(&f).await?;
+    let maint = PgMaintenance::new(pool.clone(), Clock, deadline()).await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let token = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(60), &token);
@@ -194,7 +195,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     let w = ScanWindow::new(None, 2)?;
     assert_eq!(
         maint
-            .reclaim(&grant(&b, EXPIRY - 1, 2)?, w, deadline())
+            .reclaim(grant(&b, EXPIRY - 1, 2)?, w, deadline())
             .await?
             .reclaimed,
         0
@@ -202,7 +203,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     for (cutoff, through) in [(i64::MAX, 2), (EXPIRY, 4)] {
         assert_eq!(
             maint
-                .reclaim(&grant(&b, cutoff, through)?, w, deadline())
+                .reclaim(grant(&b, cutoff, through)?, w, deadline())
                 .await
                 .err()
                 .context("expected operation to fail")?
@@ -210,8 +211,8 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
             ErrorKind::InvalidInput
         );
     }
-    let g = grant(&b, EXPIRY, 1)?;
-    let protected = maint.reclaim(&g, w, deadline()).await?;
+    let g = || grant(&b, EXPIRY, 1);
+    let protected = maint.reclaim(g()?, w, deadline()).await?;
     assert_eq!(
         (
             protected.scanned,
@@ -243,11 +244,42 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
         model::Facts::new(source.clone()),
     )?;
     execution.execute(None, first, &control).await?;
-    let release = grant(&b, EXPIRY, 2)?;
+    let original: String =
+        sqlx::query_scalar("SELECT policy FROM rss_observation.streams WHERE scope=$1")
+            .bind(b.encode()?)
+            .fetch_one(&f.admin)
+            .await?;
+    for damaged in [
+        original.replace("\"version\":1", "\"version\":2"),
+        original.replace("\"retrySeconds\":86400", "\"retrySeconds\":-1"),
+    ] {
+        assert_ne!(damaged, original);
+        sqlx::query("UPDATE rss_observation.streams SET policy=$1 WHERE scope=$2")
+            .bind(damaged)
+            .bind(b.encode()?)
+            .execute(&f.admin)
+            .await?;
+        assert_eq!(
+            maint
+                .reclaim(grant(&b, EXPIRY, 2)?, w, deadline())
+                .await
+                .err()
+                .context("corrupt policy admitted")?
+                .kind(),
+            ErrorKind::Invariant
+        );
+        assert_eq!(source.bounds(&control).await?.expired_through, None);
+    }
+    sqlx::query("UPDATE rss_observation.streams SET policy=$1 WHERE scope=$2")
+        .bind(original)
+        .bind(b.encode()?)
+        .execute(&f.admin)
+        .await?;
+    let release = || grant(&b, EXPIRY, 2);
     maint.inject_next_fault(Fault::BeforeCommit);
     assert_eq!(
         maint
-            .reclaim(&release, w, deadline())
+            .reclaim(release()?, w, deadline())
             .await
             .err()
             .context("expected operation to fail")?
@@ -258,17 +290,40 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
         source.resolve(second, &control).await?.record(),
         store.receive(&old, deadline()).await?.record(),
     );
+    // Hold a real cleanup after both writes, before settlement. Other connections must
+    // still observe the original receipt and the complete page in the old MVCC snapshot.
+    let mut staged = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *staged)
+        .await?;
+    let staged_count: i32 =
+        sqlx::query_scalar("SELECT reclaimed FROM rss_observation.reclaim($1,$2,2,NULL,2)")
+            .bind(b.encode()?)
+            .bind(EXPIRY)
+            .fetch_one(&mut *staged)
+            .await?;
+    assert_eq!(staged_count, 1);
+    let read_limit = BatchLimit::new(4)?;
+    let (replay, resolved, page) = tokio::join!(
+        store.receive(&old, deadline()),
+        source.resolve(second, &control),
+        source.read(source.scope(), Some(first.position()), read_limit, &control)
+    );
+    assert_same_record(replay?.record(), resolved?.record());
+    assert_eq!(page?, vec![second.clone(), third.clone()]);
+    staged.rollback().await?;
     maint.inject_next_fault(Fault::CommitAckLost);
     assert_eq!(
         maint
-            .reclaim(&release, w, deadline())
+            .reclaim(release()?, w, deadline())
             .await
             .err()
             .context("expected operation to fail")?
             .kind(),
         ErrorKind::CommitUnknown
     );
-    let repeat = maint.reclaim(&release, w, deadline()).await?;
+    let repeat = maint.reclaim(release()?, w, deadline()).await?;
     assert_eq!(
         (repeat.scanned, repeat.reclaimed, repeat.released_bytes),
         (2, 0, 0)
@@ -276,7 +331,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     assert!(
         maint
             .reclaim(
-                &release,
+                release()?,
                 ScanWindow::new(repeat.last_examined, 2)?,
                 deadline()
             )
@@ -495,11 +550,22 @@ async fn settlement_and_competing_pages() -> anyhow::Result<()> {
     let other = store.clone();
     let activation = tokio::spawn(async move { activate(&other, &next, Some(1)).await });
     f.wait_for_blocked(pid, 1).await?;
+    let activating:i32=sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND usename='handoff_runtime'")
+        .bind(pid).fetch_one(&f.admin).await?;
+    // The retry sees Missing before the original receive commits, then queues behind retirement.
+    let retry_store = store.clone();
+    let retry = batch(&old, "snapshot", 0, "all", Body::Snapshot(vec![]))?;
+    let retry_task = tokio::spawn(async move { retry_store.receive(&retry, deadline()).await });
+    f.wait_for_blocked(activating, 1).await?;
     pending.commit().await?;
     activation.await??;
-    let authorized = grant(&old, EXPIRY, 1)?;
+    assert!(matches!(
+        retry_task.await??,
+        rss_observation::ReceiveOutcome::Replay(_)
+    ));
+    let authorized = || grant(&old, EXPIRY, 1);
     let window = ScanWindow::new(None, 1)?;
-    let read = ReadGrant::verify(&Trusted, old)?;
+    let read = ReadGrant::verify(&Trusted, old.clone())?;
     for fault in [Fault::CommitPending, Fault::RollbackAckLost] {
         let expected = match fault {
             Fault::CommitPending => ErrorKind::CommitUnknown,
@@ -511,7 +577,7 @@ async fn settlement_and_competing_pages() -> anyhow::Result<()> {
         );
         assert_eq!(
             maint
-                .reclaim(&authorized, window, budget)
+                .reclaim(authorized()?, window, budget)
                 .await
                 .err()
                 .context("expected interruption")?
@@ -524,8 +590,8 @@ async fn settlement_and_competing_pages() -> anyhow::Result<()> {
         ));
     }
     let (one, two) = tokio::try_join!(
-        maint.reclaim(&authorized, window, deadline()),
-        maint.reclaim(&authorized, window, deadline())
+        maint.reclaim(authorized()?, window, deadline()),
+        maint.reclaim(authorized()?, window, deadline())
     )?;
     assert_eq!(one.reclaimed + two.reclaimed, 1);
     assert_eq!(
@@ -605,16 +671,16 @@ async fn bounded_candidate_scan() -> anyhow::Result<()> {
         tx.rollback().await?;
         let nodes = &plan[0]["Plan"];
         let visited = candidate_rows(nodes);
-        let g = grant(&s, EXPIRY, 0)?;
+        let g = || grant(&s, EXPIRY, 0);
         let empty = maint
-            .reclaim(&g, ScanWindow::new(None, 4)?, deadline())
+            .reclaim(g()?, ScanWindow::new(None, 4)?, deadline())
             .await?;
         assert_eq!(
             (empty.scanned, empty.reclaimed, empty.last_examined),
             (4, 0, Some(3))
         );
         let w = ScanWindow::new(Some(after), 4)?;
-        let page = maint.reclaim(&g, w, deadline()).await?;
+        let page = maint.reclaim(g()?, w, deadline()).await?;
         println!(
             "retired history size={total} examined={visited} scanned={} released={} bytes={} shared_hits={}",
             page.scanned, page.reclaimed, page.released_bytes, nodes["Shared Hit Blocks"]
@@ -624,7 +690,7 @@ async fn bounded_candidate_scan() -> anyhow::Result<()> {
             (page.scanned, page.reclaimed, page.released_bytes),
             (4, 1, last.batch().encode().len() as u64)
         );
-        assert_eq!(maint.reclaim(&g, w, deadline()).await?.reclaimed, 0);
+        assert_eq!(maint.reclaim(g()?, w, deadline()).await?.reclaimed, 0);
     }
     Ok(())
 }

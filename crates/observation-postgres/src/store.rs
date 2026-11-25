@@ -344,7 +344,14 @@ impl<C: Clock> ObservationStore for PgStore<C> {
         let fault = self.take_fault();
         let readback_lost = fault.as_ref().is_some_and(Fault::hides_readback);
         match self.receive_once(input, deadline, fault).await {
-            Err(error) if error.kind() == ErrorKind::CommitUnknown => {
+            // A retry may have seen Missing before it queued behind the original
+            // receive and a concurrent retirement. Recheck the durable identity.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::CommitUnknown | ErrorKind::StaleEpoch
+                ) =>
+            {
                 if readback_lost {
                     return Err(error);
                 }
@@ -367,6 +374,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
                     Err(e) if matches!(e.kind(), ErrorKind::Invariant | ErrorKind::Conflict) => {
                         Err(e)
                     }
+                    Err(e) if error.kind() == ErrorKind::StaleEpoch => Err(e),
                     _ => Err(error),
                 }
             }

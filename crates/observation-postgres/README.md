@@ -123,8 +123,8 @@ The flag controls dependencies and APIs only: every installation and every recei
 revision-4 journal. `bounds` reads the durable committed high-water and the last released position.
 Each page checks this floor in the same statement snapshot. A cursor equal to the floor may continue;
 an earlier cursor gets HistoryExpired, including an empty page. Exact references use per-batch evidence,
-so a retained active record below the floor can still resolve. Resume an expired generation using a
-host-prepared read model and complete deduplication receipts covering the missing prefix.
+so a retained active record below the floor can still resolve. Initialize a new generation with `GenerationStart::after`, a host-prepared read model and
+complete deduplication receipts at or beyond the floor. The old generation keeps its original start.
 
 `read` validates rows one at a time and emits bounded immutable version-1 references containing
 Scope, batch ID and the full Observation fingerprint. Event IDs are ASCII hex fingerprints. No

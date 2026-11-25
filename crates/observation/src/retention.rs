@@ -89,7 +89,7 @@ pub trait ObservationMaintenance: Send + Sync {
     /// Reclaim one page under the original deadline and product authority.
     fn reclaim(
         &self,
-        grant: &MaintenanceGrant,
+        grant: MaintenanceGrant,
         window: ScanWindow,
         deadline: Deadline,
     ) -> impl Future<Output = Result<RetentionPage, Error>> + Send;
