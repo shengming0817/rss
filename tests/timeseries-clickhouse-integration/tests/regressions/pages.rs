@@ -1,6 +1,6 @@
 use super::*;
 
-async fn during_select<T, M>(
+pub(super) async fn during_select<T, M>(
     proxy: &transport::Proxy,
     read: impl std::future::Future<Output = T>,
     change: impl std::future::Future<Output = anyhow::Result<M>>,
@@ -124,7 +124,8 @@ async fn slow_page_releases_single_pg_connection_and_checks_lifecycle() -> anyho
 }
 
 #[tokio::test]
-async fn aggregate_cursor_observes_publication_and_reference_changes() -> anyhow::Result<()> {
+async fn aggregate_cursor_survives_publication_and_equivalent_reference_changes()
+-> anyhow::Result<()> {
     let f = Fixture::new("ch-cache-page").await?;
     let d = definition(TENANT)?;
     f.register(&d).await?;
@@ -151,10 +152,13 @@ async fn aggregate_cursor_observes_publication_and_reference_changes() -> anyhow
         .next
         .ok_or(Error::Invariant)?;
     confirmed(f.write(&stream_batch(&d, "other", "later", 3)?).await?)?;
-    assert!(matches!(
-        f.store.aggregate(&q, Some(&cursor), deadline()?).await,
-        Err(Error::HistoryExpired)
-    ));
+    assert!(
+        f.store
+            .aggregate(&q, Some(&cursor), deadline()?)
+            .await?
+            .next
+            .is_none()
+    );
     let cursor = f
         .store
         .aggregate(&q, None, deadline()?)
@@ -176,10 +180,13 @@ async fn aggregate_cursor_observes_publication_and_reference_changes() -> anyhow
     )
     .await??;
     assert!(matches!(page.buckets[0].value, AggregateValue::Count(1)));
-    assert!(matches!(
-        f.store.aggregate(&q, Some(&cursor), deadline()?).await,
-        Err(Error::HistoryExpired)
-    ));
+    assert!(
+        f.store
+            .aggregate(&q, Some(&cursor), deadline()?)
+            .await?
+            .next
+            .is_none()
+    );
     let uncached = during_select(
         &proxy,
         store.aggregate(&q, None, deadline()?),

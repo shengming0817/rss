@@ -82,7 +82,11 @@ Set `Limits.query_threads` explicitly (use 1 for conservative operation). A publ
 aggregate acquires that many permits at once and runs its SELECTs with the corresponding
 `max_threads` and `max_final_threads`. Other calls and tenant binding use one permit.
 The thread setting must fit the owner capacity. Every operation also occupies one of the owner’s
-`Limits.max_in_flight` request slots. When a queued head cannot fit, one fitting successor
+`Limits.max_in_flight` request slots. `Limits.max_waiters` explicitly caps waiting calls
+across tenants; zero permits only immediate admission. A full queue returns `Unavailable`
+before provider IO. Immediately eligible calls, including the allowed bypass, do not consume
+a waiting place. Cancellation removes its indexed ticket; grant and close notify outside
+the owner mutex. When a queued head cannot fit, one fitting successor
 may pass it. Subsequent releases accumulate for that head. Reader and maintenance profiles must accept their
 query settings and allow the full range of positive execution timeouts, including individual
 values, because each caller supplies its own deadline.
@@ -125,13 +129,23 @@ the namespace has no unpublished batches.
 Raw values retain typed canonical JSON, exact integer timestamps/sequences, original
 receipt time and digest. Integers never round-trip through float. History and latest
 use query-time deduplication, canonical ordering and authenticated keyset cursors.
-Raw pagination fixes its publication ceiling across calls. History and latest consult the
-namespace fence generation. Aggregate pages additionally bind the publication ceiling and
-the summary-reference generation. A changed dependency on continuation returns
-`HistoryExpired`; restart pagination. A short PG read-only snapshot selects matching
-fences and summary references. The reader releases PG before ClickHouse IO and rechecks
-the page dependencies before returning. An unstable first page retries once within the
-same deadline, then returns `Unavailable`. `Limits.max_fences` bounds namespace frontiers
+Raw and aggregate pagination fix their publication ceiling across calls. History and
+latest consult the namespace fence generation. Aggregate continuations bind the exact
+stream, series, range and predecessor dependencies, including deletion/restoration and
+stream lifecycle. Unrelated publication does not interrupt pagination. Summary references
+record the maximum revision of their actual inputs, including the predecessor; equivalent
+recomputations remain usable at the old ceiling. Otherwise the reader computes from the
+same raw prefix within its existing budgets.
+
+A short PG read-only snapshot selects dependencies and references, then releases its
+connection before ClickHouse IO. Another short snapshot rechecks control dependencies and
+only the summary objects whose reads were attempted, including failed reads. Changed cache
+references permit one retry at the same ceiling and absolute deadline. A changed aggregate
+continuation dependency or repeatedly unstable reference returns `SnapshotInvalidated`:
+restart from the first page. `HistoryExpired` means required history is unavailable;
+`InvalidCursor` covers invalid authentication, expiry or installation binding. A repeatedly
+unstable first page returns `Unavailable`; stable budget exhaustion stays `BudgetExceeded`.
+`Limits.max_fences` bounds namespace frontiers
 independently of sample budgets. Scan, output, memory and
 time budgets fail explicitly rather than returning a successful truncated result.
 

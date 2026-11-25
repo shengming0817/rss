@@ -1,17 +1,28 @@
 use super::*;
-use std::{future::Future, pin::Pin, task::{Context, Poll, Wake, Waker}};
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, Wake, Waker},
+};
 
 fn poll<F: Future>(f: Pin<&mut F>) -> Poll<F::Output> {
     f.poll(&mut Context::from_waker(Waker::noop()))
 }
-fn ready<'a, F: Future<Output = Result<Permit<'a>, Error>>>(f: Pin<&mut F>) -> anyhow::Result<Permit<'a>> {
+fn ready<'a, F: Future<Output = Result<Permit<'a>, Error>>>(
+    f: Pin<&mut F>,
+) -> anyhow::Result<Permit<'a>> {
     match poll(f) {
         Poll::Ready(result) => Ok(result?),
         Poll::Pending => anyhow::bail!("permit remained pending"),
     }
 }
 fn capacity(slots: u32, units: u32, read: u32, waiters: u32) -> anyhow::Result<Capacity> {
-    Ok(Capacity::new(slots, units, NonZeroU32::new(read).ok_or(Error::InvalidInput)?, waiters))
+    Ok(Capacity::new(
+        slots,
+        units,
+        NonZeroU32::new(read).ok_or(Error::InvalidInput)?,
+        waiters,
+    ))
 }
 fn balances(c: &Capacity, slots: u32, units: u32, waiters: usize) {
     let s = c.state();
@@ -27,7 +38,10 @@ fn full_queue_allows_one_bypass_then_accumulates_for_the_head() -> anyhow::Resul
     let bypass = ready(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut())?;
     balances(&c, 1, 2, 1);
     drop(bypass);
-    assert!(matches!(poll(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut()), Poll::Ready(Err(Error::Unavailable))));
+    assert!(matches!(
+        poll(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut()),
+        Poll::Ready(Err(Error::Unavailable))
+    ));
     drop(held);
     let wide = ready(wide.as_mut())?;
     balances(&c, 2, 0, 0);
@@ -40,7 +54,10 @@ fn full_queue_allows_one_bypass_then_accumulates_for_the_head() -> anyhow::Resul
 fn zero_waiters_and_equal_weights_follow_the_same_admission_rules() -> anyhow::Result<()> {
     let c = capacity(1, 1, 1, 0)?;
     let permit = ready(Box::pin(c.acquire(AdmissionClass::Read)).as_mut())?;
-    assert!(matches!(poll(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut()), Poll::Ready(Err(Error::Unavailable))));
+    assert!(matches!(
+        poll(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut()),
+        Poll::Ready(Err(Error::Unavailable))
+    ));
     drop(permit);
     drop(ready(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut())?);
     let c = capacity(1, 1, 1, 3)?;
@@ -64,7 +81,9 @@ fn head_middle_and_not_yet_observed_grants_cancel_without_losing_capacity() -> a
     let mut first = Box::pin(c.acquire(AdmissionClass::Read));
     let mut middle = Box::pin(c.acquire(AdmissionClass::Unit));
     let mut last = Box::pin(c.acquire(AdmissionClass::Read));
-    for f in [&mut first, &mut middle, &mut last] { assert!(poll(f.as_mut()).is_pending()); }
+    for f in [&mut first, &mut middle, &mut last] {
+        assert!(poll(f.as_mut()).is_pending());
+    }
     drop(middle);
     drop(first);
     balances(&c, 0, 0, 1);
@@ -101,34 +120,53 @@ struct CheckWake {
     calls: std::sync::atomic::AtomicUsize,
 }
 impl Wake for CheckWake {
-    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
     fn wake_by_ref(self: &Arc<Self>) {
-        assert!(self.capacity.0.try_lock().is_ok(), "notification held the capacity mutex");
+        assert!(
+            self.capacity.0.try_lock().is_ok(),
+            "notification held the capacity mutex"
+        );
         self.calls.fetch_add(1, Ordering::Relaxed);
     }
 }
 #[test]
-fn grant_and_close_wake_outside_the_mutex_and_close_preserves_active_permits() -> anyhow::Result<()> {
+fn grant_and_close_wake_outside_the_mutex_and_close_preserves_active_permits() -> anyhow::Result<()>
+{
     let c = Arc::new(capacity(1, 1, 1, 3)?);
     let held = ready(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut())?;
-    let wake = Arc::new(CheckWake { capacity: c.clone(), calls: 0.into() });
+    let wake = Arc::new(CheckWake {
+        capacity: c.clone(),
+        calls: 0.into(),
+    });
     let waker = Waker::from(wake.clone());
     let mut context = Context::from_waker(&waker);
     let mut first = Box::pin(c.acquire(AdmissionClass::Read));
     let mut second = Box::pin(c.acquire(AdmissionClass::Unit));
     let mut third = Box::pin(c.acquire(AdmissionClass::Read));
-    for f in [&mut first, &mut second, &mut third] { assert!(f.as_mut().poll(&mut context).is_pending()); }
+    for f in [&mut first, &mut second, &mut third] {
+        assert!(f.as_mut().poll(&mut context).is_pending());
+    }
     drop(held);
     assert_eq!(wake.calls.load(Ordering::Relaxed), 1);
     let active = ready(first.as_mut())?;
     c.close();
     c.close();
     assert_eq!(wake.calls.load(Ordering::Relaxed), 3);
-    for f in [&mut second, &mut third] { assert!(matches!(poll(f.as_mut()), Poll::Ready(Err(Error::Unavailable)))); }
+    for f in [&mut second, &mut third] {
+        assert!(matches!(
+            poll(f.as_mut()),
+            Poll::Ready(Err(Error::Unavailable))
+        ));
+    }
     balances(&c, 0, 0, 0);
     drop(active);
     balances(&c, 1, 1, 0);
-    assert!(matches!(poll(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut()), Poll::Ready(Err(Error::Unavailable))));
+    assert!(matches!(
+        poll(Box::pin(c.acquire(AdmissionClass::Unit)).as_mut()),
+        Poll::Ready(Err(Error::Unavailable))
+    ));
     Ok(())
 }
 
@@ -161,5 +199,37 @@ fn doubled_cancel_population_has_linear_index_operation_count() -> anyhow::Resul
         assert!(twice <= 2 * w + 4, "{w} -> {twice}");
     }
     // Each measured operation is a BTreeMap lookup/remove: total O(W log(W + 1)).
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn queueing_uses_the_original_absolute_deadline() -> anyhow::Result<()> {
+    use rss_request_context::{Clock, Deadline};
+    use std::time::{Duration, Instant};
+    struct Timer;
+    impl Clock for Timer {
+        fn now(&self) -> Instant {
+            tokio::time::Instant::now().into_std()
+        }
+    }
+    let c = capacity(1, 1, 1, 1)?;
+    let held = c.acquire(AdmissionClass::Unit).await?;
+    let deadline = Deadline::from_timeout(&Timer, Duration::from_secs(5))?;
+    tokio::time::advance(Duration::from_secs(3)).await;
+    let mut waiting = Box::pin(crate::lifecycle::bounded(
+        &Timer,
+        deadline,
+        c.acquire(AdmissionClass::Read),
+    ));
+    assert!(poll(waiting.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(matches!(
+        poll(waiting.as_mut()),
+        Poll::Ready(Err(Error::Deadline))
+    ));
+    drop(waiting);
+    balances(&c, 0, 0, 0);
+    drop(held);
+    balances(&c, 1, 1, 0);
     Ok(())
 }

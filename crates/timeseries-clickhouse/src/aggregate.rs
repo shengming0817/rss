@@ -8,13 +8,23 @@ use crate::{
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
-use sqlx::PgConnection;
-#[derive(Clone, sqlx::FromRow)]
+use sqlx::{PgConnection, Row};
+#[derive(Clone)]
 struct SummaryRef {
     spec_digest: Vec<u8>,
     lo: i64,
     hi: i64,
     object_id: String,
+}
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for SummaryRef {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            spec_digest: row.try_get("spec_digest")?,
+            lo: row.try_get("lo")?,
+            hi: row.try_get("hi")?,
+            object_id: row.try_get("object_id")?,
+        })
+    }
 }
 pub(crate) struct References {
     rows: Vec<SummaryRef>,
@@ -52,9 +62,17 @@ pub(crate) fn mask(
     Ok(())
 }
 pub(crate) fn mask_end(
-    builder: &mut SummaryBuilder, fences: &[Fence], spec: &SummarySpec, window: Interval,
+    builder: &mut SummaryBuilder,
+    fences: &[Fence],
+    spec: &SummarySpec,
+    window: Interval,
 ) -> Result<(), Error> {
-    mask(builder, fences, spec, Timestamp::new(window.end().micros() - 1)?)
+    mask(
+        builder,
+        fences,
+        spec,
+        Timestamp::new(window.end().micros() - 1)?,
+    )
 }
 impl<C: Clock> Operation<'_, C> {
     pub(crate) async fn predecessor(
@@ -247,7 +265,11 @@ impl<C: Clock> Operation<'_, C> {
             rows.truncate(rows.partition_point(|row| row.lo < end));
         }
         rows.reverse();
-        Ok(References { rows, end, attempted: Vec::new() })
+        Ok(References {
+            rows,
+            end,
+            attempted: Vec::new(),
+        })
     }
     async fn cached(
         &self,
@@ -262,9 +284,16 @@ impl<C: Clock> Operation<'_, C> {
         let mut path = std::collections::BTreeMap::new();
         path.insert(window.end().micros(), None);
         let first = refs.partition_point(|r| r.lo >= window.end().micros());
-        for row in refs[first..].iter().take_while(|r| r.lo >= window.start().micros()) {
-            if row.hi <= row.lo { return Err(Error::Invariant); }
-            if path.contains_key(&row.hi) { path.entry(row.lo).or_insert(Some(row)); }
+        for row in refs[first..]
+            .iter()
+            .take_while(|r| r.lo >= window.start().micros())
+        {
+            if row.hi <= row.lo {
+                return Err(Error::Invariant);
+            }
+            if path.contains_key(&row.hi) {
+                path.entry(row.lo).or_insert(Some(row));
+            }
         }
         let mut at = window.start().micros();
         if !path.contains_key(&at) {
@@ -315,7 +344,10 @@ impl Request for AggregateQuery {
         self.binding()
     }
     async fn dependencies<C: Clock>(
-        &self, store: &Operation<'_, C>, c: &mut PgConnection, _: i64,
+        &self,
+        store: &Operation<'_, C>,
+        c: &mut PgConnection,
+        _: i64,
     ) -> Result<Dependencies, Error> {
         let stream = self.spec().stream();
         let scope = stream.scope();
@@ -323,21 +355,46 @@ impl Request for AggregateQuery {
             .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(stream.source().as_str()).bind(stream.generation().as_str())
             .fetch_optional(&mut *c).await.map_err(sql_error)?;
         let (closed, reclaimed) = state.unwrap_or_default();
-        if reclaimed { return Err(Error::HistoryExpired); }
-        let start = if needs_prior(self.spec()) { 0 } else { self.query().window().start().micros() };
+        if reclaimed {
+            return Err(Error::HistoryExpired);
+        }
+        let start = if needs_prior(self.spec()) {
+            0
+        } else {
+            self.query().window().start().micros()
+        };
         let fences = control::visible_fences(c, self.query(), start, store.limits, true).await?;
-        let tag = store.material.key.page_state(Self::DOMAIN, self.binding()?, store.instance, &(&fences, closed))?;
+        let tag = store.material.key.page_state(
+            Self::DOMAIN,
+            self.binding()?,
+            store.instance,
+            &(&fences, closed),
+        )?;
         Ok(Dependencies { fences, tag })
     }
     async fn valid<C: Clock>(
-        &self, _: &Operation<'_, C>, c: &mut PgConnection, metadata: &References, ceiling: i64,
+        &self,
+        _: &Operation<'_, C>,
+        c: &mut PgConnection,
+        metadata: &References,
+        ceiling: i64,
     ) -> Result<bool, Error> {
-        if metadata.attempted.is_empty() { return Ok(true); }
+        if metadata.attempted.is_empty() {
+            return Ok(true);
+        }
         let scope = self.spec().stream().scope();
-        let specs: Vec<_> = metadata.attempted.iter().map(|r| r.spec_digest.clone()).collect();
+        let specs: Vec<_> = metadata
+            .attempted
+            .iter()
+            .map(|r| r.spec_digest.clone())
+            .collect();
         let starts: Vec<_> = metadata.attempted.iter().map(|r| r.lo).collect();
         let ends: Vec<_> = metadata.attempted.iter().map(|r| r.hi).collect();
-        let ids: Vec<_> = metadata.attempted.iter().map(|r| r.object_id.as_str()).collect();
+        let ids: Vec<_> = metadata
+            .attempted
+            .iter()
+            .map(|r| r.object_id.as_str())
+            .collect();
         // Each attempted object is looked up by the existing summary primary key.
         sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM unnest($3::bytea[],$4::bigint[],$5::bigint[],$6::text[]) a(spec_digest,lo,hi,object_id) WHERE NOT EXISTS(SELECT FROM rss_ts_ch.summaries s WHERE s.tenant_id=$1::text::uuid AND s.namespace=$2 AND s.spec_digest=a.spec_digest AND s.lo=a.lo AND s.hi=a.hi AND s.object_id=a.object_id::uuid AND s.semantics=$7 AND s.max_input_revision<=$8 AND (s.dirty_from IS NULL OR s.dirty_from>$8)))")
             .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(specs).bind(starts).bind(ends).bind(ids)
@@ -374,7 +431,13 @@ impl Request for AggregateQuery {
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
             let cached = store
-                .cached(&refs.rows, &mut refs.attempted, q.spec().stream().scope(), window, deadline)
+                .cached(
+                    &refs.rows,
+                    &mut refs.attempted,
+                    q.spec().stream().scope(),
+                    window,
+                    deadline,
+                )
                 .await?;
             let is_cached = cached.is_some();
             let value = match cached {

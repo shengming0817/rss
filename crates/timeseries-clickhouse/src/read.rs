@@ -140,15 +140,34 @@ impl Request for Query {
         self.binding()
     }
     async fn dependencies<C: Clock>(
-        &self, store: &Operation<'_, C>, c: &mut sqlx::PgConnection, fence: i64,
+        &self,
+        store: &Operation<'_, C>,
+        c: &mut sqlx::PgConnection,
+        fence: i64,
     ) -> Result<Dependencies, Error> {
         Ok(Dependencies {
-            fences: control::visible_fences(c, self, self.window().start().micros(), store.limits, false).await?,
-            tag: store.material.key.page_state(Self::DOMAIN, self.binding()?, store.instance, &fence)?,
+            fences: control::visible_fences(
+                c,
+                self,
+                self.window().start().micros(),
+                store.limits,
+                false,
+            )
+            .await?,
+            tag: store.material.key.page_state(
+                Self::DOMAIN,
+                self.binding()?,
+                store.instance,
+                &fence,
+            )?,
         })
     }
     async fn valid<C: Clock>(
-        &self, _: &Operation<'_, C>, _: &mut sqlx::PgConnection, _: &(), _: i64,
+        &self,
+        _: &Operation<'_, C>,
+        _: &mut sqlx::PgConnection,
+        _: &(),
+        _: i64,
     ) -> Result<bool, Error> {
         Ok(true) // reason: raw reads have no mutable summary references to recheck.
     }
@@ -227,9 +246,13 @@ impl Request for Query {
         };
         let more = more_groups || rows.len() > limit as usize;
         rows.truncate(limit as usize);
-        let rows: Vec<_> = rows.into_iter().map(|row| ObservedSample {
-            sample: row.sample, received_at: row.received_at,
-        }).collect();
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|row| ObservedSample {
+                sample: row.sample,
+                received_at: row.received_at,
+            })
+            .collect();
         q.validate_page(&rows)?;
         let next = if more {
             Some(Position::of(&rows.last().ok_or(Error::Invariant)?.sample)?)

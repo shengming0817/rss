@@ -443,3 +443,57 @@ async fn one_small_write_passes_a_blocked_full_width_read() -> anyhow::Result<()
     confirmed(late.await?)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn full_owner_queue_rejects_without_io_and_close_wakes_all_tenants() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-waiter-limit").await?;
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let mut caps = limits()?;
+    caps.max_in_flight = NonZeroU32::MIN;
+    caps.max_waiters = 2;
+    let store = proxy.store_with_limits(f.pool.clone(), caps).await?;
+    let other = bind(&store.owner, OTHER, "ch_other").await?;
+    let a = definition(TENANT)?;
+    let b = definition(OTHER)?;
+    register(&store, &a).await?;
+    register(&other, &b).await?;
+    let qa = read_request(&a, 1)?;
+    let qb = read_request(&b, 1)?;
+    proxy.arm(4);
+    let held = write(&store, batch("held", vec![sample(&a, "held", 10, 1)?])?);
+    tokio::pin!(held);
+    tokio::select! { _=&mut held=>anyhow::bail!("write missed gate"), r=proxy.wait_held()=>r?, }
+    let left = store.query(&qa, None, deadline()?);
+    let right = other.query(&qb, None, deadline()?);
+    tokio::pin!(left, right);
+    for f in [&mut left, &mut right] {
+        tokio::select! { biased; _=f=>anyhow::bail!("queued read completed"), ()=std::future::ready(())=>{} }
+    }
+    let requests = proxy.requests().await.len();
+    assert!(matches!(
+        other.query(&qb, None, deadline()?).await,
+        Err(Error::Unavailable)
+    ));
+    let rejected = batch("rejected", vec![sample(&b, "rejected", 20, 2)?])?;
+    let request = Authorized::<Batch>::verify(&authority(OTHER)?, rejected)?;
+    assert!(matches!(
+        other.write(&request, deadline()?).await,
+        Err(Error::Unavailable)
+    ));
+    assert_eq!(proxy.requests().await.len(), requests);
+    let persisted: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE batch_id='rejected')",
+    )
+    .fetch_one(&f.admin)
+    .await?;
+    assert!(!persisted);
+    let close = store.owner.close(deadline()?);
+    tokio::pin!(close);
+    tokio::select! { biased; _=&mut close=>anyhow::bail!("close passed active write"), ()=std::future::ready(())=>{} }
+    assert!(matches!(left.await, Err(Error::Unavailable)));
+    assert!(matches!(right.await, Err(Error::Unavailable)));
+    proxy.release();
+    confirmed(held.await?)?;
+    close.await?;
+    Ok(())
+}

@@ -1,5 +1,6 @@
 mod pages;
 mod revision;
+mod snapshots;
 use super::*;
 
 #[tokio::test]

@@ -31,6 +31,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 default = []
 integration = []
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 anyhow.workspace = true
 [lints]
 workspace = true

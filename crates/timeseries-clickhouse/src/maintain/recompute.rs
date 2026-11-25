@@ -68,7 +68,9 @@ pub(super) async fn step<C: Clock>(
     let fold = state.fold.as_mut().ok_or(Error::Invariant)?;
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
-        let (builder, max_input_revision) = store.builder(spec, bucket, boundary, &fences, deadline).await?;
+        let (builder, max_input_revision) = store
+            .builder(spec, bucket, boundary, &fences, deadline)
+            .await?;
         fold.builder = Some(builder);
         fold.max_input_revision = max_input_revision;
     }

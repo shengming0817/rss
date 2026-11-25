@@ -99,7 +99,12 @@ impl<C: Clock> ChOwner<C> {
         Ok(Self {
             inner: Arc::new(Shared {
                 clock: Arc::new(clock),
-                capacity: Capacity::new(limits.max_in_flight.get(), limits.operation_permits.get(), limits.query_threads, limits.max_waiters),
+                capacity: Capacity::new(
+                    limits.max_in_flight.get(),
+                    limits.operation_permits.get(),
+                    limits.query_threads,
+                    limits.max_waiters,
+                ),
                 limits,
                 instance,
                 closed: AtomicBool::new(false),
