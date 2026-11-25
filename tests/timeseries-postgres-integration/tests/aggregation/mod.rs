@@ -1252,3 +1252,5 @@ async fn unrelated_fences_keep_pruned_counter_summary_readable() -> anyhow::Resu
     }
     Ok(())
 }
+
+mod io;

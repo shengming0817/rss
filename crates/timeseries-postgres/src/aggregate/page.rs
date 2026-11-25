@@ -123,15 +123,20 @@ impl<C: Clock> Read<'_, C> {
         &self,
         c: &mut PgConnection,
         page: &mut Page,
-        mut buckets: &[Bucket],
+        mut buckets: &mut [Bucket],
     ) -> Result<bool, Error> {
-        while let Some(first) = buckets.first() {
+        while !buckets.is_empty() {
+            cache::resolve(c, self.q, buckets, self.limits).await?;
+            let first = &buckets[0];
             check(self.clock, self.deadline)?;
             let n = if first.cover.as_ref().map_err(|e| *e)?.is_some() {
                 let mut size = 0;
                 let n = buckets
                     .iter()
                     .take_while(|b| {
+                        if !b.resolved() {
+                            return false;
+                        }
                         let Ok(Some(cover)) = &b.cover else {
                             return false;
                         };
@@ -160,14 +165,17 @@ impl<C: Clock> Read<'_, C> {
             } else {
                 let n = buckets
                     .iter()
-                    .take_while(|b| matches!(b.cover, Ok(None)))
+                    .take_while(|b| b.resolved() && matches!(b.cover, Ok(None)))
                     .count();
                 if !self.raw_run(c, &buckets[..n], page).await? {
                     return Ok(false);
                 }
                 n
             };
-            buckets = &buckets[n..];
+            for bucket in &mut buckets[..n] {
+                bucket.cover = Ok(None);
+            }
+            buckets = &mut buckets[n..];
         }
         Ok(true)
     }
@@ -197,9 +205,9 @@ pub(super) async fn collect<C: Clock>(
         bytes: 0,
     };
     while page.at < q.query().window().end() {
-        let count = (q.query().budget().max_points.get() as usize - page.points).min(16);
-        let buckets = cache::plan(c, q, page.at, count, limits).await?;
-        if !read.block(c, &mut page, &buckets).await? {
+        let count = (q.query().budget().max_points.get() as usize - page.points).min(128);
+        let mut buckets = cache::plan(c, q, page.at, count, limits).await?;
+        if !read.block(c, &mut page, &mut buckets).await? {
             break;
         }
     }

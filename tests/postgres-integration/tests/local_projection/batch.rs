@@ -486,6 +486,8 @@ async fn index_admission(f: &Fixture) -> anyhow::Result<()> {
         "outbox_pending_due",
         "outbox_lease_due",
         "outbox_stale_retry",
+        "outbox_publishing_retry",
+        "outbox_published_body",
     ] {
         let original:String=sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE schemaname='rss_transactional_messaging' AND indexname=$1").bind(name).fetch_one(&f.owner).await?;
         let drop = format!("DROP INDEX rss_transactional_messaging.{name}");
@@ -505,6 +507,7 @@ async fn index_admission(f: &Fixture) -> anyhow::Result<()> {
 
 pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
     index_admission(f).await?;
+    scan_admission(f).await?;
     for (signature, before, after) in [
         (
             "rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)",
@@ -513,8 +516,8 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
         ),
         (
             "rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)",
-            "FOR UPDATE OF src SKIP LOCKED",
-            "FOR UPDATE OF src",
+            "FOR UPDATE SKIP LOCKED",
+            "FOR UPDATE",
         ),
     ] {
         let original: String = sqlx::query_scalar("SELECT pg_get_functiondef($1::regprocedure)")
@@ -540,5 +543,62 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
         PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
             .await?;
     restored.close().await;
+    Ok(())
+}
+
+async fn scan_admission(f: &Fixture) -> anyhow::Result<()> {
+    sqlx::raw_sql("CREATE ROLE scan_excess NOLOGIN; GRANT scan_excess TO projection_worker WITH INHERIT FALSE, SET TRUE;").execute(&f.owner).await?;
+    for (damage, repair) in [
+        (
+            "REVOKE SELECT ON rss_transactional_messaging.outbox_scan FROM rss_tmsg_relay",
+            "GRANT SELECT ON rss_transactional_messaging.outbox_scan TO rss_tmsg_relay",
+        ),
+        (
+            "REVOKE INSERT ON rss_transactional_messaging.outbox_scan FROM rss_tmsg_relay",
+            "GRANT INSERT ON rss_transactional_messaging.outbox_scan TO rss_tmsg_relay",
+        ),
+        (
+            "REVOKE UPDATE ON rss_transactional_messaging.outbox_scan FROM rss_tmsg_relay",
+            "GRANT UPDATE ON rss_transactional_messaging.outbox_scan TO rss_tmsg_relay",
+        ),
+        (
+            "REVOKE DELETE ON rss_transactional_messaging.outbox_scan FROM rss_tmsg_relay",
+            "GRANT DELETE ON rss_transactional_messaging.outbox_scan TO rss_tmsg_relay",
+        ),
+        (
+            "ALTER TABLE rss_transactional_messaging.outbox_scan DROP CONSTRAINT outbox_scan_pkey",
+            "ALTER TABLE rss_transactional_messaging.outbox_scan ADD PRIMARY KEY(tenant_id,domain)",
+        ),
+        (
+            "ALTER TABLE rss_transactional_messaging.outbox_scan RENAME CONSTRAINT outbox_scan_pkey TO moved_scan_key",
+            "ALTER TABLE rss_transactional_messaging.outbox_scan RENAME CONSTRAINT moved_scan_key TO outbox_scan_pkey",
+        ),
+        (
+            "ALTER TABLE rss_transactional_messaging.outbox_scan ALTER COLUMN lane DROP NOT NULL",
+            "ALTER TABLE rss_transactional_messaging.outbox_scan ALTER COLUMN lane SET NOT NULL",
+        ),
+        (
+            "CREATE POLICY bypass_scan ON rss_transactional_messaging.outbox_scan USING(true)",
+            "DROP POLICY bypass_scan ON rss_transactional_messaging.outbox_scan",
+        ),
+        (
+            "GRANT SELECT ON rss_transactional_messaging.outbox_scan TO projection_worker",
+            "REVOKE SELECT ON rss_transactional_messaging.outbox_scan FROM projection_worker",
+        ),
+        (
+            "GRANT SELECT(domain) ON rss_transactional_messaging.outbox_scan TO scan_excess",
+            "REVOKE SELECT(domain) ON rss_transactional_messaging.outbox_scan FROM scan_excess",
+        ),
+    ] {
+        sqlx::raw_sql(damage).execute(&f.owner).await?;
+        let result =
+            PgRuntime::connect_consumer(f.config.clone(), Timer::new(), fence_fixture::storage())
+                .await;
+        sqlx::raw_sql(repair).execute(&f.owner).await?;
+        assert!(result.is_err(), "scan contract damage admitted: {damage}");
+    }
+    sqlx::query("REVOKE scan_excess FROM projection_worker")
+        .execute(&f.owner)
+        .await?;
     Ok(())
 }

@@ -38,13 +38,13 @@ and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or 
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
-`PgOutboxStore::next_wakeup(binding, deadline)` reads the same candidate definition as claim for the selected
+`PgOutboxStore::next_wakeup(binding, deadline)` reads eligibility independently of the claim scan cursor for the selected
 tenant and configured domain. Hosts query other tenants separately when composing a waiting strategy. `OutboxWakeup::due_now()` reports already-due work;
 `next_deadline()` separately reports the earliest future eligibility, including retry/lease and active
 DR state. The deadline uses the injected runtime clock and is anchored before database I/O, so the
 query cannot extend the wait. Due work may be locked or claimed concurrently: bound immediate rescans
 and retain a recovery scan. These hints do not claim, settle, prove delivery or grant tenant access.
-The fresh schema stores message metadata in `envelope` and the complete payload in `payload bytea`, including after settlement.
+The fresh schema stores message metadata in `envelope` and the payload in `payload bytea`; the explicit retention capability below can retire eligible Published bodies.
 The external migrator grants `next_outbox_wakeup(uuid,text)` to relay/consumer roles; private
 `outbox_candidates(uuid,text,timestamptz,timestamptz,integer)` remains accessible only to the relay function owner.
 
@@ -568,3 +568,41 @@ Inbox/Outbox lease TTLs accept positive whole milliseconds representable in Post
 Per-operation statement/lock timeouts separately require at most i32::MAX milliseconds.
 `PgArchiveRepository::with_retired_scan_limit(1..=1024)` selects the expired-generation scan budget;
 its default remains 64 and it does not alter request authorization or digest identity.
+
+### Bounded claim work and Published body retention
+
+A claim examines at most `max(64, min(4 * limit, 1024))` admitted candidate headers.
+Each indexed lane reads at most the remaining budget before the merged window is capped;
+the current DR plan has its separate 1024-member bound. A call may wrap once using its
+remaining budget. Filtering and source locking happen after admission. A committed
+tenant/domain cursor advances past locked, stale or DR-blocked candidates and revisits
+the earliest candidates after successful work or exhaustion. Each sweep fixes its upper
+eligibility time so continuous arrivals cannot starve skipped prefixes. Contention on
+cursor progress permits repeated metadata scans without serializing source claims.
+Windows advance by eligibility time and sequence; source locks within a window follow
+source sequence. Partition order and DR barriers remain authoritative.
+An empty batch can be a bounded unsuccessful scan. `OutboxClaimBatch::scan_progress()`
+retains `More` when the scan budget runs out; the default worker continues after 100ms.
+Caller-driven relay and `PgProjectionBatch` callers retain the same state before consuming
+the batch. `next_wakeup` remains a time hint; an empty result alone does not prove drainage.
+
+`PgPublishedBodyMaintenance` owns a separate private pool. The host explicitly authorizes
+the tenant and retention policy, chooses the original-deadline cutoff and schedules sweeps.
+Grant its dedicated login schema USAGE and EXECUTE on `check_execution()` and
+`reclaim_published_bodies(bigint,bigint,integer)` only (the installation's public scope
+helpers remain available). Ordinary runtime, producer, consumer and recovery profiles
+reject this capability. Do not grant table writes or role-owner membership.
+
+Call `reclaim(binding, PublishedBodyRetention::new(before_us, after_seq, limit)?, deadline)`
+with 1–1024 candidates; start at sequence zero, continue from `next_seq`, and restart a
+later sweep at zero to revisit skipped rows. A short page ends the current sweep. The
+shared execution fence, original deadline and current unfinished DR members restrict
+release even when the host's cutoff allows it. Append seals body and authored-evidence digests. Release verifies these digests under the source lock and atomically marks the body retired; cold evidence verifies the retained seal. Successful release clears the body.
+Fingerprints, authored metadata, terminal state, original deadline, recovery version and
+coordinates remain available for same-ID replay/conflict checks, projection readback and
+compensation evidence. No body is restored by duplicate append.
+
+Counts describe this committed transaction, not a durable operation receipt. Cancellation
+or uncertain commit does not prove rollback; repeat the same page safely without treating
+its counts as an exactly-once accounting total. Logical release does not immediately
+shrink PostgreSQL files: VACUUM and storage reuse remain the external database owner's job.

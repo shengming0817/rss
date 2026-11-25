@@ -39,6 +39,7 @@ pub(crate) async fn probe(
     let valid = within(&runtime.timer, cutoff, |_| async {
         sqlx::query_scalar::<_, bool>(include_str!("fence_probe.sql"))
             .bind(operator)
+            .bind(profile == Profile::BodyMaintenance)
             .fetch_one(&runtime.pool)
             .await
     })

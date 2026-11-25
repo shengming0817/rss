@@ -40,6 +40,7 @@ struct ObservedStore {
     reply: Semaphore,
     fail_settle: Option<&'static str>,
     settle_calls: AtomicUsize,
+    scan_more: bool,
 }
 
 impl ObservedStore {
@@ -57,6 +58,7 @@ impl ObservedStore {
             reply: Semaphore::new(0),
             fail_settle: None,
             settle_calls: 0.into(),
+            scan_more: false,
         }
     }
 
@@ -98,7 +100,16 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
         if call == self.block_call {
             self.reply.acquire().await.expect("claim gate").forget();
         }
-        Ok(batch)
+        if self.scan_more {
+            OutboxClaimBatch::try_from_provider(
+                batch.into_iter().collect(),
+                limit,
+                rss_transactional_messaging::outbox::OutboxScanProgress::More,
+            )
+            .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))
+        } else {
+            Ok(batch)
+        }
     }
 
     async fn extend(
@@ -132,6 +143,90 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
         self.owned.fetch_sub(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn empty_continuation_is_paced_separately_from_idle() {
+    use rss_transactional_messaging::outbox::OutboxScanProgress;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for more in [false, true] {
+            let mut observed = ObservedStore::new(0, 0, MessagingErrorKind::Transient);
+            observed.scan_more = more;
+            let store = Arc::new(observed);
+            let timer = Arc::new(AdvancingTimer::new());
+            let publisher = Arc::new(ScriptedPublisher::new([]));
+            let report = relay_once(
+                execution(fixture_tenant(), 1),
+                &*store,
+                &*publisher,
+                &*timer,
+                &NoopEmitter,
+                NonZeroUsize::MIN,
+            )
+            .await
+            .expect("report");
+            assert_eq!(
+                report.scan_progress(),
+                if more {
+                    OutboxScanProgress::More
+                } else {
+                    OutboxScanProgress::Complete
+                }
+            );
+            store.calls.store(0, Ordering::SeqCst);
+            let config = RelayConfig::new(
+                NonZeroUsize::MIN,
+                NonZeroUsize::MIN,
+                Duration::from_secs(30),
+                Duration::from_secs(1),
+            )
+            .expect("config");
+            let worker = RelayWorker::new(
+                store.clone(),
+                publisher,
+                timer.clone(),
+                Arc::new(NoopEmitter),
+                config,
+            );
+            let stop = CancellationToken::new();
+            let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), stop.clone()));
+            let delay = if more {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(30)
+            };
+            timer.wait_registered(delay).await;
+            assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+            timer.advance(Duration::from_millis(99));
+            tokio::task::yield_now().await;
+            assert_eq!(
+                store.calls.load(Ordering::SeqCst),
+                1,
+                "no busy loop before continuation delay"
+            );
+            timer.advance(Duration::from_millis(1));
+            if more {
+                support::wait_for_count(&store.calls, 2).await;
+                timer.wait_registered(Duration::from_millis(200)).await;
+                assert_eq!(
+                    store.calls.load(Ordering::SeqCst),
+                    2,
+                    "persistent empty continuation remains paced"
+                );
+            } else {
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    store.calls.load(Ordering::SeqCst),
+                    1,
+                    "idle retains host interval"
+                );
+            }
+            stop.cancel();
+            support::join_worker(task).await.expect("stop");
+        }
+    })
+    .await
+    .expect("bounded worker scenario");
 }
 
 struct Run {

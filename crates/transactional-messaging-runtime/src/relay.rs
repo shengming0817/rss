@@ -16,7 +16,8 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingRuntimePhase,
 };
 use rss_transactional_messaging::outbox::{
-    OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxRelayStore, OutboxSettlement,
+    OutboxClaimBatch, OutboxDisposition, OutboxLeaseStatus, OutboxRelayStore, OutboxScanProgress,
+    OutboxSettlement,
 };
 use rss_transactional_messaging::policy::{DeliveryBudget, within};
 use rss_transactional_messaging::transport::{
@@ -92,9 +93,15 @@ pub struct RelayReport {
     retried: usize,
     dead_lettered: usize,
     fenced: usize,
+    scan_progress: OutboxScanProgress,
 }
 
 impl RelayReport {
+    /// Continue scanning with bounded pacing when the provider exhausted its scan budget.
+    #[must_use]
+    pub const fn scan_progress(self) -> OutboxScanProgress {
+        self.scan_progress
+    }
     /// Number of durable claims admitted into this batch.
     #[must_use]
     pub const fn claimed(self) -> usize {
@@ -143,6 +150,7 @@ where
 {
     let budget = store.delivery_budget();
     let claims = claim_heads(binding, store, clock, budget, emitter, limit).await?;
+    let scan_progress = claims.scan_progress();
 
     let mut results = stream::iter(claims.into_iter().enumerate().map(
         |(index, claim)| async move {
@@ -159,6 +167,7 @@ where
 
     let mut report = RelayReport {
         claimed: results.len(),
+        scan_progress,
         ..RelayReport::default()
     };
     let mut first_error = None;
@@ -528,7 +537,11 @@ impl Admission {
         match claims {
             Ok(batch) => {
                 if batch.is_empty() && active.len() == before && matches!(self, Self::Ready) {
-                    *self = Self::delay(clock, emitter, config.idle_scan_interval, Self::Idle);
+                    let delay = match batch.scan_progress() {
+                        OutboxScanProgress::More => MIN_SCAN_DELAY,
+                        OutboxScanProgress::Complete => config.idle_scan_interval,
+                    };
+                    *self = Self::delay(clock, emitter, delay, Self::Idle);
                 }
                 Some(batch)
             }

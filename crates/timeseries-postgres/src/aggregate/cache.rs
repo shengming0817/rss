@@ -16,14 +16,29 @@ pub(super) struct Cover {
 pub(super) struct Bucket {
     pub(super) window: Interval,
     pub(super) cover: Result<Option<Cover>, Error>,
+    expand: bool,
 }
 
+// Batched planning bounds candidate metadata independently of per-bucket work.
+const TILE_PROBE: usize = 32;
+const HEADER_BUDGET: usize = 4096;
 pub(super) async fn plan(
     c: &mut PgConnection,
     q: &AggregateQuery,
     at: Timestamp,
     count: usize,
     limits: &Limits,
+) -> Result<Vec<Bucket>, Error> {
+    plan_with_limit(c, q, at, count, limits, TILE_PROBE).await
+}
+
+async fn plan_with_limit(
+    c: &mut PgConnection,
+    q: &AggregateQuery,
+    at: Timestamp,
+    count: usize,
+    limits: &Limits,
+    candidate_limit: usize,
 ) -> Result<Vec<Bucket>, Error> {
     let spec = q.spec();
     let mut windows = Vec::new();
@@ -43,7 +58,7 @@ pub(super) async fn plan(
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(spec.semantics()?.as_bytes().as_slice())
         .bind(windows.iter().map(|w| w.start().micros()).collect::<Vec<_>>())
         .bind(windows.iter().map(|w| w.end().micros()).collect::<Vec<_>>())
-        .bind(i64::from(limits.max_points.get())+1).fetch(c);
+        .bind(candidate_limit.min(limits.max_points.get() as usize) as i64 + 1).fetch(&mut *c);
     let mut candidates: Vec<Vec<Tile>> = windows.iter().map(|_| Vec::new()).collect();
     while let Some(row) = rows.try_next().await.map_err(sql_error)? {
         let idx: i64 = row.try_get("idx").map_err(sql_error)?;
@@ -60,14 +75,61 @@ pub(super) async fn plan(
                     .map_err(|_| Error::Invariant)?,
             });
     }
-    Ok(windows
-        .into_iter()
-        .zip(candidates)
-        .map(|(window, tiles)| Bucket {
+    drop(rows);
+    let mut result = Vec::new();
+    for (window, tiles) in windows.into_iter().zip(candidates) {
+        // A whole tile is conclusive even when the small metadata probe truncates.
+        // Ambiguous covers are expanded in a separate bounded metadata group.
+        let complete = tiles.first().is_some_and(|t| {
+            t.identity.1 == window.start().micros()
+                && t.end == window.end().micros()
+                && t.bytes <= limits.max_bytes.get() as usize
+        });
+        let expand = tiles.len() > candidate_limit
+            && candidate_limit < limits.max_points.get() as usize
+            && !complete;
+        let cover = if expand {
+            Ok(None)
+        } else {
+            choose(window, tiles, limits)
+        };
+        result.push(Bucket {
             window,
-            cover: choose(window, tiles, limits),
-        })
-        .collect())
+            cover,
+            expand,
+        });
+    }
+    Ok(result)
+}
+
+pub(super) async fn resolve(
+    c: &mut PgConnection,
+    q: &AggregateQuery,
+    buckets: &mut [Bucket],
+    limits: &Limits,
+) -> Result<(), Error> {
+    if buckets[0].expand {
+        let per_bucket = limits.max_points.get() as usize;
+        let count = buckets
+            .iter()
+            .take_while(|b| b.expand)
+            .take((HEADER_BUDGET / per_bucket.saturating_add(1)).max(1))
+            .count();
+        let expanded =
+            plan_with_limit(c, q, buckets[0].window.start(), count, limits, per_bucket).await?;
+        if expanded.len() != count {
+            return Err(Error::Invariant);
+        }
+        for (bucket, resolved) in buckets.iter_mut().zip(expanded) {
+            *bucket = resolved;
+        }
+    }
+    Ok(())
+}
+impl Bucket {
+    pub(super) fn resolved(&self) -> bool {
+        !self.expand
+    }
 }
 
 // A longer tile may end at a dead end. Compute the cheapest complete suffix
