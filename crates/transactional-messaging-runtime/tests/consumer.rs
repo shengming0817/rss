@@ -3962,13 +3962,26 @@ async fn local_permit_ready_at_cutoff_requeues_without_starting_claim() {
     let msg = envelope(|_| {});
     let sub = subscription(&msg);
     let timer = ManualTimer::new();
+    struct ExpireOnTransfer<'a>(&'a ManualTimer, Duration);
+    impl TransactionalMessagingEmitter for ExpireOnTransfer<'_> {
+        fn emit(&self, event: TransactionalMessagingObservation) {
+            if matches!(
+                event,
+                TransactionalMessagingObservation::ConsumerClaimCapacityBusy
+            ) {
+                self.0.advance(self.1);
+            }
+        }
+    }
+    let budget = consumer_policy().budget();
+    let emitter = ExpireOnTransfer(&timer, budget.total() - budget.settlement_reserve());
     let execution = ConsumerExecution::new(
         ConsumerGroup::parse("cutoff-race").expect("group"),
         &TrustedIngress,
         &sub,
         &timer,
         consumer_policy(),
-        &NoopEmitter,
+        &emitter,
     );
     let gate = Arc::new(tokio::sync::Notify::new());
     let inbox = FakeInbox {
@@ -3988,10 +4001,7 @@ async fn local_permit_ready_at_cutoff_requeues_without_starting_claim() {
         Delivery::new(msg, recorder.clone()),
     );
     tokio::pin!(attempt);
-    assert!(futures::poll!(&mut attempt).is_pending());
     gate.notify_one();
-    let budget = execution.policy().budget();
-    timer.advance(budget.total() - budget.settlement_reserve());
     assert_eq!(
         attempt.await.expect("busy settlement"),
         ProcessingDisposition::CapacityBusy

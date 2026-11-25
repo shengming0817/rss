@@ -106,6 +106,33 @@ enum OwnerAction {
     Commit,
 }
 
+async fn verify_row_hint(
+    owner: &sqlx::PgPool,
+    inbox: &PgInboxStore,
+    binding: &VerifiedConsumerBinding,
+) -> anyhow::Result<()> {
+    for seconds in [10_i32, 120] {
+        sqlx::query("UPDATE rss_transactional_messaging.inbox SET lease_until=clock_timestamp()+make_interval(secs => $1) WHERE message_id=$2")
+            .bind(f64::from(seconds)).bind(binding.identity().message_id().as_str()).execute(owner).await?;
+        let permit = inbox
+            .reserve_claim(binding.execution(), binding.identity(), deadline())?
+            .acquire()
+            .await?;
+        let IdempotencyDisposition::InProgress {
+            retry_after: Some(hint),
+        } = inbox.claim(permit).await?
+        else {
+            anyhow::bail!("live database lease must supply its measured hint");
+        };
+        let limit = Duration::from_secs(seconds as u64);
+        assert!(
+            (limit - Duration::from_secs(5)..=limit).contains(&hint),
+            "row hint {hint:?} for {seconds}s lease"
+        );
+    }
+    Ok(())
+}
+
 pub(super) async fn remote_cases(
     config: PgConfig,
     holder_runtime: Arc<PgRuntime>,
@@ -142,6 +169,9 @@ pub(super) async fn remote_cases(
         let IdempotencyDisposition::Acquired(holder) = holder_inbox.claim(permit).await? else {
             anyhow::bail!("fixture owner must acquire");
         };
+        if matches!(action, OwnerAction::Hold) {
+            verify_row_hint(owner, &waiter_inbox, &binding).await?;
+        }
         let mut holder = Some(holder);
         let before = claim_count(owner).await?;
         let clock = ProbeClock {

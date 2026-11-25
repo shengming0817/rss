@@ -231,7 +231,7 @@ where
         };
     let claim = wait_for_claim(inbox, execution, &binding, deadlines.operation()).await;
     match claim {
-        Ok(busy @ (None | Some(IdempotencyDisposition::InProgress { .. }))) => {
+        Ok(ClaimWait::Busy(busy)) => {
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
@@ -240,11 +240,7 @@ where
                 execution.emitter,
             )
             .await?;
-            Ok(if busy.is_none() {
-                ProcessingDisposition::CapacityBusy
-            } else {
-                ProcessingDisposition::InProgress
-            })
+            Ok(busy)
         }
         Err(error) => {
             emit_runtime_failure(
@@ -261,9 +257,7 @@ where
             )
             .await)
         }
-        Ok(Some(IdempotencyDisposition::Terminal(receipt))) => match binding
-            .validate_terminal(receipt)
-        {
+        Ok(ClaimWait::Terminal(receipt)) => match binding.validate_terminal(receipt) {
             Ok(terminal) => {
                 let disposition = terminal.disposition();
                 settle_observed(
@@ -292,7 +286,7 @@ where
                 Ok(ProcessingDisposition::Rejected(failure))
             }
         },
-        Ok(Some(IdempotencyDisposition::Acquired(claim))) => {
+        Ok(ClaimWait::Acquired(claim)) => {
             process_acquired(
                 inbox,
                 transaction,
@@ -310,13 +304,18 @@ where
     }
 }
 
-// None is the known pre-SQL capacity timeout. Durable I/O timeouts remain errors.
+enum ClaimWait<C> {
+    Busy(ProcessingDisposition),
+    Acquired(C),
+    Terminal(rss_transactional_messaging::transaction::TerminalReceipt),
+}
+
 async fn wait_for_claim<I, V, R, E>(
     inbox: &I,
     execution: &ConsumerExecution<'_, V, R, E>,
     binding: &VerifiedConsumerBinding,
     cutoff: Deadline,
-) -> Result<Option<IdempotencyDisposition<I::Claim>>, MessagingError>
+) -> Result<ClaimWait<I::Claim>, MessagingError>
 where
     I: InboxStore,
     R: ExecutionTimer,
@@ -324,11 +323,33 @@ where
 {
     let mut capacity_wait = None;
     let mut backoff = None;
+    let mut known_busy = None;
     let result = loop {
-        let result = claim_once(inbox, execution, binding, cutoff, &mut capacity_wait).await;
-        let Ok(Some(IdempotencyDisposition::InProgress { retry_after })) = result else {
-            break result;
+        let attempt = claim_once(
+            inbox,
+            execution,
+            binding,
+            cutoff,
+            &mut capacity_wait,
+            &mut known_busy,
+        )
+        .await;
+        let retry_after = match attempt {
+            Ok(IdempotencyDisposition::Acquired(claim)) => break Ok(ClaimWait::Acquired(claim)),
+            Ok(IdempotencyDisposition::Terminal(receipt)) => {
+                break Ok(ClaimWait::Terminal(receipt));
+            }
+            Ok(IdempotencyDisposition::InProgress { retry_after }) => retry_after,
+            Err(error) => {
+                if error.kind() == MessagingErrorKind::DeadlineElapsed
+                    && let Some(busy) = known_busy
+                {
+                    break Ok(ClaimWait::Busy(busy));
+                }
+                break Err(error);
+            }
         };
+        known_busy = Some(ProcessingDisposition::InProgress);
         execution
             .emitter
             .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
@@ -346,7 +367,7 @@ where
                 .unwrap_or_default()
                 .is_zero()
         {
-            break result;
+            break Ok(ClaimWait::Busy(ProcessingDisposition::InProgress));
         }
     };
     if let Some(duration) = capacity_wait {
@@ -363,7 +384,8 @@ async fn claim_once<I, V, R, E>(
     binding: &VerifiedConsumerBinding,
     cutoff: Deadline,
     capacity_wait: &mut Option<Duration>,
-) -> Result<Option<IdempotencyDisposition<I::Claim>>, MessagingError>
+    known_busy: &mut Option<ProcessingDisposition>,
+) -> Result<IdempotencyDisposition<I::Claim>, MessagingError>
 where
     I: InboxStore,
     R: ExecutionTimer,
@@ -372,12 +394,14 @@ where
     let timer = execution.timer;
     let mut waiting_since = None;
     let started = &mut waiting_since;
+    let waiting_busy = &mut *known_busy;
     let emitter = execution.emitter;
     let permit = within(timer, cutoff, |deadline| async move {
         match inbox.reserve_claim(binding.execution(), binding.identity(), deadline)? {
             ClaimAdmission::Ready(permit) => Ok(permit),
             ClaimAdmission::Waiting(wait) => {
                 *started = Some(timer.now());
+                *waiting_busy = Some(ProcessingDisposition::CapacityBusy);
                 emitter.emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
                 wait.await
             }
@@ -388,14 +412,14 @@ where
     if let Some(start) = waiting_since {
         let elapsed = timer.now().saturating_duration_since(start);
         *capacity_wait = Some(capacity_wait.unwrap_or_default().saturating_add(elapsed));
-        if matches!(&permit, Err(error) if error.kind() == MessagingErrorKind::DeadlineElapsed) {
-            return Ok(None);
-        }
     }
     let permit = permit?;
-    within(timer, cutoff, |_| inbox.claim(permit))
-        .await?
-        .map(Some)
+    // The timeout-first watchdog may expire after permit transfer but before this poll.
+    within(timer, cutoff, |_| async {
+        *known_busy = None;
+        inbox.claim(permit).await
+    })
+    .await?
 }
 
 struct ClaimBackoff {
