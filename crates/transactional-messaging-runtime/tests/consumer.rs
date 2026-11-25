@@ -4016,3 +4016,73 @@ async fn local_permit_ready_at_cutoff_requeues_without_starting_claim() {
     assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
     assert_eq!(recorder.abandon_count(), 0);
 }
+
+#[tokio::test(start_paused = true)]
+async fn simultaneous_deliveries_spread_their_final_remote_claims() {
+    struct ProbeTimes<'a> {
+        timer: &'a RealtimeClock,
+        probes: Mutex<Vec<std::time::Instant>>,
+    }
+    impl TransactionalMessagingEmitter for ProbeTimes<'_> {
+        fn emit(&self, observation: TransactionalMessagingObservation) {
+            if matches!(
+                observation,
+                TransactionalMessagingObservation::ConsumerClaimInProgress
+            ) {
+                self.probes
+                    .lock()
+                    .expect("probe times")
+                    .push(self.timer.now());
+            }
+        }
+    }
+    let timer = RealtimeClock::new();
+    let start = timer.now();
+    let inbox = FakeInbox {
+        capacity: None,
+        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+            retry_after: None,
+        })),
+        lease: LeaseStatus::Lost,
+    };
+    let tx = FakeTx {
+        calls: Arc::new(AtomicUsize::new(0)),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let attempts = (0..8).map(|_| async {
+        let msg = envelope(|_| {});
+        let sub = subscription(&msg);
+        let times = ProbeTimes {
+            timer: &timer,
+            probes: Mutex::new(Vec::new()),
+        };
+        let execution = ConsumerExecution::new(
+            ConsumerGroup::parse("same-start").expect("group"),
+            &TrustedIngress,
+            &sub,
+            &timer,
+            consumer_policy(),
+            &times,
+        );
+        let recorder = RecordingSettlement::new();
+        let result = consume_once(
+            &inbox,
+            &tx,
+            &execution,
+            Delivery::new(msg, recorder.clone()),
+        )
+        .await;
+        assert_eq!(result.expect("busy"), ProcessingDisposition::InProgress);
+        assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
+        let probes = times.probes.into_inner().expect("probe times");
+        assert!((12..=16).contains(&probes.len()));
+        let final_probe = *probes.last().expect("last probe");
+        let elapsed = final_probe.saturating_duration_since(start);
+        // Tokio's paused timer wakes at millisecond resolution.
+        assert!((Duration::from_millis(7500)..=Duration::from_millis(7751)).contains(&elapsed));
+        final_probe
+    });
+    let times = futures::future::join_all(attempts).await;
+    assert!(times.windows(2).any(|pair| pair[0] != pair[1]));
+    assert_eq!(tx.calls.load(Ordering::SeqCst), 0);
+}

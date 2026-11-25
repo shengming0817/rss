@@ -358,15 +358,13 @@ where
         execution
             .emitter
             .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
-        let wake = match last_probe.remaining(execution.timer.now()) {
-            Some(left) if !left.is_zero() => {
-                let delay = backoff
-                    .get_or_insert_with(ClaimBackoff::new)
-                    .next(retry_after, left);
-                last_probe.capped(execution.timer, delay)
-            }
-            _ => cutoff,
-        };
+        let left = last_probe
+            .remaining(execution.timer.now())
+            .unwrap_or_default();
+        let delay = backoff
+            .get_or_insert_with(ClaimBackoff::new)
+            .next(retry_after, left);
+        let wake = delay.map_or(cutoff, |delay| last_probe.capped(execution.timer, delay));
         if within(execution.timer, cutoff, |_| {
             execution.timer.sleep_until(wake)
         })
@@ -436,6 +434,7 @@ struct ClaimBackoff {
     base: Duration,
     random: std::hash::RandomState,
     probe: u64,
+    final_scheduled: bool,
 }
 
 impl ClaimBackoff {
@@ -445,23 +444,31 @@ impl ClaimBackoff {
             base: Self::FIRST,
             random: std::hash::RandomState::new(),
             probe: 0,
+            final_scheduled: false,
         }
     }
 
-    fn next(&mut self, hint: Option<Duration>, until_final: Duration) -> Duration {
+    fn next(&mut self, hint: Option<Duration>, until_final: Duration) -> Option<Duration> {
         use std::hash::BuildHasher as _;
+        if self.final_scheduled || until_final.is_zero() {
+            return None;
+        }
         // One earlier tier for a near expiry; a constantly renewed short lease still backs off.
         let lower = hint
             .unwrap_or(self.base)
             .clamp((self.base / 2).max(Self::FIRST), self.base);
         self.base = (self.base * 2).min(Duration::from_secs(1));
-        // When the last useful probe is inside this tier, do it once with I/O headroom.
-        if until_final <= lower * 2 {
-            return until_final;
-        }
         let sample = self.random.hash_one(self.probe);
         self.probe = self.probe.wrapping_add(1);
-        lower + Duration::from_nanos(sample % (lower.as_nanos() as u64))
+        if until_final <= lower * 2 {
+            // Spend the final probe once and spread its wake before the reserved I/O window.
+            self.final_scheduled = true;
+            let spread = (until_final / 4).min(Duration::from_millis(250));
+            return Some(
+                until_final - Duration::from_nanos(sample % (spread.as_nanos() as u64 + 1)),
+            );
+        }
+        Some(lower + Duration::from_nanos(sample % (lower.as_nanos() as u64)))
     }
 }
 
@@ -474,7 +481,11 @@ mod claim_backoff_tests {
         let mut backoff = ClaimBackoff::new();
         backoff.base = Duration::from_secs(1);
         let latest = Duration::from_millis(1250);
-        assert_eq!(backoff.next(Some(Duration::from_secs(1)), latest), latest);
+        let final_delay = backoff.next(Some(Duration::from_secs(1)), latest);
+        assert!(
+            matches!(final_delay, Some(delay) if (Duration::from_secs(1)..=latest).contains(&delay))
+        );
+        assert_eq!(backoff.next(None, latest), None);
     }
 
     #[test]
@@ -490,7 +501,7 @@ mod claim_backoff_tests {
                 } else {
                     base
                 };
-                let delay = backoff.next(hint, Duration::MAX);
+                let delay = backoff.next(hint, Duration::MAX).unwrap_or_default();
                 assert!((floor..floor * 2).contains(&delay));
                 if index > 10 {
                     assert!(delay >= Duration::from_millis(cap_floor));
