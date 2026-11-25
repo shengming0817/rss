@@ -3,7 +3,7 @@ use crate::{
     transaction::{Fault, Lease, Progress, Stage, runtime_budget, sql_error, watchdog, within},
 };
 use rss_observation::{
-    Batch, Clock, Decision, Error, ErrorKind, Id, LifecycleGrant, ObservationStore, Policy,
+    Batch, Clock, Decision, Error, ErrorKind, Id, LifecycleGrant, LookupOutcome, ObservationStore, Policy,
     ReadGrant, ReceiveOutcome, Record, Scope, State, VerifiedBatch,
 };
 use rss_request_context::{Deadline, TenantId};
@@ -23,7 +23,7 @@ impl<C: Clock> PgStore<C> {
     /// The host configures TLS and credentials and supplies a clock sharing the Deadline domain.
     /// Admission is bounded, executes no migrations and quarantines unconfirmed probe transactions.
     pub async fn new(pool: PgPool, clock: C, deadline: Deadline) -> Result<Self, Error> {
-        Self::admit(pool, clock, deadline, None).await
+        Self::admit(pool, clock, deadline, None, false).await
     }
     /// Integration-only admission fault; only RollbackPending is valid for this boundary.
     #[cfg(feature = "integration")]
@@ -36,13 +36,14 @@ impl<C: Clock> PgStore<C> {
         if !matches!(&fault, Fault::RollbackPending(_)) {
             return Err(ErrorKind::InvalidInput.into());
         }
-        Self::admit(pool, clock, deadline, Some(fault)).await
+        Self::admit(pool, clock, deadline, Some(fault), false).await
     }
-    async fn admit(
+    pub(crate) async fn admit(
         pool: PgPool,
         clock: C,
         deadline: Deadline,
         _fault: Option<Fault>,
+        maintenance: bool,
     ) -> Result<Self, Error> {
         let progress = Progress::new();
         within(&clock, deadline, &progress, async {
@@ -58,7 +59,7 @@ impl<C: Clock> PgStore<C> {
                     .execute(&mut *tx)
                     .await
                     .map_err(sql_error)?;
-                probe::validate(&mut tx).await
+                probe::validate(&mut tx, maintenance).await
             }
             .await;
             progress.set(Stage::Rollback);
@@ -264,10 +265,10 @@ impl<C: Clock> PgStore<C> {
         let batch = input.batch().clone();
         let fingerprint = input.fingerprint();
         self.transact(input.scope().tenant(),deadline,fault,move |connection,progress|Box::pin(async move{
-            if let Some(record)=read(connection,&input_scope,batch.id()).await?{return replay(record,&batch);}
+            if let Some(outcome)=read(connection,&input_scope,batch.id()).await?.retry(&batch, &fingerprint)? {return Ok(outcome);}
             let row=sqlx::query("SELECT state,policy FROM rss_observation.lock_stream($1)").bind(input_scope.encode()?).fetch_one(&mut *connection).await.map_err(sql_error)?;
             // A concurrent exact retry may have committed while we waited for the stream lock.
-            if let Some(record)=read(connection,&input_scope,batch.id()).await?{return replay(record,&batch);}
+            if let Some(outcome)=read(connection,&input_scope,batch.id()).await?.retry(&batch, &fingerprint)? {return Ok(outcome);}
             let state=durable(State::decode(row.try_get("state").map_err(sql_error)?))?;
             let policy=durable(Policy::decode(row.try_get("policy").map_err(sql_error)?))?;
             let received:i64=sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint").fetch_one(&mut *connection).await.map_err(sql_error)?;
@@ -360,7 +361,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
                     )
                     .await;
                 match found {
-                    Ok(Some(record)) => replay(record, input.batch()),
+                    Ok(identity) => identity.retry(input.batch(), &input.fingerprint())?.ok_or(error),
                     Err(e) if matches!(e.kind(), ErrorKind::Invariant | ErrorKind::Conflict) => {
                         Err(e)
                     }
@@ -375,14 +376,14 @@ impl<C: Clock> ObservationStore for PgStore<C> {
         grant: &ReadGrant,
         id: &Id,
         deadline: Deadline,
-    ) -> Result<Option<Record>, Error> {
+    ) -> Result<LookupOutcome, Error> {
         let scope = grant.scope().clone();
         let id = id.clone();
         self.transact(
             grant.scope().tenant(),
             deadline,
             self.take_fault(),
-            move |connection, _| Box::pin(async move { read(connection, &scope, &id).await }),
+            move |connection, _| Box::pin(async move { Ok(read(connection, &scope, &id).await?.lookup()) }),
         )
         .await
     }
@@ -400,14 +401,43 @@ fn replay(record: Record, batch: &Batch) -> Result<ReceiveOutcome, Error> {
     }
     Ok(ReceiveOutcome::Replay(record))
 }
+enum StoredBatch {
+    Found(Record),
+    Expired([u8; 32]),
+    Missing,
+}
+impl StoredBatch {
+    fn lookup(self) -> LookupOutcome {
+        match self {
+            Self::Found(record) => LookupOutcome::Found(record),
+            Self::Missing => LookupOutcome::NotFound,
+            Self::Expired(_) => LookupOutcome::Expired,
+        }
+    }
+    fn retry(self, batch: &Batch, fingerprint: &[u8; 32]) -> Result<Option<ReceiveOutcome>, Error> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::Found(record) => replay(record,batch).map(Some),
+            Self::Expired(original) if &original == fingerprint => Err(ErrorKind::HistoryExpired.into()),
+            Self::Expired(_) => Err(ErrorKind::Conflict.into()),
+        }
+    }
+}
 async fn read(
     connection: &mut PgConnection,
     scope: &Scope,
     id: &Id,
-) -> Result<Option<Record>, Error> {
-    let row=sqlx::query("SELECT raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND scope=$2 AND batch_id=$3")
+) -> Result<StoredBatch, Error> {
+    let row=sqlx::query("SELECT raw IS NULL AS expired,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND scope=$2 AND batch_id=$3")
         .bind(scope.tenant().to_string()).bind(scope.encode()?).bind(id.as_str()).fetch_optional(connection).await.map_err(sql_error)?;
-    row.map(|row| restore(row, scope, id)).transpose()
+    match row {
+        None => Ok(StoredBatch::Missing),
+        Some(row) if row.try_get("expired").map_err(sql_error)? => {
+            let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(sql_error)?;
+            Ok(StoredBatch::Expired(fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?))
+        }
+        Some(row) => restore(row,scope,id).map(StoredBatch::Found),
+    }
 }
 pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {
     let restore = || -> Result<Record, Error> {

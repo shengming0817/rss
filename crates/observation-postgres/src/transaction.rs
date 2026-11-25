@@ -19,6 +19,9 @@ pub(crate) fn sql_error(error: sqlx::Error) -> Error {
         // rollback before exposing Deadline; commit/rollback errors have separate classifiers.
         Some("57014" | "55P03") => ErrorKind::Deadline,
         Some("23505" | "OB001") => ErrorKind::Conflict,
+        Some("OB005") => ErrorKind::InvalidInput,
+        Some("OB006") => ErrorKind::UnknownStream,
+        Some("OB007") => ErrorKind::Unauthorized,
         Some("OB002") => ErrorKind::StaleEpoch,
         Some("OB003") => ErrorKind::LifecycleConflict,
         Some("OB004" | "23514" | "23503" | "42501" | "42P01" | "42703") => ErrorKind::Invariant,

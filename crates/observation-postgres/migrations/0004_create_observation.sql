@@ -2,7 +2,7 @@
 -- Runtime role provisioning and grants are consumer-owned.
 -- ref: postgres/postgres doc/src/sgml/mvcc.sgml@c13dd7d50f21268dc64b4b3edbce31993985ab12
 CREATE SCHEMA rss_observation;
-COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:3';
+COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:4';
 CREATE TABLE rss_observation.objects (
  tenant_id uuid NOT NULL, object_id text NOT NULL,
  registration_id text, revision numeric(20,0) NOT NULL CHECK (revision BETWEEN 0 AND 18446744073709551615),
@@ -31,15 +31,17 @@ CREATE TABLE rss_observation.admissions (
 );
 CREATE TABLE rss_observation.journals (
  tenant_id uuid PRIMARY KEY,
- last_position bigint NOT NULL CHECK(last_position>0)
+ last_position bigint NOT NULL CHECK(last_position>0),
+ expired_through bigint NOT NULL DEFAULT 0 CHECK (expired_through BETWEEN 0 AND last_position)
 );
 CREATE TABLE rss_observation.batches (
  tenant_id uuid NOT NULL, scope text NOT NULL, batch_id text NOT NULL,
  sequence numeric(20,0) NOT NULL CHECK (sequence BETWEEN 0 AND 18446744073709551615),
- raw bytea NOT NULL CHECK (octet_length(raw) BETWEEN 1 AND 4194304),
+ raw bytea CHECK (octet_length(raw) BETWEEN 1 AND 4194304),
  fingerprint bytea NOT NULL CHECK (octet_length(fingerprint)=32),
  received_at bigint NOT NULL CHECK (received_at>=0),
- policy text NOT NULL, decision text NOT NULL,
+ policy text, decision text,
+ CHECK ((raw IS NULL)=(policy IS NULL) AND (raw IS NULL)=(decision IS NULL)),
  applicable boolean NOT NULL,
  log_position bigint,
  CONSTRAINT observation_position CHECK (
@@ -119,7 +121,8 @@ DECLARE current_stream rss_observation.streams; t uuid := (p_scope::jsonb->>'ten
  position bigint; max_position CONSTANT bigint := 9223372036854775807;
 BEGIN
  SELECT * INTO STRICT current_stream FROM rss_observation.lock_stream(p_scope);
- IF current_stream.revision<>p_expected OR current_stream.state::jsonb<>p_decision::jsonb->'before'
+ IF p_raw IS NULL OR p_policy IS NULL OR p_decision IS NULL
+ OR current_stream.revision<>p_expected OR current_stream.state::jsonb<>p_decision::jsonb->'before'
  OR (p_decision::jsonb->'after'->>'revision')::numeric<>p_expected+1 OR current_stream.policy::jsonb<>p_policy::jsonb THEN
   RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='transition contract';
  END IF;
@@ -146,6 +149,56 @@ BEGIN
  INSERT INTO rss_observation.batches(tenant_id,scope,batch_id,sequence,raw,fingerprint,received_at,policy,decision,applicable,log_position)
  VALUES(t,p_scope,p_id,p_sequence,p_raw,p_fingerprint,p_received,p_policy,p_decision,p_applicable,position);
  UPDATE rss_observation.streams SET state=(p_decision::jsonb->'after')::text WHERE tenant_id=t AND scope=p_scope;
+END $$;
+-- ref: etcd-io/etcd server/storage/mvcc/kvstore_compaction.go@f5d605a93abe2fdfa13880aab0f1f3a4203628dd
+-- Candidate window includes released and ineligible identities. Its boundaries survive retries.
+CREATE FUNCTION rss_observation.reclaim(p_scope text,p_cutoff bigint,p_through bigint,p_after numeric,p_limit integer)
+RETURNS TABLE(last_examined numeric,scanned integer,reclaimed integer,released_bytes bigint)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_observation AS $$
+DECLARE t uuid := (p_scope::jsonb->>'tenant')::uuid;
+ s rss_observation.streams; candidate record; minimum_age numeric; floor_position bigint := 0;
+BEGIN
+ IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN
+  RAISE EXCEPTION USING ERRCODE='OB007',MESSAGE='maintenance scope mismatch';
+ END IF;
+ IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 64 OR p_cutoff IS NULL OR p_cutoff NOT BETWEEN 0 AND floor(extract(epoch FROM clock_timestamp()))
+    OR p_through IS NULL OR p_through<0 OR p_after NOT BETWEEN 0 AND 18446744073709551615 OR p_after<>trunc(p_after) THEN
+  RAISE EXCEPTION USING ERRCODE='OB005',MESSAGE='invalid maintenance window';
+ END IF;
+ SELECT * INTO s FROM rss_observation.streams WHERE tenant_id=t AND scope=p_scope FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='OB006',MESSAGE='unknown stream'; END IF;
+ IF EXISTS (SELECT FROM rss_observation.objects WHERE tenant_id=t AND object_id=s.object_id AND registration_id=s.registration_id)
+    AND NOT EXISTS (SELECT FROM rss_observation.streams WHERE tenant_id=t AND object_id=s.object_id AND registration_id=s.registration_id
+     AND source_id=s.source_id AND dataset_id=s.dataset_id AND activation_revision>s.activation_revision) THEN
+  RAISE EXCEPTION USING ERRCODE='OB003',MESSAGE='stream is active';
+ END IF;
+ IF p_through>coalesce((SELECT last_position FROM rss_observation.journals WHERE tenant_id=t),0) THEN
+  RAISE EXCEPTION USING ERRCODE='OB005',MESSAGE='uncommitted release position';
+ END IF;
+ -- Lifecycle policy is immutable; commit_batch checks the captured batch policy against it.
+ minimum_age:=(s.policy::jsonb->>'retrySeconds')::numeric+(s.policy::jsonb->>'safetySeconds')::numeric;
+ IF minimum_age IS NULL OR minimum_age NOT BETWEEN 2 AND 9223372036854775807 THEN
+  RAISE EXCEPTION USING ERRCODE='OB004',MESSAGE='invalid retention policy';
+ END IF;
+ scanned:=0; reclaimed:=0; released_bytes:=0;
+ FOR candidate IN SELECT sequence,batch_id,received_at,log_position,octet_length(raw) AS bytes
+  FROM rss_observation.batches WHERE tenant_id=t AND scope=p_scope AND sequence>coalesce(p_after,-1)
+  ORDER BY sequence LIMIT p_limit
+ LOOP
+  scanned:=scanned+1; last_examined:=candidate.sequence;
+  IF candidate.bytes IS NOT NULL AND candidate.received_at+minimum_age<=p_cutoff
+     AND (candidate.log_position IS NULL OR candidate.log_position<=p_through) THEN
+   UPDATE rss_observation.batches SET raw=NULL,policy=NULL,decision=NULL
+    WHERE tenant_id=t AND scope=p_scope AND batch_id=candidate.batch_id;
+   reclaimed:=reclaimed+1; released_bytes:=released_bytes+candidate.bytes;
+   floor_position:=greatest(floor_position,candidate.log_position);
+  END IF;
+ END LOOP;
+ IF floor_position>0 THEN
+  UPDATE rss_observation.journals SET expired_through=greatest(expired_through,floor_position)
+   WHERE tenant_id=t AND expired_through<floor_position;
+ END IF;
+ RETURN NEXT;
 END $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_observation FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_observation FROM PUBLIC;
