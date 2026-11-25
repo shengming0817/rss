@@ -16,12 +16,12 @@ use std::{
 const GUARD: Duration = Duration::from_secs(10);
 use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
-struct ManualTimer(tokio::sync::watch::Sender<Duration>);
+pub(super) struct ManualTimer(tokio::sync::watch::Sender<Duration>);
 impl ManualTimer {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(tokio::sync::watch::channel(Duration::ZERO).0)
     }
-    fn advance(&self, seconds: u64) {
+    pub(super) fn advance(&self, seconds: u64) {
         self.0.send_replace(Duration::from_secs(seconds));
     }
 }

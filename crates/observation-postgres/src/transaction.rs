@@ -59,6 +59,14 @@ pub enum Fault {
     ClientDeadlineOnly = 10,
 }
 
+/// One transaction owns both the injected fault and its optional rollback notification.
+#[derive(Default)]
+pub(crate) struct TransactionFault {
+    pub code: u8,
+    #[cfg(feature = "integration")]
+    pub rollback_started: Option<futures::channel::oneshot::Sender<()>>,
+}
+
 use rss_observation::Clock;
 use rss_request_context::Deadline;
 use std::{

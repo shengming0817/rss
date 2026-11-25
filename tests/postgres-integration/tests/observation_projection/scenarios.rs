@@ -1,4 +1,5 @@
 use super::fixture::*;
+mod settlement;
 use rss_observation::{Body, Change, Id, ObservationStore, ReadGrant, ReceiveOutcome};
 use rss_projection::{
     BatchLimit, Control, Event, Execution, GenerationStart, Position, ProjectionScope, ReplayBound,
@@ -795,7 +796,7 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     assert_eq!(changed.rows_affected(), 1);
     assert_source_failures(f, &input, &execution, bad, &control).await?;
-    assert_restore_settlement(&input, &execution, bad).await
+    settlement::verify(f, &input, &execution, &projection, &events, &control).await
 }
 async fn assert_source_failures(
     f: &Fixture,
@@ -834,69 +835,6 @@ async fn assert_source_failures(
     assert_eq!(execution.checkpoint(control).await?.position, None);
     assert!(values(f, "bad-row", "inside").await?.is_empty());
 
-    Ok(())
-}
-async fn assert_restore_settlement(
-    input: &Inputs,
-    execution: &Session,
-    bad: &Event,
-) -> anyhow::Result<()> {
-    let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
-    let budget_cancel = tokio_util::sync::CancellationToken::new();
-    let control = rss_projection::Control::new(
-        &budget_clock,
-        std::time::Duration::from_secs(60),
-        &budget_cancel,
-    );
-    use rss_projection::{ErrorKind as Kind, Phase};
-    // Settlement uncertainty overrides the earlier restore failure; its coordinate is not evidence of rollback.
-    input
-        .store
-        .inject_next_fault(rss_observation_postgres::Fault::RollbackAckLost);
-    let error = input
-        .source
-        .read(input.source.scope(), None, BatchLimit::new(2)?, &control)
-        .await
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("rollback failure lost"))?;
-    assert_eq!(error.kind(), Kind::RollbackFailed);
-    assert_eq!(error.diagnostic().map(|d| d.phase()), Some(Phase::Rollback));
-    assert_eq!(error.diagnostic().and_then(|d| d.position()), None);
-    input
-        .store
-        .inject_next_fault(rss_observation_postgres::Fault::RollbackPending);
-    let short = Control::new(
-        &budget_clock,
-        rss_projection::Timer::now(&budget_clock) + Duration::from_millis(100),
-        &budget_cancel,
-    );
-    let error = input
-        .source
-        .resolve(bad, &short)
-        .await
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("pending rollback accepted"))?;
-    assert_eq!(error.kind(), Kind::RollbackFailed);
-    // The same pending rollback must survive the runner composition, not just a direct call.
-    input
-        .store
-        .inject_next_fault(rss_observation_postgres::Fault::RollbackPending);
-    let run_budget = Control::new(
-        &budget_clock,
-        rss_projection::Timer::now(&budget_clock) + Duration::from_millis(100),
-        &budget_cancel,
-    );
-    let report = rss_projection::run(
-        input.source.as_ref(),
-        execution,
-        &run_budget,
-        RunLimit::new(BatchLimit::new(2)?, 2)?,
-    )
-    .await;
-    assert!(
-        matches!(report.stop, rss_projection::Stop::Failed(error) if error.kind() == Kind::RollbackFailed)
-    );
-    assert_eq!(execution.checkpoint(&control).await?.position, None);
     Ok(())
 }
 fn assert_restore_error(

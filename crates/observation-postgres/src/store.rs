@@ -1,6 +1,8 @@
 use crate::{
     probe,
-    transaction::{Lease, Progress, Stage, runtime_budget, sql_error, watchdog, within},
+    transaction::{
+        Lease, Progress, Stage, TransactionFault, runtime_budget, sql_error, watchdog, within,
+    },
 };
 use rss_observation::{
     Batch, Clock, Decision, Error, ErrorKind, Id, LifecycleGrant, ObservationStore, Policy,
@@ -9,14 +11,14 @@ use rss_observation::{
 use rss_request_context::{Deadline, TenantId};
 use sqlx::{Connection, PgConnection, PgPool, Row, postgres::PgRow};
 #[cfg(feature = "integration")]
-use std::sync::Arc;
+use std::sync::Mutex;
 /// Adopted, dedicated pool. The host configures TLS/authentication before construction.
 /// Dropping an operation quarantines its unconfirmed transaction. Close stops pool admission.
 pub struct PgStore<C> {
     pool: PgPool,
     pub(crate) clock: C,
     #[cfg(feature = "integration")]
-    fault: Arc<std::sync::atomic::AtomicU8>,
+    fault: Mutex<TransactionFault>,
 }
 impl<C: Clock> PgStore<C> {
     /// Adopt a dedicated pool after validating the PostgreSQL storage and effective-permission contract.
@@ -76,7 +78,7 @@ impl<C: Clock> PgStore<C> {
             pool,
             clock,
             #[cfg(feature = "integration")]
-            fault: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            fault: Mutex::default(),
         })
     }
     /// Close pool admission immediately and await borrowers within the original deadline.
@@ -94,17 +96,41 @@ impl<C: Clock> PgStore<C> {
     /// Inject one fault into the next eligible fixture operation on this handle.
     /// Readback deliberately uses a clean transaction. Admission faults use new_with_fault instead.
     pub fn inject_next_fault(&self, fault: crate::Fault) {
-        self.fault
-            .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
+        self.set_fault(TransactionFault {
+            code: fault as u8,
+            rollback_started: None,
+        });
     }
-    pub(crate) fn take_fault(&self) -> u8 {
+    /// Arm a pending rollback and observe when that transaction has actually entered rollback.
+    #[cfg(feature = "integration")]
+    pub fn inject_pending_rollback(&self) -> futures::channel::oneshot::Receiver<()> {
+        let (entered, waiting) = futures::channel::oneshot::channel();
+        self.set_fault(TransactionFault {
+            code: crate::Fault::RollbackPending as u8,
+            rollback_started: Some(entered),
+        });
+        waiting
+    }
+    #[cfg(feature = "integration")]
+    fn set_fault(&self, fault: TransactionFault) {
+        *self
+            .fault
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fault;
+    }
+    pub(crate) fn take_fault(&self) -> TransactionFault {
         #[cfg(feature = "integration")]
         {
-            self.fault.swap(0, std::sync::atomic::Ordering::SeqCst)
+            std::mem::take(
+                &mut *self
+                    .fault
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
         }
         #[cfg(not(feature = "integration"))]
         {
-            0
+            TransactionFault::default()
         } // reason: faults do not exist in production builds.
     }
     async fn setup(
@@ -122,7 +148,7 @@ impl<C: Clock> PgStore<C> {
         &self,
         tenant: TenantId,
         deadline: Deadline,
-        fault: u8,
+        fault: TransactionFault,
         operation: F,
     ) -> Result<T, E>
     where
@@ -161,7 +187,7 @@ impl<C: Clock> PgStore<C> {
     pub(crate) async fn transact_inner<T, E, F, B>(
         &self,
         tenant: TenantId,
-        fault: u8,
+        fault: TransactionFault,
         progress: &Progress,
         budget: &B,
         operation: F,
@@ -187,16 +213,16 @@ impl<C: Clock> PgStore<C> {
         let result = async {
             self.setup(&mut tx, tenant, budget()?).await?;
             #[cfg(feature = "integration")]
-            crate::transaction::watchdog_fault(&mut tx, fault).await?;
+            crate::transaction::watchdog_fault(&mut tx, fault.code).await?;
             budget()?;
             let result = operation(&mut tx, progress, budget).await;
             budget()?;
             #[cfg(feature = "integration")]
-            let result = crate::transaction::after_write_fault(&mut tx, fault, result).await;
+            let result = crate::transaction::after_write_fault(&mut tx, fault.code, result).await;
             result
         }
         .await;
-        let result = if fault == 1 || fault == 5 || fault == 6 {
+        let result = if fault.code == 1 || fault.code == 5 || fault.code == 6 {
             Err(Error::new(ErrorKind::Storage).into())
         } else {
             result
@@ -204,13 +230,13 @@ impl<C: Clock> PgStore<C> {
         match result {
             Ok(value) => {
                 progress.set(Stage::Effects);
-                if fault == 4 {
+                if fault.code == 4 {
                     std::future::pending::<()>().await;
                 }
                 tx.commit()
                     .await
                     .map_err(|e| Error::provider(ErrorKind::CommitUnknown, e))?;
-                if fault == 2 || fault == 3 {
+                if fault.code == 2 || fault.code == 3 {
                     return Err(Error::new(ErrorKind::CommitUnknown).into());
                 }
                 lease.settled = true;
@@ -218,13 +244,17 @@ impl<C: Clock> PgStore<C> {
             }
             Err(error) => {
                 progress.set(Stage::Rollback);
-                if fault == 6 {
+                if fault.code == 6 {
+                    #[cfg(feature = "integration")]
+                    if let Some(entered) = fault.rollback_started {
+                        let _ = entered.send(());
+                    }
                     std::future::pending::<()>().await;
                 }
                 tx.rollback()
                     .await
                     .map_err(|e| Error::provider(ErrorKind::RollbackFailed, e))?;
-                if fault == 5 {
+                if fault.code == 5 {
                     return Err(Error::new(ErrorKind::RollbackFailed).into());
                 }
                 lease.settled = true;
@@ -238,7 +268,7 @@ impl<C: Clock> PgStore<C> {
         &self,
         input: &VerifiedBatch,
         deadline: Deadline,
-        fault: u8,
+        fault: TransactionFault,
     ) -> Result<ReceiveOutcome, Error> {
         let input_scope = input.scope().clone();
         let batch = input.batch().clone();
@@ -273,6 +303,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
         let policy = policy.encode()?;
         let initial = State::initial().encode()?;
         let fault = self.take_fault();
+        let readback_lost = fault.code == 3;
         let encoded_scope = scope.clone();
         let encoded_policy = policy.clone();
         let result: Result<u64, Error> = self
@@ -299,8 +330,8 @@ impl<C: Clock> ObservationStore for PgStore<C> {
             )
             .await;
         match result {
-            Err(error) if error.kind() == ErrorKind::CommitUnknown && fault != 3 => {
-                let found=self.transact(grant.scope().tenant(),deadline,0,move |connection,_|Box::pin(async move {
+            Err(error) if error.kind() == ErrorKind::CommitUnknown && !readback_lost => {
+                let found=self.transact(grant.scope().tenant(),deadline,TransactionFault::default(),move |connection,_|Box::pin(async move {
                     let revision:Option<String>=sqlx::query_scalar("SELECT activation_revision::text FROM rss_observation.streams WHERE tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid AND scope=$1 AND activation_previous IS NOT DISTINCT FROM $2::numeric AND policy::jsonb=$3::jsonb")
                         .bind(scope).bind(expected.map(|n|n.to_string())).bind(policy).fetch_optional(connection).await.map_err(sql_error)?;
                     revision.map(|r|r.parse::<u64>().map_err(|_|Error::new(ErrorKind::Invariant))).transpose()
@@ -320,17 +351,23 @@ impl<C: Clock> ObservationStore for PgStore<C> {
         deadline: Deadline,
     ) -> Result<ReceiveOutcome, Error> {
         let fault = self.take_fault();
+        let readback_lost = fault.code == 3;
         match self.receive_once(input, deadline, fault).await {
             Err(error) if error.kind() == ErrorKind::CommitUnknown => {
-                if fault == 3 {
+                if readback_lost {
                     return Err(error);
                 }
                 let scope = input.scope().clone();
                 let id = input.batch().id().clone();
                 let found = self
-                    .transact(input.scope().tenant(), deadline, 0, move |connection, _| {
-                        Box::pin(async move { read(connection, &scope, &id).await })
-                    })
+                    .transact(
+                        input.scope().tenant(),
+                        deadline,
+                        TransactionFault::default(),
+                        move |connection, _| {
+                            Box::pin(async move { read(connection, &scope, &id).await })
+                        },
+                    )
                     .await;
                 match found {
                     Ok(Some(record)) => replay(record, input.batch()),
@@ -361,7 +398,7 @@ impl<C: Clock> ObservationStore for PgStore<C> {
     }
     async fn state(&self, grant: &ReadGrant, deadline: Deadline) -> Result<State, Error> {
         let scope = grant.scope().encode()?;
-        self.transact(grant.scope().tenant(),deadline,0,move |connection,_|Box::pin(async move{
+        self.transact(grant.scope().tenant(),deadline,TransactionFault::default(),move |connection,_|Box::pin(async move{
             let raw:Option<String>=sqlx::query_scalar("SELECT state FROM rss_observation.streams WHERE scope=$1 AND tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid").bind(scope).fetch_optional(connection).await.map_err(sql_error)?;
             durable(State::decode(&raw.ok_or(ErrorKind::UnknownStream)?))
         })).await
