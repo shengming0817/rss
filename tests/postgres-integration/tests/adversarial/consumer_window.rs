@@ -1,6 +1,7 @@
 mod claim_wait;
 use super::*;
 use crate::Validator;
+use rss_request_context::{Clock, ExecutionTimer};
 use rss_transactional_messaging::{
     error::MessagingError,
     message::SubscriptionIdentity,
@@ -11,6 +12,28 @@ use rss_transactional_messaging_runtime::consumer::{ConsumerWorker, Subscription
 use rss_transactional_messaging_testkit::memory::RecordingSettlement;
 use std::{num::NonZeroU16, sync::Mutex};
 use tokio_util::sync::CancellationToken;
+
+// Let the owner renew in database time while a frozen waiter can only wake by permit transfer.
+enum WorkerClock {
+    Owner(Timer),
+    Waiter(FakeClock),
+}
+impl Clock for WorkerClock {
+    fn now(&self) -> std::time::Instant {
+        match self {
+            Self::Owner(clock) => clock.now(),
+            Self::Waiter(clock) => clock.now(),
+        }
+    }
+}
+impl ExecutionTimer for WorkerClock {
+    async fn sleep_until(&self, deadline: Deadline) {
+        match self {
+            Self::Owner(clock) => clock.sleep_until(deadline).await,
+            Self::Waiter(clock) => clock.sleep_until(deadline).await,
+        }
+    }
+}
 
 struct One(Mutex<Option<Delivery<Vec<u8>, RecordingSettlement>>>);
 impl DeliverySource<Vec<u8>> for One {
@@ -125,7 +148,11 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
             ConsumerGroup::parse("window")?,
             Arc::new(Validator),
             sub,
-            Arc::new(Timer::new()),
+            Arc::new(if id == "window-held" {
+                WorkerClock::Owner(Timer::new())
+            } else {
+                WorkerClock::Waiter(FakeClock::new())
+            }),
             ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
             Arc::new(Sink(busy.clone())),
             SubscriptionBackoffPolicy::STANDARD,

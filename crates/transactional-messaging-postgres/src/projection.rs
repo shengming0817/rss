@@ -331,7 +331,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             .inbox
             .claim_with_access(
                 binding.execution(),
-                binding.identity(),
+                binding.identity().clone(),
                 cutoff,
                 crate::transaction::PoolAccess::Ordinary,
             )

@@ -140,14 +140,13 @@ impl PgInboxStore {
     pub(crate) async fn claim_with_access(
         &self,
         binding: rss_transactional_messaging::fence::ExecutionBinding,
-        identity: &ConsumerIdentity,
+        identity: ConsumerIdentity,
         cutoff: Deadline,
         access: PoolAccess<'_>,
     ) -> Result<IdempotencyDisposition<PgInboxClaim>, MessagingError> {
         if binding.tenant() != identity.tenant_id() {
             return Err(PgError::lost().port());
         }
-        let identity = identity.clone();
         let lease_ms = self.lease_ms;
         let (mut outcome, observed) = settled(
             self.runtime
@@ -304,7 +303,7 @@ impl InboxStore for PgInboxStore {
         let outcome = self
             .claim_with_access(
                 permit.binding,
-                &permit.identity,
+                permit.identity,
                 permit.cutoff,
                 PoolAccess::Reserved(&permit.slot),
             )

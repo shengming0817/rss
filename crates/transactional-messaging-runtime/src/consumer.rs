@@ -371,14 +371,14 @@ where
 {
     let timer = execution.timer;
     let mut waiting_since = None;
-    let permit = within(timer, cutoff, |deadline| async {
+    let started = &mut waiting_since;
+    let emitter = execution.emitter;
+    let permit = within(timer, cutoff, |deadline| async move {
         match inbox.reserve_claim(binding.execution(), binding.identity(), deadline)? {
             ClaimAdmission::Ready(permit) => Ok(permit),
             ClaimAdmission::Waiting(wait) => {
-                waiting_since = Some(timer.now());
-                execution
-                    .emitter
-                    .emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
+                *started = Some(timer.now());
+                emitter.emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
                 wait.await
             }
         }
