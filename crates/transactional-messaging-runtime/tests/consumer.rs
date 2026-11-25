@@ -4086,3 +4086,63 @@ async fn simultaneous_deliveries_spread_their_final_remote_claims() {
     assert!(times.windows(2).any(|pair| pair[0] != pair[1]));
     assert_eq!(tx.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn reachable_lease_expiry_allows_the_original_delivery_to_finish() {
+    let timer = ManualTimer::new();
+    let msg = envelope(|_| {});
+    let sub = subscription(&msg);
+    let execution = ConsumerExecution::new(
+        ConsumerGroup::parse("lease-expiry").expect("group"),
+        &TrustedIngress,
+        &sub,
+        &timer,
+        consumer_policy(),
+        &NoopEmitter,
+    );
+    let inbox = FakeInbox {
+        capacity: None,
+        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+            retry_after: None,
+        })),
+        lease: LeaseStatus::Held {
+            remaining: Duration::from_secs(30),
+        },
+    };
+    let tx = FakeTx {
+        calls: Arc::new(AtomicUsize::new(0)),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let recorder = RecordingSettlement::new();
+    let attempt = consume_once(
+        &inbox,
+        &tx,
+        &execution,
+        Delivery::new(msg, recorder.clone()),
+    );
+    tokio::pin!(attempt);
+    // Advance through the normal bands, then present a lease expiring at 7.700 s.
+    for millis in [5, 10, 20, 40, 80, 160, 320, 640, 1280, 2000, 2345] {
+        assert!(futures::poll!(&mut attempt).is_pending());
+        timer.advance(Duration::from_millis(millis));
+    }
+    *inbox.disposition.lock().expect("state") = Some(IdempotencyDisposition::InProgress {
+        retry_after: Some(Duration::from_millis(800)),
+    });
+    assert!(futures::poll!(&mut attempt).is_pending());
+    timer.advance(Duration::from_micros(799_999));
+    assert!(futures::poll!(&mut attempt).is_pending());
+    assert!(recorder.settlements().is_empty());
+    timer.advance(Duration::from_micros(1));
+    *inbox.disposition.lock().expect("lease expired") =
+        Some(IdempotencyDisposition::Acquired(Claim));
+    timer.advance(Duration::from_millis(50));
+    assert!(matches!(
+        futures::poll!(&mut attempt),
+        std::task::Poll::Ready(Ok(ProcessingDisposition::Committed(
+            TerminalDisposition::Succeeded
+        )))
+    ));
+    assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
+    assert_eq!(tx.calls.load(Ordering::SeqCst), 1);
+}

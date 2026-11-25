@@ -463,12 +463,19 @@ impl ClaimBackoff {
         if until_final <= lower * 2 {
             // Spend the final probe once and spread its wake before the reserved I/O window.
             self.final_scheduled = true;
-            let spread = (until_final / 4).min(Duration::from_millis(250));
-            return Some(
-                until_final - Duration::from_nanos(sample % (spread.as_nanos() as u64 + 1)),
-            );
+            return Some(Self::final_delay(hint, until_final, sample));
         }
         Some(lower + Duration::from_nanos(sample % (lower.as_nanos() as u64)))
+    }
+
+    fn final_delay(hint: Option<Duration>, latest: Duration, sample: u64) -> Duration {
+        let fallback = (latest / 4).min(Duration::from_millis(250));
+        // If eligibility fits, spend the last probe at or after it. An owner can still
+        // release early, so keep a bounded fallback when eligibility is beyond our cutoff.
+        let width = hint
+            .and_then(|lease| latest.checked_sub(lease))
+            .map_or(fallback, |after_expiry| fallback.min(after_expiry));
+        latest - Duration::from_nanos(sample % (width.as_nanos() as u64 + 1))
     }
 }
 
@@ -486,6 +493,25 @@ mod claim_backoff_tests {
             matches!(final_delay, Some(delay) if (Duration::from_secs(1)..=latest).contains(&delay))
         );
         assert_eq!(backoff.next(None, latest), None);
+    }
+
+    #[test]
+    fn final_jitter_respects_reachable_expiry_at_both_edges() {
+        let latest = Duration::from_millis(850);
+        let hint = Duration::from_millis(800);
+        assert_eq!(
+            ClaimBackoff::final_delay(Some(hint), latest, 50_000_000),
+            hint
+        );
+        assert_eq!(ClaimBackoff::final_delay(Some(hint), latest, 0), latest);
+        assert_eq!(
+            ClaimBackoff::final_delay(Some(latest), latest, u64::MAX),
+            latest
+        );
+        assert_eq!(
+            ClaimBackoff::final_delay(Some(Duration::MAX), latest, 100_000_000),
+            Duration::from_millis(750)
+        );
     }
 
     #[test]

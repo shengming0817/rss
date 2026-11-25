@@ -64,7 +64,8 @@ A delivery waiting for ordinary capacity holds its unsettled handle and wakes wh
 For a live remote claim, the first probe waits 2.5–5 ms. Subsequent randomized intervals double up
 to 1–2 s. A short provider lease estimate can advance the probe by one tier. Each wait ends at the
 original operation cutoff. The final probe also uses per-delivery jitter. It runs at most once, leaving at least
-one quarter of the original operation budget (capped at 250 ms) scheduled for I/O. A known busy timeout requeues once. A durable claim error abandons the delivery.
+one quarter of the original operation budget (capped at 250 ms) scheduled for I/O. A lease estimate
+inside the remaining probe window sets its earliest eligible wake. A known busy timeout requeues once. A durable claim error abandons the delivery.
 The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.
 The same loop
 runs on an application's Tokio host or through the optional RSS lifecycle bridge.
