@@ -772,11 +772,11 @@ async fn rebuilt_checkpoint(
 }
 
 pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
+    let input = seed(f).await?;
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
 
-    let input = seed(f).await?;
     let events = input
         .source
         .read(input.source.scope(), None, BatchLimit::new(2)?, &control)
@@ -796,7 +796,7 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     assert_eq!(changed.rows_affected(), 1);
     assert_source_failures(f, &input, &execution, bad, &control).await?;
-    settlement::verify(f, &input, &execution, &projection, &events, &control).await
+    settlement::verify(f, &input, &execution, &projection, &events).await
 }
 async fn assert_source_failures(
     f: &Fixture,

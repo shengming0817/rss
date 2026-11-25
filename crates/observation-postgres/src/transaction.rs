@@ -34,37 +34,53 @@ pub(crate) fn sql_error(error: sqlx::Error) -> Error {
 }
 /// One-shot integration transport/transaction faults; defaults expose no injection API.
 #[cfg(feature = "integration")]
-#[derive(Clone, Copy, Debug)]
-#[repr(u8)]
+#[derive(Debug)]
 pub enum Fault {
     /// Roll back after the operation staged its work but before issuing COMMIT.
-    BeforeCommit = 1,
+    BeforeCommit,
     /// Commit on the real backend, then hide its acknowledgment to exercise exact readback.
-    CommitAckLost = 2,
+    CommitAckLost,
     /// Commit but suppress both acknowledgment and the following recovery read.
-    CommitAckAndReadLost = 3,
+    CommitAckAndReadLost,
     /// Hold COMMIT unresolved until the caller deadline cancels the transaction.
-    CommitPending = 4,
+    CommitPending,
     /// Perform rollback on the backend but hide acknowledgment; report RollbackFailed.
-    RollbackAckLost = 5,
-    /// Hold rollback unresolved until the caller deadline cancels it.
-    RollbackPending = 6,
+    RollbackAckLost,
+    /// Hold rollback unresolved until the deadline, optionally signaling entry into rollback.
+    RollbackPending(Option<futures::channel::oneshot::Sender<()>>),
     /// Set a short server statement watchdog before the operation (real SQLSTATE 57014).
-    ShortStatementWatchdog = 7,
+    ShortStatementWatchdog,
     /// Set a short server lock watchdog before the operation (real SQLSTATE 55P03).
-    ShortLockWatchdog = 8,
+    ShortLockWatchdog,
     /// Trigger a real statement timeout after staging all writes, before commit.
-    StatementTimeoutAfterWrite = 9,
+    StatementTimeoutAfterWrite,
     /// Disable server watchdogs only to isolate client-deadline cancellation in a test.
-    ClientDeadlineOnly = 10,
+    ClientDeadlineOnly,
 }
 
-/// One transaction owns both the injected fault and its optional rollback notification.
-#[derive(Default)]
-pub(crate) struct TransactionFault {
-    pub code: u8,
+// The default build cannot construct an injected fault.
+#[cfg(not(feature = "integration"))]
+pub(crate) enum Fault {}
+
+impl Fault {
+    pub(crate) fn hides_readback(&self) -> bool {
+        #[cfg(feature = "integration")]
+        {
+            matches!(self, Self::CommitAckAndReadLost)
+        }
+        #[cfg(not(feature = "integration"))]
+        {
+            match *self {}
+        }
+    }
+
     #[cfg(feature = "integration")]
-    pub rollback_started: Option<futures::channel::oneshot::Sender<()>>,
+    pub(crate) async fn hold_rollback(entered: Option<futures::channel::oneshot::Sender<()>>) -> ! {
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        std::future::pending().await
+    }
 }
 
 use rss_observation::Clock;
@@ -126,12 +142,12 @@ pub(crate) fn watchdog(remaining: Duration) -> String {
 #[cfg(feature = "integration")]
 pub(crate) async fn watchdog_fault(
     connection: &mut sqlx::PgConnection,
-    fault: u8,
+    fault: Option<&Fault>,
 ) -> Result<(), Error> {
     let values = match fault {
-        7 => Some(("10ms", "0")),
-        8 => Some(("0", "10ms")),
-        10 => Some(("0", "0")),
+        Some(Fault::ShortStatementWatchdog) => Some(("10ms", "0")),
+        Some(Fault::ShortLockWatchdog) => Some(("0", "10ms")),
+        Some(Fault::ClientDeadlineOnly) => Some(("0", "0")),
         _ => None,
     };
     if let Some((statement, lock)) = values {
@@ -149,10 +165,10 @@ pub(crate) async fn watchdog_fault(
 #[cfg(feature = "integration")]
 pub(crate) async fn after_write_fault<T, E: From<Error>>(
     connection: &mut sqlx::PgConnection,
-    fault: u8,
+    fault: Option<&Fault>,
     result: Result<T, E>,
 ) -> Result<T, E> {
-    if fault == 9 && result.is_ok() {
+    if matches!(fault, Some(Fault::StatementTimeoutAfterWrite)) && result.is_ok() {
         sqlx::query("SELECT set_config('statement_timeout','10ms',true)")
             .execute(&mut *connection)
             .await

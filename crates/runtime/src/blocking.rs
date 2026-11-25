@@ -591,25 +591,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)] // reason: hold a real live native handle past the first poll.
+    async fn eligible_join_does_not_self_wake_while_the_worker_is_live() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let worker = owner_for_join_test(std::thread::spawn(move || {
+            gate.recv_timeout(Duration::from_secs(5))
+                .expect("release live thread");
+            Ok(())
+        }));
+        let wakes = Arc::new(WakeCount::default());
+        let waker = std::task::Waker::from(wakes.clone());
+        let mut wait = Box::pin(worker.shutdown());
+        assert!(
+            wait.as_mut()
+                .poll(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+        // A Tokio yield defers a wake until the scheduler gets control.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            wakes.0.load(Ordering::Relaxed),
+            0,
+            "live worker join self-woke"
+        );
+        release.send(()).expect("release native handle");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), wait)
+                .await
+                .expect("native join completes")
+                .is_ok()
+        );
+    }
+
     #[test]
     #[allow(clippy::expect_used)] // reason: thread, runtime and bounded gate failures are test assertions.
     fn delayed_tls_allows_waiter_timeout_runtime_drop_and_rejoin() {
-        let (finish_body, body_gate) = std::sync::mpsc::channel();
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        let worker = owner_for_join_test(std::thread::spawn(move || {
-            THREAD_EXIT_GUARD.with(|guard| {
-                *guard.borrow_mut() = Some(ThreadExitGuard {
-                    entered: entered_sender,
-                    release: release_receiver,
+        let worker = ManagedBlockingWorker::try_spawn(
+            "thread-local-join",
+            CancellationToken::new(),
+            Duration::from_secs(1),
+            move |_| {
+                THREAD_EXIT_GUARD.with(|guard| {
+                    *guard.borrow_mut() = Some(ThreadExitGuard {
+                        entered: entered_sender,
+                        release: release_receiver,
+                    });
                 });
-            });
-            body_gate
-                .recv_timeout(Duration::from_secs(5))
-                .expect("finish worker body");
-            Ok(())
-        }));
-
+                Ok(())
+            },
+        )
+        .expect("worker starts");
+        entered_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("TLS destructor is parked");
         let runtime = || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_time()
@@ -617,25 +654,6 @@ mod tests {
                 .expect("timer runtime")
         };
         let first_runtime = runtime();
-        let wakes = Arc::new(WakeCount::default());
-        let waker = std::task::Waker::from(wakes.clone());
-        {
-            let _entered = first_runtime.enter();
-            let mut first = Box::pin(worker.shutdown());
-            let mut cx = std::task::Context::from_waker(&waker);
-            assert!(first.as_mut().poll(&mut cx).is_pending());
-            assert_eq!(
-                wakes.0.load(Ordering::Relaxed),
-                0,
-                "live worker join self-woke"
-            );
-            finish_body.send(()).expect("release worker body");
-            entered_receiver
-                .recv_timeout(Duration::from_secs(2))
-                .expect("TLS destructor is parked");
-            assert!(first.as_mut().poll(&mut cx).is_pending());
-            assert_eq!(wakes.0.load(Ordering::Relaxed), 0, "TLS join self-woke");
-        }
         first_runtime.block_on(async {
             assert!(
                 tokio::time::timeout(Duration::from_millis(10), worker.shutdown())

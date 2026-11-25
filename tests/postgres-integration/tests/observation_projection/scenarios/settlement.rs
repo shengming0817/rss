@@ -16,14 +16,16 @@ pub(super) async fn verify(
     execution: &Session,
     projection: &rss_projection_postgres::PgStore,
     events: &[Event],
-    inspect: &Control<'_, ProjectionClock>,
 ) -> anyhow::Result<()> {
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let cancel = CancellationToken::new();
+    let inspect = Control::new(&clock, GUARD, &cancel);
     input
         .store
         .inject_next_fault(rss_observation_postgres::Fault::RollbackAckLost);
     let read = input
         .source
-        .read(input.source.scope(), None, BatchLimit::new(2)?, inspect)
+        .read(input.source.scope(), None, BatchLimit::new(2)?, &inspect)
         .await;
     assert_rollback(
         read.err()
@@ -31,7 +33,6 @@ pub(super) async fn verify(
     );
 
     let timer = ManualTimer::new();
-    let cancel = CancellationToken::new();
     let control = Control::new(&timer, Duration::from_secs(END), &cancel);
     let entered = input.store.inject_pending_rollback();
     let direct = input
@@ -46,7 +47,7 @@ pub(super) async fn verify(
     )
     .await?;
     assert_rollback(result.err().context("resolve accepted pending rollback")?);
-    assert_durable(f, execution, projection, events, inspect).await?;
+    assert_durable(f, execution, projection, events).await?;
 
     let mut blocker = f.admin.begin().await?;
     let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -75,7 +76,7 @@ pub(super) async fn verify(
         "checkpoint lock reached: {error:?}"
     );
     blocker.rollback().await?;
-    assert_durable(f, execution, projection, events, inspect).await?;
+    assert_durable(f, execution, projection, events).await?;
 
     let timer = ManualTimer::new();
     let control = Control::new(&timer, Duration::from_secs(END), &cancel);
@@ -88,7 +89,7 @@ pub(super) async fn verify(
     )
     .await?;
     assert_rollback(failed_without_progress(report)?);
-    assert_durable(f, execution, projection, events, inspect).await
+    assert_durable(f, execution, projection, events).await
 }
 
 // Wall time only bounds a broken fixture. The operation's deadline advances at the handshake.
@@ -144,9 +145,12 @@ async fn assert_durable(
     execution: &Session,
     projection: &rss_projection_postgres::PgStore,
     events: &[Event],
-    control: &Control<'_, ProjectionClock>,
 ) -> anyhow::Result<()> {
-    let checkpoint = execution.checkpoint(control).await?;
+    // Inspect settled state on a fresh budget after each independently controlled interruption.
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, GUARD, &cancel);
+    let checkpoint = execution.checkpoint(&control).await?;
     assert_eq!(checkpoint.position, None);
     for event in events {
         let query = ReceiptQuery::new(
@@ -155,13 +159,14 @@ async fn assert_durable(
             event.id(),
         )?;
         assert_eq!(
-            projection.receipt_status(&query, control).await?,
+            projection.receipt_status(&query, &control).await?,
             ReceiptStatus::Pending(checkpoint)
         );
     }
     assert!(
-        values(f, execution.scope().generation(), "inside")
-            .await?
+        tokio::time::timeout(GUARD, values(f, execution.scope().generation(), "inside"))
+            .await
+            .context("timed out inspecting the read model")??
             .is_empty()
     );
     Ok(())
