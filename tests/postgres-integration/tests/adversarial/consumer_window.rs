@@ -1,3 +1,4 @@
+mod claim_wait;
 use super::*;
 use crate::Validator;
 use rss_transactional_messaging::{
@@ -69,9 +70,10 @@ impl ConsumerTx<Vec<u8>> for BeforeEffect {
 }
 
 pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
+    claim_wait::install_counter(owner).await?;
     let runtime = Arc::new(
         PgRuntime::connect(
-            config.with_pool_limits(0, 2),
+            config.clone().with_pool_limits(0, 2),
             Timer::new(),
             fence_fixture::storage(),
         )
@@ -135,9 +137,15 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     }
     // The first Worker has a durable claim but has not requested its effect connection.
     tokio::time::timeout(Duration::from_secs(2), busy.notified()).await?;
+    claim_wait::cancel_waiter(&inbox, &runtime).await?;
     start.notify_one();
     entered.notified().await;
-    verify_renewal_under_saturation(owner, &busy).await?;
+    verify_renewal_under_saturation(owner).await?;
+    assert_eq!(
+        claim_wait::claim_count(owner).await?,
+        1,
+        "only the holder reached claim SQL"
+    );
     release.notify_one();
     testkit::await_try(Duration::from_secs(4), async || {
         Ok::<_, anyhow::Error>(
@@ -153,18 +161,20 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         task.await??;
     }
     verify_settled(owner, &recorders).await?;
+    assert_eq!(
+        claim_wait::claim_count(owner).await?,
+        2,
+        "the local waiter claimed exactly once"
+    );
+    claim_wait::remote_cases(config, runtime.clone(), owner).await?;
     runtime.close().await;
     Ok(())
 }
 
-async fn verify_renewal_under_saturation(
-    owner: &sqlx::PgPool,
-    busy: &Notify,
-) -> anyhow::Result<()> {
+async fn verify_renewal_under_saturation(owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let remaining = || {
         sqlx::query_scalar::<_,i64>("SELECT (extract(epoch FROM lease_until)*1000)::bigint FROM rss_transactional_messaging.inbox WHERE message_id='window-held'").fetch_one(owner)
     };
-    tokio::time::timeout(Duration::from_secs(3), busy.notified()).await?;
     let initial = remaining().await?;
     testkit::await_try(Duration::from_secs(5), async || {
         Ok::<_, anyhow::Error>((remaining().await? > initial + 900).then_some(()))

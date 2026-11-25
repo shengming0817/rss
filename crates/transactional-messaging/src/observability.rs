@@ -240,7 +240,7 @@ pub enum TransactionalMessagingObservation {
     ConsumerClaimInProgress,
     /// Ordinary execution capacity was occupied before a durable claim started.
     ConsumerClaimCapacityBusy,
-    /// Elapsed time from the first capacity refusal to the final claim result or cutoff.
+    /// Cumulative time spent awaiting local claim capacity for one delivery.
     ConsumerCapacityWait {
         /// Cumulative wait for this delivery.
         duration: Duration,
