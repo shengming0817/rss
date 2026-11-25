@@ -775,7 +775,7 @@ async fn rollback_pending(
     scope: &Scope,
 ) -> anyhow::Result<()> {
     let short = || Deadline::at(Timer.now() + Duration::from_millis(100));
-    store.inject_next_fault(Fault::RollbackPending);
+    store.inject_next_fault(Fault::RollbackPending(None));
     assert_eq!(
         store
             .lookup(&read_grant(scope)?, &Id::new("s1")?, short())
@@ -784,7 +784,7 @@ async fn rollback_pending(
             .map(|e| e.kind()),
         Some(ErrorKind::RollbackFailed)
     );
-    store.inject_next_fault(Fault::RollbackPending);
+    store.inject_next_fault(Fault::RollbackPending(None));
     assert_eq!(
         store
             .receive(&snapshot(scope, "rollback-wait", 100)?, short())
@@ -794,7 +794,7 @@ async fn rollback_pending(
         Some(ErrorKind::RollbackFailed)
     );
     assert_eq!(
-        PgStore::new_with_fault(pool.clone(), Timer, short(), Fault::RollbackPending)
+        PgStore::new_with_fault(pool.clone(), Timer, short(), Fault::RollbackPending(None))
             .await
             .err()
             .map(|e| e.kind()),

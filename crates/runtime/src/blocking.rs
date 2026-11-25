@@ -7,7 +7,7 @@
 //! ref: tokio-rs/tokio d8756916 tokio/src/task/blocking.rs
 
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot, watch};
 
 use tokio_util::sync::CancellationToken;
 
@@ -17,24 +17,6 @@ use crate::{
     TaskStatus,
 };
 
-struct ThreadCompletion(Option<tokio::sync::oneshot::Sender<()>>);
-
-impl Drop for ThreadCompletion {
-    fn drop(&mut self) {
-        if let Some(sender) = self.0.take() {
-            let _ = sender.send(());
-        }
-    }
-}
-
-std::thread_local! {
-    // Initialized before the runner body, so user thread-locals initialized by that body are
-    // destroyed first. Shutdown still checks `JoinHandle::is_finished` before the final join.
-    static THREAD_COMPLETION: std::cell::RefCell<Option<ThreadCompletion>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
 /// Supervised dedicated-thread worker.
 #[must_use = "dropping the worker cancels its managed runner"]
 pub struct ManagedBlockingWorker {
@@ -42,13 +24,53 @@ pub struct ManagedBlockingWorker {
     token: CancellationToken,
     shutdown_timeout: Duration,
     join: Mutex<JoinState<ThreadJoin>>,
-    status_sender: tokio::sync::watch::Sender<TaskState>,
     status: TaskStatus,
 }
 
+type WorkerResult = Result<(), ShutdownError>;
+type WorkerThread = std::thread::JoinHandle<WorkerResult>;
+type JoinRequest = oneshot::Sender<WorkerThread>;
+type JoinReceipt = oneshot::Receiver<WorkerResult>;
+
 struct ThreadJoin {
-    thread: Option<std::thread::JoinHandle<Result<(), ShutdownError>>>,
-    completion: Option<tokio::sync::oneshot::Receiver<()>>,
+    handoff: Option<(JoinRequest, WorkerThread)>,
+    result: JoinReceipt,
+}
+
+// Reserve the blocking join before starting user code. A dropped request releases the helper
+// immediately, including when worker startup fails. No host executor participates in the join.
+// ref: rust-lang/rust library/std/src/thread/join_handle.rs@1.96.0
+fn prepare_join(status: watch::Sender<TaskState>) -> std::io::Result<(JoinRequest, JoinReceipt)> {
+    let (submit, request) = oneshot::channel::<WorkerThread>();
+    let (publish, result) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("rss-worker-join".into())
+        .spawn(move || {
+            let Ok(worker) = request.blocking_recv() else {
+                return;
+            };
+            match worker.join() {
+                Ok(outcome) => {
+                    let _ = publish.send(outcome);
+                }
+                Err(payload) => {
+                    status.send_replace(TaskState::Stopped(TaskExit::Failed(
+                        ShutdownErrorKind::TaskPanicked,
+                    )));
+                    let _ = publish.send(Err(ShutdownError::task_panicked(
+                        BlockingWorkerJoinPanicked,
+                    )));
+                    // The native panic is already settled. A panicking payload destructor may
+                    // itself return an arbitrary payload, which cannot safely be dropped again.
+                    if let Err(nested) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+                    {
+                        std::mem::forget(nested);
+                    }
+                }
+            }
+        })?;
+    Ok((submit, result))
 }
 
 /// Opaque, unstarted dedicated-thread registration.
@@ -79,7 +101,7 @@ struct BlockingWorkerPanicked;
 struct BlockingWorkerJoinPanicked;
 
 impl ManagedBlockingWorker {
-    /// Spawn one long-lived runner on a dedicated OS thread.
+    /// Spawn a dedicated runner and reserve a second OS thread for its eventual blocking join.
     pub fn try_spawn<N, F>(
         name: N,
         token: CancellationToken,
@@ -95,16 +117,13 @@ impl ManagedBlockingWorker {
         let thread_token = token.clone();
         let status_token = token.clone();
         let (sender, status) = task_status_channel(name.clone());
-        let status_sender = sender.clone();
+        let (submit, result) =
+            prepare_join(sender.clone()).map_err(ManagedBlockingWorkerStartError)?;
         sender.send_replace(TaskState::Running);
         let terminal = TaskTerminalGuard::new(sender);
-        let (completed, completion) = tokio::sync::oneshot::channel();
         let thread = std::thread::Builder::new()
             .name(name.clone())
             .spawn(move || {
-                THREAD_COMPLETION.with(|slot| {
-                    *slot.borrow_mut() = Some(ThreadCompletion(Some(completed)));
-                });
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(thread_token)));
                 match result {
@@ -137,10 +156,9 @@ impl ManagedBlockingWorker {
             token,
             shutdown_timeout,
             join: Mutex::new(JoinState::Running(ThreadJoin {
-                thread: Some(thread),
-                completion: Some(completion),
+                handoff: Some((submit, thread)),
+                result,
             })),
-            status_sender,
             status,
         })
     }
@@ -168,29 +186,13 @@ impl ManagedBlockingWorker {
         self.token.cancel();
         let mut state = self.join.lock().await;
         if let JoinState::Running(join) = &mut *state {
-            if let Some(completion) = &mut join.completion {
-                let _ = completion.await;
-                // Record completion before any yield: a ready oneshot must never be repolled.
-                join.completion = None;
+            if let Some((submit, worker)) = join.handoff.take() {
+                // A lost helper also closes the result channel and is reported to all waiters.
+                let _ = submit.send(worker);
             }
-            let thread = join
-                .thread
-                .as_ref()
-                .unwrap_or_else(|| unreachable!("running thread retains its handle"));
-            while !thread.is_finished() {
-                tokio::task::yield_now().await;
-            }
-            let thread = join
-                .thread
-                .take()
-                .unwrap_or_else(|| unreachable!("finished thread joins exactly once"));
-            let result = thread.join().unwrap_or_else(|_| {
-                self.status_sender
-                    .send_replace(TaskState::Stopped(TaskExit::Failed(
-                        ShutdownErrorKind::TaskPanicked,
-                    )));
-                Err(ShutdownError::task_panicked(BlockingWorkerJoinPanicked))
-            });
+            let result = (&mut join.result)
+                .await
+                .unwrap_or_else(|error| Err(ShutdownError::task_unknown(error)));
             *state = JoinState::Joined(result);
         }
         match &*state {
@@ -563,16 +565,75 @@ mod tests {
         assert!(receiver.recv_timeout(Duration::from_secs(1)).is_ok());
     }
 
+    #[derive(Default)]
+    struct WakeCount(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // The raw handle is eligible for handoff before the runner exits. Both the live body
+    // and its subsequent TLS destructor can be held independently of the join notifier.
+    #[allow(clippy::expect_used)] // reason: native join reservation is test setup.
+    fn owner_for_join_test(thread: WorkerThread) -> ManagedBlockingWorker {
+        let (sender, status) = task_status_channel("thread-local-join");
+        let (submit, result) = prepare_join(sender).expect("reserve join");
+        ManagedBlockingWorker {
+            name: "thread-local-join".into(),
+            token: CancellationToken::new(),
+            shutdown_timeout: Duration::from_secs(1),
+            join: Mutex::new(JoinState::Running(ThreadJoin {
+                handoff: Some((submit, thread)),
+                result,
+            })),
+            status,
+        }
+    }
+
     #[tokio::test]
-    #[allow(clippy::expect_used)] // reason: channel and join failures are test assertion failures.
-    async fn shutdown_waits_for_thread_local_destructors() {
+    #[allow(clippy::expect_used)] // reason: hold a real live native handle past the first poll.
+    async fn eligible_join_does_not_self_wake_while_the_worker_is_live() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let worker = owner_for_join_test(std::thread::spawn(move || {
+            gate.recv_timeout(Duration::from_secs(5))
+                .expect("release live thread");
+            Ok(())
+        }));
+        let wakes = Arc::new(WakeCount::default());
+        let waker = std::task::Waker::from(wakes.clone());
+        let mut wait = Box::pin(worker.shutdown());
+        assert!(
+            wait.as_mut()
+                .poll(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+        // A Tokio yield defers a wake until the scheduler gets control.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            wakes.0.load(Ordering::Relaxed),
+            0,
+            "live worker join self-woke"
+        );
+        release.send(()).expect("release native handle");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), wait)
+                .await
+                .expect("native join completes")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)] // reason: thread, runtime and bounded gate failures are test assertions.
+    fn delayed_tls_allows_waiter_timeout_runtime_drop_and_rejoin() {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let worker = ManagedBlockingWorker::try_spawn(
             "thread-local-join",
             CancellationToken::new(),
             Duration::from_secs(1),
-            move |_token| {
+            move |_| {
                 THREAD_EXIT_GUARD.with(|guard| {
                     *guard.borrow_mut() = Some(ThreadExitGuard {
                         entered: entered_sender,
@@ -582,25 +643,67 @@ mod tests {
                 Ok(())
             },
         )
-        .expect("worker thread starts");
-
-        let mut first = Box::pin(worker.shutdown());
-        assert!(futures::poll!(&mut first).is_pending());
+        .expect("worker starts");
         entered_receiver
-            .recv_timeout(Duration::from_secs(1))
-            .expect("thread-local destructor starts");
-        drop(first);
-        let mut retry = Box::pin(worker.shutdown());
-        assert!(
-            futures::poll!(&mut retry).is_pending(),
-            "retry must wait for thread-local destruction"
+            .recv_timeout(Duration::from_secs(2))
+            .expect("TLS destructor is parked");
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("timer runtime")
+        };
+        let first_runtime = runtime();
+        first_runtime.block_on(async {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), worker.shutdown())
+                    .await
+                    .is_err()
+            );
+        });
+        drop(first_runtime);
+
+        runtime().block_on(async {
+            let mut retry = Box::pin(worker.shutdown());
+            let mut concurrent = Box::pin(worker.shutdown());
+            assert!(futures::poll!(&mut retry).is_pending());
+            assert!(futures::poll!(&mut concurrent).is_pending());
+            release_sender
+                .send(())
+                .expect("release destructor after runtime drop");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let (one, two) = tokio::join!(retry, concurrent);
+                assert!(one.is_ok() && two.is_ok());
+                assert!(worker.shutdown().await.is_ok());
+            })
+            .await
+            .expect("join published for all waiters");
+        });
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)] // reason: both native panic and panicking payload destruction are under test.
+    async fn native_join_panic_is_published_after_thread_exit() {
+        let (sender, status) = task_status_channel("native-panic");
+        let (submit, result) = prepare_join(sender).expect("join thread starts");
+        struct PanicOnDrop;
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("private payload destructor");
+            }
+        }
+        let worker = std::thread::spawn(|| std::panic::panic_any(PanicOnDrop));
+        assert!(submit.send(worker).is_ok());
+        let error = tokio::time::timeout(Duration::from_secs(2), result)
+            .await
+            .expect("native join bounded by guard")
+            .expect("join result published")
+            .expect_err("native worker panicked");
+        assert_eq!(error.kind(), ShutdownErrorKind::TaskPanicked);
+        assert_eq!(
+            status.current(),
+            TaskState::Stopped(TaskExit::Failed(ShutdownErrorKind::TaskPanicked))
         );
-        release_sender.send(()).expect("release destructor");
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), retry)
-                .await
-                .expect("thread joins")
-                .is_ok()
-        );
+        assert!(!format!("{error:?}").contains("private payload"));
     }
 }

@@ -62,8 +62,9 @@ when a waiter is cancelled. Concurrent/repeated calls return the same actual joi
 errors and panics; thread success includes thread-local destruction. A task status is not a join
 receipt. Dropping the task owner aborts its task; dropping a thread owner requests cancellation but
 cannot forcibly stop the thread. These standalone shutdown methods do not impose their own timeout.
-Migration: a second shutdown no longer clears a failure, and cancelling only a shutdown waiter no
-longer aborts an independently retained managed task.
+Each blocking worker reserves a second OS thread at startup to join the runner on the first
+shutdown request. The join can finish independently of the calling runtime. Dropping the worker
+before its first shutdown releases the reserved thread.
 
 There are no default features. The crate deliberately has no compatibility API for former
 lifecycle ownership paths.

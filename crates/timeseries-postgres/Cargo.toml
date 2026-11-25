@@ -13,6 +13,7 @@ rss-timeseries.workspace = true
 rss-request-context.workspace = true
 rss-contract.workspace = true
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+url.workspace = true # Security floor for the transitive dependency above.
 futures = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["time"] }
 serde = { workspace = true, features = ["derive"] }
