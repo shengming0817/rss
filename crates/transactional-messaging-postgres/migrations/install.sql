@@ -39,7 +39,11 @@ CREATE TABLE rss_transactional_messaging.outbox (
   partition_head boolean NOT NULL DEFAULT false CHECK (NOT partition_head OR partition_key IS NOT NULL),
   envelope jsonb NOT NULL,
   payload bytea,
-  CONSTRAINT outbox_body_shape CHECK (payload IS NOT NULL OR status = 'published'),
+  body_digest bytea CHECK(body_digest IS NULL OR octet_length(body_digest)=32),
+  authored_evidence bytea CHECK(authored_evidence IS NULL OR octet_length(authored_evidence)=32),
+  body_retired boolean NOT NULL DEFAULT false,
+  CONSTRAINT outbox_body_shape CHECK ((payload IS NULL)=body_retired AND
+    (NOT body_retired OR (status='published' AND body_digest IS NOT NULL AND authored_evidence IS NOT NULL))),
   fingerprint bytea NOT NULL,
   status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','publishing','published','dead_letter','resolved')),
   retry_count integer NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
@@ -165,6 +169,7 @@ CREATE TABLE rss_transactional_messaging.outbox_partitions (
 -- A committed metadata cursor bounds unsuccessful claim work across invocations.
 CREATE TABLE rss_transactional_messaging.outbox_scan (
  tenant_id uuid NOT NULL, domain text COLLATE "C" NOT NULL,
+ through_at timestamptz NOT NULL DEFAULT '-infinity',
  eligible_at timestamptz NOT NULL DEFAULT '-infinity', source_seq bigint NOT NULL DEFAULT 0,
  lane integer NOT NULL DEFAULT 0 CHECK(lane BETWEEN 0 AND 3),
  PRIMARY KEY(tenant_id,domain)
@@ -531,8 +536,9 @@ BEGIN
   SELECT NOT EXISTS(SELECT FROM outbox o WHERE o.tenant_id=t AND o.domain=domain_name
    AND o.partition_key=partition_name AND o.partition_head) INTO first_in_partition;
  END IF;
- INSERT INTO outbox(tenant_id,message_id,domain,partition_key,partition_seq,partition_head,envelope,payload,fingerprint)
-  VALUES(t,id,domain_name,partition_name,ordinal,first_in_partition,envelope,body,digest)
+ INSERT INTO outbox(tenant_id,message_id,domain,partition_key,partition_seq,partition_head,envelope,payload,fingerprint,body_digest,authored_evidence)
+  VALUES(t,id,domain_name,partition_name,ordinal,first_in_partition,envelope,body,digest,sha256(body),
+   sha256(convert_to('rss-outbox-evidence-v1','UTF8')||convert_to((envelope-ARRAY['trace','tenant_authority'])::text,'UTF8')||digest||sha256(body)))
   ON CONFLICT(tenant_id,message_id) DO NOTHING RETURNING outbox.fingerprint INTO persisted;
  IF FOUND THEN RETURN 'inserted'; END IF;
  SELECT o.fingerprint INTO STRICT persisted FROM outbox o WHERE o.tenant_id=t AND o.message_id=id;
@@ -709,10 +715,11 @@ DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(curren
  observed timestamptz; progress outbox_scan; examined integer:=0; owns_progress boolean; wrapped boolean:=false;
  scan_limit integer:=greatest(64,least(p_limit::bigint*4,1024))::integer;
  candidates NO SCROLL CURSOR FOR
-  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,observed,scan_limit);
+  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit);
 BEGIN
  PERFORM check_execution();
- IF p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
+ IF p_domain IS NULL OR octet_length(p_domain) NOT BETWEEN 1 AND 255 OR (p_domain COLLATE "C") ~ '[^A-Za-z0-9_.:-]' OR p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
+ IF consumer_scope_domain() IS NOT NULL AND consumer_scope_domain()<>p_domain THEN RETURN; END IF;
  -- FETCH NEXT avoids PL/pgSQL FOR's prefetch locks and never reopens an exhausted scan.
  -- ref: PostgreSQL REL_17_6 src/pl/plpgsql/src/pl_exec.c exec_stmt_fetch/exec_for_query.
  observed:=clock_timestamp();
@@ -722,7 +729,8 @@ BEGIN
   INSERT INTO outbox_scan(tenant_id,domain) VALUES(p_tenant,p_domain) ON CONFLICT DO NOTHING;
  END IF;
  SELECT * INTO progress FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
- IF NOT FOUND THEN progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
+ IF NOT FOUND THEN progress.through_at:=observed; progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
+ IF progress.eligible_at='-infinity'::timestamptz THEN progress.through_at:=observed; END IF;
  OPEN candidates;
  LOOP
   EXIT WHEN used>=p_limit;
@@ -730,7 +738,7 @@ BEGIN
   IF NOT FOUND THEN
    IF examined=0 AND NOT wrapped AND progress.eligible_at<>'-infinity'::timestamptz THEN
     CLOSE candidates;
-    progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; wrapped:=true;
+    progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; progress.through_at:=observed; wrapped:=true;
     OPEN candidates;
     CONTINUE;
    END IF;
@@ -766,7 +774,7 @@ BEGIN
   progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0;
  END IF;
  IF owns_progress THEN
-  UPDATE outbox_scan s SET eligible_at=progress.eligible_at,source_seq=progress.source_seq,lane=progress.lane
+  UPDATE outbox_scan s SET through_at=progress.through_at,eligible_at=progress.eligible_at,source_seq=progress.source_seq,lane=progress.lane
    WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
  END IF;
 END $f$;
@@ -799,8 +807,12 @@ BEGIN
    WHERE d.tenant_id=t AND d.outbox_seq=o.seq AND d.status<>'completed'
     AND p.epoch=current_setting('rss.execution_epoch')::bigint
     AND p.lineage=decode(current_setting('rss.storage_lineage'),'hex')) THEN CONTINUE; END IF;
+  IF o.body_digest IS DISTINCT FROM sha256(o.payload) OR o.authored_evidence IS DISTINCT FROM
+   sha256(convert_to('rss-outbox-evidence-v1','UTF8')||convert_to((o.envelope-ARRAY['trace','tenant_authority'])::text,'UTF8')||o.fingerprint||o.body_digest) THEN
+   RAISE EXCEPTION 'published evidence mismatch' USING ERRCODE='PZ002';
+  END IF;
   released_bytes:=released_bytes+octet_length(o.payload); reclaimed:=reclaimed+1;
-  UPDATE outbox SET payload=NULL WHERE outbox.seq=o.seq;
+  UPDATE outbox SET payload=NULL,body_retired=true WHERE outbox.seq=o.seq;
  END LOOP;
  RETURN NEXT;
 END $f$;
@@ -1047,7 +1059,7 @@ BEGIN
    SELECT * INTO src FROM outbox WHERE tenant_id=t AND message_id=item->>'message' FOR UPDATE;
    IF NOT FOUND THEN RAISE EXCEPTION 'member absent' USING ERRCODE='P0002'; END IF;
    IF src.status<>'published' OR src.fingerprint<>decode(item->>'fingerprint','hex') OR src.recovery_version<>(item->>'version')::bigint THEN RAISE EXCEPTION 'member conflict' USING ERRCODE='23505'; END IF;
-   IF src.automatic_retry_deadline IS NULL OR src.automatic_retry_deadline<=clock_timestamp() THEN RAISE EXCEPTION 'redrive expired' USING ERRCODE='PZ004'; END IF;
+   IF src.payload IS NULL OR src.automatic_retry_deadline IS NULL OR src.automatic_retry_deadline<=clock_timestamp() THEN RAISE EXCEPTION 'redrive expired' USING ERRCODE='PZ004'; END IF;
    INSERT INTO dr_members(tenant_id,operation_id,ordinal,message_id,consumer_group,fingerprint,outbox_seq,status) VALUES(t,p_operation,idx,src.message_id,'',src.fingerprint,src.seq,'pending');
   ELSE
    SELECT * INTO terminal FROM inbox WHERE tenant_id=t AND message_id=item->>'message' AND consumer_group=item->>'group';

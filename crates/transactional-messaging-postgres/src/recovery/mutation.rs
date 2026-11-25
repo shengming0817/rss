@@ -225,7 +225,7 @@ async fn validate_evidence(
     request: &Mutation,
     evidence: &MessageId,
 ) -> Result<(), PgError> {
-    let row = sqlx::query("SELECT status,envelope::text,payload,fingerprint FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2 FOR SHARE")
+    let row = sqlx::query("SELECT status,envelope::text,payload,fingerprint,body_retired AND authored_evidence=sha256(convert_to('rss-outbox-evidence-v1','UTF8')||convert_to((envelope-ARRAY['trace','tenant_authority'])::text,'UTF8')||fingerprint||body_digest) AS retired_evidence FROM rss_transactional_messaging.outbox WHERE tenant_id=$1::uuid AND message_id=$2 FOR SHARE")
         .bind(request.tenant().to_string()).bind(evidence.as_str()).fetch_optional(&mut *tx.connection).await?.ok_or(Error::Evidence)?;
     if row.try_get::<&str, _>("status")? != "published" {
         return Err(Error::Evidence.into());
@@ -233,12 +233,13 @@ async fn validate_evidence(
     if row.try_get::<Option<Vec<u8>>, _>("payload")?.is_none() {
         // Only the maintenance definer can retire a Published body. Its immutable
         // append-validated metadata and fingerprint retain the authored evidence.
-        return if crate::envelope::Envelope::cold_evidence(
-            &row,
-            request.tenant(),
-            evidence,
-            request.target().key().as_str(),
-        )? {
+        return if row.try_get::<Option<bool>, _>("retired_evidence")? == Some(true)
+            && crate::envelope::Envelope::cold_evidence(
+                &row,
+                request.tenant(),
+                evidence,
+                request.target().key().as_str(),
+            )? {
             Ok(())
         } else {
             Err(Error::Evidence.into())

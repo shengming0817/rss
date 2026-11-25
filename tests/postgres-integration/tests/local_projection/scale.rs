@@ -323,6 +323,24 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(unlocked.len(), 1, "lookahead is not locked");
     claim.rollback().await?;
     held.rollback().await?;
-    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
+    let mut revisited = false;
+    for n in 0..10 {
+        append(f, "arrival", n, 1, 0).await?;
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
+        )
+        .bind(tenant().to_string())
+        .fetch_all(&f.raw_worker)
+        .await?;
+        revisited |= rows.iter().any(|id| locked.contains(id));
+        if revisited {
+            break;
+        }
+    }
+    assert!(
+        revisited,
+        "a frozen sweep revisits unlocked prefixes despite continuous arrivals"
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE 'window-%' OR message_id LIKE 'arrival-%'").execute(&f.owner).await?;
     Ok(())
 }

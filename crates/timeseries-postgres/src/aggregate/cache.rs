@@ -16,6 +16,7 @@ pub(super) struct Cover {
 pub(super) struct Bucket {
     pub(super) window: Interval,
     pub(super) cover: Result<Option<Cover>, Error>,
+    expand: bool,
 }
 
 // Batched planning bounds candidate metadata independently of per-bucket work.
@@ -87,27 +88,46 @@ async fn plan_with_limit(
             && candidate_limit < limits.max_points.get() as usize
             && !complete;
         let cover = if expand {
-            Box::pin(plan_with_limit(
-                c,
-                q,
-                window.start(),
-                1,
-                limits,
-                limits.max_points.get() as usize,
-            ))
-            .await?
-            .pop()
-            .ok_or(Error::Invariant)?
-            .cover
+            Ok(None)
         } else {
             choose(window, tiles, limits)
         };
-        result.push(Bucket { window, cover });
-        if expand {
-            break;
-        }
+        result.push(Bucket {
+            window,
+            cover,
+            expand,
+        });
     }
     Ok(result)
+}
+
+pub(super) async fn resolve(
+    c: &mut PgConnection,
+    q: &AggregateQuery,
+    bucket: &mut Bucket,
+    limits: &Limits,
+) -> Result<(), Error> {
+    if bucket.expand {
+        bucket.cover = plan_with_limit(
+            c,
+            q,
+            bucket.window.start(),
+            1,
+            limits,
+            limits.max_points.get() as usize,
+        )
+        .await?
+        .pop()
+        .ok_or(Error::Invariant)?
+        .cover;
+        bucket.expand = false;
+    }
+    Ok(())
+}
+impl Bucket {
+    pub(super) fn resolved(&self) -> bool {
+        !self.expand
+    }
 }
 
 // A longer tile may end at a dead end. Compute the cheapest complete suffix

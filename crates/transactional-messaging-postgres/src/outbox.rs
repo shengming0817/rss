@@ -200,7 +200,7 @@ impl<R> PgOutboxStore<R> {
         })).await
     }
     /// Observe one tenant's durable scheduling without claiming, renewing or settling work.
-    /// Shares the claim candidate definition, including active DR generations. A fenced target
+    /// Evaluates eligibility independently of the claim cursor, including active DR generations. A fenced target
     /// returns ownership lost; the host selects any subsequent tenant.
     pub async fn next_wakeup(
         &self,

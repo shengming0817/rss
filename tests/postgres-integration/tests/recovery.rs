@@ -1309,6 +1309,21 @@ async fn compensated(
             .await,
     )?;
     assert_eq!(cross.reclaimed, 0);
+    let mut corrupt = owner.begin().await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET payload=payload||decode('00','hex') WHERE message_id='compensation-evidence'").execute(&mut *corrupt).await?;
+    // The maintenance session cannot observe an uncommitted corruption fixture.
+    corrupt.commit().await?;
+    assert!(
+        maintenance
+            .reclaim(
+                crate::execution(tenant(), 1),
+                PublishedBodyRetention::new(cutoff, after_seq, 1)?,
+                deadline()
+            )
+            .await
+            .fold(|_| false, |_| true, |_| true, |_| true, |_| true, |_| true)
+    );
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET payload=substring(payload FROM 1 FOR octet_length(payload)-1) WHERE message_id='compensation-evidence'").execute(owner).await?;
     let physical_before: i64 = sqlx::query_scalar(
         "SELECT pg_total_relation_size('rss_transactional_messaging.outbox')::bigint",
     )

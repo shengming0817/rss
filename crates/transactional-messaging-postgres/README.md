@@ -38,13 +38,13 @@ and `append_outbox(bytea,jsonb)`. Give it no Outbox INSERT, allocator access or 
 CREATE or policy mutation rights. The migration revokes PUBLIC EXECUTE. RLS remains ENABLE/FORCE,
 including for the non-bypass relay function owner through its explicit Outbox-only policy.
 
-`PgOutboxStore::next_wakeup(binding, deadline)` reads the same candidate definition as claim for the selected
+`PgOutboxStore::next_wakeup(binding, deadline)` reads eligibility independently of the claim scan cursor for the selected
 tenant and configured domain. Hosts query other tenants separately when composing a waiting strategy. `OutboxWakeup::due_now()` reports already-due work;
 `next_deadline()` separately reports the earliest future eligibility, including retry/lease and active
 DR state. The deadline uses the injected runtime clock and is anchored before database I/O, so the
 query cannot extend the wait. Due work may be locked or claimed concurrently: bound immediate rescans
 and retain a recovery scan. These hints do not claim, settle, prove delivery or grant tenant access.
-The fresh schema stores message metadata in `envelope` and the complete payload in `payload bytea`, including after settlement.
+The fresh schema stores message metadata in `envelope` and the payload in `payload bytea`; the explicit retention capability below can retire eligible Published bodies.
 The external migrator grants `next_outbox_wakeup(uuid,text)` to relay/consumer roles; private
 `outbox_candidates(uuid,text,timestamptz,timestamptz,integer)` remains accessible only to the relay function owner.
 
@@ -574,7 +574,7 @@ its default remains 64 and it does not alter request authorization or digest ide
 A claim scans at most `max(64, min(4 * limit, 1024))` metadata candidates, using
 indexed time/sequence windows. Filtering and source locking happen after the window is
 bounded. A committed tenant/domain cursor advances past locked, stale or DR-blocked
-candidates and wraps after exhaustion. Contention on cursor progress permits repeated
+candidates and wraps after exhaustion. Each sweep fixes its upper eligibility time so continuous arrivals cannot starve skipped prefixes. Contention on cursor progress permits repeated
 metadata scans without serializing source claims. Cross-partition selection follows
 eligibility time then sequence; partition order and DR barriers remain authoritative.
 An empty batch can be a bounded unsuccessful scan. Hosts continue bounded polling using
@@ -591,7 +591,7 @@ Call `reclaim(binding, PublishedBodyRetention::new(before_us, after_seq, limit)?
 with 1–1024 candidates; start at sequence zero, continue from `next_seq`, and restart a
 later sweep at zero to revisit skipped rows. A short page ends the current sweep. The
 shared execution fence, original deadline and current unfinished DR members restrict
-release even when the host's cutoff allows it. Successful release clears only the body.
+release even when the host's cutoff allows it. Append seals body and authored-evidence digests. Release verifies these digests under the source lock and atomically marks the body retired; cold evidence verifies the retained seal. Successful release clears the body.
 Fingerprints, authored metadata, terminal state, original deadline, recovery version and
 coordinates remain available for same-ID replay/conflict checks, projection readback and
 compensation evidence. No body is restored by duplicate append.
