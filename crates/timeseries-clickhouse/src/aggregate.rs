@@ -118,17 +118,17 @@ impl<C: Clock> Operation<'_, C> {
         let prior = self
             .predecessor(spec, window.start(), boundary, fences, deadline)
             .await?;
-        if needs_prior(spec) {
-            if fences.iter().any(|f| {
+        if needs_prior(spec)
+            && fences.iter().any(|f| {
                 f.kind == "pruned"
                     && control::overlaps(&f.selection, &spec.selection())
                     && f.window.start() < window.start()
                     && prior
                         .as_ref()
                         .is_none_or(|p| p.sample.input().observed_at < f.window.end())
-            }) {
-                return Err(Error::HistoryExpired);
-            }
+            })
+        {
+            return Err(Error::HistoryExpired);
         }
         let mut builder = SummaryBuilder::new(spec.clone(), window)?;
         let max_input_revision = prior.as_ref().map_or(0, |row| row.revision);

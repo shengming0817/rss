@@ -430,11 +430,17 @@ async fn predecessor_revisions_remain_fixed_across_cached_and_raw_pages() -> any
     );
     assert_eq!(second.refreshed_through, None);
     let current = f.store.aggregate(&all, None, deadline()?).await?;
+    // The late point at 199 itself resets bucket 100, but is the non-resetting
+    // predecessor of bucket 200. Its input revision must be carried by that cache.
     assert!(
-        current
-            .buckets
-            .iter()
-            .all(|b| !b.completeness.contains(&Completeness::ResetBoundary))
+        current.buckets[0]
+            .completeness
+            .contains(&Completeness::ResetBoundary)
+    );
+    assert!(
+        !current.buckets[1]
+            .completeness
+            .contains(&Completeness::ResetBoundary)
     );
     Ok(())
 }
@@ -909,8 +915,8 @@ async fn reclaim_waits_for_summary_attempts_and_blocks_future_recompute() -> any
             }
         )
         .await
-        .unwrap_err()
-        .downcast_ref::<Error>(),
+        .err()
+        .and_then(|e| e.downcast::<Error>().ok()),
         Some(Error::HistoryExpired)
     ));
     assert_eq!(
@@ -954,6 +960,11 @@ async fn provider_scan_memory_and_result_limits_remain_budget_errors() -> anyhow
             caps,
         )
         .await?;
+        if kind == "memory" {
+            // Force provider accounting to flush below its default multi-MiB slack.
+            f.ch.sql("ALTER USER ch_reader SETTINGS max_untracked_memory=1")
+                .await?;
+        }
         let result = store.query(&q, None, deadline()?).await;
         assert!(
             matches!(result, Err(Error::BudgetExceeded)),

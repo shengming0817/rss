@@ -189,6 +189,9 @@ impl<C: Clock> Operation<'_, C> {
                     reason: MaintenanceBlock::PendingWrite,
                 }));
             }
+            if matches!(r.action(), MaintenanceAction::Recompute { .. }) {
+                recompute::check(tx.connection(), r).await?;
+            }
             external = state.publish.is_some() || state.cleanup.is_some();
             let revision = tx.revision;
             let boundary = tx.published;

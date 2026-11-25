@@ -1,11 +1,11 @@
 use super::*;
 
-pub(super) async fn during_select<T, M>(
+pub(super) fn during_select<T, M>(
     proxy: &transport::Proxy,
     read: impl std::future::Future<Output = T>,
     change: impl std::future::Future<Output = anyhow::Result<M>>,
-) -> anyhow::Result<T> {
-    during_select_mode(proxy, 5, read, change).await
+) -> impl std::future::Future<Output = anyhow::Result<T>> {
+    Box::pin(during_select_mode(proxy, 5, read, change))
 }
 pub(super) async fn during_select_mode<T, M>(
     proxy: &transport::Proxy,

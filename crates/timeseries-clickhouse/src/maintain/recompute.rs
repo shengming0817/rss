@@ -21,15 +21,7 @@ pub(super) struct Publication {
     max_input_revision: i64,
     revision: i64,
 }
-pub(super) async fn step<C: Clock>(
-    store: &Operation<'_, C>,
-    c: &mut PgConnection,
-    r: &MaintenanceRequest,
-    state: &mut State,
-    revision: i64,
-    boundary: i64,
-    deadline: Deadline,
-) -> Result<Step, Error> {
+pub(super) async fn check(c: &mut PgConnection, r: &MaintenanceRequest) -> Result<(), Error> {
     let MaintenanceAction::Recompute { spec, window } = r.action() else {
         return Err(Error::Invariant);
     };
@@ -48,6 +40,21 @@ pub(super) async fn step<C: Clock>(
     if reclaimed {
         return Err(Error::HistoryExpired);
     }
+    Ok(())
+}
+pub(super) async fn step<C: Clock>(
+    store: &Operation<'_, C>,
+    c: &mut PgConnection,
+    r: &MaintenanceRequest,
+    state: &mut State,
+    revision: i64,
+    boundary: i64,
+    deadline: Deadline,
+) -> Result<Step, Error> {
+    let MaintenanceAction::Recompute { spec, window } = r.action() else {
+        return Err(Error::Invariant);
+    };
+    let window = *window;
     if state.publish.is_some() {
         return publish(store, c, r, state, revision, deadline).await;
     }

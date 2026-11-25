@@ -208,6 +208,7 @@ async fn queueing_uses_the_original_absolute_deadline() -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
     struct Timer;
     impl Clock for Timer {
+        #[allow(clippy::disallowed_methods)] // reason: injected clock follows Tokio's controlled test time.
         fn now(&self) -> Instant {
             tokio::time::Instant::now().into_std()
         }
