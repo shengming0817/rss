@@ -2,7 +2,7 @@ use crate::{
     ChStore, Operation,
     control::{self, Fence},
     cursor::Position,
-    page::{Dependencies, Request, View},
+    page::{Dependencies, Recheck, Request, View},
     projection::{RAW_FIELDS, Raw, hex, literal},
 };
 use rss_request_context::{Clock, Deadline};
@@ -108,10 +108,10 @@ impl<C: Clock> Operation<'_, C> {
         let mut cursor = self
             .ch_query(self.reader.query_raw(sql), deadline)?
             .fetch::<Raw>()
-            .map_err(|_| Error::Unavailable)?;
+            .map_err(crate::projection::read_error)?;
         let mut size = 0usize;
         let mut rows = Vec::new();
-        while let Some(row) = cursor.next().await.map_err(|_| Error::Unavailable)? {
+        while let Some(row) = cursor.next().await.map_err(crate::projection::read_error)? {
             size = size
                 .checked_add(row.payload.len())
                 .ok_or(Error::BudgetExceeded)?;
@@ -131,7 +131,7 @@ impl Request for Query {
     type Position = Position;
     type Metadata = ();
     type Page = Page;
-    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.history.v2";
+    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.history.v3";
     const INVALIDATED: Error = Error::HistoryExpired;
     fn query(&self) -> &Query {
         self
@@ -162,14 +162,21 @@ impl Request for Query {
             )?,
         })
     }
-    async fn valid<C: Clock>(
+    async fn recheck<C: Clock>(
         &self,
-        _: &Operation<'_, C>,
+        store: &Operation<'_, C>,
         _: &mut sqlx::PgConnection,
         _: &(),
-        _: i64,
-    ) -> Result<bool, Error> {
-        Ok(true) // reason: raw reads have no mutable summary references to recheck.
+        check: Recheck,
+    ) -> Result<(bool, bool), Error> {
+        let tag = store.material.key.page_state(
+            Self::DOMAIN,
+            self.binding()?,
+            store.instance,
+            &check.fence,
+        )?;
+        let same = tag == check.tag;
+        Ok((same, same))
     }
     async fn metadata<C: Clock>(
         &self,
@@ -222,7 +229,7 @@ impl Request for Query {
                 .ch_query(store.reader.query_raw(&sql), deadline)?
                 .fetch_all::<(String, String, String)>()
                 .await
-                .map_err(|_| Error::Unavailable)?;
+                .map_err(crate::projection::read_error)?;
             if keys.len() > groups as usize {
                 let (series, source, generation) = &keys[groups as usize - 1];
                 condition.push_str(&format!(

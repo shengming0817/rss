@@ -497,3 +497,34 @@ async fn full_owner_queue_rejects_without_io_and_close_wakes_all_tenants() -> an
     close.await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn public_read_keeps_one_deadline_across_owner_queue_and_network() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-queue-network-deadline").await?;
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let mut caps = limits()?;
+    caps.max_in_flight = NonZeroU32::MIN;
+    let store = proxy.store_with_limits(f.pool.clone(), caps).await?;
+    let d = definition(TENANT)?;
+    register(&store, &d).await?;
+    let q = read_request(&d, 1)?;
+    proxy.arm(4);
+    let writing = write(&store, batch("held", vec![sample(&d, "held", 10, 1)?])?);
+    tokio::pin!(writing);
+    tokio::select! { _=&mut writing=>anyhow::bail!("write missed gate"), r=proxy.wait_held()=>r?, }
+    let end = Deadline::from_timeout(&Timer, Duration::from_secs(3))?;
+    let reading = store.query(&q, None, end);
+    tokio::pin!(reading);
+    tokio::select! { biased; _=&mut reading=>anyhow::bail!("read skipped owner queue"), ()=std::future::ready(())=>{} }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    proxy.arm(5);
+    proxy.release();
+    confirmed(writing.await?)?;
+    tokio::select! { _=&mut reading=>anyhow::bail!("read missed network gate"), r=proxy.wait_held()=>r?, }
+    // A restarted three-second budget would exceed this two-second guard.
+    let result = tokio::time::timeout(Duration::from_secs(2), &mut reading).await?;
+    assert!(matches!(result, Err(Error::Deadline)));
+    proxy.release();
+    assert_eq!(store.query(&q, None, deadline()?).await?.rows.len(), 1);
+    Ok(())
+}

@@ -30,13 +30,13 @@ pub(crate) trait Request {
         connection: &mut PgConnection,
         view: &View<Self::Position>,
     ) -> Result<Self::Metadata, Error>;
-    async fn valid<C: Clock>(
+    async fn recheck<C: Clock>(
         &self,
         store: &Operation<'_, C>,
         connection: &mut PgConnection,
         metadata: &Self::Metadata,
-        ceiling: i64,
-    ) -> Result<bool, Error>;
+        check: Recheck,
+    ) -> Result<(bool, bool), Error>;
     async fn read<C: Clock>(
         &self,
         store: &Operation<'_, C>,
@@ -44,6 +44,13 @@ pub(crate) trait Request {
         metadata: &mut Self::Metadata,
         deadline: Deadline,
     ) -> Result<(Self::Page, Option<Self::Position>), Error>;
+}
+pub(crate) struct Recheck {
+    pub ceiling: i64,
+    pub published: i64,
+    pub fence: i64,
+    pub tag: [u8; 32],
+    pub continuation: bool,
 }
 pub(crate) struct Dependencies {
     pub fences: Vec<Fence>,
@@ -100,18 +107,22 @@ impl<C: Clock> Operation<'_, C> {
             let snapshot = async {
                 let current = Version::load(&mut tx, scope).await?;
                 let version = current.unwrap_or_default();
+                let time = now(tx.connection()).await?;
+                let cursor = after
+                    .map(|token| {
+                        self.material.key.open::<Cursor<R::Position>>(
+                            R::DOMAIN,
+                            token,
+                            binding,
+                            self.instance,
+                            time,
+                        )
+                    })
+                    .transpose()?;
                 let deps = request
                     .dependencies(self, tx.connection(), version.fence)
                     .await?;
-                let time = now(tx.connection()).await?;
-                let (ceiling, position, expires) = if let Some(token) = after {
-                    let (expires, cursor) = self.material.key.open::<Cursor<R::Position>>(
-                        R::DOMAIN,
-                        token,
-                        binding,
-                        self.instance,
-                        time,
-                    )?;
+                let (ceiling, position, expires) = if let Some((expires, cursor)) = cursor {
                     if current.is_none()
                         || cursor.ceiling < 0
                         || cursor.ceiling > version.published
@@ -154,15 +165,23 @@ impl<C: Clock> Operation<'_, C> {
                 .await?;
             let recheck = async {
                 let current = Version::load(&mut tx, scope).await?.unwrap_or_default();
-                let deps = request
-                    .dependencies(self, tx.connection(), current.fence)
-                    .await?;
-                let same = ceiling <= current.published && tag == deps.tag;
-                let valid = same
-                    && request
-                        .valid(self, tx.connection(), &metadata, ceiling)
-                        .await?;
-                Ok((same, valid))
+                if ceiling > current.published {
+                    return Ok((false, false));
+                }
+                request
+                    .recheck(
+                        self,
+                        tx.connection(),
+                        &metadata,
+                        Recheck {
+                            ceiling,
+                            published: current.published,
+                            fence: current.fence,
+                            tag,
+                            continuation: after.is_some(),
+                        },
+                    )
+                    .await
             }
             .await;
             let (same, valid) = tx.read(recheck).await?;

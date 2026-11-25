@@ -1,7 +1,7 @@
 use crate::{
     Operation,
     control::{self, Fence},
-    page::{Dependencies, Request, View},
+    page::{Dependencies, Recheck, Request, View},
     projection::{SummaryRow, literal},
     read::{ReadRow, selection, visible},
     transaction::{bytes, decode, sql_error},
@@ -30,6 +30,7 @@ pub(crate) struct References {
     rows: Vec<SummaryRef>,
     end: i64,
     attempted: Vec<SummaryRef>,
+    raw_budget: Option<Interval>,
 }
 pub(crate) fn needs_prior(spec: &SummarySpec) -> bool {
     matches!(
@@ -45,6 +46,7 @@ pub(crate) fn mask(
     builder: &mut SummaryBuilder,
     fences: &[Fence],
     spec: &SummarySpec,
+    window: Interval,
     at: Timestamp,
 ) -> Result<(), Error> {
     for f in fences {
@@ -54,7 +56,9 @@ pub(crate) fn mask(
             && f.window.start() <= at
             && builder
                 .last_observed_at()
-                .is_some_and(|last| f.window.end() > last && f.window.start() >= last)
+                .map_or(f.window.end() > window.start(), |last| {
+                    f.window.end() > last && f.window.start() >= last
+                })
         {
             builder.interrupt(f.window.start())?;
         }
@@ -71,6 +75,7 @@ pub(crate) fn mask_end(
         builder,
         fences,
         spec,
+        window,
         Timestamp::new(window.end().micros() - 1)?,
     )
 }
@@ -171,7 +176,13 @@ impl<C: Clock> Operation<'_, C> {
         }
         for row in rows {
             let sample = row.sample;
-            mask(&mut builder, fences, spec, sample.input().observed_at)?;
+            mask(
+                &mut builder,
+                fences,
+                spec,
+                window,
+                sample.input().observed_at,
+            )?;
             builder.push(sample, self.limits.max_points.get() as usize)?;
         }
         mask_end(&mut builder, fences, spec, window)?;
@@ -193,7 +204,7 @@ impl<C: Clock> Operation<'_, C> {
             .ch_query(self.reader.query_raw(&sql), deadline)?
             .fetch_all::<SummaryRow>()
             .await
-            .map_err(|_| Error::Unavailable)?;
+            .map_err(crate::projection::read_error)?;
         if rows.len() != 1 {
             return Err(Error::Invariant);
         }
@@ -218,6 +229,7 @@ impl<C: Clock> Operation<'_, C> {
             return Ok(References {
                 rows: Vec::new(),
                 attempted: Vec::new(),
+                raw_budget: None,
                 end: q.query().window().start().micros(),
             });
         }
@@ -269,6 +281,7 @@ impl<C: Clock> Operation<'_, C> {
             rows,
             end,
             attempted: Vec::new(),
+            raw_budget: None,
         })
     }
     async fn cached(
@@ -279,33 +292,16 @@ impl<C: Clock> Operation<'_, C> {
         window: Interval,
         deadline: Deadline,
     ) -> Result<Option<Summary>, Error> {
-        // The bounded reference graph is acyclic (hi > lo). Solve coverage backwards
-        // before reading values, so a long dead-end bucket cannot hide a valid shorter chain.
-        let mut path = std::collections::BTreeMap::new();
-        path.insert(window.end().micros(), None);
-        let first = refs.partition_point(|r| r.lo >= window.end().micros());
-        for row in refs[first..]
-            .iter()
-            .take_while(|r| r.lo >= window.start().micros())
-        {
-            if row.hi <= row.lo {
-                return Err(Error::Invariant);
-            }
-            if path.contains_key(&row.hi) {
-                path.entry(row.lo).or_insert(Some(row));
-            }
-        }
-        let mut at = window.start().micros();
-        if !path.contains_key(&at) {
+        let Some(path) = coverage(refs, window)? else {
             return Ok(None);
-        }
+        };
         let mut value: Option<Summary> = None;
         let mut size = 0usize;
-        while at < window.end().micros() {
-            let row = path.get(&at).and_then(|r| *r).ok_or(Error::Invariant)?;
+        for row in path {
             attempted.push(row.clone());
             let summary = self.summary_value(&row.object_id, scope, deadline).await?;
-            if summary.window.start().micros() != at || summary.window.end().micros() != row.hi {
+            if summary.window.start().micros() != row.lo || summary.window.end().micros() != row.hi
+            {
                 return Err(Error::Invariant);
             }
             size = size
@@ -318,10 +314,37 @@ impl<C: Clock> Operation<'_, C> {
                 None => summary,
                 Some(old) => old.merge(summary, self.limits.max_points.get() as usize)?,
             });
-            at = row.hi;
         }
         Ok(value)
     }
+}
+// The bounded DAG is solved backwards before reading any object.
+fn coverage(refs: &[SummaryRef], window: Interval) -> Result<Option<Vec<&SummaryRef>>, Error> {
+    let mut path = std::collections::BTreeMap::new();
+    path.insert(window.end().micros(), None);
+    let first = refs.partition_point(|r| r.lo >= window.end().micros());
+    for row in refs[first..]
+        .iter()
+        .take_while(|r| r.lo >= window.start().micros())
+    {
+        if row.hi <= row.lo {
+            return Err(Error::Invariant);
+        }
+        if path.contains_key(&row.hi) {
+            path.entry(row.lo).or_insert(Some(row));
+        }
+    }
+    let mut at = window.start().micros();
+    if !path.contains_key(&at) {
+        return Ok(None);
+    }
+    let mut chain = Vec::new();
+    while at < window.end().micros() {
+        let row = path.get(&at).and_then(|r| *r).ok_or(Error::Invariant)?;
+        chain.push(row);
+        at = row.hi;
+    }
+    Ok(Some(chain))
 }
 fn cost(bucket: &AggregateBucket) -> usize {
     1 + match &bucket.value {
@@ -335,7 +358,7 @@ impl Request for AggregateQuery {
     type Position = Timestamp;
     type Metadata = References;
     type Page = AggregatePage;
-    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.aggregate.v2";
+    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.aggregate.v3";
     const INVALIDATED: Error = Error::SnapshotInvalidated;
     fn query(&self) -> &Query {
         self.query()
@@ -372,15 +395,39 @@ impl Request for AggregateQuery {
         )?;
         Ok(Dependencies { fences, tag })
     }
-    async fn valid<C: Clock>(
+    async fn recheck<C: Clock>(
         &self,
-        _: &Operation<'_, C>,
+        store: &Operation<'_, C>,
         c: &mut PgConnection,
         metadata: &References,
-        ceiling: i64,
-    ) -> Result<bool, Error> {
+        check: Recheck,
+    ) -> Result<(bool, bool), Error> {
+        let deps = self.dependencies(store, c, check.fence).await?;
+        if deps.tag != check.tag {
+            return Ok((false, false));
+        }
+        if check.continuation
+            && check.published > check.ceiling
+            && let Some(window) = metadata.raw_budget
+        {
+            let latest = store
+                .references(
+                    c,
+                    self,
+                    &View {
+                        published: check.published,
+                        fences: Vec::new(),
+                        position: Some(window.start()),
+                        exists: true,
+                    },
+                )
+                .await?;
+            if coverage(&latest.rows, window)?.is_some() {
+                return Err(Error::SnapshotInvalidated);
+            }
+        }
         if metadata.attempted.is_empty() {
-            return Ok(true);
+            return Ok((true, true));
         }
         let scope = self.spec().stream().scope();
         let specs: Vec<_> = metadata
@@ -398,7 +445,7 @@ impl Request for AggregateQuery {
         // Each attempted object is looked up by the existing summary primary key.
         sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM unnest($3::bytea[],$4::bigint[],$5::bigint[],$6::text[]) a(spec_digest,lo,hi,object_id) WHERE NOT EXISTS(SELECT FROM rss_ts_ch.summaries s WHERE s.tenant_id=$1::text::uuid AND s.namespace=$2 AND s.spec_digest=a.spec_digest AND s.lo=a.lo AND s.hi=a.hi AND s.object_id=a.object_id::uuid AND s.semantics=$7 AND s.max_input_revision<=$8 AND (s.dirty_from IS NULL OR s.dirty_from>$8)))")
             .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(specs).bind(starts).bind(ends).bind(ids)
-            .bind(self.spec().semantics()?.as_bytes().as_slice()).bind(ceiling).fetch_one(c).await.map_err(sql_error)
+            .bind(self.spec().semantics()?.as_bytes().as_slice()).bind(check.ceiling).fetch_one(c).await.map(|valid| (true, valid)).map_err(sql_error)
     }
     async fn metadata<C: Clock>(
         &self,
@@ -443,9 +490,13 @@ impl Request for AggregateQuery {
             let value = match cached {
                 Some(v) => v,
                 None => {
-                    store
+                    let result = store
                         .raw_summary(q.spec(), window, published, &fences, deadline)
-                        .await?
+                        .await;
+                    if matches!(result, Err(Error::BudgetExceeded)) {
+                        refs.raw_budget = Some(window);
+                    }
+                    result?
                 }
             };
             let bucket = value.project(q.operation())?;

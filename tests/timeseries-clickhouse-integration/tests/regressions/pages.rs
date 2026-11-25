@@ -5,7 +5,15 @@ pub(super) async fn during_select<T, M>(
     read: impl std::future::Future<Output = T>,
     change: impl std::future::Future<Output = anyhow::Result<M>>,
 ) -> anyhow::Result<T> {
-    proxy.arm(5);
+    during_select_mode(proxy, 5, read, change).await
+}
+pub(super) async fn during_select_mode<T, M>(
+    proxy: &transport::Proxy,
+    mode: u8,
+    read: impl std::future::Future<Output = T>,
+    change: impl std::future::Future<Output = anyhow::Result<M>>,
+) -> anyhow::Result<T> {
+    proxy.arm(mode);
     tokio::pin!(read);
     tokio::select! { _=&mut read=>anyhow::bail!("page completed before SELECT response"), ready=proxy.wait_held()=>ready?, }
     change.await?;

@@ -28,7 +28,7 @@ ref: ClickHouse/clickhouse-rs src/lib.rs@v0.15.3
 ## Installation and authority
 
 The external PG migrator adopts a dedicated NOLOGIN, NOSUPERUSER, NOBYPASSRLS schema
-owner and executes `CONTROL_SQL`. Schema version 3 is fresh-install only. During installation the owner sets
+owner and executes `CONTROL_SQL`. Schema version 4 is fresh-install only. During installation the owner sets
 `installation.max_pending_batches` to a per-namespace publication window from 1 to 16 (default 1).
 All runtime owners consult the same installation row when allocating a revision. Runtime must not be a member of that owner or have
 schema CREATE, installation writes, superuser, BYPASSRLS, CREATEROLE or replication.
@@ -142,9 +142,10 @@ connection before ClickHouse IO. Another short snapshot rechecks control depende
 only the summary objects whose reads were attempted, including failed reads. Changed cache
 references permit one retry at the same ceiling and absolute deadline. A changed aggregate
 continuation dependency or repeatedly unstable reference returns `SnapshotInvalidated`:
-restart from the first page. `HistoryExpired` means required history is unavailable;
+restart from the first page. For aggregate reads, `HistoryExpired` means required history is unavailable;
 `InvalidCursor` covers invalid authentication, expiry or installation binding. A repeatedly
 unstable first page returns `Unavailable`; stable budget exhaustion stays `BudgetExceeded`.
+Raw history/latest cursors report `HistoryExpired` when the namespace fence epoch changes.
 `Limits.max_fences` bounds namespace frontiers
 independently of sample budgets. Scan, output, memory and
 time budgets fail explicitly rather than returning a successful truncated result.

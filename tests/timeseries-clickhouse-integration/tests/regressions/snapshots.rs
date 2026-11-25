@@ -169,6 +169,26 @@ async fn equivalent_recompute_after_unrelated_publication_keeps_dense_cache_usab
     assert!(matches!(page.buckets[0].value, AggregateValue::Count(10)));
     assert_eq!(page.refreshed_through, Some(Timestamp::new(200)?));
     assert!(proxy.raw_read_threads().await.is_empty()); // dense raw fallback would exceed 2 points
+    confirmed(
+        f.write(&batch("late", vec![sample(&d, "late", 150, 10)?])?)
+            .await?,
+    )?;
+    // A stable dirty cache with no replacement remains a real budget failure.
+    let fresh = store.aggregate(&q, None, deadline()?).await?;
+    assert!(matches!(
+        store.aggregate(&q, fresh.next.as_ref(), deadline()?).await,
+        Err(Error::BudgetExceeded)
+    ));
+    recompute(&f, "future", &all).await?;
+    assert!(matches!(
+        store.aggregate(&q, Some(&cursor), deadline()?).await,
+        Err(Error::SnapshotInvalidated)
+    ));
+    let fresh = store.aggregate(&q, None, deadline()?).await?;
+    let fresh = store
+        .aggregate(&q, fresh.next.as_ref(), deadline()?)
+        .await?;
+    assert!(matches!(fresh.buckets[0].value, AggregateValue::Count(11)));
     Ok(())
 }
 
@@ -198,8 +218,9 @@ async fn unused_reference_changes_do_not_retry_raw_reads_and_unlink_retries_used
     .await??;
     assert_eq!(proxy.raw_read_threads().await.len(), 1);
     let cursor = first.next.ok_or(Error::Invariant)?;
-    let last = during_select(
+    let last = super::pages::during_select_mode(
         &proxy,
+        6,
         store.aggregate(&q, Some(&cursor), deadline()?),
         async {
             assert!(matches!(
@@ -459,7 +480,27 @@ async fn deletion_at_bucket_end_does_not_change_the_preceding_bucket() -> anyhow
         serde_json::to_value(&f.store.aggregate(&all, None, deadline()?).await?.buckets[0])?,
         serde_json::to_value(&baseline)?
     );
+    let coarse = authorized(
+        SummarySpec::new(
+            b.stream().clone(),
+            b.samples()[0].input().series.clone(),
+            NonZeroU64::new(200).ok_or(Error::Invariant)?,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )?,
+        window(0, 200)?,
+        1,
+        AggregateOp::Count,
+    )?;
+    let raw_coarse = f.store.aggregate(&coarse, None, deadline()?).await?.buckets;
+    assert!(raw_coarse[0].completeness.contains(&Completeness::Gaps));
     recompute(&f, "recompute", &all).await?;
+    let cached_coarse = f.store.aggregate(&coarse, None, deadline()?).await?;
+    assert_eq!(cached_coarse.refreshed_through, Some(Timestamp::new(200)?));
+    assert_eq!(
+        serde_json::to_value(cached_coarse.buckets)?,
+        serde_json::to_value(raw_coarse)?
+    );
     assert_eq!(
         serde_json::to_value(&f.store.aggregate(&all, None, deadline()?).await?.buckets[0])?,
         serde_json::to_value(&baseline)?
@@ -565,6 +606,21 @@ async fn close_and_physical_prune_separate_reopen_from_unrecoverable_history() -
         f.store.aggregate(&q, Some(&cursor), deadline()?).await,
         Err(Error::HistoryExpired)
     ));
+    let wrong_key = f
+        .store
+        .owner
+        .bind_tenant(
+            TenantId::parse(TENANT)?,
+            credentials("ch_reader")?,
+            CursorKey::new([43; 32]),
+            NonZeroU64::MIN,
+            deadline()?,
+        )
+        .await?;
+    assert!(matches!(
+        wrong_key.aggregate(&q, Some(&cursor), deadline()?).await,
+        Err(Error::InvalidCursor)
+    ));
     Ok(())
 }
 
@@ -601,6 +657,308 @@ async fn two_reference_replacements_exhaust_the_bounded_retry_without_moving_the
             proxy.release();
         }
         assert!(matches!(reading.await,Err(e) if e==expected));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn first_page_retry_keeps_the_original_publication_ceiling() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-first-retry").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch(
+        "seed",
+        vec![sample(&d, "a", 10, 1)?, sample(&d, "b", 110, 2)?],
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let q = count_query(&b, 200, 1)?;
+    let all = count_query(&b, 200, 2)?;
+    recompute(&f, "cache", &all).await?;
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let store = proxy.store(f.pool.clone()).await?;
+    let first = during_select(&proxy, store.aggregate(&q, None, deadline()?), async {
+        confirmed(
+            f.write(&batch(
+                "late",
+                vec![sample(&d, "late-a", 20, 3)?, sample(&d, "late-b", 120, 4)?],
+            )?)
+            .await?,
+        )?;
+        recompute(&f, "future", &all).await
+    })
+    .await??;
+    assert!(matches!(first.buckets[0].value, AggregateValue::Count(1)));
+    let next = store
+        .aggregate(&q, first.next.as_ref(), deadline()?)
+        .await?;
+    assert!(matches!(next.buckets[0].value, AggregateValue::Count(1)));
+    let fresh = store.aggregate(&all, None, deadline()?).await?;
+    assert!(
+        fresh
+            .buckets
+            .iter()
+            .all(|b| matches!(b.value, AggregateValue::Count(2)))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn predecessor_fences_and_retention_preserve_counter_semantics() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-prior-retention").await?;
+    let mut def = definition(TENANT)?.spec().clone();
+    def.metric = Metric::Counter {
+        number: NumberKind::U64,
+        temporality: Temporality::Cumulative,
+    };
+    let d = Definition::new(def)?;
+    f.register(&d).await?;
+    let point = |name: &str, at: i64, value: u64| -> anyhow::Result<Sample> {
+        Ok(Sample::new(SampleInput {
+            stream: Stream::new(d.spec().scope.clone(), id("sensor")?, id("generation")?),
+            series: Series::new(
+                d.clone(),
+                id("device")?,
+                id("resource")?,
+                Default::default(),
+            )?,
+            id: id(name)?,
+            sequence: at as u64,
+            observed_at: Timestamp::new(at)?,
+            interval: Some(window(0, at)?),
+            reading: Reading::Valid(Value::Number(Number::U64(value))),
+        })?)
+    };
+    let b = batch(
+        "seed",
+        vec![
+            point("prior", 10, 200)?,
+            point("first", 105, 100)?,
+            point("second", 205, 110)?,
+        ],
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let spec = SummarySpec::new(
+        b.stream().clone(),
+        b.samples()[0].input().series.clone(),
+        NonZeroU64::new(100).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        NonZeroU64::new(10),
+    )?;
+    let all = authorized(spec.clone(), window(100, 300)?, 2, AggregateOp::Increase)?;
+    let q = authorized(spec, window(100, 300)?, 1, AggregateOp::Increase)?;
+    recompute(&f, "cache", &all).await?;
+    let before = f.store.aggregate(&q, None, deadline()?).await?;
+    assert!(
+        before.buckets[0]
+            .completeness
+            .contains(&Completeness::ResetBoundary)
+    );
+    let sel = q.request().spec().selection();
+    f.maintain(
+        "hide-prior-gap",
+        MaintenanceAction::Delete {
+            selection: sel.clone(),
+            window: window(60, 61)?,
+            restore_until: Timestamp::new(i64::MAX)?,
+        },
+    )
+    .await?;
+    assert!(matches!(
+        f.store
+            .aggregate(&q, before.next.as_ref(), deadline()?)
+            .await,
+        Err(Error::SnapshotInvalidated)
+    ));
+    let cut = f.store.aggregate(&q, None, deadline()?).await?;
+    assert!(
+        !cut.buckets[0]
+            .completeness
+            .contains(&Completeness::ResetBoundary)
+    );
+    f.maintain(
+        "restore-prior-gap",
+        MaintenanceAction::Restore {
+            selection: sel.clone(),
+            window: window(60, 61)?,
+            deletion_fence: id("hide-prior-gap")?,
+        },
+    )
+    .await?;
+    assert!(matches!(
+        f.store.aggregate(&q, cut.next.as_ref(), deadline()?).await,
+        Err(Error::SnapshotInvalidated)
+    ));
+    recompute(&f, "restored", &all).await?;
+    f.maintain(
+        "cutoff",
+        MaintenanceAction::AdvanceCutoff {
+            selection: sel.clone(),
+            before: Timestamp::new(100)?,
+        },
+    )
+    .await?;
+    assert!(matches!(
+        f.maintain(
+            "prune",
+            MaintenanceAction::Prune {
+                selection: sel,
+                raw_before: Timestamp::new(100)?,
+                summaries_before: Timestamp::new(0)?
+            }
+        )
+        .await?,
+        MaintenanceProgress::Complete { .. }
+    ));
+    confirmed(
+        f.write(&batch("late", vec![point("late", 110, 101)?])?)
+            .await?,
+    )?;
+    let raw = f.store.aggregate(&all, None, deadline()?).await?;
+    assert!(
+        raw.buckets[0]
+            .completeness
+            .contains(&Completeness::ResetBoundary)
+    );
+    recompute(&f, "after-prune", &all).await?;
+    let cached = f.store.aggregate(&all, None, deadline()?).await?;
+    assert_eq!(
+        serde_json::to_value(raw.buckets)?,
+        serde_json::to_value(cached.buckets)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reclaim_waits_for_summary_attempts_and_blocks_future_recompute() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-reclaim-summary").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch("prototype", vec![sample(&d, "prototype", 10, 1)?])?;
+    let q = count_query(&b, 100, 1)?;
+    f.maintain(
+        "close",
+        MaintenanceAction::CloseStream {
+            stream: b.stream().clone(),
+        },
+    )
+    .await?;
+    let request = Authorized::<MaintenanceRequest>::verify(
+        &authority(TENANT)?,
+        MaintenanceRequest::new(
+            id("pending-summary")?,
+            MaintenanceAction::Recompute {
+                spec: q.request().spec().clone(),
+                window: window(0, 100)?,
+            },
+            MaintenanceBudget {
+                rows: NonZeroU32::MIN,
+                buckets: NonZeroU32::MIN,
+            },
+        )?,
+    )?;
+    let MaintenanceProgress::More { next, .. } =
+        confirmed(f.store.step(&request, None, deadline()?).await?)?
+    else {
+        anyhow::bail!("missing prepared summary");
+    };
+    assert!(matches!(
+        f.maintain(
+            "reclaim-pending",
+            MaintenanceAction::Reclaim {
+                stream: b.stream().clone()
+            }
+        )
+        .await?,
+        MaintenanceProgress::Blocked {
+            reason: MaintenanceBlock::PendingWrite,
+            ..
+        }
+    ));
+    assert!(matches!(
+        f.maintain(
+            "drain",
+            MaintenanceAction::Prune {
+                selection: q.request().spec().selection(),
+                raw_before: Timestamp::new(0)?,
+                summaries_before: Timestamp::new(100)?
+            }
+        )
+        .await?,
+        MaintenanceProgress::Complete { .. }
+    ));
+    assert!(matches!(
+        f.maintain(
+            "reclaim",
+            MaintenanceAction::Reclaim {
+                stream: b.stream().clone()
+            }
+        )
+        .await?,
+        MaintenanceProgress::Complete { .. }
+    ));
+    assert!(matches!(
+        f.store.step(&request, Some(&next), deadline()?).await,
+        Err(Error::HistoryExpired)
+    ));
+    assert!(matches!(
+        f.maintain(
+            "new-summary",
+            MaintenanceAction::Recompute {
+                spec: q.request().spec().clone(),
+                window: window(0, 100)?
+            }
+        )
+        .await
+        .unwrap_err()
+        .downcast_ref::<Error>(),
+        Some(Error::HistoryExpired)
+    ));
+    assert_eq!(
+        f.ch.sql("SELECT count() FROM rss_ts_ch.summaries")
+            .await?
+            .trim(),
+        "0"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_scan_memory_and_result_limits_remain_budget_errors() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-read-budgets").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    confirmed(
+        f.write(&batch(
+            "seed",
+            (0..20)
+                .map(|n| sample(&d, &format!("p{n}"), n + 1, n as u64))
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        )?)
+        .await?,
+    )?;
+    let q = Authorized::<Query>::verify(&authority(TENANT)?, query(&d, QueryMode::History, 20)?)?;
+    for kind in ["scan-rows", "scan-bytes", "memory", "result"] {
+        let mut caps = limits()?;
+        match kind {
+            "scan-rows" => caps.max_scan_rows = NonZeroU64::MIN,
+            "scan-bytes" => caps.max_scan_bytes = NonZeroU64::MIN,
+            "memory" => caps.max_memory_bytes = NonZeroU64::MIN,
+            _ => caps.max_bytes = NonZeroU32::MIN,
+        }
+        let store = Fixture::connect_options(
+            &f.ch,
+            f.pool.clone(),
+            TENANT,
+            "ch_reader",
+            "ch_writer",
+            caps,
+        )
+        .await?;
+        let result = store.query(&q, None, deadline()?).await;
+        assert!(
+            matches!(result, Err(Error::BudgetExceeded)),
+            "{kind}: {result:?}"
+        );
     }
     Ok(())
 }

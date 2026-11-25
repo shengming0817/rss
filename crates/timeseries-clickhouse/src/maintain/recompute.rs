@@ -42,6 +42,12 @@ pub(super) async fn step<C: Clock>(
     {
         return Err(Error::InvalidInput);
     }
+    let stream = spec.stream();
+    let reclaimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.streams WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND reclaimed)")
+        .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(stream.source().as_str()).bind(stream.generation().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
+    if reclaimed {
+        return Err(Error::HistoryExpired);
+    }
     if state.publish.is_some() {
         return publish(store, c, r, state, revision, deadline).await;
     }
@@ -108,7 +114,7 @@ pub(super) async fn step<C: Clock>(
             input.id.as_str().to_owned(),
         ));
         let builder = fold.builder.as_mut().ok_or(Error::Invariant)?;
-        aggregate::mask(builder, &fences, spec, sample.input().observed_at)?;
+        aggregate::mask(builder, &fences, spec, bucket, sample.input().observed_at)?;
         builder.push(sample, store.limits.max_points.get() as usize)?;
         processed += 1;
     }

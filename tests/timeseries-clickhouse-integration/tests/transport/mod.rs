@@ -214,6 +214,8 @@ async fn serve(
         .unwrap_or_default();
     let body_sql = String::from_utf8_lossy(&data);
     let reads_raw = sql.contains("FROM rss_ts_ch.raw") || body_sql.contains("FROM rss_ts_ch.raw");
+    let reads_summary = sql.contains("FROM rss_ts_ch.summaries FINAL")
+        || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
     let reads_page = sql.contains("FROM rss_ts_ch.raw FINAL")
         || body_sql.contains("FROM rss_ts_ch.raw FINAL")
         || sql.contains("FROM rss_ts_ch.summaries FINAL")
@@ -240,7 +242,8 @@ async fn serve(
     let mode = state
         .mode
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
-            ((m == 5 && reads_page) || (m != 5 && is_insert)).then_some(0)
+            ((m == 5 && reads_page) || (m == 6 && reads_summary) || (m < 5 && is_insert))
+                .then_some(0)
         })
         .unwrap_or(0);
     let captured = Captured {
@@ -254,6 +257,15 @@ async fn serve(
     if mode == 2 {
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("withheld before registration"));
+    }
+    if mode == 6 {
+        state.entered.add_permits(1);
+        state
+            .release
+            .acquire()
+            .await
+            .map_err(|_| std::io::Error::other("gate closed"))?
+            .forget();
     }
     let response = forward(&state, captured)
         .await

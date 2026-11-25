@@ -60,10 +60,7 @@ async fn safe_limit<C: Clock>(
                 .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
                 .max(0),
         );
-        if matches!(
-            spec.series().definition().spec().metric,
-            Metric::Bool | Metric::State { .. }
-        ) && spec.coverage() == CoveragePolicy::ObservedOnly
+        if crate::aggregate::needs_prior(&spec)
             && let Some(prior) = store
                 .predecessor(&spec, raw_before, boundary, &fences, deadline)
                 .await?
@@ -339,6 +336,12 @@ pub(super) async fn reclaim<C: Clock>(
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_optional(&mut *c).await.map_err(sql_error)?;
     if closed != Some(true) {
         return Ok(Step::Blocked(MaintenanceBlock::StreamOpen));
+    }
+    // Attempts are namespace-scoped, as is their revocation/drain protocol.
+    let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND target='summaries' AND allowed)")
+        .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
+    if pending {
+        return Ok(Step::Blocked(MaintenanceBlock::PendingWrite));
     }
     let predicate = format!(
         "tenant={} AND namespace={} AND source={} AND generation={}",

@@ -3,7 +3,7 @@
 CREATE SCHEMA rss_ts_ch;
 CREATE TABLE rss_ts_ch.installation (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 3 CHECK(version=3),
+ id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 4 CHECK(version=4),
  max_pending_batches integer NOT NULL DEFAULT 1 CHECK(max_pending_batches BETWEEN 1 AND 16)
 );
 INSERT INTO rss_ts_ch.installation DEFAULT VALUES;
