@@ -58,12 +58,14 @@ CREATE TABLE rss_ts_ch.identities (
 CREATE TABLE rss_ts_ch.attempts (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), query_id uuid NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+ source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
  target text NOT NULL CHECK(target IN ('raw','summaries')),
  digest text NOT NULL CHECK(length(digest)=64), revision bigint NOT NULL CHECK(revision>=0),
  allowed boolean NOT NULL DEFAULT true, drained boolean NOT NULL DEFAULT false,
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces,
  CHECK(NOT allowed OR NOT drained)
 );
+CREATE INDEX stream_attempts ON rss_ts_ch.attempts(tenant_id,namespace,source,generation,target);
 CREATE UNIQUE INDEX raw_batch_attempt ON rss_ts_ch.attempts(tenant_id,namespace,revision) WHERE target='raw';
 CREATE TABLE rss_ts_ch.fences (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
@@ -91,6 +93,7 @@ CREATE TABLE rss_ts_ch.summaries (
  series text COLLATE "C" NOT NULL CHECK(length(series)=64),
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
  max_input_revision bigint NOT NULL CHECK(max_input_revision>=0),
+ dependency_start bigint NOT NULL CHECK(dependency_start>=0 AND dependency_start<=lo),
  object_id uuid NOT NULL, dirty_from bigint CHECK(dirty_from>=0),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces

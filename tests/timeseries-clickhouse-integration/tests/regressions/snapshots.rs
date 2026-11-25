@@ -867,6 +867,26 @@ async fn reclaim_waits_for_summary_attempts_and_blocks_future_recompute() -> any
     else {
         anyhow::bail!("missing prepared summary");
     };
+    let other = Stream::new(
+        b.stream().scope().clone(),
+        id("other-closed")?,
+        id("generation")?,
+    );
+    f.maintain(
+        "close-other",
+        MaintenanceAction::CloseStream {
+            stream: other.clone(),
+        },
+    )
+    .await?;
+    assert!(matches!(
+        f.maintain(
+            "reclaim-other",
+            MaintenanceAction::Reclaim { stream: other }
+        )
+        .await?,
+        MaintenanceProgress::Complete { .. }
+    ));
     assert!(matches!(
         f.maintain(
             "reclaim-pending",
@@ -971,5 +991,250 @@ async fn provider_scan_memory_and_result_limits_remain_budget_errors() -> anyhow
             "{kind}: {result:?}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn newly_linked_equivalent_summary_recovers_an_over_budget_continuation() -> anyhow::Result<()>
+{
+    let f = Fixture::new("ch-new-equivalent").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch(
+        "seed",
+        (0..10)
+            .map(|n| sample(&d, &format!("p{n}"), 101 + n, n as u64))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let q = count_query(&b, 200, 1)?;
+    let cursor = first_cursor(&f, &q).await?;
+    let all = count_query(&b, 200, 2)?;
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let mut caps = limits()?;
+    caps.max_points = NonZeroU32::new(2).ok_or(Error::Invariant)?;
+    let store = proxy.store_with_limits(f.pool.clone(), caps).await?;
+    let page = during_select(
+        &proxy,
+        store.aggregate(&q, Some(&cursor), deadline()?),
+        async {
+            confirmed(f.write(&stream_batch(&d, "other", "other", 1)?).await?)?;
+            recompute(&f, "first-cache", &all).await
+        },
+    )
+    .await??;
+    assert!(matches!(page.buckets[0].value, AggregateValue::Count(10)));
+    assert_eq!(page.refreshed_through, Some(Timestamp::new(200)?));
+    Ok(())
+}
+
+#[tokio::test]
+async fn out_of_range_delete_restore_preserves_dense_gauge_cache() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-outside-fence").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch(
+        "seed",
+        (0..10)
+            .map(|n| sample(&d, &format!("p{n}"), 201 + n, n as u64))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let all = count_query(&b, 300, 3)?;
+    recompute(&f, "cache", &all).await?;
+    let q = authorized(
+        all.request().spec().clone(),
+        window(100, 300)?,
+        1,
+        AggregateOp::Count,
+    )?;
+    let cursor = first_cursor(&f, &q).await?;
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let mut caps = limits()?;
+    caps.max_points = NonZeroU32::new(2).ok_or(Error::Invariant)?;
+    let store = proxy.store_with_limits(f.pool.clone(), caps).await?;
+    for restoring in [false, true] {
+        let action = if restoring {
+            MaintenanceAction::Restore {
+                selection: q.request().spec().selection(),
+                window: window(10, 20)?,
+                deletion_fence: id("outside-hide")?,
+            }
+        } else {
+            MaintenanceAction::Delete {
+                selection: q.request().spec().selection(),
+                window: window(10, 20)?,
+                restore_until: Timestamp::new(i64::MAX)?,
+            }
+        };
+        f.maintain(
+            if restoring {
+                "outside-restore"
+            } else {
+                "outside-hide"
+            },
+            action,
+        )
+        .await?;
+        let page = store.aggregate(&q, Some(&cursor), deadline()?).await?;
+        assert!(matches!(page.buckets[0].value, AggregateValue::Count(10)));
+        assert_eq!(page.refreshed_through, Some(Timestamp::new(300)?));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn actual_predecessor_bounds_fences_for_raw_and_cached_continuations() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-actual-prior").await?;
+    let mut def = definition(TENANT)?.spec().clone();
+    def.metric = Metric::Counter {
+        number: NumberKind::U64,
+        temporality: Temporality::Cumulative,
+    };
+    let d = Definition::new(def)?;
+    f.register(&d).await?;
+    let point = |name: &str, at: i64, value: u64| -> anyhow::Result<Sample> {
+        Ok(Sample::new(SampleInput {
+            stream: Stream::new(d.spec().scope.clone(), id("sensor")?, id("generation")?),
+            series: Series::new(
+                d.clone(),
+                id("device")?,
+                id("resource")?,
+                Default::default(),
+            )?,
+            id: id(name)?,
+            sequence: at as u64,
+            observed_at: Timestamp::new(at)?,
+            interval: Some(window(0, at)?),
+            reading: Reading::Valid(Value::Number(Number::U64(value))),
+        })?)
+    };
+    let b = batch(
+        "seed",
+        vec![
+            point("prior", 90, 100)?,
+            point("first", 105, 110)?,
+            point("second", 205, 120)?,
+        ],
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let spec = SummarySpec::new(
+        b.stream().clone(),
+        b.samples()[0].input().series.clone(),
+        NonZeroU64::new(100).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        NonZeroU64::new(10),
+    )?;
+    let q = authorized(spec.clone(), window(100, 300)?, 1, AggregateOp::Increase)?;
+    let all = authorized(spec, window(100, 300)?, 2, AggregateOp::Increase)?;
+    for cached in [false, true] {
+        if cached {
+            recompute(&f, "cache", &all).await?;
+        }
+        let cursor = first_cursor(&f, &q).await?;
+        let name = if cached { "cache-hide" } else { "raw-hide" };
+        f.maintain(
+            name,
+            MaintenanceAction::Delete {
+                selection: q.request().spec().selection(),
+                window: window(10, 20)?,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+        )
+        .await?;
+        f.store.aggregate(&q, Some(&cursor), deadline()?).await?;
+        f.maintain(
+            &format!("{name}-restore"),
+            MaintenanceAction::Restore {
+                selection: q.request().spec().selection(),
+                window: window(10, 20)?,
+                deletion_fence: id(name)?,
+            },
+        )
+        .await?;
+        f.store.aggregate(&q, Some(&cursor), deadline()?).await?;
+    }
+    let cursor = first_cursor(&f, &q).await?;
+    f.maintain(
+        "relevant-hide",
+        MaintenanceAction::Delete {
+            selection: q.request().spec().selection(),
+            window: window(95, 96)?,
+            restore_until: Timestamp::new(i64::MAX)?,
+        },
+    )
+    .await?;
+    assert!(matches!(
+        f.store.aggregate(&q, Some(&cursor), deadline()?).await,
+        Err(Error::SnapshotInvalidated)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn hold_last_ignores_pruned_history_outside_its_contribution_window() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-hold-prune").await?;
+    let mut def = definition(TENANT)?.spec().clone();
+    def.metric = Metric::Bool;
+    let d = Definition::new(def)?;
+    f.register(&d).await?;
+    let point = |name: &str, at: i64| -> anyhow::Result<Sample> {
+        Ok(Sample::new(SampleInput {
+            stream: Stream::new(d.spec().scope.clone(), id("sensor")?, id("generation")?),
+            series: Series::new(
+                d.clone(),
+                id("device")?,
+                id("resource")?,
+                Default::default(),
+            )?,
+            id: id(name)?,
+            sequence: at as u64,
+            observed_at: Timestamp::new(at)?,
+            interval: None,
+            reading: Reading::Valid(Value::Bool(true)),
+        })?)
+    };
+    let b = batch("seed", vec![point("old", 10)?, point("current", 105)?])?;
+    confirmed(f.write(&b).await?)?;
+    let spec = SummarySpec::new(
+        b.stream().clone(),
+        b.samples()[0].input().series.clone(),
+        NonZeroU64::new(100).ok_or(Error::Invariant)?,
+        CoveragePolicy::HoldLast(NonZeroU64::new(10).ok_or(Error::Invariant)?),
+        None,
+    )?;
+    let q = authorized(spec, window(100, 200)?, 10, AggregateOp::Timeline)?;
+    f.maintain(
+        "cut",
+        MaintenanceAction::AdvanceCutoff {
+            selection: q.request().spec().selection(),
+            before: Timestamp::new(50)?,
+        },
+    )
+    .await?;
+    f.maintain(
+        "prune",
+        MaintenanceAction::Prune {
+            selection: q.request().spec().selection(),
+            raw_before: Timestamp::new(50)?,
+            summaries_before: Timestamp::new(0)?,
+        },
+    )
+    .await?;
+    let raw = f.store.aggregate(&q, None, deadline()?).await?;
+    recompute(&f, "cache", &q).await?;
+    let cached = f.store.aggregate(&q, None, deadline()?).await?;
+    assert_eq!(
+        serde_json::to_value(raw.buckets)?,
+        serde_json::to_value(cached.buckets)?
+    );
+    // A predecessor exactly at the hold horizon may affect a transition at the
+    // window start, but contributes no zero-length segment.
+    confirmed(
+        f.write(&batch("boundary", vec![point("boundary", 90)?])?)
+            .await?,
+    )?;
+    f.store.aggregate(&q, None, deadline()?).await?;
+    recompute(&f, "boundary-cache", &q).await?;
     Ok(())
 }

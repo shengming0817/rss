@@ -8,6 +8,7 @@ use crate::{
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
 #[derive(Clone)]
 struct SummaryRef {
@@ -15,6 +16,7 @@ struct SummaryRef {
     lo: i64,
     hi: i64,
     object_id: String,
+    dependency_start: i64,
 }
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for SummaryRef {
     fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
@@ -23,14 +25,22 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for SummaryRef {
             lo: row.try_get("lo")?,
             hi: row.try_get("hi")?,
             object_id: row.try_get("object_id")?,
+            dependency_start: row.try_get("dependency_start")?,
         })
     }
+}
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Position {
+    at: Timestamp,
+    dependency_start: i64,
 }
 pub(crate) struct References {
     rows: Vec<SummaryRef>,
     end: i64,
     attempted: Vec<SummaryRef>,
     raw_budget: Option<Interval>,
+    dependency_start: i64,
+    fences: Vec<Fence>,
 }
 pub(crate) fn needs_prior(spec: &SummarySpec) -> bool {
     matches!(
@@ -40,6 +50,36 @@ pub(crate) fn needs_prior(spec: &SummarySpec) -> bool {
             ..
         } | Metric::Bool
             | Metric::State { .. }
+    )
+}
+pub(crate) fn dependency_start(spec: &SummarySpec, start: Timestamp) -> i64 {
+    if !needs_prior(spec) {
+        return start.micros();
+    }
+    match (&spec.series().definition().spec().metric, spec.coverage()) {
+        (Metric::Bool | Metric::State { .. }, CoveragePolicy::HoldLast(n)) => start
+            .micros()
+            .saturating_sub(i64::try_from(n.get()).unwrap_or(i64::MAX))
+            .max(0),
+        _ => 0,
+    }
+}
+fn dependency_tag<C: Clock>(
+    store: &Operation<'_, C>,
+    q: &AggregateQuery,
+    fences: &[Fence],
+    start: i64,
+    lifecycle: [u8; 32],
+) -> Result<[u8; 32], Error> {
+    let fences: Vec<_> = fences
+        .iter()
+        .filter(|f| f.window.end().micros() > start)
+        .collect();
+    store.material.key.page_state(
+        AggregateQuery::DOMAIN,
+        q.binding()?,
+        store.instance,
+        &(fences, lifecycle),
     )
 }
 pub(crate) fn mask(
@@ -92,8 +132,9 @@ impl<C: Clock> Operation<'_, C> {
             return Ok(None);
         } // reason: Gauge and delta intervals do not need a predecessor.
         let condition = format!(
-            "{} AND revision<={boundary} AND observed_at<{}{}",
+            "{} AND revision<={boundary} AND observed_at>={} AND observed_at<{}{}",
             selection(&spec.selection())?,
+            dependency_start(spec, at),
             at.micros(),
             visible(fences)?
         );
@@ -114,15 +155,21 @@ impl<C: Clock> Operation<'_, C> {
         boundary: i64,
         fences: &[Fence],
         deadline: Deadline,
-    ) -> Result<(SummaryBuilder, i64), Error> {
+    ) -> Result<(SummaryBuilder, i64, i64), Error> {
         let prior = self
             .predecessor(spec, window.start(), boundary, fences, deadline)
             .await?;
+        let dependency_start = prior
+            .as_ref()
+            .map_or(dependency_start(spec, window.start()), |p| {
+                p.sample.input().observed_at.micros()
+            });
         if needs_prior(spec)
             && fences.iter().any(|f| {
                 f.kind == "pruned"
                     && control::overlaps(&f.selection, &spec.selection())
                     && f.window.start() < window.start()
+                    && f.window.end().micros() > dependency_start
                     && prior
                         .as_ref()
                         .is_none_or(|p| p.sample.input().observed_at < f.window.end())
@@ -135,7 +182,7 @@ impl<C: Clock> Operation<'_, C> {
         if let Some(prior) = prior {
             builder.push(prior.sample, self.limits.max_points.get() as usize)?;
         }
-        Ok((builder, max_input_revision))
+        Ok((builder, max_input_revision, dependency_start))
     }
     async fn raw_summary(
         &self,
@@ -144,6 +191,7 @@ impl<C: Clock> Operation<'_, C> {
         boundary: i64,
         fences: &[Fence],
         deadline: Deadline,
+        dependency: &mut i64,
     ) -> Result<Summary, Error> {
         if fences.iter().any(|f| {
             f.kind == "pruned"
@@ -153,9 +201,10 @@ impl<C: Clock> Operation<'_, C> {
         }) {
             return Err(Error::HistoryExpired);
         }
-        let (mut builder, _) = self
+        let (mut builder, _, start) = self
             .builder(spec, window, boundary, fences, deadline)
             .await?;
+        *dependency = start;
         let condition = format!(
             "{} AND revision<={boundary} AND observed_at>={} AND observed_at<{}{}",
             selection(&spec.selection())?,
@@ -223,19 +272,25 @@ impl<C: Clock> Operation<'_, C> {
         &self,
         c: &mut PgConnection,
         q: &AggregateQuery,
-        view: &View<Timestamp>,
+        view: &View<Position>,
     ) -> Result<References, Error> {
+        let dependency_start = view.position.as_ref().map_or(
+            dependency_start(q.spec(), q.query().window().start()),
+            |p| p.dependency_start,
+        );
         if !view.exists {
             return Ok(References {
                 rows: Vec::new(),
                 attempted: Vec::new(),
                 raw_budget: None,
+                dependency_start,
+                fences: view.fences.clone(),
                 end: q.query().window().start().micros(),
             });
         }
         let scope = q.spec().stream().scope();
         let range = q.query().window();
-        let start = view.position.unwrap_or(range.start());
+        let start = view.position.as_ref().map_or(range.start(), |p| p.at);
         if start < range.start() || start >= range.end() {
             return Err(Error::InvalidCursor);
         }
@@ -252,7 +307,7 @@ impl<C: Clock> Operation<'_, C> {
         // Fetch whole buckets in chronological order. If the reference budget runs out
         // partway through a later bucket, resume at that bucket with a fresh page budget.
         let mut rows: Vec<SummaryRef> = sqlx::query_as(
-            "SELECT spec_digest,lo,hi,object_id::text FROM rss_ts_ch.summaries
+            "SELECT spec_digest,lo,hi,object_id::text,dependency_start FROM rss_ts_ch.summaries
             WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5
               AND max_input_revision<=$7 AND (dirty_from IS NULL OR dirty_from>$7) AND lo/$8::bigint=(hi-1)/$8::bigint
             ORDER BY lo,hi,object_id LIMIT $6",
@@ -282,6 +337,8 @@ impl<C: Clock> Operation<'_, C> {
             end,
             attempted: Vec::new(),
             raw_budget: None,
+            dependency_start,
+            fences: view.fences.clone(),
         })
     }
     async fn cached(
@@ -355,7 +412,7 @@ fn cost(bucket: &AggregateBucket) -> usize {
     }
 }
 impl Request for AggregateQuery {
-    type Position = Timestamp;
+    type Position = Position;
     type Metadata = References;
     type Page = AggregatePage;
     const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.aggregate.v3";
@@ -371,6 +428,7 @@ impl Request for AggregateQuery {
         store: &Operation<'_, C>,
         c: &mut PgConnection,
         _: i64,
+        position: Option<&Position>,
     ) -> Result<Dependencies, Error> {
         let stream = self.spec().stream();
         let scope = stream.scope();
@@ -381,19 +439,32 @@ impl Request for AggregateQuery {
         if reclaimed {
             return Err(Error::HistoryExpired);
         }
-        let start = if needs_prior(self.spec()) {
-            0
-        } else {
-            self.query().window().start().micros()
-        };
+        let start = position.map_or(
+            dependency_start(self.spec(), self.query().window().start()),
+            |p| p.dependency_start,
+        );
         let fences = control::visible_fences(c, self.query(), start, store.limits, true).await?;
         let tag = store.material.key.page_state(
             Self::DOMAIN,
             self.binding()?,
             store.instance,
-            &(&fences, closed),
+            &closed,
         )?;
         Ok(Dependencies { fences, tag })
+    }
+    fn state<C: Clock>(
+        &self,
+        store: &Operation<'_, C>,
+        metadata: &References,
+        tag: [u8; 32],
+    ) -> Result<[u8; 32], Error> {
+        dependency_tag(
+            store,
+            self,
+            &metadata.fences,
+            metadata.dependency_start,
+            tag,
+        )
     }
     async fn recheck<C: Clock>(
         &self,
@@ -402,28 +473,42 @@ impl Request for AggregateQuery {
         metadata: &References,
         check: Recheck,
     ) -> Result<(bool, bool), Error> {
-        let deps = self.dependencies(store, c, check.fence).await?;
-        if deps.tag != check.tag {
+        let position = Position {
+            at: self.query().window().start(),
+            dependency_start: metadata.dependency_start,
+        };
+        let deps = self
+            .dependencies(store, c, check.fence, Some(&position))
+            .await?;
+        if dependency_tag(
+            store,
+            self,
+            &deps.fences,
+            metadata.dependency_start,
+            deps.tag,
+        )? != check.tag
+        {
             return Ok((false, false));
         }
-        if check.continuation
-            && check.published > check.ceiling
-            && let Some(window) = metadata.raw_budget
-        {
-            let latest = store
-                .references(
-                    c,
-                    self,
-                    &View {
-                        published: check.published,
-                        fences: Vec::new(),
-                        position: Some(window.start()),
-                        exists: true,
-                    },
-                )
-                .await?;
-            if coverage(&latest.rows, window)?.is_some() {
-                return Err(Error::SnapshotInvalidated);
+        if let Some(window) = metadata.raw_budget {
+            let view = |published| View {
+                published,
+                fences: Vec::new(),
+                position: Some(Position {
+                    at: window.start(),
+                    dependency_start: metadata.dependency_start,
+                }),
+                exists: true,
+            };
+            let original = store.references(c, self, &view(check.ceiling)).await?;
+            if coverage(&original.rows, window)?.is_some() {
+                return Ok((true, false));
+            }
+            if check.continuation && check.published > check.ceiling {
+                let latest = store.references(c, self, &view(check.published)).await?;
+                if coverage(&latest.rows, window)?.is_some() {
+                    return Err(Error::SnapshotInvalidated);
+                }
             }
         }
         if metadata.attempted.is_empty() {
@@ -451,19 +536,22 @@ impl Request for AggregateQuery {
         &self,
         store: &Operation<'_, C>,
         c: &mut PgConnection,
-        view: &View<Timestamp>,
+        view: &View<Position>,
     ) -> Result<References, Error> {
         store.references(c, self, view).await
     }
     async fn read<C: Clock>(
         &self,
         store: &Operation<'_, C>,
-        view: View<Timestamp>,
+        view: View<Position>,
         refs: &mut References,
         deadline: Deadline,
-    ) -> Result<(AggregatePage, Option<Timestamp>), Error> {
+    ) -> Result<(AggregatePage, Option<Position>), Error> {
         let q = self;
-        let mut at = view.position.unwrap_or(q.query().window().start());
+        let mut at = view
+            .position
+            .as_ref()
+            .map_or(q.query().window().start(), |p| p.at);
         let fences = view.fences;
         let mut buckets = Vec::new();
         let mut used = 0usize;
@@ -477,6 +565,15 @@ impl Request for AggregateQuery {
         {
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
+            if at == q.query().window().start()
+                && let Some(path) = coverage(&refs.rows, window)?
+            {
+                refs.dependency_start = path
+                    .iter()
+                    .map(|r| r.dependency_start)
+                    .min()
+                    .unwrap_or(refs.dependency_start);
+            }
             let cached = store
                 .cached(
                     &refs.rows,
@@ -490,9 +587,13 @@ impl Request for AggregateQuery {
             let value = match cached {
                 Some(v) => v,
                 None => {
+                    let mut start = refs.dependency_start;
                     let result = store
-                        .raw_summary(q.spec(), window, published, &fences, deadline)
+                        .raw_summary(q.spec(), window, published, &fences, deadline, &mut start)
                         .await;
+                    if at == q.query().window().start() {
+                        refs.dependency_start = start;
+                    }
                     if matches!(result, Err(Error::BudgetExceeded)) {
                         refs.raw_budget = Some(window);
                     }
@@ -520,7 +621,10 @@ impl Request for AggregateQuery {
                 refreshed = Some(end);
             }
         }
-        let position = (view.exists && at < q.query().window().end()).then_some(at);
+        let position = (view.exists && at < q.query().window().end()).then_some(Position {
+            at,
+            dependency_start: refs.dependency_start,
+        });
         Ok((
             AggregatePage {
                 buckets,

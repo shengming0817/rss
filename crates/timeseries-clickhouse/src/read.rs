@@ -144,6 +144,7 @@ impl Request for Query {
         store: &Operation<'_, C>,
         c: &mut sqlx::PgConnection,
         fence: i64,
+        _: Option<&Position>,
     ) -> Result<Dependencies, Error> {
         Ok(Dependencies {
             fences: control::visible_fences(
@@ -161,6 +162,14 @@ impl Request for Query {
                 &fence,
             )?,
         })
+    }
+    fn state<C: Clock>(
+        &self,
+        _: &Operation<'_, C>,
+        _: &(),
+        tag: [u8; 32],
+    ) -> Result<[u8; 32], Error> {
+        Ok(tag)
     }
     async fn recheck<C: Clock>(
         &self,

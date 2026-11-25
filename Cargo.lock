@@ -3858,6 +3858,7 @@ dependencies = [
  "hmac 0.12.1",
  "hyper-rustls",
  "hyper-util",
+ "ring",
  "rss-contract",
  "rss-request-context",
  "rss-timeseries",

@@ -458,7 +458,13 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
         f.store = replacement_writer(&f).await?;
         let b = batch("sink", vec![sample(&d, "sink", 10, 3)?])?;
         if target == "summaries" {
-            confirmed(f.write(&b).await?)?;
+            f.maintain(
+                "close-empty",
+                MaintenanceAction::CloseStream {
+                    stream: b.stream().clone(),
+                },
+            )
+            .await?;
         }
         // A dependent materialized-view sink receives a real INSERT block, after
         // the production guard join yielded rows. Its PostgreSQL source is the
@@ -553,6 +559,41 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
                 )
                 .await?;
             }
+            if target == "summaries" {
+                let revoke = Authorized::<MaintenanceRequest>::verify(
+                    &authority(TENANT)?,
+                    MaintenanceRequest::new(
+                        id("sink-prune")?,
+                        MaintenanceAction::Prune {
+                            selection: query(&d, QueryMode::History, 10)?.selection().clone(),
+                            raw_before: Timestamp::new(0)?,
+                            summaries_before: Timestamp::new(100)?,
+                        },
+                        MaintenanceBudget {
+                            rows: NonZeroU32::new(2).ok_or(Error::Invariant)?,
+                            buckets: NonZeroU32::MIN,
+                        },
+                    )?,
+                )?;
+                assert!(matches!(
+                    confirmed(f.store.step(&revoke, None, deadline()?).await?)?,
+                    MaintenanceProgress::More { .. }
+                ));
+                // The real INSERT is already in the dependent sink. Revocation is
+                // committed, but its exact query ID has not terminated yet.
+                assert!(matches!(
+                    f.maintain(
+                        "reclaim-undrained",
+                        MaintenanceAction::Reclaim {
+                            stream: b.stream().clone()
+                        }
+                    )
+                    .await?,
+                    MaintenanceProgress::Blocked {
+                        reason: MaintenanceBlock::PendingWrite
+                    }
+                ));
+            }
             let progress = f
                 .maintain(
                     "sink-prune",
@@ -583,6 +624,18 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
                 .trim(),
             "0"
         );
+        if target == "summaries" {
+            assert!(matches!(
+                f.maintain(
+                    "reclaim-drained",
+                    MaintenanceAction::Reclaim {
+                        stream: b.stream().clone()
+                    }
+                )
+                .await?,
+                MaintenanceProgress::Complete { .. }
+            ));
+        }
         proxy.replay().await?;
         assert_eq!(
             f.ch.sql(&format!("SELECT count() FROM rss_ts_ch.{target}"))

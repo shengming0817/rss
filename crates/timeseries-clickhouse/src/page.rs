@@ -23,6 +23,7 @@ pub(crate) trait Request {
         store: &Operation<'_, C>,
         connection: &mut PgConnection,
         fence: i64,
+        position: Option<&Self::Position>,
     ) -> Result<Dependencies, Error>;
     async fn metadata<C: Clock>(
         &self,
@@ -30,6 +31,12 @@ pub(crate) trait Request {
         connection: &mut PgConnection,
         view: &View<Self::Position>,
     ) -> Result<Self::Metadata, Error>;
+    fn state<C: Clock>(
+        &self,
+        store: &Operation<'_, C>,
+        metadata: &Self::Metadata,
+        tag: [u8; 32],
+    ) -> Result<[u8; 32], Error>;
     async fn recheck<C: Clock>(
         &self,
         store: &Operation<'_, C>,
@@ -119,14 +126,9 @@ impl<C: Clock> Operation<'_, C> {
                         )
                     })
                     .transpose()?;
-                let deps = request
-                    .dependencies(self, tx.connection(), version.fence)
-                    .await?;
+                let expected = cursor.as_ref().map(|(_, c)| c.state);
                 let (ceiling, position, expires) = if let Some((expires, cursor)) = cursor {
-                    if current.is_none()
-                        || cursor.ceiling < 0
-                        || cursor.ceiling > version.published
-                        || cursor.state != deps.tag
+                    if current.is_none() || cursor.ceiling < 0 || cursor.ceiling > version.published
                     {
                         return Err(R::INVALIDATED);
                     }
@@ -142,6 +144,9 @@ impl<C: Clock> Operation<'_, C> {
                     }
                     (ceiling, None, expires)
                 };
+                let deps = request
+                    .dependencies(self, tx.connection(), version.fence, position.as_ref())
+                    .await?;
                 let view = View {
                     published: ceiling,
                     fences: deps.fences,
@@ -149,6 +154,10 @@ impl<C: Clock> Operation<'_, C> {
                     exists: current.is_some(),
                 };
                 let metadata = request.metadata(self, tx.connection(), &view).await?;
+                let state = request.state(self, &metadata, deps.tag)?;
+                if expected.is_some_and(|tag| state != tag) {
+                    return Err(R::INVALIDATED);
+                }
                 Ok((view, metadata, deps.tag, expires))
             }
             .await;
@@ -156,6 +165,7 @@ impl<C: Clock> Operation<'_, C> {
             let ceiling = view.published;
             // Keep attempted-object evidence even when the ClickHouse read fails.
             let result = request.read(self, view, &mut metadata, deadline).await;
+            let tag = request.state(self, &metadata, tag)?;
             let mut tx = self
                 .session(
                     scope,

@@ -128,14 +128,16 @@ the namespace has no unpublished batches.
 
 Raw values retain typed canonical JSON, exact integer timestamps/sequences, original
 receipt time and digest. Integers never round-trip through float. History and latest
-use query-time deduplication, canonical ordering and authenticated keyset cursors.
+use query-time deduplication, canonical ordering and authenticated, encrypted keyset cursors.
 Raw and aggregate pagination fix their publication ceiling across calls. History and
 latest consult the namespace fence generation. Aggregate continuations bind the exact
 stream, series, range and predecessor dependencies, including deletion/restoration and
-stream lifecycle. Unrelated publication does not interrupt pagination. Summary references
+stream lifecycle. The dependency range starts at the actual required predecessor (bounded
+by HoldLast for state metrics); summaries persist that boundary for invalidation and cursors. Unrelated publication does not interrupt pagination. Summary references
 record the maximum revision of their actual inputs, including the predecessor; equivalent
 recomputations remain usable at the old ceiling. Otherwise the reader computes from the
-same raw prefix within its existing budgets.
+same raw prefix within its existing budgets. If raw computation exceeds its budget and an
+equivalent summary becomes available, the reader first retries at the original ceiling.
 
 A short PG read-only snapshot selects dependencies and references, then releases its
 connection before ClickHouse IO. Another short snapshot rechecks control dependencies and
@@ -177,3 +179,6 @@ same behavior with an isolated workspace; `--artifacts DIR --revision SHA` consu
 only fixed archives and their declared closure. PostgreSQL is a required control
 service, but `rss-timeseries-postgres`, messaging and runtime crates are not dependencies.
 Candidate validation and actual registry publication remain separate release facts.
+
+Summary permits carry their stream identity. Reclaim waits for that stream’s revoked writes
+to terminate and their unreferenced effects to be removed; another stream’s summary does not block it.

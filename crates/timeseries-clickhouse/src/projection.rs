@@ -90,13 +90,14 @@ pub(crate) struct Attempt {
 }
 pub(crate) async fn permit(
     c: &mut PgConnection,
-    s: &Scope,
+    stream: &rss_timeseries::Stream,
     target: &'static str,
     digest: &str,
     revision: i64,
 ) -> Result<Attempt, Error> {
-    let r=sqlx::query("INSERT INTO rss_ts_ch.attempts(tenant_id,namespace,target,digest,revision) VALUES($1::text::uuid,$2,$3,$4,$5) RETURNING id::text,query_id::text")
-        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(target).bind(digest).bind(revision).fetch_one(c).await.map_err(sql_error)?;
+    let s = stream.scope();
+    let r=sqlx::query("INSERT INTO rss_ts_ch.attempts(tenant_id,namespace,target,digest,revision,source,generation) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7) RETURNING id::text,query_id::text")
+        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(target).bind(digest).bind(revision).bind(stream.source().as_str()).bind(stream.generation().as_str()).fetch_one(c).await.map_err(sql_error)?;
     Ok(Attempt {
         id: r.try_get("id").map_err(sql_error)?,
         query: r.try_get("query_id").map_err(sql_error)?,
