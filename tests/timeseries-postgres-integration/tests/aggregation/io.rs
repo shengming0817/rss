@@ -2,15 +2,16 @@
 use super::*;
 #[path = "wire.rs"]
 mod wire;
-async fn calls(pool: &PgPool) -> anyhow::Result<(i64, i64)> {
+async fn calls(pool: &PgPool) -> anyhow::Result<(i64, i64, i64)> {
     let mut leases = Vec::new();
-    let mut totals = (0, 0);
+    let mut totals = (0, 0, 0);
     for _ in 0..pool.options().get_max_connections() {
         let mut c = pool.acquire().await?;
-        let counts:(i64,i64)=sqlx::query_as("SELECT coalesce(sum(custom_plans+generic_plans),0)::bigint,coalesce(sum(custom_plans+generic_plans) FILTER(WHERE statement LIKE '%headers AS (%' OR statement LIKE 'SELECT observed_at,raw%'),0)::bigint FROM pg_prepared_statements WHERE statement NOT LIKE '%pg_prepared_statements%' AND (statement LIKE 'SELECT%' OR statement LIKE 'WITH%')")
+        let counts:(i64,i64,i64)=sqlx::query_as("SELECT coalesce(sum(custom_plans+generic_plans),0)::bigint,coalesce(sum(custom_plans+generic_plans) FILTER(WHERE statement LIKE '%headers AS (%' OR statement LIKE 'SELECT observed_at,raw%'),0)::bigint,coalesce(sum(custom_plans+generic_plans) FILTER(WHERE statement LIKE '%FROM rss_timeseries.summaries%'),0)::bigint FROM pg_prepared_statements WHERE statement NOT LIKE '%pg_prepared_statements%' AND (statement LIKE 'SELECT%' OR statement LIKE 'WITH%')")
             .fetch_one(&mut *c).await?;
         totals.0 += counts.0;
         totals.1 += counts.1;
+        totals.2 += counts.2;
         leases.push(c);
     }
     Ok(totals)
@@ -213,6 +214,16 @@ async fn ambiguous_tiles_reuse_the_batched_probe() -> anyhow::Result<()> {
     let after = calls(&f.pool).await?;
     assert_eq!(page.buckets.len(), 12);
     assert_eq!(page.buckets.iter().map(|b| b.valid_samples).sum::<u64>(), 1);
+    println!(
+        "ambiguous-cache page_select={} cache_select={}",
+        after.0 - before.0,
+        after.2 - before.2
+    );
+    assert_eq!(
+        after.2 - before.2,
+        3,
+        "one probe, one bounded expansion, one shared payload query"
+    );
     assert!(
         after.0 - before.0 <= 10,
         "complex covers must share bounded header and payload queries: {} SELECTs",

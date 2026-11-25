@@ -52,7 +52,7 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
    AND pg_get_expr(p.polqual,c.oid)=$p$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$p$
    AND pg_get_expr(p.polwithcheck,c.oid)=$p$(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)$p$)
  AND EXISTS(SELECT FROM pg_constraint c JOIN pg_index i ON i.indexrelid=c.conindid
-  WHERE c.conrelid=to_regclass('rss_transactional_messaging.outbox_scan') AND c.contype='p'
+  WHERE c.conrelid=to_regclass('rss_transactional_messaging.outbox_scan') AND c.contype='p' AND c.conname='outbox_scan_pkey'
    AND NOT c.condeferrable AND c.convalidated AND i.indisvalid AND i.indisready
    AND pg_get_constraintdef(c.oid)='PRIMARY KEY (tenant_id, domain)')
  AND EXISTS(SELECT FROM pg_constraint WHERE conrelid=to_regclass('rss_transactional_messaging.outbox_scan')

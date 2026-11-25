@@ -570,6 +570,10 @@ async fn scan_admission(f: &Fixture) -> anyhow::Result<()> {
             "ALTER TABLE rss_transactional_messaging.outbox_scan ADD PRIMARY KEY(tenant_id,domain)",
         ),
         (
+            "ALTER TABLE rss_transactional_messaging.outbox_scan RENAME CONSTRAINT outbox_scan_pkey TO moved_scan_key",
+            "ALTER TABLE rss_transactional_messaging.outbox_scan RENAME CONSTRAINT moved_scan_key TO outbox_scan_pkey",
+        ),
+        (
             "ALTER TABLE rss_transactional_messaging.outbox_scan ALTER COLUMN lane DROP NOT NULL",
             "ALTER TABLE rss_transactional_messaging.outbox_scan ALTER COLUMN lane SET NOT NULL",
         ),

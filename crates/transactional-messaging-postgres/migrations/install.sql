@@ -782,7 +782,7 @@ BEGIN
   ELSE
    INSERT INTO outbox_scan AS s(tenant_id,domain,through_at,eligible_at,source_seq,lane)
     VALUES(p_tenant,p_domain,progress.through_at,progress.eligible_at,progress.source_seq,progress.lane)
-    ON CONFLICT(tenant_id,domain) DO UPDATE SET through_at=excluded.through_at,eligible_at=excluded.eligible_at,source_seq=excluded.source_seq,lane=excluded.lane
+    ON CONFLICT ON CONSTRAINT outbox_scan_pkey DO UPDATE SET through_at=excluded.through_at,eligible_at=excluded.eligible_at,source_seq=excluded.source_seq,lane=excluded.lane
     WHERE (s.through_at,s.eligible_at,s.source_seq,s.lane) IS DISTINCT FROM (excluded.through_at,excluded.eligible_at,excluded.source_seq,excluded.lane);
   END IF;
  END IF;

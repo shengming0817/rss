@@ -343,17 +343,33 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
         );
     }
     append(f, "window", 0, 130, 0).await?;
+    let projection = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: false,
+        })
+        .await?;
+    let validator = Validator;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=statement_timestamp()-interval '1 day' WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
     let mut held = f.owner.begin().await?;
     let locked:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'window-%' ORDER BY seq LIMIT 128 FOR UPDATE")
         .fetch_all(&mut *held).await?;
     for _ in 0..2 {
-        let rows: Vec<i64> = sqlx::query_scalar(
-            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
-        )
-        .bind(tenant().to_string())
-        .fetch_all(&f.raw_worker)
-        .await?;
+        let batch = projection
+            .project_batch(
+                crate::execution(tenant(), 1),
+                &validator,
+                NonZeroUsize::MIN,
+                deadline(),
+                Duration::from_secs(5),
+            )
+            .await?;
+        assert_eq!(
+            batch.scan_progress(),
+            rss_transactional_messaging::outbox::OutboxScanProgress::More
+        );
+        let rows = futures::StreamExt::collect::<Vec<_>>(batch).await;
         assert!(
             rows.is_empty(),
             "each locked window is a bounded empty page"
