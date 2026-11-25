@@ -109,14 +109,16 @@ impl std::fmt::Debug for ConsumerIdentity {
     }
 }
 
-/// Admission or durable inbox state observed while attempting to acquire ownership.
+/// Durable inbox state observed while attempting to acquire ownership.
 pub enum IdempotencyDisposition<C> {
-    /// Execution capacity is occupied; the provider did not attempt a durable claim.
-    CapacityBusy,
     /// This attempt acquired a fenced claim and may enter the transaction path.
     Acquired(C),
     /// Another live attempt owns the record; do not execute the handler.
-    InProgress,
+    InProgress {
+        /// Estimated time until eligibility, measured by the provider at acknowledgement.
+        /// The current owner may release, finish or renew before the next probe.
+        retry_after: Option<Duration>,
+    },
     /// A durable terminal result exists; validate it against verified ingress before settlement.
     Terminal(TerminalReceipt),
 }
@@ -131,6 +133,24 @@ pub enum LeaseStatus {
     },
     /// The attempt no longer owns the record; stop executing effects.
     Lost,
+}
+
+/// Local capacity for one bound claim. Dropping a wait cancels its queue entry.
+pub enum ClaimAdmission<'a, P> {
+    /// Capacity was available immediately.
+    Ready(P),
+    /// Wait for ownership of the actual permit within the original provider cutoff.
+    Waiting(std::pin::Pin<Box<dyn Future<Output = Result<P, MessagingError>> + Send + 'a>>),
+}
+
+impl<P> ClaimAdmission<'_, P> {
+    /// Take the ready permit or wait for its transfer.
+    pub async fn acquire(self) -> Result<P, MessagingError> {
+        match self {
+            Self::Ready(permit) => Ok(permit),
+            Self::Waiting(wait) => wait.await,
+        }
+    }
 }
 
 /// Trusted durable-state provider for inbox identity, leases, and terminal receipts.
@@ -155,13 +175,22 @@ pub trait InboxStore: Send + Sync {
     /// Single provider-owned lease policy used for durable TTL and runtime renewal scheduling.
     fn lease_policy(&self) -> crate::policy::LeaseRenewalPolicy;
 
-    /// Acquire exclusive ownership, or return the existing live or terminal state for the full
-    /// identity.
-    fn claim(
+    /// Provider reservation binding capacity, identity and the original I/O cutoff.
+    type Permit: Send;
+
+    /// Validate the binding and reserve local capacity without starting durable work.
+    fn reserve_claim(
         &self,
         binding: crate::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
+    ) -> Result<ClaimAdmission<'_, Self::Permit>, MessagingError>;
+
+    /// Consume the reservation once. Only an acknowledged durable claim transfers capacity
+    /// to the claim handle. Every other outcome returns the permit to its owner.
+    fn claim(
+        &self,
+        permit: Self::Permit,
     ) -> impl Future<Output = Result<IdempotencyDisposition<Self::Claim>, MessagingError>> + Send;
 
     /// Read committed terminal state without acquiring ownership or modifying the record.

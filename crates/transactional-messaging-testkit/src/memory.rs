@@ -541,7 +541,7 @@ mod consumer {
 
     use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
     use rss_transactional_messaging::inbox::{
-        ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
+        ClaimAdmission, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
     };
     use rss_transactional_messaging::message::MessageFingerprint;
     use rss_transactional_messaging::policy::OperationDeadline;
@@ -649,6 +649,12 @@ mod consumer {
         }
     }
 
+    /// A validated in-memory claim reservation tied to the creating store.
+    pub struct MemoryClaimPermit {
+        store: Arc<Mutex<InboxState>>,
+        identity: ConsumerIdentity,
+    }
+
     impl InboxStore for MemoryInboxStore {
         #[allow(clippy::expect_used)]
         // reason: this provider's fixed 30-second test lease always admits a renewal schedule.
@@ -658,25 +664,46 @@ mod consumer {
         }
         type Claim = (ConsumerIdentity, u64);
 
-        async fn claim(
+        type Permit = MemoryClaimPermit;
+
+        fn reserve_claim(
             &self,
             binding: rss_transactional_messaging::fence::ExecutionBinding,
             identity: &ConsumerIdentity,
             _deadline: OperationDeadline,
-        ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        ) -> Result<ClaimAdmission<'_, Self::Permit>, MessagingError> {
             if binding.tenant() != identity.tenant_id() {
                 return Err(MessagingError::new(
                     MessagingErrorKind::OwnershipLost,
                     std::io::Error::other("fixture execution tenant mismatch"),
                 ));
             }
+            Ok(ClaimAdmission::Ready(MemoryClaimPermit {
+                store: self.inner.clone(),
+                identity: identity.clone(),
+            }))
+        }
+
+        async fn claim(
+            &self,
+            permit: Self::Permit,
+        ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+            if !Arc::ptr_eq(&permit.store, &self.inner) {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::Invariant,
+                    std::io::Error::other("wrong inbox reservation"),
+                ));
+            }
+            let identity = &permit.identity;
             let key = identity_key(identity);
             let mut state = self
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match state.records.get(&key) {
-                Some(InboxRecord::Claimed { .. }) => Ok(IdempotencyDisposition::InProgress),
+                Some(InboxRecord::Claimed { .. }) => {
+                    Ok(IdempotencyDisposition::InProgress { retry_after: None })
+                }
                 Some(InboxRecord::Terminal {
                     identity,
                     fingerprint,
@@ -883,4 +910,4 @@ mod consumer {
 }
 
 #[cfg(feature = "consumer")]
-pub use consumer::{MemoryInboxStore, RecordingSettlement};
+pub use consumer::{MemoryClaimPermit, MemoryInboxStore, RecordingSettlement};

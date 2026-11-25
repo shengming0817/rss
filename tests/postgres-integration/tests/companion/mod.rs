@@ -227,9 +227,14 @@ async fn interrupted_scopes(
         let binding = super::binding(&message);
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {

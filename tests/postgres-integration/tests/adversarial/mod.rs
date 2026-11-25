@@ -76,12 +76,17 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         contenders.spawn(async move {
             inbox
                 .claim(
-                    crate::execution(
-                        (binding(&message("concurrent-claim")).identity()).tenant_id(),
-                        1,
-                    ),
-                    binding(&message("concurrent-claim")).identity(),
-                    deadline(),
+                    inbox
+                        .reserve_claim(
+                            crate::execution(
+                                (binding(&message("concurrent-claim")).identity()).tenant_id(),
+                                1,
+                            ),
+                            binding(&message("concurrent-claim")).identity(),
+                            deadline(),
+                        )?
+                        .acquire()
+                        .await?,
                 )
                 .await
         });
@@ -99,9 +104,14 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
     assert!(matches!(
         inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline()
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        deadline()
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Acquired(_)
@@ -146,9 +156,14 @@ async fn concurrency(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::R
         )?;
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {
@@ -599,9 +614,14 @@ async fn tenant_isolation(
         )?;
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((receipt_binding.identity()).tenant_id(), 1),
-                receipt_binding.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((receipt_binding.identity()).tenant_id(), 1),
+                        receipt_binding.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {
@@ -731,9 +751,14 @@ async fn inbox_lock_expiry(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> any
         let binding = binding(&message(id));
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {

@@ -18,9 +18,14 @@ async fn deliver(
     )?;
     let IdempotencyDisposition::Acquired(claim) = inbox
         .claim(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            budget()?,
+            inbox
+                .reserve_claim(
+                    crate::execution((binding.identity()).tenant_id(), 1),
+                    binding.identity(),
+                    budget()?,
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     else {
@@ -143,9 +148,14 @@ pub(crate) async fn permanent_inputs(f: &Fixture) -> anyhow::Result<()> {
         assert!(matches!(
             inbox
                 .claim(
-                    crate::execution((binding(m.envelope())?.identity()).tenant_id(), 1),
-                    binding(m.envelope())?.identity(),
-                    budget()?
+                    inbox
+                        .reserve_claim(
+                            crate::execution((binding(m.envelope())?.identity()).tenant_id(), 1),
+                            binding(m.envelope())?.identity(),
+                            budget()?
+                        )?
+                        .acquire()
+                        .await?
                 )
                 .await?,
             IdempotencyDisposition::Terminal(_)

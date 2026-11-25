@@ -88,12 +88,17 @@ impl Harness {
         &self,
         message: &MessageEnvelope<Vec<u8>>,
     ) -> Result<PgInboxClaim, MessagingError> {
-        match self
-            .inbox()
+        let inbox = self.inbox();
+        match inbox
             .claim(
-                crate::execution((binding(message).identity()).tenant_id(), 1),
-                binding(message).identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding(message).identity()).tenant_id(), 1),
+                        binding(message).identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         {
@@ -105,12 +110,17 @@ impl Harness {
         &self,
         message: &MessageEnvelope<Vec<u8>>,
     ) -> Result<TerminalReceipt, MessagingError> {
-        match self
-            .inbox()
+        let inbox = self.inbox();
+        match inbox
             .claim(
-                crate::execution((binding(message).identity()).tenant_id(), 1),
-                binding(message).identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding(message).identity()).tenant_id(), 1),
+                        binding(message).identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         {
@@ -141,13 +151,18 @@ impl Harness {
         Ok(())
     }
     async fn commit_effect(&self) -> Result<(), MessagingError> {
+        let inbox = self.inbox();
         let message = message(&self.id());
-        if let IdempotencyDisposition::Acquired(claim) = self
-            .inbox()
+        if let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((binding(&message).identity()).tenant_id(), 1),
-                binding(&message).identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding(&message).identity()).tenant_id(), 1),
+                        binding(&message).identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         {
@@ -318,11 +333,17 @@ impl InboxDriver for Harness {
         self.reset_case();
     }
     async fn first_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-        self.inbox()
+        let inbox = self.inbox();
+        inbox
             .claim(
-                crate::execution((binding(&message(&self.id())).identity()).tenant_id(), 1),
-                binding(&message(&self.id())).identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding(&message(&self.id())).identity()).tenant_id(), 1),
+                        binding(&message(&self.id())).identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await
     }
@@ -332,6 +353,7 @@ impl InboxDriver for Harness {
     async fn other_group_claim(
         &self,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        let inbox = self.inbox();
         let message = message(&self.id());
         let identity = ConsumerIdentity::new(
             message.metadata().tenant_id(),
@@ -339,11 +361,16 @@ impl InboxDriver for Harness {
             message.id().clone(),
             message.metadata().contract().clone(),
         );
-        self.inbox()
+        inbox
             .claim(
-                crate::execution(identity.tenant_id(), 1),
-                &identity,
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution(identity.tenant_id(), 1),
+                        &identity,
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await
     }
@@ -371,24 +398,34 @@ impl InboxDriver for Harness {
     async fn reclaim_after_release(
         &self,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        let inbox = self.inbox();
         let identity = binding(&message(&format!("{}-release", self.id())));
-        let IdempotencyDisposition::Acquired(claim) = self
-            .inbox()
+        let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((identity.identity()).tenant_id(), 1),
-                identity.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((identity.identity()).tenant_id(), 1),
+                        identity.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {
             return Err(port(std::io::Error::other("new claim")));
         };
         self.inbox().release(claim, deadline()).await?;
-        self.inbox()
+        inbox
             .claim(
-                crate::execution((identity.identity()).tenant_id(), 1),
-                identity.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((identity.identity()).tenant_id(), 1),
+                        identity.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await
     }

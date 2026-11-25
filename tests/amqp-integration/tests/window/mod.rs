@@ -278,9 +278,14 @@ async fn claim_original(
     .map_err(|_| anyhow::anyhow!("fixture binding"))?;
     let IdempotencyDisposition::Acquired(holder) = store
         .claim(
-            verified.execution(),
-            verified.identity(),
-            provider_deadline(),
+            store
+                .reserve_claim(
+                    verified.execution(),
+                    verified.identity(),
+                    provider_deadline(),
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     else {

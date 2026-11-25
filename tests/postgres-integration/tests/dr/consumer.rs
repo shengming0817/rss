@@ -72,7 +72,12 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let claim = match inbox
-        .claim(consumer.execution(), consumer.identity(), deadline())
+        .claim(
+            inbox
+                .reserve_claim(consumer.execution(), consumer.identity(), deadline())?
+                .acquire()
+                .await?,
+        )
         .await?
     {
         IdempotencyDisposition::Acquired(c) => c,
@@ -93,7 +98,12 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
     );
     assert!(matches!(
         inbox
-            .claim(consumer.execution(), consumer.identity(), deadline())
+            .claim(
+                inbox
+                    .reserve_claim(consumer.execution(), consumer.identity(), deadline())?
+                    .acquire()
+                    .await?
+            )
             .await?,
         IdempotencyDisposition::Terminal(_)
     ));
@@ -131,7 +141,12 @@ pub async fn run(config: PgConfig, operator: PgConfig, owner: &sqlx::PgPool) -> 
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let claim = match inbox
-        .claim(identity.execution(), identity.identity(), deadline())
+        .claim(
+            inbox
+                .reserve_claim(identity.execution(), identity.identity(), deadline())?
+                .acquire()
+                .await?,
+        )
         .await?
     {
         IdempotencyDisposition::Acquired(c) => c,

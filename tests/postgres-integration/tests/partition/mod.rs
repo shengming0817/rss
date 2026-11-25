@@ -537,9 +537,14 @@ async fn rejected_effect(runtime: Arc<PgRuntime>, owner: &PgPool) -> anyhow::Res
     )?;
     let IdempotencyDisposition::Acquired(claim) = inbox
         .claim(
-            crate::execution((verified.identity()).tenant_id(), 1),
-            verified.identity(),
-            deadline(),
+            inbox
+                .reserve_claim(
+                    crate::execution((verified.identity()).tenant_id(), 1),
+                    verified.identity(),
+                    deadline(),
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     else {

@@ -419,9 +419,14 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     )?;
     let IdempotencyDisposition::Acquired(claim) = inbox
         .claim(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            budget()?,
+            inbox
+                .reserve_claim(
+                    crate::execution((binding.identity()).tenant_id(), 1),
+                    binding.identity(),
+                    budget()?,
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     else {
@@ -464,9 +469,14 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     let _page = f.recover(s).await?;
     let IdempotencyDisposition::Acquired(claim) = inbox
         .claim(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            budget()?,
+            inbox
+                .reserve_claim(
+                    crate::execution((binding.identity()).tenant_id(), 1),
+                    binding.identity(),
+                    budget()?,
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     else {
@@ -669,9 +679,14 @@ async fn verify_terminal(
     assert!(matches!(
         inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                budget()?
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        budget()?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Terminal(_)

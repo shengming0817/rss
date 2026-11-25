@@ -258,9 +258,14 @@ impl TransactionCase {
         let IdempotencyDisposition::Acquired(holder) = self
             .inbox
             .claim(
-                verified.execution(),
-                verified.identity(),
-                support::deadline(&*self.clock),
+                self.inbox
+                    .reserve_claim(
+                        verified.execution(),
+                        verified.identity(),
+                        support::deadline(&*self.clock),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {

@@ -244,8 +244,7 @@ fn expect_disposition<C>(
         Ok(actual) => {
             let actual = match actual {
                 IdempotencyDisposition::Acquired(_) => "acquired",
-                IdempotencyDisposition::CapacityBusy => "capacity-busy",
-                IdempotencyDisposition::InProgress => "in-progress",
+                IdempotencyDisposition::InProgress { .. } => "in-progress",
                 IdempotencyDisposition::Terminal(_) => "terminal",
             };
             if actual == expected {

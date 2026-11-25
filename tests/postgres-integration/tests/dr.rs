@@ -181,9 +181,14 @@ async fn run() -> anyhow::Result<()> {
         matches!(
             inbox
                 .claim(
-                    crate::execution(legacy_identity.tenant_id(), 1),
-                    &legacy_identity,
-                    deadline()
+                    inbox
+                        .reserve_claim(
+                            crate::execution(legacy_identity.tenant_id(), 1),
+                            &legacy_identity,
+                            deadline()
+                        )?
+                        .acquire()
+                        .await?
                 )
                 .await?,
             IdempotencyDisposition::Terminal(_)
@@ -192,9 +197,14 @@ async fn run() -> anyhow::Result<()> {
     );
     let old_inbox = match inbox
         .claim(
-            crate::execution(identity.tenant_id(), 1),
-            &identity,
-            deadline(),
+            inbox
+                .reserve_claim(
+                    crate::execution(identity.tenant_id(), 1),
+                    &identity,
+                    deadline(),
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     {
@@ -377,9 +387,14 @@ async fn run() -> anyhow::Result<()> {
         matches!(
             next_inbox
                 .claim(
-                    crate::execution(identity.tenant_id(), 2),
-                    &identity,
-                    deadline()
+                    next_inbox
+                        .reserve_claim(
+                            crate::execution(identity.tenant_id(), 2),
+                            &identity,
+                            deadline()
+                        )?
+                        .acquire()
+                        .await?
                 )
                 .await?,
             IdempotencyDisposition::Acquired(_)

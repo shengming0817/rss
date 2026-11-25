@@ -177,14 +177,20 @@ async fn consumer(clock: &FakeClock) -> anyhow::Result<()> {
         Deadline::from_timeout(clock, Duration::from_secs(5))?,
         clock,
     );
-    let IdempotencyDisposition::Acquired(claim) =
-        store.claim(binding()?, &identity, deadline).await?
-    else {
+    let permit = store
+        .reserve_claim(binding()?, &identity, deadline)?
+        .acquire()
+        .await?;
+    let IdempotencyDisposition::Acquired(claim) = store.claim(permit).await? else {
         anyhow::bail!("initial claim was not acquired")
     };
+    let duplicate = store
+        .reserve_claim(binding()?, &identity, deadline)?
+        .acquire()
+        .await?;
     assert!(matches!(
-        store.claim(binding()?, &identity, deadline).await?,
-        IdempotencyDisposition::InProgress
+        store.claim(duplicate).await?,
+        IdempotencyDisposition::InProgress { .. }
     ));
     store.expire(&identity);
     assert_eq!(store.extend(&claim, deadline).await?, LeaseStatus::Lost);
