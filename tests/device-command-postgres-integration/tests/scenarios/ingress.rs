@@ -16,19 +16,7 @@ async fn deliver(
         f.runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(
-            inbox
-                .reserve_claim(
-                    crate::execution((binding.identity()).tenant_id(), 1),
-                    binding.identity(),
-                    budget()?,
-                )?
-                .acquire()
-                .await?,
-        )
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = claim_delivery(&inbox, &binding).await? else {
         anyhow::bail!("expected fresh ingress claim")
     };
     let consumer = PgConsumerTx::receipt_only(
@@ -145,21 +133,7 @@ pub(crate) async fn permanent_inputs(f: &Fixture) -> anyhow::Result<()> {
             f.runtime.clone(),
             LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
         )?;
-        assert!(matches!(
-            inbox
-                .claim(
-                    inbox
-                        .reserve_claim(
-                            crate::execution((binding(m.envelope())?.identity()).tenant_id(), 1),
-                            binding(m.envelope())?.identity(),
-                            budget()?
-                        )?
-                        .acquire()
-                        .await?
-                )
-                .await?,
-            IdempotencyDisposition::Terminal(_)
-        ));
+        verify_terminal(&inbox, &binding(m.envelope())?).await?;
     }
     assert_eq!(f.load("poison-target", s).await?, original);
     let expected = message("expected-ingress", s.tenant())?;

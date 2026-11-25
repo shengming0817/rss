@@ -102,6 +102,13 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         )
         .await?,
     );
+    local_wait(runtime.clone(), owner).await?;
+    claim_wait::remote_cases(config, runtime.clone(), owner).await?;
+    runtime.close().await;
+    Ok(())
+}
+
+async fn local_wait(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let inbox = Arc::new(PgInboxStore::new(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_millis(900))?,
@@ -114,7 +121,20 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     let busy = Arc::new(Notify::new());
     let mut tasks = Vec::new();
     let mut recorders = Vec::new();
-    for id in ["window-held", "window-waiting"] {
+    let open = Arc::new(Notify::new());
+    open.notify_one();
+    for (id, clock, gate) in [
+        (
+            "window-held",
+            WorkerClock::Owner(Timer::new()),
+            release.clone(),
+        ),
+        (
+            "window-waiting",
+            WorkerClock::Waiter(FakeClock::new()),
+            open,
+        ),
+    ] {
         let msg = message(id);
         let metadata = msg.metadata();
         let sub = SubscriptionIdentity::new(
@@ -125,13 +145,6 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         let recorder = RecordingSettlement::new();
         let source = One(Mutex::new(Some(Delivery::new(msg, recorder.clone()))));
         recorders.push(recorder);
-        let gate = if id == "window-held" {
-            release.clone()
-        } else {
-            let gate = Arc::new(Notify::new());
-            gate.notify_one();
-            gate
-        };
         let effect = GateEffect {
             entered: entered.clone(),
             release: gate,
@@ -148,11 +161,7 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
             ConsumerGroup::parse("window")?,
             Arc::new(Validator),
             sub,
-            Arc::new(if id == "window-held" {
-                WorkerClock::Owner(Timer::new())
-            } else {
-                WorkerClock::Waiter(FakeClock::new())
-            }),
+            Arc::new(clock),
             ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
             Arc::new(Sink(busy.clone())),
             SubscriptionBackoffPolicy::STANDARD,
@@ -174,6 +183,21 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
         "only the holder reached claim SQL"
     );
     release.notify_one();
+    drain_workers(&recorders, token, tasks).await?;
+    verify_settled(owner, &recorders).await?;
+    assert_eq!(
+        claim_wait::claim_count(owner).await?,
+        2,
+        "the local waiter claimed exactly once"
+    );
+    Ok(())
+}
+
+async fn drain_workers(
+    recorders: &[RecordingSettlement],
+    token: CancellationToken,
+    tasks: Vec<tokio::task::JoinHandle<Result<(), MessagingError>>>,
+) -> anyhow::Result<()> {
     testkit::await_try(Duration::from_secs(4), async || {
         Ok::<_, anyhow::Error>(
             recorders
@@ -187,14 +211,6 @@ pub(crate) async fn run(config: PgConfig, owner: &sqlx::PgPool) -> anyhow::Resul
     for task in tasks {
         task.await??;
     }
-    verify_settled(owner, &recorders).await?;
-    assert_eq!(
-        claim_wait::claim_count(owner).await?,
-        2,
-        "the local waiter claimed exactly once"
-    );
-    claim_wait::remote_cases(config, runtime.clone(), owner).await?;
-    runtime.close().await;
     Ok(())
 }
 

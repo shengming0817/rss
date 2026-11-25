@@ -243,42 +243,66 @@ impl TransactionCase {
         };
         Ok(consume_once(&self.inbox, &transaction, &execution, delivery).await?)
     }
-    async fn busy_duplicate(&self, stream: &mut Stream) -> anyhow::Result<()> {
+    async fn claim_live_owner(
+        &self,
+        id: &str,
+        verifier: &Validator,
+        group: ConsumerGroup,
+    ) -> anyhow::Result<PgInboxClaim> {
         use rss_transactional_messaging::{
             inbox::{IdempotencyDisposition, InboxStore},
             transaction::verify_ingress,
         };
+        let binding = verify_ingress(verifier, group, &self.subscription, &message(id)?)
+            .map_err(|_| anyhow::anyhow!("fixture ingress"))?;
+        let permit = self
+            .inbox
+            .reserve_claim(
+                binding.execution(),
+                binding.identity(),
+                support::deadline(&*self.clock),
+            )?
+            .acquire()
+            .await?;
+        match self.inbox.claim(permit).await? {
+            IdempotencyDisposition::Acquired(holder) => Ok(holder),
+            _ => anyhow::bail!("missing owner"),
+        }
+    }
+    async fn busy_duplicate(&self, stream: &mut Stream) -> anyhow::Result<()> {
+        use rss_transactional_messaging::inbox::InboxStore;
         let id = "live-owner";
         self.publish(id).await?;
         let delivery = next(stream).await?;
         let verifier = Validator(true);
         let group = ConsumerGroup::parse("mqtt-transactional")?;
-        let verified = verify_ingress(&verifier, group.clone(), &self.subscription, &message(id)?)
-            .map_err(|_| anyhow::anyhow!("fixture ingress"))?;
-        let IdempotencyDisposition::Acquired(holder) = self
-            .inbox
-            .claim(
-                self.inbox
-                    .reserve_claim(
-                        verified.execution(),
-                        verified.identity(),
-                        support::deadline(&*self.clock),
-                    )?
-                    .acquire()
-                    .await?,
-            )
-            .await?
-        else {
-            anyhow::bail!("missing owner");
-        };
+        let holder = self.claim_live_owner(id, &verifier, group.clone()).await?;
         let before = support::ready_generation(&self.connection)?;
+        self.wait_for_busy_delivery(delivery, &verifier, group, before)
+            .await?;
+        support::wait_reconnected(&self.connection, before).await?;
+        assert_eq!(support::ready_generation(&self.connection)?, before + 1);
+        self.inbox
+            .release(holder, support::deadline(&*self.clock))
+            .await?;
+        assert_committed(self.process(next(stream).await?, None, false, true).await?);
+        assert_eq!(count(&self.database, id).await?, 1);
+        Ok(())
+    }
+    async fn wait_for_busy_delivery(
+        &self,
+        delivery: Delivery<Vec<u8>, MqttTransactionSettlement>,
+        verifier: &Validator,
+        group: ConsumerGroup,
+        before: u64,
+    ) -> anyhow::Result<()> {
         let short = PgInboxStore::new(
             self.database.runtime.clone(),
             LeaseRenewalPolicy::from_ttl(Duration::from_millis(600))?,
         )?;
         let execution = ConsumerExecution::new(
             group,
-            &verifier,
+            verifier,
             &self.subscription,
             &*self.clock,
             ConsumerExecutionPolicy::new(
@@ -297,13 +321,6 @@ impl TransactionCase {
         );
         assert_eq!(support::ready_generation(&self.connection)?, before);
         assert_eq!(processing.await?, ProcessingDisposition::InProgress);
-        support::wait_reconnected(&self.connection, before).await?;
-        assert_eq!(support::ready_generation(&self.connection)?, before + 1);
-        self.inbox
-            .release(holder, support::deadline(&*self.clock))
-            .await?;
-        assert_committed(self.process(next(stream).await?, None, false, true).await?);
-        assert_eq!(count(&self.database, id).await?, 1);
         Ok(())
     }
     async fn committed(&self, stream: &mut Stream) -> anyhow::Result<()> {

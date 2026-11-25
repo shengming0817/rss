@@ -417,19 +417,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
         f.runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(60))?,
     )?;
-    let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(
-            inbox
-                .reserve_claim(
-                    crate::execution((binding.identity()).tenant_id(), 1),
-                    binding.identity(),
-                    budget()?,
-                )?
-                .acquire()
-                .await?,
-        )
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = claim_delivery(&inbox, &binding).await? else {
         anyhow::bail!("new claim missing")
     };
     let consumer = PgConsumerTx::receipt_only(
@@ -467,19 +455,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
     inbox.release(claim, budget()?).await?;
     f.publish().await?;
     let _page = f.recover(s).await?;
-    let IdempotencyDisposition::Acquired(claim) = inbox
-        .claim(
-            inbox
-                .reserve_claim(
-                    crate::execution((binding.identity()).tenant_id(), 1),
-                    binding.identity(),
-                    budget()?,
-                )?
-                .acquire()
-                .await?,
-        )
-        .await?
-    else {
+    let IdempotencyDisposition::Acquired(claim) = claim_delivery(&inbox, &binding).await? else {
         anyhow::bail!("retry claim missing")
     };
     assert_eq!(
@@ -662,6 +638,22 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn claim_delivery(
+    inbox: &rss_transactional_messaging_postgres::PgInboxStore,
+    binding: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
+) -> anyhow::Result<
+    rss_transactional_messaging::inbox::IdempotencyDisposition<
+        rss_transactional_messaging_postgres::PgInboxClaim,
+    >,
+> {
+    use rss_transactional_messaging::inbox::InboxStore;
+    let permit = inbox
+        .reserve_claim(binding.execution(), binding.identity(), budget()?)?
+        .acquire()
+        .await?;
+    Ok(inbox.claim(permit).await?)
+}
+
 async fn verify_terminal(
     inbox: &rss_transactional_messaging_postgres::PgInboxStore,
     binding: &rss_transactional_messaging::transaction::VerifiedConsumerBinding,
@@ -677,18 +669,7 @@ async fn verify_terminal(
         .ok_or_else(|| anyhow::anyhow!("receipt missing"))?;
     assert!(binding.validate_terminal(receipt).is_ok());
     assert!(matches!(
-        inbox
-            .claim(
-                inbox
-                    .reserve_claim(
-                        crate::execution((binding.identity()).tenant_id(), 1),
-                        binding.identity(),
-                        budget()?
-                    )?
-                    .acquire()
-                    .await?
-            )
-            .await?,
+        claim_delivery(inbox, binding).await?,
         IdempotencyDisposition::Terminal(_)
     ));
     Ok(())
