@@ -18,8 +18,8 @@ async fn bounded_candidate_scan() -> anyhow::Result<()> {
     let store = f.store().await?;
     let maint = PgMaintenance::new(maintenance_role(&f).await?, Clock, deadline()).await?;
     for (tenant, total, history) in [
-        (OTHER, 1024_u32, 2_i32),
-        (TENANT, 128, 30),
+        (OTHER, 1024_u32, 1022_i32),
+        (TENANT, 128, 510),
         (TENANT, 32768, 8190),
     ] {
         let object = format!("history-{total}");
