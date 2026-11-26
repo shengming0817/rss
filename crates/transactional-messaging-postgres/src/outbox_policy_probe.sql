@@ -38,6 +38,6 @@ SELECT rss_transactional_messaging.outbox_policy_present()
   AND NOT t.tgisinternal AND t.tgattr=''::int2vector AND t.tgfoid='rss_transactional_messaging.protect_policy_change()'::regprocedure)
  AND NOT EXISTS(SELECT FROM functions f LEFT JOIN pg_proc p ON p.oid=to_regprocedure('rss_transactional_messaging.'||f.signature)
   WHERE p.oid IS NULL OR p.prosrc IS DISTINCT FROM f.body OR p.proowner IS DISTINCT FROM f.owner
-   OR p.prosecdef<>f.definer OR p.provolatile::text<>f.volatility
+   OR p.proisstrict OR p.prosecdef<>f.definer OR p.provolatile::text<>f.volatility
    OR p.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
    OR EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) WHERE grantee=0 AND privilege_type='EXECUTE')<>f.public_read)

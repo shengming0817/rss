@@ -191,6 +191,8 @@ async fn recorded_before_switch(
         |_| true
     ));
     assert!(is_hot(owner, id).await?);
+    Box::pin(expire_while_policy_locked(owner, &r)).await?;
+    assert!(is_hot(owner, id).await?);
     Ok((id, r))
 }
 
@@ -230,9 +232,70 @@ async fn resume_recorded(
     Ok(())
 }
 
+async fn recorded_proof(
+    owner: &sqlx::PgPool,
+    r: &AuthorizedRequest,
+) -> anyhow::Result<(String, serde_json::Value)> {
+    Ok(sqlx::query_as("SELECT j.lease_token::text,o.object FROM rss_transactional_messaging.archive_jobs j JOIN rss_transactional_messaging.archive_objects o USING(tenant_id,generation) WHERE j.operation_id=$1::uuid AND o.verified")
+        .bind(r.request().operation().to_string()).fetch_one(owner).await?)
+}
+
+// Let the owner expire a recorded lease while the cleanup transaction waits on a policy update.
+async fn expire_while_policy_locked(
+    owner: &sqlx::PgPool,
+    r: &AuthorizedRequest,
+) -> anyhow::Result<()> {
+    let (token, object) = recorded_proof(owner, r).await?;
+    let mut update = owner.begin().await?;
+    let writer: i32 = sqlx::query_scalar(
+        "SELECT pg_backend_pid() FROM rss_transactional_messaging.policy FOR UPDATE",
+    )
+    .fetch_one(&mut *update)
+    .await?;
+    let mut cleanup = owner.acquire().await?;
+    let reader: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *cleanup)
+        .await?;
+    let operation = r.request().operation().to_string();
+    let expire = async {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT $1=ANY(pg_blocking_pids($2))")
+                    .bind(writer)
+                    .bind(reader)
+                    .fetch_one(&mut *update)
+                    .await?;
+                if waiting {
+                    return anyhow::Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await??;
+        // Policy precedes the job lock in both archive claim and purge.
+        sqlx::query("SELECT 1 FROM rss_transactional_messaging.archive_jobs WHERE operation_id=$1::uuid FOR UPDATE NOWAIT")
+            .bind(&operation).execute(&mut *update).await?;
+        sqlx::query("UPDATE rss_transactional_messaging.archive_jobs SET lease_until=clock_timestamp() WHERE operation_id=$1::uuid")
+            .bind(&operation).execute(&mut *update).await?;
+        update.commit().await?;
+        anyhow::Ok(())
+    };
+    let purge =
+        sqlx::query("SELECT rss_transactional_messaging.archive_purge($1::uuid,$2::uuid,$3,$4)")
+            .bind(&operation)
+            .bind(token)
+            .bind(r.request().digest().to_vec())
+            .bind(object);
+    let (result, released) = tokio::join!(purge.execute(&mut *cleanup), expire);
+    released?;
+    assert!(
+        matches!(result,Err(sqlx::Error::Database(ref e)) if e.code().as_deref()==Some("PZ001"))
+    );
+    Ok(())
+}
+
 async fn reject_old_proof(owner: &sqlx::PgPool, r: &AuthorizedRequest) -> anyhow::Result<()> {
-    let (token, object): (String, serde_json::Value) = sqlx::query_as("SELECT j.lease_token::text,o.object FROM rss_transactional_messaging.archive_jobs j JOIN rss_transactional_messaging.archive_objects o USING(tenant_id,generation) WHERE j.operation_id=$1::uuid AND o.verified")
-        .bind(r.request().operation().to_string()).fetch_one(owner).await?;
+    let (token, object) = recorded_proof(owner, r).await?;
     let mut tx = owner.begin().await?;
     sqlx::query("SET LOCAL rss.execution_epoch='2'")
         .execute(&mut *tx)

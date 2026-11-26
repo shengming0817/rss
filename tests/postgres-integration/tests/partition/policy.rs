@@ -115,9 +115,13 @@ async fn new_window(owner: &PgPool, config: PgConfig) -> anyhow::Result<()> {
         (before..=now_us(owner).await?)
             .contains(&(facts(owner, "policy-second").await?.0 - 60_000_000))
     );
+    sqlx::query("UPDATE rss_transactional_messaging.policy SET retry_initial_seconds=2147483647,retry_max_seconds=2147483647")
+        .execute(owner).await?;
     second
-        .settle(item, OutboxSettlement::Published(()), deadline())
+        .settle(item, OutboxSettlement::Retry, deadline())
         .await?;
+    let (absolute, retry, count) = facts(owner, "policy-second").await?;
+    assert_eq!((retry, count), (absolute, 1));
     Ok(())
 }
 pub(crate) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyhow::Result<()> {

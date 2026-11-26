@@ -936,6 +936,10 @@ async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::
             "REVOKE UPDATE(retry_initial_seconds) ON rss_transactional_messaging.policy FROM archive_worker",
         ),
         (
+            "ALTER FUNCTION rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) STRICT",
+            "ALTER FUNCTION rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) CALLED ON NULL INPUT",
+        ),
+        (
             "ALTER TABLE rss_transactional_messaging.policy ENABLE ROW LEVEL SECURITY",
             "ALTER TABLE rss_transactional_messaging.policy DISABLE ROW LEVEL SECURITY",
         ),

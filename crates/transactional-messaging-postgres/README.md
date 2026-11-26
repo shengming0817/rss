@@ -50,7 +50,7 @@ with first claims and archive decisions. On a reduction, the row preserves the f
 HOT and receipt protection deadlines. This can defer HOT cleanup across the database until
 outstanding protection expires. Reapplying the same values does not move either deadline.
 The next first claim freezes its window using database time. Renewal, redrive and DR use the
-stored absolute deadline; an existing retry keeps its scheduled time. An archive whose proof
+stored absolute deadline. Each new retry is scheduled at or before that deadline; an existing retry keeps its scheduled time. An archive whose proof
 falls short after a policy increase returns a retention error and keeps its HOT capsule.
 
 The runtime login must not own the schema/tables, be superuser, have BYPASSRLS, or belong to the

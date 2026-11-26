@@ -965,7 +965,7 @@ ALTER FUNCTION rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,
 
 CREATE FUNCTION rss_transactional_messaging.settle_outbox(p_tenant uuid,p_seq bigint,p_token uuid,p_lease_us bigint,p_disposition text,p_dr uuid)
 RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
-DECLARE n timestamptz; remaining bigint; attempts integer; next_count integer; next_retry timestamptz;
+DECLARE n timestamptz; remaining bigint; attempts integer; next_count integer; next_retry timestamptz; original_deadline timestamptz;
 BEGIN
  SELECT delivery_us INTO remaining FROM outbox_lease(p_tenant,p_seq,p_token,p_lease_us,0,p_dr);
  IF NOT FOUND THEN RETURN 'lost_lease'; END IF;
@@ -974,13 +974,17 @@ BEGIN
  IF p_disposition='retry' AND (p_dr IS NULL OR remaining>0) THEN
   -- outbox_lease already holds the relevant row locks. Read the pre-settlement count.
   IF p_dr IS NULL THEN
-   SELECT retry_count INTO STRICT attempts FROM outbox WHERE seq=p_seq AND tenant_id=p_tenant;
+   SELECT retry_count,automatic_retry_deadline INTO STRICT attempts,original_deadline
+    FROM outbox WHERE seq=p_seq AND tenant_id=p_tenant;
   ELSE
-   SELECT retry_count INTO STRICT attempts FROM dr_members WHERE tenant_id=p_tenant AND operation_id=p_dr AND outbox_seq=p_seq;
+   SELECT m.retry_count,o.automatic_retry_deadline INTO STRICT attempts,original_deadline
+    FROM dr_members m JOIN outbox o ON o.seq=m.outbox_seq AND o.tenant_id=m.tenant_id
+    WHERE m.tenant_id=p_tenant AND m.operation_id=p_dr AND m.outbox_seq=p_seq;
   END IF;
   -- Positive int4 initial and cap: at shift 31 even a base of one exceeds every cap,
   -- and the largest possible intermediate is below 2^62.
-  SELECT n + least(retry_max_seconds::bigint, retry_initial_seconds::bigint << least(attempts,31))*interval '1 second'
+  SELECT least(original_deadline,n + least(retry_max_seconds::bigint,
+    retry_initial_seconds::bigint << least(attempts,31))*interval '1 second')
    INTO STRICT next_retry FROM policy WHERE revision=1;
   next_count:=least(attempts::bigint+1,2147483647)::integer;
  END IF;
@@ -1017,9 +1021,9 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_t
 DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid; d consumer_dead_letter; j archive_jobs; p policy; a archive_objects; n timestamptz; retired jsonb; receipt_seconds bigint; hot_until timestamptz;
 BEGIN
  PERFORM rss_transactional_messaging.check_execution();
+ p:=lock_outbox_policy();
  SELECT * INTO d FROM consumer_dead_letter WHERE tenant_id=t AND id=p_id FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'archive not found' USING ERRCODE='P0002'; END IF;
- p:=lock_outbox_policy();
  IF p_hot<p.automatic_window_seconds::bigint+p.safety_seconds OR p_cold<=0 OR p_ttl NOT BETWEEN 1 AND 9223372036854775 OR p_scan IS NULL OR p_scan NOT BETWEEN 1 AND 1024 THEN RAISE EXCEPTION 'archive retention' USING ERRCODE='22023'; END IF;
  n:=clock_timestamp();
  receipt_seconds:=greatest(p.receipt_retention_seconds,
@@ -1092,9 +1096,10 @@ RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_tr
 DECLARE j archive_jobs; a archive_objects; d consumer_dead_letter; p policy; n timestamptz;
 BEGIN
  PERFORM rss_transactional_messaging.check_execution();
+ -- Wait for any policy writer before archive_fence checks the lease on the locked job.
+ p:=lock_outbox_policy();
  j:=archive_fence(p_op,p_token,p_digest);
  SELECT * INTO d FROM consumer_dead_letter WHERE tenant_id=j.tenant_id AND id=j.dead_letter_id;
- p:=lock_outbox_policy();
  SELECT * INTO a FROM archive_objects WHERE tenant_id=j.tenant_id AND generation=j.generation;
  n:=clock_timestamp();
  IF j.held OR j.fault IS NOT NULL OR a.verified IS NOT TRUE OR a.object IS DISTINCT FROM p_object THEN
