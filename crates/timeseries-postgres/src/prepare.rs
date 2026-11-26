@@ -5,7 +5,10 @@ use crate::Limits;
 use rss_timeseries::{Batch, Error};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::sync::oneshot;
 use weights::Weights;
@@ -33,22 +36,28 @@ struct State {
 struct Waiter {
     weight: u32,
     bypassed: bool,
-    ready: Option<oneshot::Sender<()>>,
+    granted: Arc<AtomicBool>,
+    ready: oneshot::Sender<Granted>,
     #[cfg(feature = "integration")]
     session: rss_timeseries::measurement::Session,
 }
 
-// A queued ticket absent from the map has already received both resources,
-// even if the woken receiver has not yet been polled.
+struct Granted {
+    #[cfg(feature = "integration")]
+    at: Option<rss_timeseries::measurement::Started>,
+}
+
 pub(crate) struct Permit {
-    queued: Option<u64>,
+    // The flag is shared only with the queued entry. All transitions are under
+    // the capacity lock, including close racing a grant before its first poll.
+    queued: Option<(u64, Arc<AtomicBool>)>,
     capacity: Capacity,
     weight: u32,
     #[cfg(feature = "integration")]
     session: rss_timeseries::measurement::Session,
 }
 
-type Wake = Vec<oneshot::Sender<()>>;
+type Wake = Vec<(oneshot::Sender<Granted>, Granted)>;
 
 impl Capacity {
     pub(crate) fn new(limits: &Limits) -> Result<Self, Error> {
@@ -74,14 +83,19 @@ impl Capacity {
         state: &mut State,
         weight: u32,
         #[cfg(feature = "integration")] session: rss_timeseries::measurement::Session,
-    ) {
+    ) -> Granted {
         state.slots -= 1;
         state.bytes -= weight;
         #[cfg(feature = "integration")]
         session.update(|r| {
+            r.granted_batches += 1;
             r.reserved_bytes += weight as usize;
             r.peak_reserved_bytes = r.peak_reserved_bytes.max(r.reserved_bytes);
         });
+        Granted {
+            #[cfg(feature = "integration")]
+            at: session.capacity(state.slots, state.bytes, state.waiting.len()),
+        }
     }
     // At most one fitting successor may pass a byte-blocked head. A cancellation
     // or release can make older waiters eligible; service those before new arrivals.
@@ -107,26 +121,28 @@ impl Capacity {
             };
             if let Some(waiter) = state.waiting.remove(&id) {
                 state.weights.set(id, None);
-                Self::grant(
+                let grant = Self::grant(
                     state,
                     waiter.weight,
                     #[cfg(feature = "integration")]
                     waiter.session,
                 );
-                if let Some(ready) = waiter.ready {
-                    grants.push(ready);
-                }
+                waiter.granted.store(true, Ordering::Relaxed);
+                grants.push((waiter.ready, grant));
             }
         }
         grants
     }
 
     pub(crate) async fn acquire(&self, batch: &Batch) -> Result<Permit, Error> {
+        self.acquire_weight(charge(batch.encoded_len(), batch.samples().len()))
+            .await
+    }
+    async fn acquire_weight(&self, weight: u32) -> Result<Permit, Error> {
         #[cfg(feature = "integration")]
         let start = rss_timeseries::measurement::timer();
-        let weight = charge(batch.encoded_len(), batch.samples().len());
         #[cfg(feature = "integration")]
-        let blocked_on;
+        let queued_at;
         #[cfg(feature = "integration")]
         let session = rss_timeseries::measurement::Session::detailed();
         let (mut permit, received) = {
@@ -163,46 +179,42 @@ impl Capacity {
                     session,
                 });
             }
-            #[cfg(feature = "integration")]
-            {
-                blocked_on = if state.slots == 0 {
-                    "queued_without_slot"
-                } else if weight > state.bytes {
-                    "queued_without_bytes"
-                } else {
-                    "queued_by_order"
-                };
-            }
             let id = state.next;
             state.next = id.checked_add(1).ok_or(Error::Invariant)?;
             let (ready, rx) = oneshot::channel();
+            let granted = Arc::new(AtomicBool::new(false));
             state.weights.set(id, Some(weight));
             state.waiting.insert(
                 id,
                 Waiter {
                     weight,
                     bypassed: false,
-                    ready: Some(ready),
+                    ready,
+                    granted: granted.clone(),
                     #[cfg(feature = "integration")]
                     session,
                 },
             );
+            #[cfg(feature = "integration")]
+            {
+                queued_at = session.capacity(state.slots, state.bytes, state.waiting.len());
+            }
             (
                 Permit {
                     capacity: self.clone(),
                     weight,
-                    queued: Some(id),
+                    queued: Some((id, granted)),
                     #[cfg(feature = "integration")]
                     session,
                 },
                 rx,
             )
         };
-        received.await.map_err(|_| Error::Unavailable)?;
+        let _grant = received.await.map_err(|_| Error::Unavailable)?;
         permit.queued = None;
         #[cfg(feature = "integration")]
         {
-            rss_timeseries::measurement::record(blocked_on, start, 0, 0);
+            session.preparation_wait(weight, queued_at, _grant.at);
             rss_timeseries::measurement::record("permit_wait", start, weight as usize, 0);
         }
         Ok(permit)
@@ -212,11 +224,10 @@ impl Capacity {
         let waiting = {
             let mut state = self.lock();
             state.closed = true;
-            state
-                .waiting
-                .values_mut()
-                .filter_map(|w| w.ready.take())
-                .collect::<Vec<_>>()
+            (
+                std::mem::take(&mut state.waiting),
+                std::mem::take(&mut state.weights),
+            )
         };
         drop(waiting);
     }
@@ -233,32 +244,94 @@ impl Drop for Permit {
         let removed;
         let wake = {
             let mut state = self.capacity.lock();
-            let was_head = self.queued.is_some_and(|id| {
-                state
+            if let Some((id, granted)) = &self.queued
+                && !granted.load(Ordering::Relaxed)
+            {
+                if state.closed {
+                    return;
+                }
+                let was_head = state
                     .waiting
                     .first_key_value()
-                    .is_some_and(|(&first, _)| first == id)
-            });
-            removed = self.queued.and_then(|id| {
-                let w = state.waiting.remove(&id)?;
-                state.weights.set(id, None);
-                Some(w)
-            });
-            if removed.is_some() {
+                    .is_some_and(|(first, _)| first == id);
+                removed = state.waiting.remove(id);
+                state.weights.set(*id, None);
+                #[cfg(feature = "integration")]
+                self.session
+                    .capacity(state.slots, state.bytes, state.waiting.len());
                 if !was_head {
+                    drop(state);
+                    drop(removed);
                     return;
                 }
             } else {
+                removed = None;
                 state.slots += 1;
                 state.bytes += self.weight;
                 #[cfg(feature = "integration")]
-                self.session
-                    .update(|r| r.reserved_bytes -= self.weight as usize);
+                {
+                    self.session.update(|r| {
+                        r.reserved_bytes -= self.weight as usize;
+                        r.granted_batches -= 1;
+                    });
+                    self.session
+                        .capacity(state.slots, state.bytes, state.waiting.len());
+                }
             }
             Capacity::dispatch(&mut state)
         };
-        for ready in wake {
-            let _ = ready.send(());
+        drop(removed);
+        for (ready, grant) in wake {
+            let _ = ready.send(grant);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::{Context, Poll, Waker};
+
+    #[test]
+    fn close_drains_unpolled_waiters_and_preserves_only_granted_capacity() -> anyhow::Result<()> {
+        let capacity = Capacity(Arc::new(Mutex::new(State {
+            slots: 2,
+            bytes: 10,
+            next: 0,
+            closed: false,
+            waiting: BTreeMap::new(),
+            weights: Weights::default(),
+        })));
+        use futures::FutureExt;
+        let active = capacity
+            .acquire_weight(8)
+            .now_or_never()
+            .ok_or(Error::Invariant)??;
+        let mut head = Box::pin(capacity.acquire_weight(7));
+        let mut cancelled = Box::pin(capacity.acquire_weight(9));
+        let pending = |f: std::pin::Pin<&mut dyn Future<Output = Result<Permit, Error>>>| {
+            matches!(
+                f.poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Pending
+            )
+        };
+        assert!(pending(head.as_mut()) && pending(cancelled.as_mut()));
+        drop(active);
+        // The head now owns 7 bytes in its unread notification; the other waiter owns none.
+        capacity.close();
+        capacity.close();
+        {
+            let state = capacity.lock();
+            assert!(state.waiting.is_empty() && state.weights.first(u32::MAX).is_none());
+            assert_eq!((state.slots, state.bytes), (1, 3));
+        }
+        assert_eq!(
+            cancelled.now_or_never().ok_or(Error::Invariant)?.err(),
+            Some(Error::Unavailable)
+        );
+        drop(head);
+        let state = capacity.lock();
+        assert_eq!((state.slots, state.bytes), (2, 10));
+        Ok(())
     }
 }

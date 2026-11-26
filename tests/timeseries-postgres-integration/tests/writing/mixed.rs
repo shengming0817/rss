@@ -74,17 +74,9 @@ async fn arrivals() -> anyhow::Result<()> {
             values.len() as f64 / elapsed.as_secs_f64()
         );
     }
+    waiting_cost(&report, full.0)?;
     for ((class, stage), total) in &report.probe_stages {
-        if [
-            "queued_without_slot",
-            "queued_without_bytes",
-            "queued_by_order",
-            "permit_wait",
-            "pool_wait",
-            "prepare",
-        ]
-        .contains(stage)
-        {
+        if ["permit_wait", "pool_wait", "prepare"].contains(stage) {
             println!(
                 "MIX_STAGE {load} {class} {stage} calls={} us={} charge_bytes={}",
                 total.calls,
@@ -160,4 +152,110 @@ async fn byte_blocked_probes() -> anyhow::Result<()> {
         small_latency[31]
     );
     Ok(())
+}
+
+// The runtime records constant-size transitions. Replay them after all tasks
+// settle, so measurement does not add a waiter scan to the capacity mutex.
+fn wait_parts(
+    samples: &[measurement::CapacitySample],
+    wait: &measurement::PreparationWait,
+) -> [Duration; 4] {
+    let mut parts = [Duration::ZERO; 4];
+    let first = samples
+        .partition_point(|s| s.at <= wait.queued)
+        .saturating_sub(1);
+    let mut from = wait.queued;
+    for (i, s) in samples[first..].iter().enumerate() {
+        if from >= wait.granted {
+            break;
+        }
+        let until = samples
+            .get(first + i + 1)
+            .map_or(wait.granted, |s| s.at.min(wait.granted));
+        let reason = if s.slots == 0 {
+            0
+        } else if s.bytes < wait.weight {
+            1
+        } else {
+            2
+        };
+        parts[reason] += until - from;
+        from = until;
+    }
+    parts[3] = wait.resumed - wait.granted;
+    parts
+}
+fn waiting_cost(report: &measurement::Report, slots: usize) -> anyhow::Result<()> {
+    let samples = &report.capacity_samples;
+    let mut peak_partial = 0;
+    for s in samples.iter().filter(|s| s.queued > 0) {
+        peak_partial = peak_partial.max(
+            slots
+                .checked_sub(s.slots as usize + s.granted)
+                .ok_or(Error::Invariant)?,
+        );
+    }
+    println!("WAIT_CAP peak_held_by_waiters={peak_partial}");
+    assert_eq!(peak_partial, 0);
+    for class in ["small", "large"] {
+        let mut totals = [Duration::ZERO; 4];
+        let mut arrivals = [0usize; 3];
+        for w in report
+            .preparation_waits
+            .iter()
+            .filter(|w| w.class == Some(class))
+        {
+            let entry = samples
+                .partition_point(|s| s.at <= w.queued)
+                .checked_sub(1)
+                .ok_or(Error::Invariant)?;
+            let s = &samples[entry];
+            arrivals[if s.slots == 0 {
+                0
+            } else if s.bytes < w.weight {
+                1
+            } else {
+                2
+            }] += 1;
+            let parts = wait_parts(samples, w);
+            assert_eq!(parts.iter().sum::<Duration>(), w.resumed - w.queued);
+            for (total, part) in totals.iter_mut().zip(parts) {
+                *total += part;
+            }
+        }
+        println!(
+            "WAIT_PHASE {class} arrivals_slot_byte_order={arrivals:?} slot_us={} byte_us={} order_us={} wake_us={}",
+            totals[0].as_micros(),
+            totals[1].as_micros(),
+            totals[2].as_micros(),
+            totals[3].as_micros()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn wait_attribution_splits_resource_changes_and_wakeup() {
+    let start = Timer.now();
+    let at = |n| start + Duration::from_millis(n);
+    let samples = [(0, 0, 0), (2, 1, 1), (5, 1, 4), (9, 0, 0)].map(|(n, slots, bytes)| {
+        measurement::CapacitySample {
+            at: at(n),
+            slots,
+            bytes,
+            queued: 1,
+            granted: 0,
+        }
+    });
+    let w = measurement::PreparationWait {
+        class: Some("small"),
+        weight: 3,
+        queued: start,
+        granted: at(9),
+        resumed: at(14),
+    };
+    assert_eq!(
+        wait_parts(&samples, &w),
+        [2, 3, 4, 5].map(Duration::from_millis)
+    );
 }
