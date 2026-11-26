@@ -5,7 +5,7 @@
 //! RSS_TEST_RUN_ID="rss-$(uuidgen)" RSS_PREPARE_LOAD=repeat cargo run --release --locked -p testkit --features containers --bin rss-test-launcher -- -- cargo test --release --locked -p timeseries-postgres-integration --test suite -- writing::prepare_measure::fixed_load --exact --ignored --nocapture
 //! ```
 //! RSS_PREPARE_TIMING=1 disables per-object instrumentation for independent stage timings.
-//! The measurement-only baseline is e422c8041 (95bce6240 plus probes). Results are recorded in PR 1750.
+//! The measurement-only baseline is 3bea8b183 (95bce6240 plus probes). Results are recorded in PR 1750.
 use super::*;
 use rss_timeseries::measurement::{self, Session};
 use tokio::sync::Semaphore;
