@@ -37,15 +37,16 @@ pub(super) async fn admit(
         })
         .collect();
     let definitions = definitions(c, scope, &wanted).await?;
-    #[cfg(feature = "integration")]
-    let start = crate::measurement::cpu_start();
     let index = if wanted.is_empty() || fences.is_empty() {
         None
     } else {
-        Some(AdmissionFences::from_ordered(stream, fences)?)
+        #[cfg(feature = "integration")]
+        let start = crate::measurement::cpu_start();
+        let index = AdmissionFences::from_ordered(stream, fences)?;
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| m.build_cpu += crate::measurement::elapsed(start));
+        Some(index)
     };
-    #[cfg(feature = "integration")]
-    crate::measurement::record(|m| m.build_cpu += crate::measurement::elapsed(start));
     let mut rows = Vec::new();
     let mut new_ids = Vec::new();
     let mut digests = Vec::new();

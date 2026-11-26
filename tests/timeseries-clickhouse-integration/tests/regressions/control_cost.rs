@@ -1,6 +1,6 @@
 //! Fixed release-mode workload. Run with the testkit launcher, --ignored and --nocapture.
 use super::*;
-use rss_timeseries_clickhouse::measurement::measure;
+use rss_timeseries_clickhouse::measurement::{Counters, measure};
 use rustix::time::{ClockId, clock_gettime};
 
 fn thread_cpu() -> Duration {

@@ -42,10 +42,12 @@ pub(crate) fn record(f: impl FnOnce(&mut Counters)) {
     });
 }
 
-pub(crate) fn cpu_start() -> Option<(fn() -> Duration, Duration)> {
+type CpuStart = (fn() -> Duration, Duration);
+
+pub(crate) fn cpu_start() -> Option<CpuStart> {
     RUN.try_with(|run| (run.cpu, (run.cpu)())).ok()
 }
 
-pub(crate) fn elapsed(start: Option<(fn() -> Duration, Duration)>) -> Duration {
+pub(crate) fn elapsed(start: Option<CpuStart>) -> Duration {
     start.map_or(Duration::ZERO, |(clock, begin)| clock() - begin)
 }
