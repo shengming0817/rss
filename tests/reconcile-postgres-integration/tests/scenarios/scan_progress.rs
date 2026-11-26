@@ -163,7 +163,9 @@ async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> any
     let end = position(owner, &scope).await?;
     assert_eq!((end.0, end.1), (middle.1, middle.1));
 
-    let next = store.claim_due(&scope, 3, i32::MAX as u32, lease, c).await?;
+    let next = store
+        .claim_due(&scope, 3, i32::MAX as u32, lease, c)
+        .await?;
     let targets: Vec<_> = next.claims.iter().map(Claim::target).collect();
     assert_eq!(targets, [&old, &new]);
     assert!(!next.more);

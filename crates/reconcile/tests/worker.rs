@@ -2121,8 +2121,13 @@ async fn stop_during_an_empty_page_prevents_immediate_continuation() -> anyhow::
     store.scan_delay = Some((0, Duration::from_millis(20)));
     let business = business(0);
     let worker = run(
-        &store, &business, &scope, idle_policy(Duration::from_millis(2), Duration::from_secs(1))?,
-        &control, &stop, |_| {},
+        &store,
+        &business,
+        &scope,
+        idle_policy(Duration::from_millis(2), Duration::from_secs(1))?,
+        &control,
+        &stop,
+        |_| {},
     );
     let interrupt = async {
         // Stop an in-flight empty page. Insert work with a deadline eligible at its cutoff,
@@ -2130,7 +2135,9 @@ async fn stop_during_an_empty_page_prevents_immediate_continuation() -> anyhow::
         tokio::task::yield_now().await;
         assert_eq!(store.scans.load(Ordering::SeqCst), 1);
         let target = Target::new(scope.clone(), "next-page")?;
-        store.wake(&target, &ResourceSet::empty(scope.tenant()), &control).await?;
+        store
+            .wake(&target, &ResourceSet::empty(scope.tenant()), &control)
+            .await?;
         store.lock()[0].due = Duration::ZERO;
         stop.cancel();
         Ok::<(), Error>(())

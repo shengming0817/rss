@@ -131,3 +131,39 @@ async fn measure() -> anyhow::Result<()> {
     assert_eq!(store.close(&c).await, CloseOutcome::Drained);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "paired due-scan profile; python3 with psycopg 3 required"]
+async fn due_scan_profile() -> anyhow::Result<()> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt as _;
+
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(120), &cancel);
+    let db = Database::new(&control).await?;
+    let params = db.fixture.params();
+    let fixture = serde_json::to_vec(&serde_json::json!({
+        "host": params.host, "port": params.port, "dbname": params.database,
+        "user": params.username, "password": params.password, "ca": db.fixture.ca_pem(),
+    }))?;
+    let mut child = tokio::process::Command::new("python3")
+        .arg("tests/reconcile-postgres-integration/tests/measure/due_scan.py")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .stdin(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("profile stdin missing"))?
+        .write_all(&fixture)
+        .await?;
+    anyhow::ensure!(
+        tokio::time::timeout(Duration::from_secs(600), child.wait())
+            .await??
+            .success(),
+        "due scan profile failed"
+    );
+    Ok(())
+}
