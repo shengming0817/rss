@@ -160,7 +160,8 @@ mod tests {
             });
             std::future::pending::<()>().await
         })));
-        assert!(futures::poll!(stalled.as_mut()).is_pending());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(stalled.as_mut().poll(&mut context).is_pending());
         assert!(profile.reading_page());
         profile
             .run(async {
