@@ -18,16 +18,7 @@ use std::sync::Arc;
 const LOOKUP: &str = "SELECT raw IS NULL AS expired,scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
 // Window only over the bounded index candidates and their byte lengths. Select bodies
 // for the admitted prefix in the same snapshot as the floor.
-const READ: &str = "SELECT j.expired_through, b.scope,b.batch_id,b.raw,b.fingerprint,b.received_at,
- b.policy,b.decision,b.sequence::text AS sequence,b.applicable,b.log_position
- FROM rss_observation.journals j LEFT JOIN LATERAL (
-   SELECT log_position,sum(n) OVER (ORDER BY log_position ROWS UNBOUNDED PRECEDING) AS bytes
-   FROM (SELECT log_position,coalesce(octet_length(raw),0) AS n FROM rss_observation.batches
-     WHERE tenant_id=j.tenant_id AND applicable AND log_position>$2 AND $2>=j.expired_through
-     ORDER BY log_position LIMIT $3) candidates
- ) p ON p.bytes<=$4::bigint LEFT JOIN rss_observation.batches b
- ON b.tenant_id=j.tenant_id AND b.applicable AND b.log_position=p.log_position
- WHERE j.tenant_id=$1::uuid ORDER BY b.log_position";
+const READ: &str = include_str!("projection/page.sql");
 /// Tenant journal coordinates from one committed snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalBounds {

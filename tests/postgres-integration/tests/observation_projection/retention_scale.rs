@@ -279,7 +279,7 @@ async fn reclaim_plans(
         .collect()
 }
 
-fn examined(node: &Value, table: &str) -> u64 {
+pub(super) fn examined(node: &Value, table: &str) -> u64 {
     let rows = if node["Relation Name"] == table {
         [
             "Actual Rows",
