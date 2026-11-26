@@ -127,7 +127,11 @@ async fn empty_and_locked(
     unchanged(store, owner, scope, c).await?;
     Ok(())
 }
-async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
+async fn seed_window(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<[Target; 3]> {
     let scope = Scope::new(TenantId::parse(TENANT)?, "scan-window")?;
     let keys = ResourceSet::empty(scope.tenant());
     let old = Target::new(scope.clone(), "old")?;
@@ -144,31 +148,49 @@ async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> any
 
     store.wake(&locked, &keys, c).await?;
     store.wake(&last, &keys, c).await?;
+    Ok([old, locked, last])
+}
+async fn windows(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> anyhow::Result<()> {
+    let [old, locked, last] = seed_window(store, owner, c).await?;
+    let scope = old.scope();
+    let lease = Duration::from_secs(60);
     let mut held = owner.begin().await?;
     sqlx::query("SELECT FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity=$3 FOR UPDATE")
         .bind(TENANT).bind(scope.reconciler()).bind(locked.entity()).execute(&mut *held).await?;
-    let blocked = store.claim_due(&scope, 1, 1, lease, c).await?;
+    let blocked = store.claim_due(scope, 1, 1, lease, c).await?;
     assert!(blocked.claims.is_empty() && blocked.more);
-    let middle = position(owner, &scope).await?;
+    let middle = position(owner, scope).await?;
     assert!(middle.0 < middle.1);
 
+    rediscover_wakes(store, owner, c, &old, &last, middle.1).await?;
+    held.rollback().await?;
+    Ok(())
+}
+async fn rediscover_wakes(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    old: &Target,
+    last: &Target,
+    watermark: i64,
+) -> anyhow::Result<()> {
+    let scope = old.scope();
+    let keys = ResourceSet::empty(scope.tenant());
+    let lease = Duration::from_secs(60);
     // The old target keeps its already-passed ticket. The new one is above this watermark.
-    store.wake(&old, &keys, c).await?;
+    store.wake(old, &keys, c).await?;
     let new = Target::new(scope.clone(), "new")?;
     store.wake(&new, &keys, c).await?;
-    let tail = store.claim_due(&scope, 1, 1, lease, c).await?;
+    let tail = store.claim_due(scope, 1, 1, lease, c).await?;
     assert_eq!(tail.claims.len(), 1);
-    assert_eq!(tail.claims[0].target(), &last);
+    assert_eq!(tail.claims[0].target(), last);
     assert!(!tail.more);
-    let end = position(owner, &scope).await?;
-    assert_eq!((end.0, end.1), (middle.1, middle.1));
+    let end = position(owner, scope).await?;
+    assert_eq!((end.0, end.1), (watermark, watermark));
 
-    let next = store
-        .claim_due(&scope, 3, i32::MAX as u32, lease, c)
-        .await?;
+    let next = store.claim_due(scope, 3, i32::MAX as u32, lease, c).await?;
     let targets: Vec<_> = next.claims.iter().map(Claim::target).collect();
-    assert_eq!(targets, [&old, &new]);
+    assert_eq!(targets, [old, &new]);
     assert!(!next.more);
-    held.rollback().await?;
     Ok(())
 }
