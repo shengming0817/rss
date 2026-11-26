@@ -35,17 +35,17 @@ async fn arrivals() -> anyhow::Result<()> {
     let mut writes = JoinSet::new();
     measurement::start(true);
     for (i, large, req) in schedule {
-        tokio::time::sleep_until((started + Duration::from_millis(2 * i)).into()).await;
+        let arrival = started + Duration::from_millis(2 * i);
+        tokio::time::sleep_until(arrival.into()).await;
         let f = f.clone();
         let label = if large { "large" } else { "small" };
         writes.spawn(measurement::probe(label, async move {
-            let issued = Timer.now();
             let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(90))?;
             anyhow::ensure!(matches!(
                 f.store.write(&req, cutoff).await?,
                 Outcome::Accepted(_)
             ));
-            anyhow::Ok((usize::from(large), (Timer.now() - issued).as_micros()))
+            anyhow::Ok((usize::from(large), (Timer.now() - arrival).as_micros()))
         }));
     }
     let mut latencies = [Vec::new(), Vec::new()];

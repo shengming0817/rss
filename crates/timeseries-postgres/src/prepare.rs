@@ -1,5 +1,6 @@
 //! One admission decision covers a prepared batch slot and its full byte charge.
 //! ref: tokio tokio/src/sync/batch_semaphore.rs@tokio-1.53.3
+mod weights;
 use crate::Limits;
 use rss_timeseries::{Batch, Error};
 use std::{
@@ -7,6 +8,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 use tokio::sync::oneshot;
+use weights::Weights;
 
 /// Two bounded JSON arenas and their SQLx copy. All selected definitions occur inside
 /// distinct samples, so their combined JSON fits one input length. Per item cover
@@ -25,6 +27,7 @@ struct State {
     next: u64,
     closed: bool,
     waiting: BTreeMap<u64, Waiter>,
+    weights: Weights,
 }
 
 struct Waiter {
@@ -59,6 +62,7 @@ impl Capacity {
             next: 0,
             closed: false,
             waiting: BTreeMap::new(),
+            weights: Weights::default(),
         }))))
     }
 
@@ -93,8 +97,7 @@ impl Capacity {
                 if head.bypassed {
                     break;
                 }
-                let Some((&id, _)) = state.waiting.iter().find(|(_, w)| w.weight <= state.bytes)
-                else {
+                let Some(id) = state.weights.first(state.bytes) else {
                     break;
                 };
                 if let Some(mut head) = state.waiting.first_entry() {
@@ -103,6 +106,7 @@ impl Capacity {
                 id
             };
             if let Some(waiter) = state.waiting.remove(&id) {
+                state.weights.set(id, None);
                 Self::grant(
                     state,
                     waiter.weight,
@@ -172,6 +176,7 @@ impl Capacity {
             let id = state.next;
             state.next = id.checked_add(1).ok_or(Error::Invariant)?;
             let (ready, rx) = oneshot::channel();
+            state.weights.set(id, Some(weight));
             state.waiting.insert(
                 id,
                 Waiter {
@@ -225,6 +230,7 @@ impl Capacity {
 
 impl Drop for Permit {
     fn drop(&mut self) {
+        let removed;
         let wake = {
             let mut state = self.capacity.lock();
             let was_head = self.queued.is_some_and(|id| {
@@ -233,10 +239,12 @@ impl Drop for Permit {
                     .first_key_value()
                     .is_some_and(|(&first, _)| first == id)
             });
-            if self
-                .queued
-                .is_some_and(|id| state.waiting.remove(&id).is_some())
-            {
+            removed = self.queued.and_then(|id| {
+                let w = state.waiting.remove(&id)?;
+                state.weights.set(id, None);
+                Some(w)
+            });
+            if removed.is_some() {
                 if !was_head {
                     return;
                 }

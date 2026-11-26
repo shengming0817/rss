@@ -262,16 +262,27 @@ async fn required_failures(
 ) -> anyhow::Result<()> {
     for limit in [4, 128] {
         let query = aggregate(fine, window(0, 1280)?, limit, AggregateOp::Sum)?;
-        for message in [
-            "service unavailable",
-            "Code: 60. DB::Exception: UNKNOWN_TABLE",
-            "Code: 497. DB::Exception: ACCESS_DENIED",
-            "Code: 62. DB::Exception: Syntax error",
+        for (message, error) in [
+            ("service unavailable", Error::Unavailable),
+            ("Code: 60. DB::Exception: UNKNOWN_TABLE", Error::Unavailable),
+            (
+                "Code: 497. DB::Exception: ACCESS_DENIED",
+                Error::Unavailable,
+            ),
+            ("Code: 62. DB::Exception: Syntax error", Error::Unavailable),
+            (
+                "Code: 241. DB::Exception: User memory limit exceeded: would use more",
+                Error::BudgetExceeded,
+            ),
+            (
+                "Code: 241. DB::Exception: (total) memory limit exceeded: would use more",
+                Error::BudgetExceeded,
+            ),
         ] {
             proxy.fail_reads(Some((message, None))).await;
             assert_eq!(
                 store.aggregate(&query, None, deadline()?).await.err(),
-                Some(Error::Unavailable)
+                Some(error)
             );
             assert_eq!(proxy.slow_reads(), 1, "{message} width {limit}");
         }
@@ -508,6 +519,7 @@ async fn bounded_groups_isolate_dense_buckets_and_release_a_cancelled_reader() -
         .fetch_one(&f.admin)
         .await?;
     caps.max_bytes = NonZeroU32::new(u32::try_from(largest)? + 320).ok_or(Error::Invariant)?;
+    let group_budget = caps.max_bytes.get() as usize;
     let tight = proxy.store_with_limits(f.pool.clone(), caps).await?;
     let page = tight.aggregate(&all, None, deadline()?).await?;
     assert_eq!(serde_json::to_value(page.buckets)?, expected);
@@ -526,13 +538,14 @@ async fn bounded_groups_isolate_dense_buckets_and_release_a_cancelled_reader() -
     .await;
     let resumed = resumed?;
     eprintln!(
-        "group-handoff groups={} previous_bytes={} largest_bytes={} http_bytes={}",
+        "group-handoff groups={} previous_bytes={} largest_bytes={} max_group_budget={group_budget} page_http_bytes={}",
         m.summary_groups,
         m.previous_group_bytes,
         m.largest_group_bytes,
         proxy.wire_bytes() - wire
     );
     assert_eq!(m.previous_group_bytes, 0);
+    assert!(m.largest_group_bytes <= group_budget);
     assert!(m.summary_groups > 1 && m.largest_group_bytes >= largest as usize);
     assert_eq!(serde_json::to_value(resumed.buckets)?, expected);
     let reads = proxy.take_page_reads().await;

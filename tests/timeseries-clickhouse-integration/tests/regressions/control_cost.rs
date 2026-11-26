@@ -134,7 +134,20 @@ async fn fixed_admission() -> anyhow::Result<()> {
         .map(|n| sample(&d, &format!("capacity-{n}"), 1000, 1))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let b = batch("capacity", samples)?;
-    let (result, c) = measure(thread_cpu, f.write(&b)).await;
+    let mut caps = limits()?;
+    // The proof SELECT returns two SHA-256 hex strings and selector columns per row.
+    caps.max_bytes = NonZeroU32::new(u32::try_from(b.encoded_len())?).ok_or(Error::Invariant)?;
+    let store = Fixture::connect_options(
+        &f.ch,
+        f.pool.clone(),
+        TENANT,
+        "ch_reader",
+        "ch_writer",
+        caps,
+    )
+    .await?;
+    let req = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+    let (result, c) = measure(thread_cpu, store.write(&req, deadline()?)).await;
     assert_eq!(
         confirmed(result?)?.new_samples() as usize,
         Batch::MAX_SAMPLES

@@ -297,12 +297,14 @@ pub(crate) fn read_error(error: clickhouse::error::Error) -> ReadFailure {
                 .strip_prefix("Code: ")
                 .and_then(|s| s.split_once('.'));
             match diagnostic {
-                Some(("158" | "241" | "307" | "396", _)) => ReadFailure::Capacity,
+                Some(("158" | "307" | "396", _)) => ReadFailure::Capacity,
+                Some(("241", tail)) if tail.starts_with(" DB::Exception: Query memory limit exceeded:") => ReadFailure::Capacity,
+                Some(("241", _)) => ReadFailure::Other(Error::BudgetExceeded),
                 Some(("159" | "160", _)) => ReadFailure::Other(Error::Deadline),
                 // ClickHouse uses SYNTAX_ERROR for *all* parser errors. Only this
                 // lexical diagnostic can be remedied by shortening a generated IN list.
                 Some(("62", tail))
-                    if tail.starts_with(" DB::Exception: Max query size exceeded:") =>
+                    if tail.starts_with(" DB::Exception: Max query size exceeded (can be increased with the `max_query_size` setting):") =>
                 {
                     ReadFailure::QueryLength
                 }
