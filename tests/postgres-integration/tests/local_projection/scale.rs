@@ -446,55 +446,63 @@ impl rss_transactional_messaging::observability::TransactionalMessagingEmitter f
 }
 
 pub(super) async fn worker_continuation(f: &Fixture) -> anyhow::Result<()> {
-    use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWorker};
-    for (prefix, count, lock_prefix) in [("resume-lease", 64, false), ("resume-locked", 130, true)]
-    {
-        append(f, prefix, 0, count, 0).await?;
-        sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()-interval '2 days' WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
-        let mut held = f.owner.begin().await?;
-        if lock_prefix {
-            sqlx::query("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE $1 ORDER BY seq LIMIT 128 FOR UPDATE").bind(format!("{prefix}-%")).fetch_all(&mut *held).await?;
-        } else {
-            sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()-interval '1 day',automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
-        }
-        let store = Arc::new(PgOutboxStore::<()>::new(
-            f.worker.clone(),
-            domain()?,
-            DeliveryBudget::new(
-                Duration::from_secs(60),
-                Duration::from_secs(5),
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-            )?,
-        )?);
-        let config = RelayConfig::new(
-            NonZeroUsize::MIN,
-            NonZeroUsize::MIN,
-            Duration::from_secs(30),
-            Duration::from_secs(1),
-        )?;
-        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let worker = RelayWorker::new(
-            store,
-            Arc::new(Published(sent)),
-            Arc::new(Timer::new()),
-            Arc::new(Quiet),
-            config,
-        );
-        let stop = tokio_util::sync::CancellationToken::new();
-        let task = tokio::spawn(worker.run(crate::execution(tenant(), 1), stop.clone()));
-        let first = tokio::time::timeout(Duration::from_secs(3), received.recv()).await;
-        stop.cancel();
-        tokio::time::timeout(Duration::from_secs(3), task).await???;
-        held.rollback().await?;
-        let id = first?.ok_or_else(|| anyhow::anyhow!("worker stopped without publication"))?;
-        assert!(id.starts_with(prefix));
-        if lock_prefix {
-            assert!(id.ends_with("-128") || id.ends_with("-129"));
-        }
-        sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
-    }
+    first_publication(f, "resume-lease", 64, false).await?;
+    first_publication(f, "resume-locked", 130, true).await?;
     finish_retired_sweep(f).await
+}
+
+async fn first_publication(
+    f: &Fixture,
+    prefix: &str,
+    count: usize,
+    lock_prefix: bool,
+) -> anyhow::Result<()> {
+    use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWorker};
+    append(f, prefix, 0, count, 0).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()-interval '2 days' WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
+    let mut held = f.owner.begin().await?;
+    if lock_prefix {
+        sqlx::query("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE $1 ORDER BY seq LIMIT 128 FOR UPDATE").bind(format!("{prefix}-%")).fetch_all(&mut *held).await?;
+    } else {
+        sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()-interval '1 day',automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
+    }
+    let store = Arc::new(PgOutboxStore::<()>::new(
+        f.worker.clone(),
+        domain()?,
+        DeliveryBudget::new(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )?,
+    )?);
+    let config = RelayConfig::new(
+        NonZeroUsize::MIN,
+        NonZeroUsize::MIN,
+        Duration::from_secs(30),
+        Duration::from_secs(1),
+    )?;
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let worker = RelayWorker::new(
+        store,
+        Arc::new(Published(sent)),
+        Arc::new(Timer::new()),
+        Arc::new(Quiet),
+        config,
+    );
+    let stop = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(worker.run(crate::execution(tenant(), 1), stop.clone()));
+    let first = tokio::time::timeout(Duration::from_secs(3), received.recv()).await;
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(3), task).await???;
+    held.rollback().await?;
+    let id = first?.ok_or_else(|| anyhow::anyhow!("worker stopped without publication"))?;
+    assert!(id.starts_with(prefix));
+    if lock_prefix {
+        assert!(id.ends_with("-128") || id.ends_with("-129"));
+    }
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
+    Ok(())
 }
 
 async fn finish_retired_sweep(f: &Fixture) -> anyhow::Result<()> {
