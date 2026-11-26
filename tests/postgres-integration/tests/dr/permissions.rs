@@ -68,8 +68,8 @@ pub async fn check(
         ),
         (
             true,
-            "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) TO dr_operator",
-            "REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) FROM dr_operator",
+            "GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint) TO dr_operator",
+            "REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint) FROM dr_operator",
         ),
         (
             false,

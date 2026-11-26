@@ -30,7 +30,7 @@ pub use consumer::{
 };
 pub use consumer_profile::{grant_consumer, grant_local_projection};
 pub use inbox::{PgClaimPermit, PgInboxClaim, PgInboxStore};
-pub use outbox::{OutboxWakeup, PgOutboxClaim, PgOutboxStore, PgOutboxWriter};
+pub use outbox::{OutboxWakeup, PgOutboxClaim, PgOutboxScanBudget, PgOutboxStore, PgOutboxWriter};
 #[cfg(feature = "integration")]
 pub use transaction::PgTransactionFault;
 pub use transaction::{PgError, PgRuntime, PgStorageContractFailure, PgTransaction};

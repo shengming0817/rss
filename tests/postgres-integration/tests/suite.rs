@@ -61,8 +61,12 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
                 .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec())).await?;
         sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE tmsg_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE TABLE public.outbox (legacy boolean); CREATE TABLE public.rss_fences (legacy boolean);")
             .execute(&owner).await?;
-        sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL).execute(&owner).await?;
-        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO tmsg_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO tmsg_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO tmsg_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime;")
+        // A migrator may retry a rolled-back custom install on the same connection.
+        let mut installer = owner.acquire().await?;
+        sqlx::raw_sql("BEGIN; SET LOCAL rss.install_window_seconds='15'; ROLLBACK").execute(&mut *installer).await?;
+        sqlx::raw_sql(rss_transactional_messaging_postgres::MIGRATION_SQL).execute(&mut *installer).await?;
+        drop(installer);
+        sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_transactional_messaging TO tmsg_runtime; GRANT SELECT ON rss_transactional_messaging.policy TO tmsg_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO tmsg_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO tmsg_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO tmsg_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime;")
             .execute(&owner).await?;
         sqlx::raw_sql("CREATE TABLE public.business_effects (tenant_id uuid NOT NULL, id text NOT NULL, PRIMARY KEY(tenant_id,id)); ALTER TABLE public.business_effects ENABLE ROW LEVEL SECURITY; ALTER TABLE public.business_effects FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_effect ON public.business_effects USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT ON public.business_effects TO tmsg_runtime;").execute(&owner).await?;
         fence_fixture::provision(&owner).await?;
@@ -93,6 +97,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         eprintln!("pg-suite phase=conformance");
         Box::pin(conformance::run(runtime.clone(), &owner)).await?;
         eprintln!("pg-suite phase=adversarial");
+        Box::pin(partition::policy::run(&owner, &raw_runtime, config.clone())).await?;
         Box::pin(partition::run(runtime.clone(), &owner, &raw_runtime, config.clone())).await?;
         Box::pin(adversarial::run(runtime.clone(), &owner, &raw_runtime, config.clone())).await?;
         eprintln!("pg-suite phase=lifecycle::close_during_transaction");
@@ -512,7 +517,7 @@ async fn transaction_only_permissions(
     owner: &sqlx::PgPool,
     config: PgConfig,
 ) -> anyhow::Result<()> {
-    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) FROM tmsg_runtime").execute(owner).await?;
+    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) FROM tmsg_runtime").execute(owner).await?;
     sqlx::raw_sql("REVOKE ALL ON rss_transactional_messaging.inbox FROM tmsg_runtime")
         .execute(owner)
         .await?;
@@ -559,7 +564,7 @@ async fn producer_admission_rejections(
         "producer must reject SET-accessible wakeup capability"
     );
 
-    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime").execute(owner).await?;
+    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO tmsg_runtime").execute(owner).await?;
     assert!(
         PgRuntime::connect_producer(config.clone(), Timer::new(), fence_fixture::storage())
             .await
@@ -576,7 +581,7 @@ async fn producer_admission_rejections(
 async fn producer_relay_denied(runtime: Arc<PgRuntime>) -> anyhow::Result<()> {
     let tenant = message("transaction-only").metadata().tenant_id();
     for statement in [
-        "SELECT rss_transactional_messaging.claim_outbox(NULL,NULL,NULL,NULL)",
+        "SELECT rss_transactional_messaging.claim_outbox(NULL,NULL,NULL,NULL,NULL)",
         "SELECT rss_transactional_messaging.next_outbox_wakeup(NULL,NULL)",
         "SELECT rss_transactional_messaging.outbox_lease(NULL,NULL,NULL,NULL,NULL,NULL)",
         "SELECT rss_transactional_messaging.settle_outbox(NULL,NULL,NULL,NULL,NULL,NULL)",

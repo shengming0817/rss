@@ -1,6 +1,7 @@
 //! INVARIANT: OUTBOX-PARTITION-ORDER-01 — public Rust and independent SQL callers.
 mod confirmed_settlement;
 mod heads;
+pub(super) mod policy;
 mod wire_contract;
 use super::{Timer, binding, deadline, fence_fixture, message, outbox_budget};
 use rss_request_context::TenantId;

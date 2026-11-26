@@ -84,7 +84,7 @@ async fn seed_claim(
     sql_append(&mut seed, head).await?;
     let claim = sqlx::query_as(
         "SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint
-        FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,1,60000)",
+        FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,1,64,60000)",
     )
     .bind(tenant.to_string())
     .bind(domain)
@@ -206,7 +206,7 @@ async fn stale_snapshot(raw: &PgPool) -> anyhow::Result<()> {
     let mut retry = sql_tx(raw, tenant).await?;
     sql_prepare(&mut retry, pairs).await?;
     sql_append(&mut retry, &next).await?;
-    let claimed:String = sqlx::query_scalar("SELECT message_id FROM rss_transactional_messaging.claim_outbox($1::uuid,'repeatable',1,60000)")
+    let claimed:String = sqlx::query_scalar("SELECT message_id FROM rss_transactional_messaging.claim_outbox($1::uuid,'repeatable',1,64,60000)")
         .bind(tenant.to_string()).fetch_one(&mut *retry).await?;
     assert_eq!(claimed, next.id().as_str());
     retry.rollback().await?;
@@ -229,7 +229,7 @@ async fn capacity(raw: &PgPool) -> anyhow::Result<()> {
     let mut first = sql_tx(raw, tenant).await?;
     let mut second = sql_tx(raw, tenant).await?;
     let query =
-        "SELECT message_id FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,60000)";
+        "SELECT message_id FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,128,60000)";
     let one: Vec<String> = sqlx::query_scalar(query)
         .bind(tenant.to_string())
         .bind(lane)
@@ -262,7 +262,7 @@ async fn crossed_declarations(raw: &PgPool) -> anyhow::Result<()> {
         )
         .await?;
     }
-    let claims:Vec<(i64,String,i64)> = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,2,60000) ORDER BY seq")
+    let claims:Vec<(i64,String,i64)> = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,2,64,60000) ORDER BY seq")
         .bind(tenant.to_string()).bind(domain).fetch_all(&mut *seed).await?;
     seed.commit().await?;
     assert_eq!(claims.len(), 2);

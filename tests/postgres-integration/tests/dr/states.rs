@@ -104,6 +104,28 @@ async fn invalid_facts(owner: &sqlx::PgPool, store: &PgDrStore) -> anyhow::Resul
     assert_eq!(epoch, 3);
     Ok(())
 }
+async fn retry_at_original_deadline(
+    owner: &sqlx::PgPool,
+    outbox: &PgOutboxStore<()>,
+    plan: &AuthorizedPlan,
+    capacity: std::num::NonZeroUsize,
+) -> anyhow::Result<()> {
+    let claim = outbox
+        .claim_partition_heads(binding(4)?, capacity, deadline())
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("due DR retry"))?;
+    sqlx::query("UPDATE rss_transactional_messaging.policy SET retry_initial_seconds=2147483647,retry_max_seconds=2147483647").execute(owner).await?;
+    outbox
+        .settle(claim, OutboxSettlement::Retry, deadline())
+        .await?;
+    let capped:bool=sqlx::query_scalar("SELECT m.retry_after=o.automatic_retry_deadline AND m.message_id=o.message_id
+        FROM rss_transactional_messaging.dr_members m JOIN rss_transactional_messaging.outbox o ON o.seq=m.outbox_seq
+        WHERE m.operation_id=$1::uuid AND m.message_id='published'").bind(plan.request().operation().to_string()).fetch_one(owner).await?;
+    assert!(capped);
+    fixture_sql(owner,4,"UPDATE rss_transactional_messaging.dr_members SET retry_after=clock_timestamp()-interval '1 second' WHERE status='pending'").await
+}
 #[allow(clippy::cognitive_complexity)] // reason: ordered DR states and partition admission are one observable database protocol.
 pub async fn run(
     owner: &sqlx::PgPool,
@@ -145,9 +167,19 @@ pub async fn run(
             .await?
             .is_empty()
     );
+    let before: i64 =
+        sqlx::query_scalar("SELECT (extract(epoch FROM clock_timestamp())*1000000)::bigint")
+            .fetch_one(owner)
+            .await?;
     outbox4
         .settle(claim, OutboxSettlement::Retry, deadline())
         .await?;
+    let (retry_us, observed_us, count): (i64,i64,i32) = sqlx::query_as(
+        "SELECT (extract(epoch FROM retry_after)*1000000)::bigint,(extract(epoch FROM clock_timestamp())*1000000)::bigint,retry_count
+         FROM rss_transactional_messaging.dr_members WHERE message_id='published' AND operation_id=$1::uuid")
+        .bind(p.request().operation().to_string()).fetch_one(owner).await?;
+    assert!((before..=observed_us).contains(&(retry_us - 3_000_000)));
+    assert_eq!(count, 1);
     assert_eq!(status(&store3, &p).await?, vec![MemberStatus::Pending]);
     let retry = outbox4.next_wakeup(binding(4)?, deadline()).await?;
     assert!(
@@ -167,6 +199,7 @@ pub async fn run(
             .await?
             .due_now()
     );
+    Box::pin(retry_at_original_deadline(owner, &outbox4, &p, two)).await?;
     let claim = outbox4
         .claim_partition_heads(binding(4)?, two, deadline())
         .await?

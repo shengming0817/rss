@@ -108,6 +108,9 @@ pub enum PgError {
     /// Lease must be positive whole milliseconds representable as PostgreSQL interval microseconds.
     #[error("invalid PostgreSQL lease duration")]
     InvalidLeaseDuration,
+    /// Candidate scan budget must be between one and 1024 headers.
+    #[error("invalid PostgreSQL Outbox candidate scan budget")]
+    InvalidScanBudget,
     /// PostgreSQL statement and lock timeouts use signed 32-bit milliseconds.
     #[error("PostgreSQL operation timeout is not representable")]
     InvalidOperationTimeout,
@@ -365,6 +368,37 @@ impl PgRuntime {
     ) -> Result<Self, PgError> {
         Self::connect_profile(config, timer, storage, Profile::Consumer).await
     }
+    async fn check_outbox_policy(&self, cutoff: Deadline) -> Result<(), PgError> {
+        let mut query = sqlx::query_scalar::<_, bool>(include_str!("outbox_policy_probe.sql"));
+        for name in [
+            "protect_policy_change",
+            "lock_outbox_policy",
+            "outbox_policy_present",
+            "settle_outbox",
+            "archive_claim",
+            "archive_purge",
+        ] {
+            query = query.bind(crate::consumer_profile::function_body(
+                crate::MIGRATION_SQL,
+                name,
+            )?);
+        }
+        let valid = within(&self.timer, cutoff, |_| query.fetch_one(&self.pool))
+            .await?
+            .map_err(PgError::probe)?;
+        if valid {
+            Ok(())
+        } else {
+            let reason = PgStorageContractFailure::Policy;
+            tracing::warn!(
+                phase = "probe",
+                reason = reason.as_label(),
+                "PostgreSQL storage contract rejected"
+            );
+            Err(PgError::IncompatibleStorageContract(reason))
+        }
+    }
+
     pub(crate) async fn connect_profile<C: ExecutionTimer + 'static>(
         config: PgConfig,
         timer: C,
@@ -415,6 +449,7 @@ impl PgRuntime {
             runtime.check_relay_role(cutoff).await?;
             // Keep the additional catalog probe out of every caller's inline startup future.
             Box::pin(crate::consumer_profile::verify_scope(&runtime, cutoff)).await?;
+            Box::pin(runtime.check_outbox_policy(cutoff)).await?;
             #[cfg(feature = "recovery")]
             if profile == Profile::Dr {
                 return Ok(());

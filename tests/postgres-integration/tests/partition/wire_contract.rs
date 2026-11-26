@@ -31,7 +31,7 @@ async fn payload_sizes(raw: &PgPool) -> anyhow::Result<()> {
         let mut tx = sql_tx(raw, item.metadata().tenant_id()).await?;
         sql_prepare(&mut tx, serde_json::json!([["wire-bytes", "ordered"]])).await?;
         assert_eq!(sql_append(&mut tx, &item).await?, "inserted");
-        let stored:Vec<u8> = sqlx::query_scalar("SELECT payload FROM rss_transactional_messaging.claim_outbox($1::uuid,'wire-bytes',1,60000)")
+        let stored:Vec<u8> = sqlx::query_scalar("SELECT payload FROM rss_transactional_messaging.claim_outbox($1::uuid,'wire-bytes',1,64,60000)")
             .bind(item.metadata().tenant_id().to_string()).fetch_one(&mut *tx).await?;
         assert_eq!(stored, body);
         tx.rollback().await?;

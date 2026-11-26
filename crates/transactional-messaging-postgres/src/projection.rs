@@ -185,6 +185,13 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         })
     }
 
+    /// Set the candidate window independently of available projection permits.
+    #[must_use]
+    pub fn with_scan_budget(mut self, budget: crate::PgOutboxScanBudget) -> Self {
+        self.outbox = self.outbox.with_scan_budget(budget);
+        self
+    }
+
     /// Bind a fault to the next effect transaction, optionally pausing before its connection acquire.
     /// Sibling source/Inbox transactions cannot consume this injection. Use only in fixtures.
     #[cfg(feature = "integration")]

@@ -34,6 +34,25 @@ Registry consumers obtain the same versioned SQL through
 file. Pin the adapter version in the external migrator (`rss-transactional-messaging-postgres =
 "=0.1.0"`) so its SQL and runtime come from the same release. The constant does not execute DDL.
 
+### Database delivery policy
+
+The fresh installer seeds one policy row. To choose a different initial policy, execute
+`SET LOCAL` in the same installation transaction before `MIGRATION_SQL`. The five
+integer-second settings are `rss.install_window_seconds`, `rss.install_safety_seconds`,
+`rss.install_receipt_seconds`, `rss.install_retry_initial_seconds` and
+`rss.install_retry_max_seconds`. Defaults are 86400, 86400, 604800, 1 and 3600 respectively.
+All durations are positive signed 32-bit seconds. Receipt retention must strictly exceed window
+plus safety, and maximum retry must cover the initial retry.
+
+After installation the external owner changes these five columns together using SQL UPDATE
+on `rss_transactional_messaging.policy WHERE revision=1`. The database serializes the change
+with first claims and archive decisions. On a reduction, the row preserves the furthest prior
+HOT and receipt protection deadlines. This can defer HOT cleanup across the database until
+outstanding protection expires. Reapplying the same values does not move either deadline.
+The next first claim freezes its window using database time. Renewal, redrive and DR use the
+stored absolute deadline. Each new retry is scheduled at or before that deadline; an existing retry keeps its scheduled time. An archive whose proof
+falls short after a policy increase returns a retention error and keeps its HOT capsule.
+
 The runtime login must not own the schema/tables, be superuser, have BYPASSRLS, or belong to the
 relay role. Grant it schema USAGE; policy SELECT; Inbox SELECT/INSERT/UPDATE/DELETE; Outbox
 SELECT; and EXECUTE on `check_execution`, the three relay functions, `next_outbox_wakeup(uuid,text)`, `prepare_outbox_partitions(jsonb)`
@@ -297,7 +316,7 @@ Source: `baseline/pre-community-core-20260902`.
 | `consumer_tx.rs` | Retain private commit proof and atomic effect/receipt; remove Audit/Settings handlers in favor of trusted static effect. |
 | Product migration execution, CDC, reconcile, fault-matrix product combinations | Exclude: products own deployment and production workflows; the current installation SQL remains library-owned. |
 
-Receipt retention must strictly exceed the 24-hour automatic window plus safety margin. No
+Receipt retention must strictly exceed the configured automatic window plus safety margin. No
 automatic cleanup or CDC is supplied. Explicit recovery supplies application DLQ, redrive and resolve. A dead-letter partition
 head continues blocking its successors.
 
@@ -417,7 +436,7 @@ Grant the current Outbox signatures:
 
 ```sql
 GRANT EXECUTE ON FUNCTION
- rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),
+ rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint),
  rss_transactional_messaging.next_outbox_wakeup(uuid,text),
  rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),
  rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),
@@ -574,7 +593,10 @@ its default remains 64 and it does not alter request authorization or digest ide
 
 ### Bounded claim work and Published body retention
 
-A claim examines at most `max(64, min(4 * limit, 1024))` admitted candidate headers.
+Use `PgOutboxStore::with_scan_budget` or `PgLocalProjection::with_scan_budget` with
+`PgOutboxScanBudget::new(headers)` (1–1024 headers). The window may be smaller
+than claim capacity. The default from #3281/#3288 is `clamp(4 * capacity, 64, 1024)`.
+SQL callers supply both limits to `claim_outbox(tenant, domain, capacity, scan_budget, ttl_ms)`.
 Each indexed lane reads at most the remaining budget before the merged window is capped;
 the current DR plan has its separate 1024-member bound. Generation-index seeks check the earliest retry time in up to five distinct generations.
 A current generation or a future retry cannot prove historical work is due. An inconclusive

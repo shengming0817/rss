@@ -34,7 +34,7 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
   ('rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)',$5::text,false,'s','sql',NULL::text[]),
   ('rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint)',$8::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']),
  ('rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer)',$7::text,false,'s','sql',NULL::text[]),
- ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)',$6::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp'])
+ ('rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint)',$6::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp'])
  ) f(signature,body,definer,volatility,language,config)
  LEFT JOIN pg_proc p ON p.oid=to_regprocedure(f.signature)
  WHERE p.oid IS NULL OR p.prosrc IS DISTINCT FROM f.body OR p.prosecdef<>f.definer

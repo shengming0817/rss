@@ -5,8 +5,6 @@ WITH runtime_role AS (
   SELECT oid FROM pg_roles WHERE rolname = 'rss_tmsg_relay'
 ), required(name, privileges) AS (VALUES ('inbox','SELECT,INSERT,UPDATE,DELETE'), ('outbox','SELECT')),
 columns(relation, name, type, nullable) AS (VALUES
- ('policy','revision','integer',false), ('policy','automatic_window_seconds','bigint',false),
- ('policy','safety_seconds','bigint',false), ('policy','receipt_retention_seconds','bigint',false),
  ('inbox','tenant_id','uuid',false), ('inbox','message_id','text',false),
  ('inbox','consumer_group','text',false), ('inbox','contract','text',false),
  ('inbox','lease_token','uuid',false), ('inbox','lease_until','timestamp with time zone',false),
@@ -20,7 +18,7 @@ columns(relation, name, type, nullable) AS (VALUES
  ('outbox','retry_after','timestamp with time zone',false), ('outbox','lease_token','uuid',true),
  ('outbox','lease_until','timestamp with time zone',true), ('outbox','automatic_retry_deadline','timestamp with time zone',true), ('outbox','recovery_version','bigint',false)),
 functions(signature) AS (VALUES
- ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'),
+ ('rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint)'),
  ('rss_transactional_messaging.next_outbox_wakeup(uuid,text)'),
  ('rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid)'),
  ('rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)')),
@@ -52,12 +50,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('outbox', 'outbox_pkey', 'PRIMARY KEY (seq)'),
  ('outbox', 'outbox_retry_count_check', 'CHECK ((retry_count >= 0))'),
  ('outbox', 'outbox_status_check', 'CHECK ((status = ANY (ARRAY[''pending''::text, ''publishing''::text, ''published''::text, ''dead_letter''::text, ''resolved''::text])))'),
- ('outbox', 'outbox_tenant_id_message_id_key', 'UNIQUE (tenant_id, message_id)'),
- ('policy', 'policy_automatic_window_seconds_check', 'CHECK ((automatic_window_seconds = 86400))'),
- ('policy', 'policy_check', 'CHECK ((receipt_retention_seconds > (automatic_window_seconds + safety_seconds)))'),
- ('policy', 'policy_pkey', 'PRIMARY KEY (revision)'),
- ('policy', 'policy_revision_check', 'CHECK ((revision = 1))'),
- ('policy', 'policy_safety_seconds_check', 'CHECK ((safety_seconds = 86400))')
+ ('outbox', 'outbox_tenant_id_message_id_key', 'UNIQUE (tenant_id, message_id)')
 ), expected_defaults(relation, name, expression) AS (VALUES
  ('outbox_partitions','last_sequence','0'), ('outbox_partitions','declared','true'), ('outbox','recovery_version','1'), ('inbox','receive_count','1'), ('outbox','status', $$'pending'::text$$),
  ('outbox','retry_count','0'), ('outbox','retry_after','clock_timestamp()')
@@ -87,7 +80,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
    AND p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
    AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
    AND NOT has_function_privilege(current_user,p.oid,'EXECUTE'))),
- ('functions', pg_get_function_result(to_regprocedure('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'))
+ ('functions', pg_get_function_result(to_regprocedure('rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint)'))
    IS NOT DISTINCT FROM 'TABLE(seq bigint, tenant_id uuid, message_id text, domain text, partition_key text, lease_token uuid, lease_until timestamp with time zone, envelope jsonb, payload bytea, fingerprint bytea, dr_operation uuid, remaining_us bigint, delivery_us bigint)'),
  ('functions', NOT EXISTS(SELECT FROM pg_proc p
   WHERE p.pronamespace='rss_transactional_messaging'::regnamespace AND p.proname='append_outbox'
@@ -107,9 +100,6 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
    OR NOT ('search_path=pg_catalog, rss_transactional_messaging, pg_temp'=ANY(p.proconfig))
    OR has_function_privilege(current_user,p.oid,'EXECUTE')
    OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))),
- ('policy', (EXISTS (SELECT 1 FROM rss_transactional_messaging.policy
-    WHERE revision = 1 AND automatic_window_seconds = 86400
-      AND safety_seconds = 86400 AND receipt_retention_seconds > 172800))),
  ('runtime_role', (NOT EXISTS (SELECT 1 FROM runtime_role WHERE rolsuper OR rolbypassrls))),
  ('runtime_role', (NOT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls)
     AND (pg_has_role(current_user, r.oid, 'USAGE') OR pg_has_role(current_user, r.oid, 'SET'))))),
@@ -140,7 +130,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
  ('runtime_acl', (has_schema_privilege(current_user, 'rss_transactional_messaging', 'USAGE'))),
  ('runtime_acl', (NOT has_schema_privilege(current_user, 'rss_transactional_messaging', 'CREATE'))),
  ('relay_acl', (NOT has_schema_privilege('rss_tmsg_relay', 'rss_transactional_messaging', 'CREATE'))),
- ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.policy', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
+ ('runtime_acl', has_table_privilege(current_user,'rss_transactional_messaging.policy','SELECT')),
  ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.outbox', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))),
  ('runtime_acl', (NOT has_table_privilege(current_user, 'rss_transactional_messaging.inbox', 'TRUNCATE,REFERENCES,TRIGGER'))),
  ('runtime_acl', (NOT $2 OR NOT has_any_column_privilege(current_user, 'rss_transactional_messaging.inbox', 'SELECT,INSERT,UPDATE,REFERENCES'))),

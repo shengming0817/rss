@@ -928,6 +928,26 @@ async fn temporary_table_shadow(raw: &sqlx::PgPool) -> anyhow::Result<()> {
 async fn adversarial_schema(config: &PgConfig, owner: &sqlx::PgPool) -> anyhow::Result<()> {
     let cases = [
         (
+            "CREATE TABLE public.saved_archive_policy AS SELECT * FROM rss_transactional_messaging.policy; DELETE FROM rss_transactional_messaging.policy",
+            "INSERT INTO rss_transactional_messaging.policy SELECT * FROM public.saved_archive_policy; DROP TABLE public.saved_archive_policy",
+        ),
+        (
+            "GRANT UPDATE(retry_initial_seconds) ON rss_transactional_messaging.policy TO archive_worker",
+            "REVOKE UPDATE(retry_initial_seconds) ON rss_transactional_messaging.policy FROM archive_worker",
+        ),
+        (
+            "ALTER FUNCTION rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) STRICT",
+            "ALTER FUNCTION rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) CALLED ON NULL INPUT",
+        ),
+        (
+            "ALTER TABLE rss_transactional_messaging.policy ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE rss_transactional_messaging.policy DISABLE ROW LEVEL SECURITY",
+        ),
+        (
+            "ALTER TABLE rss_transactional_messaging.policy DISABLE TRIGGER protect_policy_change",
+            "ALTER TABLE rss_transactional_messaging.policy ENABLE TRIGGER protect_policy_change",
+        ),
+        (
             "CREATE ROLE archive_relay_parent NOLOGIN; GRANT archive_relay_parent TO rss_tmsg_relay",
             "REVOKE archive_relay_parent FROM rss_tmsg_relay; DROP ROLE archive_relay_parent",
         ),
