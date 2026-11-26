@@ -4,7 +4,7 @@ use std::{
     io::Write,
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -27,41 +27,71 @@ pub struct Report {
     pub peak_reserved_bytes: usize,
 }
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
-static TOTALS: Mutex<Option<Report>> = Mutex::new(None);
+static NEXT: AtomicU64 = AtomicU64::new(1);
+static CURRENT: AtomicU64 = AtomicU64::new(0);
+static DETAIL: AtomicBool = AtomicBool::new(false);
+static TOTALS: Mutex<(u64, Option<Report>)> = Mutex::new((0, None));
 
-/// Start after fixture setup. The benchmark runs alone in its test process.
-pub fn start() {
-    *TOTALS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Report::default());
-    ENABLED.store(true, Ordering::Relaxed);
+/// Each run starts after fixture setup. A handle from another run cannot debit this one.
+pub fn start(detail: bool) {
+    let mut guard = TOTALS.lock().unwrap_or_else(|e| e.into_inner());
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    *guard = (id, Some(Report::default()));
+    DETAIL.store(detail, Ordering::Relaxed);
+    CURRENT.store(id, Ordering::Release);
 }
 
 pub fn finish() -> Report {
-    ENABLED.store(false, Ordering::Relaxed);
-    TOTALS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .unwrap_or_default()
+    let mut guard = TOTALS.lock().unwrap_or_else(|e| e.into_inner());
+    CURRENT.store(0, Ordering::Release);
+    guard.1.take().unwrap_or_default()
 }
 
-pub fn update(f: impl FnOnce(&mut Report)) {
-    if ENABLED.load(Ordering::Relaxed)
-        && let Some(report) = TOTALS.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
-    {
-        f(report);
+#[derive(Clone, Copy)]
+pub struct Session(u64);
+impl Session {
+    pub fn current() -> Self {
+        Self(CURRENT.load(Ordering::Acquire))
+    }
+    pub fn detailed() -> Self {
+        if DETAIL.load(Ordering::Relaxed) {
+            Self::current()
+        } else {
+            Self(0)
+        }
+    }
+    pub fn update(self, f: impl FnOnce(&mut Report)) {
+        if self.0 == 0 {
+            return;
+        }
+        let mut guard = TOTALS.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.0 == self.0
+            && let Some(report) = &mut guard.1
+        {
+            f(report);
+        }
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct Started(Session, Instant);
 #[allow(clippy::disallowed_methods)] // reason: real elapsed time for isolated measurements.
-pub fn timer() -> Option<Instant> {
-    ENABLED.load(Ordering::Relaxed).then(Instant::now)
+pub fn timer() -> Option<Started> {
+    let session = Session::current();
+    (session.0 != 0).then(|| Started(session, Instant::now()))
+}
+pub fn encoding_timer() -> Option<Started> {
+    if DETAIL.load(Ordering::Relaxed) {
+        timer()
+    } else {
+        None
+    }
 }
 
-pub fn record(name: &'static str, time: Option<Instant>, json: usize, sha: usize) {
-    if let Some(start) = time {
+pub fn record(name: &'static str, time: Option<Started>, json: usize, sha: usize) {
+    if let Some(Started(session, start)) = time {
         let elapsed = start.elapsed();
-        update(|report| {
+        session.update(|report| {
             let total = report.stages.entry(name).or_default();
             total.calls += 1;
             total.elapsed += elapsed;
@@ -70,7 +100,6 @@ pub fn record(name: &'static str, time: Option<Instant>, json: usize, sha: usize
         });
     }
 }
-
 pub(crate) struct Count<W> {
     pub writer: W,
     pub bytes: usize,

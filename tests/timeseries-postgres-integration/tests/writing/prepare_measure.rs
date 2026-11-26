@@ -1,5 +1,30 @@
 //! Run each load in a fresh release-mode test process on both revisions.
+//! With Docker available, select repeat, unique, large or dense via RSS_PREPARE_LOAD.
+//! Run `cargo test --release --locked -p timeseries-postgres-integration --test suite -- writing::prepare_measure::fixed_load --exact --ignored --nocapture`.
+//! RSS_PREPARE_TIMING=1 disables per-object instrumentation for independent stage timings.
+//! The measurement-only baseline revision and results are recorded in PR 1750.
 use super::*;
+use rss_timeseries::measurement::{self, Session};
+use tokio::sync::Semaphore;
+async fn first_poll<F: Future>(
+    mut future: std::pin::Pin<&mut F>,
+    entered: &Semaphore,
+) -> anyhow::Result<()> {
+    tokio::select! { biased;
+        _=&mut future => anyhow::bail!("operation completed with every connection held"),
+        ()=std::future::ready(())=>entered.add_permits(1),
+    }
+    Ok(())
+}
+async fn wait_for_polls(entered: &Semaphore, count: usize) -> anyhow::Result<()> {
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        entered.acquire_many(count.try_into()?),
+    )
+    .await??
+    .forget();
+    Ok(())
+}
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
@@ -66,49 +91,77 @@ async fn fixed_load() -> anyhow::Result<()> {
         .map(|i| items(&d, i, samples, unique))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let rss_start = rss_kib()?;
-    rss_timeseries::measurement::start();
+    let detail = std::env::var_os("RSS_PREPARE_TIMING").is_none();
+    measurement::start(detail);
+    let entered = Arc::new(Semaphore::new(0));
     let mut writes = JoinSet::new();
     let barrier = Arc::new(tokio::sync::Barrier::new(jobs + 1));
     for (i, samples) in input.drain(..).enumerate() {
-        let req = Authorized::<Batch>::verify(
-            &authority(TENANT)?,
-            batch(&format!("batch-{i:03}"), samples)?,
-        )?;
+        let start = measurement::timer();
+        let b = batch(&format!("batch-{i:03}"), samples)?;
+        measurement::record("batch_new", start, 0, 0);
+        let req = Authorized::<Batch>::verify(&authority(TENANT)?, b)?;
+        let entered = entered.clone();
         let f = f.clone();
         let ready = barrier.clone();
         writes.spawn(async move {
             ready.wait().await;
             let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(90))?;
-            anyhow::ensure!(matches!(
-                f.store.write(&req, cutoff).await?,
-                Outcome::Accepted(_)
-            ));
+            let mut op = Box::pin(f.store.write(&req, cutoff));
+            if pressure {
+                first_poll(op.as_mut(), &entered).await?;
+            }
+            anyhow::ensure!(matches!(op.await?, Outcome::Accepted(_)));
             anyhow::Ok(())
         });
     }
     barrier.wait().await;
     let mut peak_rss = rss_kib()?;
     let mut probes = JoinSet::new();
+    let mut all_released = None;
     if pressure {
+        wait_for_polls(&entered, jobs).await?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut at_pool = false;
+                Session::current().update(|r| at_pool = r.stages.contains_key("pool_enter"));
+                if at_pool {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
         for _ in 0..10 {
             tokio::time::sleep(Duration::from_millis(10)).await;
             peak_rss = peak_rss.max(rss_kib()?);
         }
         let read = f.clone();
+        let read_entered = entered.clone();
         probes.spawn(async move {
             let start = Timer.now();
-            let result = read.store.receipt(&lookup, deadline()?).await;
+            let mut op = Box::pin(read.store.receipt(&lookup, deadline()?));
+            first_poll(op.as_mut(), &read_entered).await?;
+            let result = op.await;
             anyhow::ensure!(matches!(result?, Lookup::Found(_)));
-            anyhow::Ok(("receipt", start.elapsed()))
+            anyhow::Ok(("receipt", start.elapsed(), Timer.now()))
         });
         let write = f.clone();
+        let write_entered = entered.clone();
         probes.spawn(async move {
             let start = Timer.now();
-            anyhow::ensure!(confirmed(write.write(&probe).await?)?.new_samples() == 1);
-            anyhow::Ok(("write", start.elapsed()))
+            let mut op = Box::pin(write.write(&probe));
+            first_poll(op.as_mut(), &write_entered).await?;
+            anyhow::ensure!(confirmed(op.await?)?.new_samples() == 1);
+            anyhow::Ok(("write", start.elapsed(), Timer.now()))
         });
+        wait_for_polls(&entered, 2).await?;
         drop(occupied.pop());
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            peak_rss = peak_rss.max(rss_kib()?);
+        }
+        all_released = Some(Timer.now());
         occupied.clear();
     }
     while !writes.is_empty() {
@@ -118,8 +171,12 @@ async fn fixed_load() -> anyhow::Result<()> {
         }
     }
     while let Some(r) = probes.join_next().await {
-        let (kind, latency) = r??;
-        println!("PROBE {kind} ok=1 latency_us={}", latency.as_micros());
+        let (kind, latency, ack) = r??;
+        println!(
+            "PROBE {kind} ok=1 single_slot={} latency_us={}",
+            all_released.is_some_and(|end| ack <= end),
+            latency.as_micros()
+        );
     }
     let report = rss_timeseries::measurement::finish();
     anyhow::ensure!(report.live_bytes == 0 && report.reserved_bytes == 0);

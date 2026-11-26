@@ -78,7 +78,7 @@ fn digest<T: serde::Serialize>(domain: &[u8], value: &T) -> Result<Digest, Error
     h.update(domain);
     h.update([0]);
     #[cfg(feature = "integration")]
-    if let Some(start) = measurement::timer() {
+    if let Some(start) = measurement::encoding_timer() {
         let mut count = measurement::Count {
             writer: &mut h,
             bytes: 0,

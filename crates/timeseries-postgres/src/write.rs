@@ -69,6 +69,14 @@ impl PreparedBatch {
         let mut payloads = Vec::with_capacity(batch.samples().len());
         let mut sample_digests = Vec::with_capacity(payloads.capacity());
         let mut series_digests = Vec::with_capacity(payloads.capacity());
+        #[cfg(feature = "integration")]
+        let buffers = measurement::Buffers::default();
+        #[cfg(feature = "integration")]
+        let mut scratch =
+            (payloads.capacity() + sample_digests.capacity() + series_digests.capacity())
+                * size_of::<Vec<u8>>();
+        #[cfg(feature = "integration")]
+        buffers.set(scratch);
         // A repeated ID binds to its last occurrence before individual samples are checked.
         let mut bindings = std::collections::BTreeMap::new();
         for sample in batch.samples() {
@@ -82,9 +90,22 @@ impl PreparedBatch {
             payloads.push(crate::lifecycle::bytes(sample)?);
             sample_digests.push(sample.digest()?.as_bytes().to_vec());
             series_digests.push(series.digest()?.as_bytes().to_vec());
+            #[cfg(feature = "integration")]
+            {
+                scratch += payloads.last().map(Vec::capacity).unwrap_or_default()
+                    + sample_digests.last().map(Vec::capacity).unwrap_or_default()
+                    + series_digests.last().map(Vec::capacity).unwrap_or_default();
+                buffers.set(scratch);
+            }
         }
         let mut definitions = Vec::with_capacity(bindings.len());
         let mut definition_digests = Vec::with_capacity(bindings.len());
+        #[cfg(feature = "integration")]
+        {
+            scratch +=
+                (definitions.capacity() + definition_digests.capacity()) * size_of::<Vec<u8>>();
+            buffers.set(scratch);
+        }
         for def in bindings.into_values() {
             check(clock, deadline)?;
             #[cfg(feature = "integration")]
@@ -92,13 +113,20 @@ impl PreparedBatch {
             #[cfg(not(feature = "integration"))]
             definitions.push(crate::lifecycle::bytes(def)?);
             definition_digests.push(def.digest()?.as_bytes().to_vec());
+            #[cfg(feature = "integration")]
+            {
+                scratch += definitions.last().map(Vec::capacity).unwrap_or_default()
+                    + definition_digests
+                        .last()
+                        .map(Vec::capacity)
+                        .unwrap_or_default();
+                buffers.set(scratch);
+            }
         }
         check(clock, deadline)?;
         let stream = &identity.stream;
         let count = payloads.len();
         let horizon = i64::try_from(horizon).map_err(|_| Error::NumericRange)?;
-        #[cfg(feature = "integration")]
-        let buffers = measurement::Buffers::default();
         #[cfg(feature = "integration")]
         let (payloads, sample_digests, series_digests, definitions, definition_digests, horizon) = {
             use measurement::{Observed, nested};
@@ -172,6 +200,9 @@ impl PreparedBatch {
     }
 
     async fn admit(self, c: &mut PgConnection) -> Result<Outcome<Receipt>, Error> {
+        // The connection now owns transport and driver buffers.
+        #[cfg(feature = "integration")]
+        self._buffers.set(0);
         let row = self.query.fetch_one(c).await.map_err(sql_error)?;
         if let Some(raw) = row
             .try_get::<Option<&[u8]>, _>("suspect_raw")

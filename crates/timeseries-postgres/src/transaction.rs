@@ -99,7 +99,11 @@ impl<C: Clock> PgStore<C> {
         let fault = if mutation { self.take_fault() } else { 0 };
         let result=tokio::time::timeout(remaining, async {
             #[cfg(feature = "integration")]
-            let pg_wait = rss_timeseries::measurement::timer();
+            let pg_wait = {
+                let start=rss_timeseries::measurement::timer();
+                rss_timeseries::measurement::record("pool_enter",start,0,0);
+                start
+            };
             let connection = self.pool.acquire().await.map_err(sql_error)?;
             #[cfg(feature = "integration")]
             let lease_start = {
