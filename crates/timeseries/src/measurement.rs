@@ -76,9 +76,12 @@ impl Session {
 #[derive(Clone, Copy)]
 pub struct Started(Session, Instant);
 #[allow(clippy::disallowed_methods)] // reason: real elapsed time for isolated measurements.
+fn observed_now() -> Instant {
+    Instant::now()
+}
 pub fn timer() -> Option<Started> {
     let session = Session::current();
-    (session.0 != 0).then(|| Started(session, Instant::now()))
+    (session.0 != 0).then(|| Started(session, observed_now()))
 }
 pub fn encoding_timer() -> Option<Started> {
     if DETAIL.load(Ordering::Relaxed) {
@@ -90,7 +93,7 @@ pub fn encoding_timer() -> Option<Started> {
 
 pub fn record(name: &'static str, time: Option<Started>, json: usize, sha: usize) {
     if let Some(Started(session, start)) = time {
-        let elapsed = start.elapsed();
+        let elapsed = observed_now() - start;
         session.update(|report| {
             let total = report.stages.entry(name).or_default();
             total.calls += 1;

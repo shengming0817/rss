@@ -152,7 +152,8 @@ async fn fixed_load() -> anyhow::Result<()> {
             first_poll(op.as_mut(), &read_entered).await?;
             let result = op.await;
             anyhow::ensure!(matches!(result?, Lookup::Found(_)));
-            anyhow::Ok(("receipt", start.elapsed(), Timer.now()))
+            let ack = Timer.now();
+            anyhow::Ok(("receipt", ack - start, ack))
         });
         let write = f.clone();
         let write_entered = entered.clone();
@@ -161,7 +162,8 @@ async fn fixed_load() -> anyhow::Result<()> {
             let mut op = Box::pin(write.write(&probe));
             first_poll(op.as_mut(), &write_entered).await?;
             anyhow::ensure!(confirmed(op.await?)?.new_samples() == 1);
-            anyhow::Ok(("write", start.elapsed(), Timer.now()))
+            let ack = Timer.now();
+            anyhow::Ok(("write", ack - start, ack))
         });
         wait_for_polls(&entered, 2).await?;
         drop(occupied.pop());

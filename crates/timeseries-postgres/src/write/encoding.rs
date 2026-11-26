@@ -163,6 +163,8 @@ pub(super) async fn prepare(
     buffers.set(wire);
     const ADMIT: &str = "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)";
     let query = sqlx::query_with(ADMIT, args);
+    #[cfg(feature = "integration")]
+    store.phases[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(PreparedBatch {
         identity,
         count,

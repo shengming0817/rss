@@ -136,9 +136,13 @@ async fn byte_limit_applies_with_free_slots_and_close_wakes_waiters() -> anyhow:
     pending(first.as_mut()).await?;
     let one = f.store.available_preparation();
     assert!(one.0 > 0 && one.1 < full.1 / 2);
+    let phases = f.store.preparation_phases();
     let mut second = Box::pin(f.store.write(&req, deadline()?));
     pending(second.as_mut()).await?;
-    assert_eq!(f.store.available_preparation(), (one.0 - 1, one.1));
+    // Tokio may assign the remaining bytes to a waiting weighted acquire.
+    // No second batch can encode, and cancelling the waiter returns that partial grant.
+    assert_eq!(f.store.available_preparation().0, one.0 - 1);
+    assert_eq!(f.store.preparation_phases(), phases);
     drop(second);
     assert_eq!(f.store.available_preparation(), one);
     let mut second = Box::pin(f.store.write(&req, deadline()?));
