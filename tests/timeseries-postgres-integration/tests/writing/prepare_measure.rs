@@ -39,7 +39,7 @@ fn rss_kib() -> anyhow::Result<usize> {
 fn items(d: &Definition, lane: usize, n: usize, unique: bool) -> anyhow::Result<Vec<Sample>> {
     let source = id(&format!("source-{lane:03}"))?;
     let wide = n == Batch::MAX_SAMPLES;
-    let resource = id(&"r".repeat(if wide { 200 } else { 8 }))?;
+    let resource = id(&"r".repeat(if wide { 190 } else { 8 }))?;
     (0..n)
         .map(|j| {
             let mut input = sample(d, &format!("s-{lane:03}-{j:04}"), j as i64, j as u64)?
@@ -49,7 +49,7 @@ fn items(d: &Definition, lane: usize, n: usize, unique: bool) -> anyhow::Result<
             let subject = format!(
                 "s{:0width$}",
                 if unique { j } else { 0 },
-                width = if wide { 199 } else { 4 }
+                width = if wide { 189 } else { 4 }
             );
             input.series = Series::new(
                 d.clone(),
