@@ -456,6 +456,13 @@ async fn read(connection: &mut PgConnection, scope: &Scope, id: &Id) -> Result<S
 pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {
     let restore = || -> Result<Record, Error> {
         let raw: Vec<u8> = row.try_get("raw").map_err(sql_error)?;
+        #[cfg(all(feature = "projection", feature = "integration"))]
+        crate::read_profile::count(|cost| {
+            use std::sync::atomic::Ordering::Relaxed;
+            cost.raw_bytes.fetch_add(raw.len() as u64, Relaxed);
+            cost.decodes.fetch_add(1, Relaxed);
+            cost.fingerprints.fetch_add(1, Relaxed);
+        });
         let batch = Batch::decode(&raw)?;
         let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(sql_error)?;
         let sequence: String = row.try_get("sequence").map_err(sql_error)?;

@@ -144,7 +144,7 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
+pub(super) async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT statement,custom_plans+generic_plans FROM pg_prepared_statements",
     )

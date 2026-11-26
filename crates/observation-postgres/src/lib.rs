@@ -5,6 +5,8 @@
 mod projection;
 #[cfg(feature = "projection")]
 pub use projection::{JournalBounds, PgSource};
+#[cfg(all(feature = "projection", feature = "integration"))]
+pub mod read_profile;
 mod maintenance;
 pub use maintenance::PgMaintenance;
 mod probe;

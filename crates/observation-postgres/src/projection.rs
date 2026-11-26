@@ -213,7 +213,9 @@ impl<C: Clock> Source for PgSource<C> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
-        self.transact(control, move |connection, budget| {
+        #[cfg(feature = "integration")]
+        crate::read_profile::reading(true);
+        let result = self.transact(control, move |connection, budget| {
             Box::pin(async move {
                 let mut rows = sqlx::query(READ)
                     .bind(tenant.to_string())
@@ -244,7 +246,10 @@ impl<C: Clock> Source for PgSource<C> {
                 Ok(events)
             })
         })
-        .await
+        .await;
+        #[cfg(feature = "integration")]
+        crate::read_profile::reading(false);
+        result
     }
 }
 // Only this adapter needs to carry projection diagnostics through Observation settlement.
@@ -346,6 +351,8 @@ fn event_for(
     position: Position,
     record: &ApplicableRecord,
 ) -> Result<Event, Error> {
+    #[cfg(feature = "integration")]
+    crate::read_profile::count(|cost| { cost.fingerprints.fetch_add(1, std::sync::atomic::Ordering::Relaxed); });
     let record = record.record();
     reference_event(
         scope,
