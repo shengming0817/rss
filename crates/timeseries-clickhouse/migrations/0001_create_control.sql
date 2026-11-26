@@ -3,8 +3,8 @@
 CREATE SCHEMA rss_ts_ch;
 CREATE TABLE rss_ts_ch.installation (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 4 CHECK(version=4),
- max_pending_batches integer NOT NULL DEFAULT 1 CHECK(max_pending_batches BETWEEN 1 AND 16)
+ id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 5 CHECK(version=5),
+ max_pending_batches integer NOT NULL DEFAULT 16 CHECK(max_pending_batches BETWEEN 1 AND 16)
 );
 INSERT INTO rss_ts_ch.installation DEFAULT VALUES;
 CREATE TABLE rss_ts_ch.namespaces (
@@ -94,7 +94,7 @@ CREATE TABLE rss_ts_ch.summaries (
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
  max_input_revision bigint NOT NULL CHECK(max_input_revision>=0),
  dependency_start bigint NOT NULL CHECK(dependency_start>=0 AND dependency_start<=lo),
- object_id uuid NOT NULL, dirty_from bigint CHECK(dirty_from>=0),
+ object_id uuid NOT NULL, payload_bytes bigint NOT NULL CHECK(payload_bytes>0), dirty_from bigint CHECK(dirty_from>=0),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces
 );

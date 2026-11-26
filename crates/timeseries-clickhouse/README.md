@@ -28,8 +28,8 @@ ref: ClickHouse/clickhouse-rs src/lib.rs@v0.15.3
 ## Installation and authority
 
 The external PG migrator adopts a dedicated NOLOGIN, NOSUPERUSER, NOBYPASSRLS schema
-owner and executes `CONTROL_SQL`. Schema version 4 is fresh-install only. During installation the owner sets
-`installation.max_pending_batches` to a per-namespace publication window from 1 to 16 (default 1).
+owner and executes `CONTROL_SQL`. Schema version 5 is fresh-install only. During installation the owner sets
+`installation.max_pending_batches` to a per-namespace publication window from 1 to 16 (default 16).
 All runtime owners consult the same installation row when allocating a revision. Runtime must not be a member of that owner or have
 schema CREATE, installation writes, superuser, BYPASSRLS, CREATEROLE or replication.
 Grant schema USAGE, installation SELECT and SELECT/INSERT/UPDATE/DELETE on the ten

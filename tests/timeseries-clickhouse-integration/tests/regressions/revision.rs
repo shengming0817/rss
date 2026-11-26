@@ -5,9 +5,6 @@ async fn only_the_exact_complete_revision_can_publish_after_merge() -> anyhow::R
     let f = Fixture::new("ch-revision-keys").await?;
     let proxy = transport::Proxy::new(&f.ch).await?;
     let store = proxy.store(f.pool.clone()).await?;
-    sqlx::query("UPDATE rss_ts_ch.installation SET max_pending_batches=16")
-        .execute(&f.admin)
-        .await?;
     let d = definition(TENANT)?;
     f.register(&d).await?;
     for (name, change) in [
