@@ -31,6 +31,8 @@ impl Publisher<Vec<u8>> for GatePublisher {
 struct ObservedStore {
     memory: Memory,
     calls: AtomicUsize,
+    clock: Arc<AdvancingTimer>,
+    claim_times: Mutex<Vec<std::time::Instant>>,
     owned: AtomicUsize,
     peak: AtomicUsize,
     limits: Mutex<Vec<usize>>,
@@ -50,6 +52,8 @@ impl ObservedStore {
         Self {
             memory: Memory::new(),
             calls: 0.into(),
+            clock: Arc::new(AdvancingTimer::new()),
+            claim_times: Mutex::default(),
             owned: 0.into(),
             peak: 0.into(),
             limits: Default::default(),
@@ -86,6 +90,10 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
         limit: NonZeroUsize,
         deadline: OperationDeadline,
     ) -> Result<OutboxClaimBatch<Self::Claim>, MessagingError> {
+        self.claim_times
+            .lock()
+            .expect("claim times")
+            .push(self.clock.now());
         self.limits.lock().expect("claim limits").push(limit.get());
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call == self.fail_call {
@@ -146,25 +154,43 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
 #[tokio::test]
 async fn empty_continuation_has_a_bounded_request_slice() {
     tokio::time::timeout(Duration::from_secs(3), async {
-        let mut observed = ObservedStore::new(0, 0, MessagingErrorKind::Transient);
-        observed.empty_until = 78;
-        observed.empty_action = OutboxScanProgress::Continue;
-        let store = Arc::new(observed);
-        store.append("tail", "ordered").await;
-        let mut run = Run::with_limits(store.clone(), 32, 1);
-        for slice in 1..=9 {
-            run.timer
-                .wait_registered(Duration::from_millis(slice * 100))
-                .await;
-            assert_eq!(store.calls.load(Ordering::SeqCst), slice as usize * 8);
-            run.timer.advance(Duration::from_millis(100));
+        for policy in [
+            RelayWaitPolicy::STANDARD,
+            RelayWaitPolicy {
+                empty_pages_per_slice: NonZeroUsize::new(16).expect("nonzero"),
+                continuation_delay: Duration::from_millis(10),
+                ..RelayWaitPolicy::STANDARD
+            },
+        ] {
+            let mut observed = ObservedStore::new(0, 0, MessagingErrorKind::Transient);
+            let prefix = 78;
+            observed.empty_until = prefix;
+            observed.empty_action = OutboxScanProgress::Continue;
+            let store = Arc::new(observed);
+            store.append("tail", "ordered").await;
+            let mut run = Run::with_policy(store.clone(), 32, 1, policy);
+            let pages = policy.empty_pages_per_slice.get();
+            for slice in 1..=prefix / pages {
+                run.timer
+                    .wait_registered(policy.continuation_delay * slice as u32)
+                    .await;
+                assert_eq!(store.calls.load(Ordering::SeqCst), slice * pages);
+                run.timer.advance(policy.continuation_delay);
+            }
+            let (id, finish) = run.next().await;
+            assert_eq!(id, "tail");
+            assert_eq!(store.calls.load(Ordering::SeqCst), prefix + 1);
+            let stamps = store.claim_times.lock().expect("claim times").clone();
+            for (page, at) in stamps.iter().enumerate() {
+                assert_eq!(
+                    at.saturating_duration_since(stamps[0]),
+                    policy.continuation_delay * (page / pages) as u32
+                );
+            }
+            run.stop.cancel();
+            finish.send(()).expect("settle tail");
+            support::join_worker(run.worker).await.expect("drain");
         }
-        let (id, finish) = run.next().await;
-        assert_eq!(id, "tail");
-        assert_eq!(store.calls.load(Ordering::SeqCst), 79);
-        run.stop.cancel();
-        finish.send(()).expect("settle tail");
-        support::join_worker(run.worker).await.expect("drain");
     })
     .await
     .expect("bounded continuation");
@@ -173,61 +199,80 @@ async fn empty_continuation_has_a_bounded_request_slice() {
 #[tokio::test]
 async fn caller_driven_action_and_worker_retry_cadence() {
     tokio::time::timeout(Duration::from_secs(3), async {
-        for action in [
-            OutboxScanProgress::Complete,
-            OutboxScanProgress::RetryLater,
-            OutboxScanProgress::Continue,
+        for policy in [
+            RelayWaitPolicy::STANDARD,
+            RelayWaitPolicy {
+                empty_pages_per_slice: NonZeroUsize::new(3).expect("nonzero"),
+                continuation_delay: Duration::from_millis(7),
+                contention_delay: Duration::from_millis(19),
+                idle_scan_interval: Duration::from_millis(57),
+                error_backoff: Duration::from_millis(31),
+            },
         ] {
-            let mut observed = ObservedStore::new(0, 0, MessagingErrorKind::Transient);
-            observed.empty_action = action;
-            observed.empty_until = usize::MAX;
-            let store = Arc::new(observed);
-            let timer = Arc::new(AdvancingTimer::new());
-            let publisher = Arc::new(ScriptedPublisher::new([]));
-            let report = relay_once(
-                execution(fixture_tenant(), 1),
-                &*store,
-                &*publisher,
-                &*timer,
-                &NoopEmitter,
-                NonZeroUsize::MIN,
-            )
-            .await
-            .expect("report");
-            assert_eq!(report.scan_progress(), action);
-            if action == OutboxScanProgress::Continue {
-                continue;
+            for (action, delay, calls) in [
+                (
+                    Some(OutboxScanProgress::Continue),
+                    policy.continuation_delay,
+                    policy.empty_pages_per_slice.get(),
+                ),
+                (
+                    Some(OutboxScanProgress::RetryLater),
+                    policy.contention_delay,
+                    1,
+                ),
+                (
+                    Some(OutboxScanProgress::Complete),
+                    policy.idle_scan_interval,
+                    1,
+                ),
+                (None, policy.error_backoff, 1),
+            ] {
+                let mut observed = ObservedStore::new(
+                    0,
+                    usize::from(action.is_none()),
+                    MessagingErrorKind::Transient,
+                );
+                observed.empty_action = action.unwrap_or(OutboxScanProgress::Complete);
+                observed.empty_until = usize::MAX;
+                let store = Arc::new(observed);
+                if let Some(action) = action {
+                    let report = relay_once(
+                        execution(fixture_tenant(), 1),
+                        &*store,
+                        &ScriptedPublisher::new([]),
+                        &*store.clock,
+                        &NoopEmitter,
+                        NonZeroUsize::MIN,
+                    )
+                    .await
+                    .expect("report");
+                    assert_eq!(report.scan_progress(), action);
+                    store.calls.store(0, Ordering::SeqCst);
+                    store.claim_times.lock().expect("claim times").clear();
+                }
+                let run = Run::with_policy(store.clone(), 1, 1, policy);
+                run.timer.wait_registered(delay).await;
+                assert_eq!(run.timer.next_sleep(), Some(delay));
+                let tick = Duration::from_nanos(1);
+                run.timer.advance(delay - tick);
+                tokio::task::yield_now().await;
+                assert_eq!(store.calls.load(Ordering::SeqCst), calls);
+                run.timer.advance(tick);
+                let next_delay = if action.is_some() {
+                    delay
+                } else {
+                    policy.idle_scan_interval
+                };
+                run.timer.wait_registered(delay + next_delay).await;
+                run.stop.cancel();
+                support::join_worker(run.worker)
+                    .await
+                    .expect("stop while waiting");
+                let stamps = store.claim_times.lock().expect("claim times");
+                assert_eq!(stamps.len(), 2 * calls);
+                assert!(stamps[..calls].iter().all(|at| *at == stamps[0]));
+                assert!(stamps[calls..].iter().all(|at| *at == stamps[0] + delay));
             }
-            store.calls.store(0, Ordering::SeqCst);
-            let config = RelayConfig::new(
-                NonZeroUsize::MIN,
-                NonZeroUsize::MIN,
-                Duration::from_secs(30),
-                Duration::from_secs(1),
-            )
-            .expect("config");
-            let worker = RelayWorker::new(
-                store.clone(),
-                publisher,
-                timer.clone(),
-                Arc::new(NoopEmitter),
-                config,
-            );
-            let stop = CancellationToken::new();
-            let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), stop.clone()));
-            let delay = if action == OutboxScanProgress::Complete {
-                Duration::from_secs(30)
-            } else {
-                Duration::from_millis(100)
-            };
-            timer.wait_registered(delay).await;
-            timer.advance(delay - Duration::from_millis(1));
-            tokio::task::yield_now().await;
-            assert_eq!(store.calls.load(Ordering::SeqCst), 1);
-            timer.advance(Duration::from_millis(1));
-            support::wait_for_count(&store.calls, 2).await;
-            stop.cancel();
-            support::join_worker(task).await.expect("stop");
         }
     })
     .await
@@ -247,14 +292,30 @@ impl Run {
     }
 
     fn with_limits(store: Arc<ObservedStore>, claim_limit: usize, capacity: usize) -> Self {
+        Self::with_policy(
+            store,
+            claim_limit,
+            capacity,
+            RelayWaitPolicy {
+                error_backoff: Duration::from_millis(200),
+                ..RelayWaitPolicy::STANDARD
+            },
+        )
+    }
+
+    fn with_policy(
+        store: Arc<ObservedStore>,
+        claim_limit: usize,
+        capacity: usize,
+        policy: RelayWaitPolicy,
+    ) -> Self {
         let stop = CancellationToken::new();
-        let timer = Arc::new(AdvancingTimer::new());
+        let timer = store.clock.clone();
         let (tx, published) = mpsc::unbounded_channel();
         let config = RelayConfig::new(
             NonZeroUsize::new(claim_limit).expect("claim limit"),
             NonZeroUsize::new(capacity).expect("capacity"),
-            Duration::from_millis(100),
-            Duration::from_millis(200),
+            policy,
         )
         .expect("config");
         let worker = RelayWorker::new(
@@ -357,23 +418,29 @@ async fn a_completion_cannot_shorten_error_backoff_and_empty_scans_wait() {
     tokio::time::timeout(Duration::from_secs(2), async {
         let store = Arc::new(ObservedStore::new(0, 2, MessagingErrorKind::Transient));
         store.append("first", "a").await;
-        let mut run = Run::start(store.clone());
+        let policy = RelayWaitPolicy {
+            error_backoff: Duration::from_millis(43),
+            idle_scan_interval: Duration::from_millis(11),
+            ..RelayWaitPolicy::STANDARD
+        };
+        let mut run = Run::with_policy(store.clone(), 1, 2, policy);
         let (_, release) = run.next().await;
-        run.timer.wait_registered(Duration::from_millis(200)).await;
+        run.timer.wait_registered(policy.error_backoff).await;
         release.send(()).expect("complete in backoff");
         while store.memory.settlements().is_empty() {
             tokio::task::yield_now().await;
         }
-        for (step, expected) in [(199, 2), (1, 3), (99, 3), (1, 4)] {
-            run.timer.advance(Duration::from_millis(step));
-            support::wait_for_count(&store.calls, expected).await;
-            if step == 1 {
-                run.timer
-                    .wait_registered(Duration::from_millis(if expected == 3 { 300 } else { 400 }))
-                    .await;
-            }
+        let tick = Duration::from_nanos(1);
+        let mut elapsed = Duration::ZERO;
+        for (expected, delay) in [(2, policy.error_backoff), (3, policy.idle_scan_interval)] {
+            run.timer.advance(delay - tick);
             tokio::task::yield_now().await;
             assert_eq!(store.calls.load(Ordering::SeqCst), expected);
+            run.timer.advance(tick);
+            elapsed += delay;
+            run.timer
+                .wait_registered(elapsed + policy.idle_scan_interval)
+                .await;
         }
         run.stop.cancel();
         support::join_worker(run.worker).await.expect("empty drain");
@@ -455,13 +522,28 @@ async fn fatal_settlement_during_claim_keeps_its_error_and_drains_the_reply() {
 
 #[tokio::test]
 async fn unrepresentable_scan_delays_fail_before_claim() {
-    for (idle, backoff) in [
-        (Duration::MAX, Duration::from_secs(1)),
-        (Duration::from_secs(1), Duration::MAX),
+    let standard = RelayWaitPolicy::STANDARD;
+    for policy in [
+        RelayWaitPolicy {
+            continuation_delay: Duration::MAX,
+            ..standard
+        },
+        RelayWaitPolicy {
+            contention_delay: Duration::MAX,
+            ..standard
+        },
+        RelayWaitPolicy {
+            idle_scan_interval: Duration::MAX,
+            ..standard
+        },
+        RelayWaitPolicy {
+            error_backoff: Duration::MAX,
+            ..standard
+        },
     ] {
         let store = Arc::new(ObservedStore::new(0, 0, MessagingErrorKind::Transient));
         let config =
-            RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, idle, backoff).expect("floor");
+            RelayConfig::new(NonZeroUsize::MIN, NonZeroUsize::MIN, policy).expect("positive");
         let worker = RelayWorker::new(
             store.clone(),
             Arc::new(ScriptedPublisher::new([])),
@@ -533,7 +615,9 @@ async fn settling_a_head_wakes_an_empty_scan_without_advancing_time() {
         let mut run = Run::start(store.clone());
         let head = run.next().await;
         assert_eq!(head.0, "head");
-        run.timer.wait_registered(Duration::from_millis(100)).await;
+        run.timer
+            .wait_registered(RelayWaitPolicy::STANDARD.idle_scan_interval)
+            .await;
         assert_eq!(store.calls.load(Ordering::SeqCst), 2);
         head.1.send(()).expect("settle ordered head during idle");
         let successor = run.next().await;

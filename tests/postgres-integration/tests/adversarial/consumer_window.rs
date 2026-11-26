@@ -2,6 +2,7 @@ mod claim_wait;
 use super::*;
 use crate::Validator;
 use rss_request_context::{Clock, ExecutionTimer};
+use rss_transactional_messaging::policy::RemoteClaimWaitPolicy;
 use rss_transactional_messaging::{
     error::MessagingError,
     message::SubscriptionIdentity,
@@ -162,7 +163,11 @@ async fn local_wait(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyhow::Re
             Arc::new(Validator),
             sub,
             Arc::new(clock),
-            ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+            ConsumerExecutionPolicy::new(
+                RetryPolicy::STANDARD,
+                ExecutionBudget::STANDARD,
+                RemoteClaimWaitPolicy::STANDARD,
+            ),
             Arc::new(Sink(busy.clone())),
             SubscriptionBackoffPolicy::STANDARD,
         );

@@ -1,6 +1,7 @@
 //! Inject one lost settlement result at the provider port; every delivery and transaction is real.
 use super::*;
 use futures::StreamExt;
+use rss_transactional_messaging::policy::RemoteClaimWaitPolicy;
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
     transaction::SettlementDecision,
@@ -120,7 +121,11 @@ fn worker<S: DeliverySource<Vec<u8>>>(
         Arc::new(Validator(true)),
         subscription()?,
         clock,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        ConsumerExecutionPolicy::new(
+            RetryPolicy::STANDARD,
+            ExecutionBudget::STANDARD,
+            RemoteClaimWaitPolicy::STANDARD,
+        ),
         Arc::new(Emitter),
         SubscriptionBackoffPolicy::new(Duration::from_millis(10), Duration::from_millis(20))?,
     );

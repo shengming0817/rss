@@ -16,7 +16,9 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingIoOutcome, TransactionalMessagingObservation,
     TransactionalMessagingRuntimePhase, TransactionalMessagingSubscribeOutcome,
 };
-use rss_transactional_messaging::policy::{ConsumerExecutionPolicy, ExecutionDeadlines, RemoteClaimWaitPolicy, within};
+use rss_transactional_messaging::policy::{
+    ConsumerExecutionPolicy, ExecutionDeadlines, RemoteClaimWaitPolicy, within,
+};
 use rss_transactional_messaging::transaction::{
     CommittedTransaction, ConsumerTx, EnvelopeValidationFailure, FailureClass, IngressValidator,
     SettlementDecision, SettlementKind, TerminalDisposition, TransactionOutcome,
@@ -492,43 +494,67 @@ impl ClaimBackoff {
 mod claim_backoff_tests {
     use super::*;
 
-    fn policy() -> RemoteClaimWaitPolicy {
-        RemoteClaimWaitPolicy::new(Duration::from_millis(5), Duration::from_millis(80), Duration::from_millis(12))
-            .expect("valid test schedule")
+    fn policy() -> Result<
+        RemoteClaimWaitPolicy,
+        rss_transactional_messaging::policy::RemoteClaimWaitPolicyError,
+    > {
+        RemoteClaimWaitPolicy::new(
+            Duration::from_millis(5),
+            Duration::from_millis(80),
+            Duration::from_millis(12),
+        )
     }
 
     #[test]
-    fn final_jitter_respects_reachable_expiry_at_both_edges_and_only_runs_once() {
-        let policy = policy();
+    fn final_jitter_respects_reachable_expiry_at_both_edges_and_only_runs_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policy = policy()?;
         let mut backoff = ClaimBackoff::new(policy);
         backoff.base = policy.max_base();
         let latest = policy.max_base();
         let width = policy.final_window(latest);
         let hint = latest - width / 2;
-        assert_eq!(backoff.final_delay(Some(hint), latest, (width / 2).as_nanos() as u64), hint);
+        assert_eq!(
+            backoff.final_delay(Some(hint), latest, (width / 2).as_nanos() as u64),
+            hint
+        );
         assert_eq!(backoff.final_delay(Some(hint), latest, 0), latest);
         assert_eq!(backoff.final_delay(Some(latest), latest, u64::MAX), latest);
-        assert_eq!(backoff.final_delay(Some(Duration::MAX), latest, width.as_nanos() as u64), latest - width);
-        assert!(matches!(backoff.next(Some(hint), latest), Some(delay) if (hint..=latest).contains(&delay)));
+        assert_eq!(
+            backoff.final_delay(Some(Duration::MAX), latest, width.as_nanos() as u64),
+            latest - width
+        );
+        assert!(
+            matches!(backoff.next(Some(hint), latest), Some(delay) if (hint..=latest).contains(&delay))
+        );
         assert_eq!(backoff.next(None, latest), None);
+        Ok(())
     }
 
     #[test]
-    fn lease_hint_recovers_one_tier_and_jitter_continues_at_the_cap() {
-        let policy = policy();
+    fn lease_hint_recovers_one_tier_and_jitter_continues_at_the_cap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let policy = policy()?;
         for hint in [None, Some(Duration::ZERO)] {
             let mut backoff = ClaimBackoff::new(policy);
             let mut plateau = Vec::new();
             let mut base = policy.initial_base();
             for _ in 0..24 {
-                let lower = if hint.is_some() { (base / 2).max(policy.initial_base()) } else { base };
-                let delay = backoff.next(hint, Duration::MAX).expect("ordinary probe");
+                let lower = if hint.is_some() {
+                    (base / 2).max(policy.initial_base())
+                } else {
+                    base
+                };
+                let delay = backoff.next(hint, Duration::MAX).unwrap_or_default();
                 assert!((lower..lower * 2).contains(&delay));
-                if base == policy.max_base() { plateau.push(delay); }
+                if base == policy.max_base() {
+                    plateau.push(delay);
+                }
                 base = (base * 2).min(policy.max_base());
             }
             assert!(plateau.windows(2).any(|pair| pair[0] != pair[1]));
         }
+        Ok(())
     }
 }
 

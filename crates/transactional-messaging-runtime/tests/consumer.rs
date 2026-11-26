@@ -33,7 +33,8 @@ use rss_transactional_messaging::observability::{
 use rss_transactional_messaging::outbox::{OutboxDisposition, PartitionHead, PartitionHeadState};
 use rss_transactional_messaging::policy::{
     ConsumerExecutionPolicy, DeliveryBudget, DeliveryBudgetError, ExecutionBudget,
-    ExecutionBudgetError, ExecutionDeadlines, OperationDeadline, RetryPolicy,
+    ExecutionBudgetError, ExecutionDeadlines, OperationDeadline, RemoteClaimWaitPolicy,
+    RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, EnvelopeValidationFailure, FailureClass, IngressChallenge, IngressValidator,
@@ -209,7 +210,11 @@ impl TransactionalMessagingEmitter for NoopEmitter {
 }
 
 fn consumer_policy() -> ConsumerExecutionPolicy {
-    ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD)
+    ConsumerExecutionPolicy::new(
+        RetryPolicy::STANDARD,
+        ExecutionBudget::STANDARD,
+        RemoteClaimWaitPolicy::STANDARD,
+    )
 }
 
 #[test]
@@ -1506,6 +1511,7 @@ fn deadline_policy(total: Duration, reserve: Duration) -> ConsumerExecutionPolic
     ConsumerExecutionPolicy::new(
         RetryPolicy::STANDARD,
         ExecutionBudget::new(total, reserve).expect("execution budget"),
+        RemoteClaimWaitPolicy::STANDARD,
     )
 }
 
@@ -2007,6 +2013,7 @@ fn renewing_consumer_policy() -> ConsumerExecutionPolicy {
         RetryPolicy::STANDARD,
         ExecutionBudget::new(Duration::from_secs(40), Duration::from_secs(2))
             .expect("execution budget"),
+        RemoteClaimWaitPolicy::STANDARD,
     )
 }
 
@@ -3851,6 +3858,7 @@ async fn busy_claims_retain_one_delivery_until_the_operation_cutoff() {
         let policy = ConsumerExecutionPolicy::new(
             RetryPolicy::STANDARD,
             ExecutionBudget::new(Duration::from_secs(2), Duration::from_secs(1)).expect("budget"),
+            RemoteClaimWaitPolicy::STANDARD,
         );
         let execution = ConsumerExecution::new(
             ConsumerGroup::parse("busy").expect("group"),
@@ -4017,132 +4025,5 @@ async fn local_permit_ready_at_cutoff_requeues_without_starting_claim() {
     assert_eq!(recorder.abandon_count(), 0);
 }
 
-#[tokio::test(start_paused = true)]
-async fn simultaneous_deliveries_spread_their_final_remote_claims() {
-    struct ProbeTimes<'a> {
-        timer: &'a RealtimeClock,
-        probes: Mutex<Vec<std::time::Instant>>,
-    }
-    impl TransactionalMessagingEmitter for ProbeTimes<'_> {
-        fn emit(&self, observation: TransactionalMessagingObservation) {
-            if matches!(
-                observation,
-                TransactionalMessagingObservation::ConsumerClaimInProgress
-            ) {
-                self.probes
-                    .lock()
-                    .expect("probe times")
-                    .push(self.timer.now());
-            }
-        }
-    }
-    let timer = RealtimeClock::new();
-    let start = timer.now();
-    let inbox = FakeInbox {
-        capacity: None,
-        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
-            retry_after: None,
-        })),
-        lease: LeaseStatus::Lost,
-    };
-    let tx = FakeTx {
-        calls: Arc::new(AtomicUsize::new(0)),
-        disposition: TerminalDisposition::Succeeded,
-    };
-    let attempts = (0..8).map(|_| async {
-        let msg = envelope(|_| {});
-        let sub = subscription(&msg);
-        let times = ProbeTimes {
-            timer: &timer,
-            probes: Mutex::new(Vec::new()),
-        };
-        let execution = ConsumerExecution::new(
-            ConsumerGroup::parse("same-start").expect("group"),
-            &TrustedIngress,
-            &sub,
-            &timer,
-            consumer_policy(),
-            &times,
-        );
-        let recorder = RecordingSettlement::new();
-        let result = consume_once(
-            &inbox,
-            &tx,
-            &execution,
-            Delivery::new(msg, recorder.clone()),
-        )
-        .await;
-        assert_eq!(result.expect("busy"), ProcessingDisposition::InProgress);
-        assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
-        let probes = times.probes.into_inner().expect("probe times");
-        assert!((12..=16).contains(&probes.len()));
-        let final_probe = *probes.last().expect("last probe");
-        let elapsed = final_probe.saturating_duration_since(start);
-        // Tokio's paused timer wakes at millisecond resolution.
-        assert!((Duration::from_millis(7500)..=Duration::from_millis(7751)).contains(&elapsed));
-        final_probe
-    });
-    let times = futures::future::join_all(attempts).await;
-    assert!(times.windows(2).any(|pair| pair[0] != pair[1]));
-    assert_eq!(tx.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn reachable_lease_expiry_allows_the_original_delivery_to_finish() {
-    let timer = ManualTimer::new();
-    let msg = envelope(|_| {});
-    let sub = subscription(&msg);
-    let execution = ConsumerExecution::new(
-        ConsumerGroup::parse("lease-expiry").expect("group"),
-        &TrustedIngress,
-        &sub,
-        &timer,
-        consumer_policy(),
-        &NoopEmitter,
-    );
-    let inbox = FakeInbox {
-        capacity: None,
-        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
-            retry_after: None,
-        })),
-        lease: LeaseStatus::Held {
-            remaining: Duration::from_secs(30),
-        },
-    };
-    let tx = FakeTx {
-        calls: Arc::new(AtomicUsize::new(0)),
-        disposition: TerminalDisposition::Succeeded,
-    };
-    let recorder = RecordingSettlement::new();
-    let attempt = consume_once(
-        &inbox,
-        &tx,
-        &execution,
-        Delivery::new(msg, recorder.clone()),
-    );
-    tokio::pin!(attempt);
-    // Advance through the normal bands, then present a lease expiring at 7.700 s.
-    for millis in [5, 10, 20, 40, 80, 160, 320, 640, 1280, 2000, 2345] {
-        assert!(futures::poll!(&mut attempt).is_pending());
-        timer.advance(Duration::from_millis(millis));
-    }
-    *inbox.disposition.lock().expect("state") = Some(IdempotencyDisposition::InProgress {
-        retry_after: Some(Duration::from_millis(800)),
-    });
-    assert!(futures::poll!(&mut attempt).is_pending());
-    timer.advance(Duration::from_micros(799_999));
-    assert!(futures::poll!(&mut attempt).is_pending());
-    assert!(recorder.settlements().is_empty());
-    timer.advance(Duration::from_micros(1));
-    *inbox.disposition.lock().expect("lease expired") =
-        Some(IdempotencyDisposition::Acquired(Claim));
-    timer.advance(Duration::from_millis(50));
-    assert!(matches!(
-        futures::poll!(&mut attempt),
-        std::task::Poll::Ready(Ok(ProcessingDisposition::Committed(
-            TerminalDisposition::Succeeded
-        )))
-    ));
-    assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
-    assert_eq!(tx.calls.load(Ordering::SeqCst), 1);
-}
+#[path = "consumer/remote_claim.rs"]
+mod remote_claim;

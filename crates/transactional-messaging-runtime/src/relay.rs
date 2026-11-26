@@ -51,7 +51,12 @@ impl RelayWaitPolicy {
     };
 
     fn delays(self) -> [Duration; 4] {
-        [self.continuation_delay, self.contention_delay, self.idle_scan_interval, self.error_backoff]
+        [
+            self.continuation_delay,
+            self.contention_delay,
+            self.idle_scan_interval,
+            self.error_backoff,
+        ]
     }
 }
 
@@ -78,7 +83,11 @@ impl RelayConfig {
         if wait.delays().contains(&Duration::ZERO) {
             return Err(RelayConfigError);
         }
-        Ok(Self { claim_limit, max_in_flight, wait })
+        Ok(Self {
+            claim_limit,
+            max_in_flight,
+            wait,
+        })
     }
 
     /// Maximum number of durable claims per request.
@@ -446,7 +455,13 @@ where
         if token.is_cancelled() {
             return Ok(());
         }
-        let longest_delay = self.config.wait.delays().into_iter().max().unwrap_or_default();
+        let longest_delay = self
+            .config
+            .wait
+            .delays()
+            .into_iter()
+            .max()
+            .unwrap_or_default();
         absolute_deadline(self.clock.as_ref(), longest_delay, self.emitter.as_ref())?;
         self.drive(binding, &token).await
     }
@@ -555,9 +570,12 @@ impl Admission {
                         {
                             Self::Ready(empty_pages + 1)
                         }
-                        (true, OutboxScanProgress::Continue) => {
-                            Self::delay(clock, emitter, config.wait.continuation_delay, Self::Backoff)
-                        }
+                        (true, OutboxScanProgress::Continue) => Self::delay(
+                            clock,
+                            emitter,
+                            config.wait.continuation_delay,
+                            Self::Backoff,
+                        ),
                         (true, OutboxScanProgress::RetryLater) => {
                             Self::delay(clock, emitter, config.wait.contention_delay, Self::Backoff)
                         }

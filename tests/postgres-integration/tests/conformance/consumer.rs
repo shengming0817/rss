@@ -2,6 +2,7 @@ use super::*;
 use rss_transactional_messaging::observability::{
     TransactionalMessagingEmitter, TransactionalMessagingObservation,
 };
+use rss_transactional_messaging::policy::RemoteClaimWaitPolicy;
 use rss_transactional_messaging::transport::Delivery;
 use rss_transactional_messaging_runtime::consumer::{
     ConsumerExecution, ProcessingDisposition, consume_once,
@@ -69,7 +70,11 @@ impl Harness {
             &Validator,
             &subscription,
             &timer,
-            ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+            ConsumerExecutionPolicy::new(
+                RetryPolicy::STANDARD,
+                ExecutionBudget::STANDARD,
+                RemoteClaimWaitPolicy::STANDARD,
+            ),
             &emitter,
         );
         let transaction = FaultTransaction {

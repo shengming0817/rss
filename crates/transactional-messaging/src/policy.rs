@@ -517,8 +517,11 @@ impl RemoteClaimWaitPolicy {
     };
 
     /// Require positive durations, an ordered base range and representable nanosecond jitter.
-    pub fn new(initial_base: Duration, max_base: Duration, final_window_cap: Duration)
-        -> Result<Self, RemoteClaimWaitPolicyError> {
+    pub fn new(
+        initial_base: Duration,
+        max_base: Duration,
+        final_window_cap: Duration,
+    ) -> Result<Self, RemoteClaimWaitPolicyError> {
         if initial_base.is_zero() || max_base.is_zero() || final_window_cap.is_zero() {
             return Err(RemoteClaimWaitPolicyError::ZeroDuration);
         }
@@ -528,16 +531,24 @@ impl RemoteClaimWaitPolicy {
         if max_base.max(final_window_cap).as_nanos() > u128::from(u64::MAX) {
             return Err(RemoteClaimWaitPolicyError::JitterRange);
         }
-        Ok(Self { initial_base, max_base, final_window_cap })
+        Ok(Self {
+            initial_base,
+            max_base,
+            final_window_cap,
+        })
     }
 
     /// Lower edge of the first ordinary randomized wait.
     #[must_use]
-    pub const fn initial_base(self) -> Duration { self.initial_base }
+    pub const fn initial_base(self) -> Duration {
+        self.initial_base
+    }
 
     /// Saturation tier before per-delivery jitter is added.
     #[must_use]
-    pub const fn max_base(self) -> Duration { self.max_base }
+    pub const fn max_base(self) -> Duration {
+        self.max_base
+    }
 
     /// Reserve a quarter of the given span, limited by the host's final window cap.
     /// Apply to the original operation budget for I/O and to the remaining probe window
@@ -561,8 +572,16 @@ pub struct ConsumerExecutionPolicy {
 impl ConsumerExecutionPolicy {
     #[must_use]
     /// Combine validated retry and execution limits without changing the provider's lease policy.
-    pub const fn new(retry: RetryPolicy, budget: ExecutionBudget, remote_claim_wait: RemoteClaimWaitPolicy) -> Self {
-        Self { retry, budget, remote_claim_wait }
+    pub const fn new(
+        retry: RetryPolicy,
+        budget: ExecutionBudget,
+        remote_claim_wait: RemoteClaimWaitPolicy,
+    ) -> Self {
+        Self {
+            retry,
+            budget,
+            remote_claim_wait,
+        }
     }
 
     /// Remote claim recheck schedule shared by single-delivery and worker execution.
