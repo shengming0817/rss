@@ -115,7 +115,8 @@ async fn retention_window_cost() -> anyhow::Result<()> {
         f.stage(&input).await?.0.commit().await?;
         sizes.push(input.batch().encode().len() as u64);
     }
-    activate(&store, &scope(TENANT, "window", "r", "s", "new")?, Some(1)).await?;
+    let active = scope(TENANT, "window", "r", "s", "new")?;
+    activate(&store, &active, Some(1)).await?;
 
     for invalid in [0, 1025] {
         let mut tx = pool.begin().await?;
@@ -155,18 +156,40 @@ async fn retention_window_cost() -> anyhow::Result<()> {
                 assert!(matches!(outcome, LookupOutcome::Found(_)));
                 Ok::<_, anyhow::Error>(timer.elapsed().as_micros())
             };
+            let receive = async |seq: u64| -> anyhow::Result<u128> {
+                let input = batch(
+                    &active,
+                    &seq.to_string(),
+                    seq,
+                    "all",
+                    Body::Snapshot(vec![]),
+                )?;
+                let timer = Instant::now();
+                let outcome = store.receive(&input, deadline()).await?;
+                assert!(outcome.record().decision().outcome().is_applicable());
+                Ok(timer.elapsed().as_micros())
+            };
             let baseline = lookup().await?;
+            let write_baseline = receive(0).await?;
             let mut tx = pool.begin().await?;
-            sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-                .bind(TENANT)
-                .execute(&mut *tx)
-                .await?;
+            let (blocker, _): (i32, String) =
+                sqlx::query_as("SELECT pg_backend_pid(), set_config('rss.tenant_id',$1,true)")
+                    .bind(TENANT)
+                    .fetch_one(&mut *tx)
+                    .await?;
             let staged: i32 = sqlx::query_scalar("SELECT reclaimed FROM rss_observation.reclaim($1,$2,1155,$3::bigint::numeric,1024)")
                 .bind(retired.encode()?).bind(EXPIRY).bind(i64::try_from(start)? - 1)
                 .fetch_one(&mut *tx).await?;
             assert_eq!(staged, 1024);
             let concurrent = lookup().await?;
-            tx.rollback().await?;
+            let (write_concurrent, ()) = tokio::try_join!(receive(1), async {
+                f.wait_for_blocked(blocker, 1).await?;
+                tx.rollback().await?;
+                Ok(())
+            })?;
+            println!(
+                "retention_foreground operation=receive candidates={count} baseline_us={write_baseline} held_transaction_us={write_concurrent} journal_wait_observed=true"
+            );
             println!(
                 "retention_foreground operation=lookup candidates={count} baseline_us={baseline} concurrent_us={concurrent}"
             );
