@@ -576,29 +576,34 @@ its default remains 64 and it does not alter request authorization or digest ide
 
 A claim examines at most `max(64, min(4 * limit, 1024))` admitted candidate headers.
 Each indexed lane reads at most the remaining budget before the merged window is capped;
-the current DR plan has its separate 1024-member bound. A call may wrap once using its
-remaining budget. Filtering and source locking happen after admission. A committed
-tenant/domain cursor advances past locked, stale or DR-blocked candidates and revisits
-the earliest candidates after successful work or exhaustion. Each sweep fixes its upper
-eligibility time so continuous arrivals cannot starve skipped prefixes. Contention on
-cursor progress permits repeated metadata scans without serializing source claims.
-Windows advance by eligibility time and sequence; source locks within a window follow
-source sequence. Partition order and DR barriers remain authoritative.
-An empty batch can be a bounded unsuccessful scan. `OutboxClaimBatch::scan_progress()`
-retains `More` when the scan budget runs out; the default worker continues after 100ms.
-Caller-driven relay and `PgProjectionBatch` callers retain the same state before consuming
-the batch. `next_wakeup` remains a time hint; an empty result alone does not prove drainage.
+the current DR plan has its separate 1024-member bound. Generation-index seeks check the earliest retry time in up to five distinct generations.
+A current generation or a future retry cannot prove historical work is due. An inconclusive
+lookahead falls back to the bounded header window with paced retries.
+Each sweep binds its execution epoch, lineage and upper eligibility time. A new generation starts a fresh sweep. A full window advances the tenant/domain cursor.
+A capacity stop preserves the window entrance because source lock order can differ from eligibility
+order. Reaching the end clears the cursor so the next sweep can revisit skipped heads.
+Cursor contention permits opportunistic source claims with `SKIP LOCKED`. Partition order
+and DR barriers remain authoritative.
+
+An empty `Continue` batch indicates committed forward progress past lock contention or toward time-eligible historical work. The default worker runs up to
+eight of these scans before a 100ms pause. An empty `RetryLater` requests a short pause after
+contention or a fruitless sweep. `Complete` permits the normal idle interval. Caller-driven relay
+and local Projection expose this action before the batch is consumed. A Projection batch
+reports an exact remaining stream size so the host can immediately release surplus reservations. `next_wakeup` is a time hint.
 
 `PgPublishedBodyMaintenance` owns a separate private pool. The host explicitly authorizes
 the tenant and retention policy, chooses the original-deadline cutoff and schedules sweeps.
 Grant its dedicated login schema USAGE and EXECUTE on `check_execution()` and
-`reclaim_published_bodies(bigint,bigint,integer)` only (the installation's public scope
+`reclaim_published_bodies(bigint,bigint,integer,bigint)` only (the installation's public scope
 helpers remain available). Ordinary runtime, producer, consumer and recovery profiles
 reject this capability. Do not grant table writes or role-owner membership.
 
-Call `reclaim(binding, PublishedBodyRetention::new(before_us, after_seq, limit)?, deadline)`
-with 1–1024 candidates; start at sequence zero, continue from `next_seq`, and restart a
-later sweep at zero to revisit skipped rows. A short page ends the current sweep. The
+Call `reclaim(binding, PublishedBodyRetention::new(before_us, after_seq, limit, verify_bytes)?, deadline)`
+with 1–1024 candidates and a positive logical payload byte budget (up to i64::MAX).
+Start at zero. Resume a CandidateLimit page at `next_seq`. A ByteLimit page leaves the
+first body that did not fit ahead of this coordinate. Choose at least `required_bytes`
+for the next page. Complete ends this sweep. Start a later sweep at zero to revisit
+skipped rows. `verified_bytes` measures logical payload bytes hashed in the transaction. The
 shared execution fence, original deadline and current unfinished DR members restrict
 release even when the host's cutoff allows it. Append seals body and authored-evidence digests. Release verifies these digests under the source lock and atomically marks the body retired; cold evidence verifies the retained seal. Successful release clears the body.
 Fingerprints, authored metadata, terminal state, original deadline, recovery version and

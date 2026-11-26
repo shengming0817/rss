@@ -1,6 +1,8 @@
 //! Real PostgreSQL proof of local effect + Inbox + Outbox atomic settlement.
 #[path = "local_projection/batch.rs"]
 mod batch;
+#[path = "local_projection/claim_progress.rs"]
+mod claim_progress;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
 #[path = "local_projection/leases.rs"]
@@ -417,6 +419,7 @@ async fn source_scenarios(f: &Fixture, scale_only: bool) -> anyhow::Result<()> {
         Box::pin(batch::history_and_policy(f)).await?;
         Box::pin(scale::run(f)).await?;
     } else {
+        Box::pin(claim_progress::run(f)).await?;
         Box::pin(scale::bounded_windows(f)).await?;
         Box::pin(scale::worker_continuation(f)).await?;
         Box::pin(leases::run(f)).await?;
@@ -743,7 +746,7 @@ async fn unknown_commit(f: &Fixture) -> anyhow::Result<()> {
         (1, 1, Some("succeeded".into()), "published".into())
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 day' WHERE message_id='atomic-unknown'").execute(&f.owner).await?;
-    sqlx::query("SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024)").execute(&f.owner).await?;
+    sqlx::query("SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024,1048576)").execute(&f.owner).await?;
     let cold:bool=sqlx::query_scalar("SELECT payload IS NULL FROM rss_transactional_messaging.outbox WHERE message_id='atomic-unknown'").fetch_one(&f.owner).await?;
     assert!(cold);
     let receipt = p
@@ -1197,7 +1200,9 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
         p.resolve(&pending, deadline()).await?.is_none(),
         "historical source and Inbox success cannot prove a new DR member completed"
     );
-    sqlx::query("UPDATE rss_transactional_messaging.dr_members SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-success' AND status='publishing'").execute(&f.owner).await?;
+    // Make this exact member eligible inside the frozen sweep, regardless of how long
+    // the deliberately unacknowledged effect transaction took to time out.
+    sqlx::query("UPDATE rss_transactional_messaging.dr_members SET lease_until=retry_after WHERE message_id='atomic-success' AND status='publishing'").execute(&f.owner).await?;
     assert_eq!(
         committed_projection(only(
             collect_batch(p.project_batch(

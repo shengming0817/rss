@@ -10,9 +10,10 @@ as individual claims finish settlement, polling active work even while a claim r
 `RelayConfig::new(claim_limit, max_in_flight, idle_scan_interval, error_backoff)` controls each
 request size, total admitted work, empty-scan interval and recoverable-error delay. Both delays
 must be at least 100ms. A completion can wake an idle scan.
-Empty batches with `OutboxScanProgress::More` use a paced 100ms continuation instead of
-the configured idle interval. `relay_once` preserves this state in `RelayReport::scan_progress()`;
-caller-driven schedulers must retain it even when no claims were returned. A recoverable infrastructure failure
+Each worker can scan eight consecutive empty `Continue` pages before waiting 100ms.
+An empty `RetryLater` waits 100ms immediately. An empty `Complete` uses the configured
+idle interval. Local settlement wakes an idle wait. `relay_once` exposes the same action
+in `RelayReport::scan_progress()` for caller-driven scheduling. A recoverable infrastructure failure
 holds further requests until the error delay elapses. A durably settled Retry follows the store's
 per-record eligibility delay so other due partitions can progress. Cancellation or a fatal error stops new
 requests. An outstanding claim request runs to its original deadline. The worker drains every

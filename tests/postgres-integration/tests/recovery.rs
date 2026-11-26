@@ -329,7 +329,7 @@ async fn run() -> anyhow::Result<()> {
         .context("outbox scenarios")?;
     capture_failures(runtime.clone(), &owner).await?;
     replay_conflicts(runtime.clone(), store.clone(), &owner).await?;
-    sqlx::raw_sql("CREATE ROLE body_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT USAGE ON SCHEMA rss_transactional_messaging TO body_operator; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution(),rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer) TO body_operator;").execute(&owner).await?;
+    sqlx::raw_sql("CREATE ROLE body_operator LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; GRANT USAGE ON SCHEMA rss_transactional_messaging TO body_operator; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution(),rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint) TO body_operator;").execute(&owner).await?;
     let body_config = PgConfig::new(
         &params.host,
         params.port,
@@ -374,6 +374,7 @@ async fn run() -> anyhow::Result<()> {
         PgPublishedBodyMaintenance::connect(body_config, Timer::new(), fence_fixture::storage())
             .await?;
     compensated(runtime.clone(), store.clone(), &owner, &maintenance).await?;
+    body_retention::byte_budget(&owner, &maintenance).await?;
     maintenance.close().await;
     privilege_failures(runtime.clone(), &operator_config, &owner).await?;
     schema_failures(&operator_config, &owner).await?;
@@ -1318,7 +1319,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(i64::MAX, after_seq, 1024)?,
+                PublishedBodyRetention::new(i64::MAX, after_seq, 1024, 1_048_576)?,
                 deadline(),
             )
             .await,
@@ -1332,7 +1333,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(999_999, after_seq, 1)?,
+                PublishedBodyRetention::new(999_999, after_seq, 1, 1_048_576)?,
                 deadline(),
             )
             .await,
@@ -1349,7 +1350,7 @@ async fn compensated(
             Duration::from_millis(50),
             maintenance.reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(cutoff, after_seq, 1)?,
+                PublishedBodyRetention::new(cutoff, after_seq, 1, 1_048_576)?,
                 deadline()
             )
         )
@@ -1364,7 +1365,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(other, 1),
-                PublishedBodyRetention::new(cutoff, 0, 1024)?,
+                PublishedBodyRetention::new(cutoff, 0, 1024, 1_048_576)?,
                 deadline(),
             )
             .await,
@@ -1378,7 +1379,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(cutoff, after_seq, 1)?,
+                PublishedBodyRetention::new(cutoff, after_seq, 1, 1_048_576)?,
                 deadline()
             )
             .await
@@ -1395,7 +1396,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(1_000_000, after_seq, 1024)?,
+                PublishedBodyRetention::new(1_000_000, after_seq, 1024, 1_048_576)?,
                 deadline(),
             )
             .await,
@@ -1422,7 +1423,7 @@ async fn compensated(
         maintenance
             .reclaim(
                 crate::execution(tenant(), 1),
-                PublishedBodyRetention::new(cutoff, after_seq, 1024)?,
+                PublishedBodyRetention::new(cutoff, after_seq, 1024, 1_048_576)?,
                 deadline(),
             )
             .await,

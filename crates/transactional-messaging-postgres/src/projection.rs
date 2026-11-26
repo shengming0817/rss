@@ -37,7 +37,7 @@ pub struct PgProjectionBatch<S> {
     progress: OutboxScanProgress,
 }
 impl<S> PgProjectionBatch<S> {
-    /// Empty `More` batches need bounded continuation rather than a full idle wait.
+    /// Scheduling action for the host after this bounded scan, including empty batches.
     #[must_use]
     pub const fn scan_progress(&self) -> OutboxScanProgress {
         self.progress
@@ -45,6 +45,9 @@ impl<S> PgProjectionBatch<S> {
 }
 impl<S: Stream + Unpin> Stream for PgProjectionBatch<S> {
     type Item = S::Item;
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.pending.size_hint()
+    }
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.get_mut().pending).poll_next(cx)
     }

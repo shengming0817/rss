@@ -25,6 +25,7 @@ use rss_transactional_messaging::transport::{
     Publisher,
 };
 
+const EMPTY_PAGES_PER_SLICE: u8 = 8;
 const MIN_SCAN_DELAY: Duration = Duration::from_millis(100);
 
 /// A scan delay below the operational floor could busy-loop on a failing or empty store.
@@ -97,7 +98,7 @@ pub struct RelayReport {
 }
 
 impl RelayReport {
-    /// Continue scanning with bounded pacing when the provider exhausted its scan budget.
+    /// Whether to continue a bounded slice, retry after a short delay, or enter the idle wait.
     #[must_use]
     pub const fn scan_progress(self) -> OutboxScanProgress {
         self.scan_progress
@@ -449,7 +450,7 @@ where
         let store = self.store.as_ref();
         let budget = store.delivery_budget();
         let mut active = FuturesUnordered::new();
-        let mut admission = Admission::Ready;
+        let mut admission = Admission::Ready(0);
 
         while !token.is_cancelled() && !matches!(admission, Admission::Stopped(_)) {
             if let Some(limit) = admission.capacity(self.config, active.len()) {
@@ -485,7 +486,7 @@ where
                 Some(result) = active.next(), if !active.is_empty() => {
                     admission.completed(result, &self.config, clock, emitter);
                 }
-                () = admission.wait(clock) => admission = Admission::Ready,
+                () = admission.wait(clock) => admission = Admission::Ready(0),
             }
         }
         admission
@@ -495,7 +496,7 @@ where
 }
 
 enum Admission {
-    Ready,
+    Ready(u8),
     Idle(Deadline),
     Backoff(Deadline),
     Stopped(Option<MessagingError>),
@@ -504,7 +505,7 @@ enum Admission {
 impl Admission {
     fn capacity(&self, config: RelayConfig, in_flight: usize) -> Option<NonZeroUsize> {
         match self {
-            Self::Ready => NonZeroUsize::new(
+            Self::Ready(_) => NonZeroUsize::new(
                 (config.max_in_flight.get() - in_flight).min(config.claim_limit.get()),
             ),
             _ => None,
@@ -536,12 +537,21 @@ impl Admission {
         };
         match claims {
             Ok(batch) => {
-                if batch.is_empty() && active.len() == before && matches!(self, Self::Ready) {
-                    let delay = match batch.scan_progress() {
-                        OutboxScanProgress::More => MIN_SCAN_DELAY,
-                        OutboxScanProgress::Complete => config.idle_scan_interval,
+                if let Self::Ready(empty_pages) = *self {
+                    *self = match (batch.is_empty(), batch.scan_progress()) {
+                        (true, OutboxScanProgress::Continue)
+                            if empty_pages + 1 < EMPTY_PAGES_PER_SLICE =>
+                        {
+                            Self::Ready(empty_pages + 1)
+                        }
+                        (true, OutboxScanProgress::Continue | OutboxScanProgress::RetryLater) => {
+                            Self::delay(clock, emitter, MIN_SCAN_DELAY, Self::Backoff)
+                        }
+                        (true, OutboxScanProgress::Complete) if active.len() == before => {
+                            Self::delay(clock, emitter, config.idle_scan_interval, Self::Idle)
+                        }
+                        _ => Self::Ready(0),
                     };
-                    *self = Self::delay(clock, emitter, delay, Self::Idle);
                 }
                 Some(batch)
             }
@@ -601,7 +611,7 @@ impl Admission {
     ) {
         match result {
             Err(error) => self.failed(error, config, clock, emitter),
-            Ok(_) if matches!(self, Self::Idle(_)) => *self = Self::Ready,
+            Ok(_) if matches!(self, Self::Idle(_)) => *self = Self::Ready(0),
             Ok(_) => {}
         }
     }
