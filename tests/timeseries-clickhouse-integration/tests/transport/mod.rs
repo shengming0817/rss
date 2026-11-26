@@ -24,6 +24,7 @@ struct Captured {
 struct State {
     wire_bytes: Arc<AtomicU64>,
     page_reads: Mutex<Vec<(String, bool)>>,
+    hold_sql: Mutex<Option<String>>,
     mode: AtomicU8,
     dropped: AtomicUsize,
     saved: Mutex<Option<Captured>>,
@@ -91,6 +92,7 @@ impl Proxy {
         let state = Arc::new(State {
             wire_bytes: Arc::default(),
             page_reads: Mutex::default(),
+            hold_sql: Mutex::default(),
             mode: AtomicU8::new(0),
             dropped: AtomicUsize::new(0),
             saved: Mutex::new(None),
@@ -130,6 +132,13 @@ impl Proxy {
     }
     pub async fn take_page_reads(&self) -> Vec<(String, bool)> {
         std::mem::take(&mut *self.state.page_reads.lock().await)
+    }
+    pub async fn hold_matching(&self, sql: String) {
+        *self.state.hold_sql.lock().await = Some(sql);
+        self.arm(7);
+    }
+    pub fn matching_gate_unused(&self) -> bool {
+        self.state.mode.load(Ordering::SeqCst) == 7
     }
     pub fn arm(&self, mode: u8) {
         self.state.mode.store(mode, Ordering::SeqCst);
@@ -251,10 +260,19 @@ async fn serve(
         let prefix = format!("INSERT INTO rss_ts_ch.{table}");
         sql.starts_with(&prefix) || data.starts_with(prefix.as_bytes())
     });
+    let hold = state
+        .hold_sql
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|needle| sql.contains(needle) || body_sql.contains(needle));
     let mode = state
         .mode
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
-            ((m == 5 && reads_page) || (m == 6 && reads_summary) || (m < 5 && is_insert))
+            ((m == 7 && hold)
+                || (m == 5 && reads_page)
+                || (m == 6 && reads_summary)
+                || (m < 5 && is_insert))
                 .then_some(0)
         })
         .unwrap_or(0);
@@ -270,7 +288,7 @@ async fn serve(
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("withheld before registration"));
     }
-    if mode == 6 {
+    if matches!(mode, 6 | 7) {
         state.entered.add_permits(1);
         state
             .release

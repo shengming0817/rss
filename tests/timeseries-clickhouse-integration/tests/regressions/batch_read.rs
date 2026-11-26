@@ -151,7 +151,9 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     let mut caps = limits()?;
     caps.max_points = NonZeroU32::new(256).ok_or(Error::Invariant)?;
     let proxy = transport::Proxy::new(&f.ch).await?;
-    let store = proxy.store_with_limits(f.pool.clone(), caps).await?;
+    let store = proxy
+        .store_with_limits(f.pool.clone(), caps.clone())
+        .await?;
     let measure = Measure {
         f: &f,
         proxy: &proxy,
@@ -169,6 +171,19 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     let fine = spec(10)?;
     let all = aggregate(&fine, window(0, 1280)?, 128, AggregateOp::Sum)?;
     measure.page("miss", &all, &samples, None, (0, 1)).await?;
+    caps.max_bytes = NonZeroU32::new(48 * 1024).ok_or(Error::Invariant)?;
+    let bounded = proxy.store_with_limits(f.pool.clone(), caps).await?;
+    let before = proxy.requests().await.len();
+    let split = bounded.aggregate(&all, None, deadline()?).await?;
+    let requests = proxy.requests().await.len() - before;
+    assert!(
+        (2..=16).contains(&requests),
+        "byte-limited raw requests: {requests}"
+    );
+    assert_eq!(
+        serde_json::to_value(split.buckets)?,
+        oracle(all.request(), &samples)?
+    );
     // Populate separated islands, keeping a raw gap between them.
     cache(&f, &fine, 0, 160).await?;
     cache(&f, &fine, 320, 480).await?;
@@ -203,10 +218,26 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
         serde_json::to_value(decoded)?,
         oracle(all.request(), &samples)?
     );
+    // Stall the first multi-object request. A smaller group must still finish
+    // this same page before the absolute deadline, without releasing the stalled response.
+    proxy.arm(6);
+    let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
+    let delayed = store.aggregate(&all, None, cutoff).await;
+    proxy.release();
+    assert_eq!(
+        serde_json::to_value(delayed?.buckets)?,
+        oracle(all.request(), &samples)?
+    );
     // A stricter installation-level SQL parser cap may still require narrower groups.
     f.ch.sql("ALTER USER ch_reader SETTINGS max_query_size=3072")
         .await?;
+    let before = proxy.requests().await.len();
     let narrow = store.aggregate(&all, None, deadline()?).await?;
+    let requests = proxy.requests().await.len() - before;
+    assert!(
+        (2..=10).contains(&requests),
+        "parser-limited requests: {requests}"
+    );
     assert_eq!(
         serde_json::to_value(narrow.buckets)?,
         oracle(all.request(), &samples)?
@@ -267,7 +298,33 @@ async fn predecessor_survives_empty_buckets_and_unused_corruption_waits_for_its_
             .await,
         Err(Error::BudgetExceeded)
     ));
-    cache(&f, &spec, 20, 100).await?;
+    // The first Timeline bucket consumes all three points. A read containing
+    // data from the next bucket would stall; the continuation must start at 40.
+    let exact = aggregate(&spec, range, 3, AggregateOp::Timeline)?;
+    for cached in [false, true] {
+        let needle = if cached {
+            cache(&f, &spec, 20, 100).await?;
+            sqlx::query_scalar::<_, String>(
+                "SELECT object_id::text FROM rss_ts_ch.summaries WHERE lo=40",
+            )
+            .fetch_one(&f.admin)
+            .await?
+        } else {
+            "observed_at<80".to_owned()
+        };
+        proxy.hold_matching(needle).await;
+        let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
+        let page = store.aggregate(&exact, None, cutoff).await?;
+        assert!(
+            proxy.matching_gate_unused(),
+            "read beyond the first state bucket"
+        );
+        proxy.arm(0);
+        assert_eq!(page.buckets.len(), 1);
+        let next = page.next.ok_or(Error::Invariant)?;
+        let second = store.aggregate(&exact, Some(&next), deadline()?).await?;
+        assert_eq!(second.buckets[0].window.start().micros(), 40);
+    }
     f.ch.sql("ALTER TABLE rss_ts_ch.summaries UPDATE digest=repeat('0',64) WHERE lo=80 SETTINGS mutations_sync=2").await?;
     let short = aggregate(&spec, range, 4, AggregateOp::Timeline)?;
     let first = store.aggregate(&short, None, deadline()?).await?;

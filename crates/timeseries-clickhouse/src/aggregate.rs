@@ -327,6 +327,42 @@ fn covered<'a>(
     }
     Ok(hits)
 }
+// State observations at equal microseconds are collapsed. A projected state entry
+// starts at a distinct in-window tick (including a carried segment at the left edge).
+// Include a later bucket only if the page must at least attempt it.
+fn read_through(
+    q: &AggregateQuery,
+    window: Interval,
+    remaining: usize,
+    end: Timestamp,
+) -> Result<Timestamp, Error> {
+    let width = q.resolution_micros().get();
+    let (first, full) = match q.operation() {
+        AggregateOp::Timeline | AggregateOp::Transitions | AggregateOp::Coverage => {
+            (1 + window.width_micros(), 1 + width)
+        }
+        _ => (1, 1),
+    };
+    let remaining = remaining as u64;
+    let extra = remaining.saturating_sub(first).div_ceil(full);
+    let span = i64::try_from(extra.saturating_mul(width)).unwrap_or(i64::MAX);
+    Timestamp::new(window.end().micros().saturating_add(span).min(end.micros()))
+}
+
+// Wide reads are optional optimizations. Leave half of the remaining call budget for
+// a narrower request and the PG evidence check, including when the HTTP body stalls.
+fn batch_deadline<C: Clock>(
+    store: &Operation<'_, C>,
+    deadline: Deadline,
+    wide: bool,
+) -> Result<Deadline, Error> {
+    if !wide {
+        return Ok(deadline);
+    }
+    let now = store.clock.now();
+    let left = deadline.remaining(now).ok_or(Error::Deadline)?;
+    Ok(deadline.shortened_to(now + left / 2))
+}
 fn cost(bucket: &AggregateBucket) -> usize {
     1 + match &bucket.value {
         AggregateValue::StateSegments(v) => v.len(),
@@ -499,6 +535,8 @@ impl Request for AggregateQuery {
                 .ok_or(Error::Deadline)?;
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
+            let remaining = q.query().budget().max_points.get() as usize - used;
+            let through = read_through(q, window, remaining, Timestamp::new(refs.end)?)?;
             let is_cached = hits.front().is_some_and(|(w, _)| *w == window);
             let value = if is_cached {
                 raw = None;
@@ -515,6 +553,7 @@ impl Request for AggregateQuery {
                         store,
                         q.spec().stream().scope(),
                         &path,
+                        through,
                         &mut refs.attempted,
                         deadline,
                     )
@@ -523,12 +562,11 @@ impl Request for AggregateQuery {
                 let mut start = refs.dependency_start;
                 let run_end = hits
                     .front()
-                    .map_or(Timestamp::new(refs.end)?, |(w, _)| w.start());
+                    .map_or(through, |(w, _)| w.start().min(through));
                 let run = raw.get_or_insert_with(|| {
-                    raw::Run::new(q.spec(), &fences, published, deadline, at, run_end)
+                    raw::Run::new(q.spec(), &fences, published, deadline, at)
                 });
-                let remaining = q.query().budget().max_points.get() as usize - used;
-                let result = run.summary(store, window, remaining, &mut start).await;
+                let result = run.summary(store, window, run_end, &mut start).await;
                 if at == q.query().window().start() {
                     refs.dependency_start = start;
                 }

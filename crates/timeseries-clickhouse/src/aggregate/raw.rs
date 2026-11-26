@@ -5,12 +5,11 @@ pub(super) struct Run<'a> {
     fences: &'a [Fence],
     published: i64,
     deadline: Deadline,
-    end: Timestamp,
     seeded: bool,
     prior: Option<Sample>,
     rows: VecDeque<ReadRow>,
     complete_until: Timestamp,
-    single_bucket: bool,
+    max_buckets: u64,
 }
 
 impl<'a> Run<'a> {
@@ -20,19 +19,17 @@ impl<'a> Run<'a> {
         published: i64,
         deadline: Deadline,
         start: Timestamp,
-        end: Timestamp,
     ) -> Self {
         Self {
             spec,
             fences,
             published,
             deadline,
-            end,
             seeded: false,
             prior: None,
             rows: VecDeque::new(),
             complete_until: start,
-            single_bucket: false,
+            max_buckets: u64::MAX,
         }
     }
 
@@ -41,6 +38,7 @@ impl<'a> Run<'a> {
         store: &Operation<'_, C>,
         start: Timestamp,
         end: Timestamp,
+        cutoff: Deadline,
     ) -> Result<Vec<ReadRow>, Error> {
         let condition = format!(
             "{} AND revision<={} AND observed_at>={} AND observed_at<{}{}",
@@ -55,7 +53,7 @@ impl<'a> Run<'a> {
                 &condition,
                 "observed_at,sequence,sample_id",
                 store.limits.max_points.get(),
-                self.deadline,
+                cutoff,
             )
             .await
     }
@@ -64,31 +62,23 @@ impl<'a> Run<'a> {
         &mut self,
         store: &Operation<'_, C>,
         window: Interval,
-        remaining: usize,
+        through: Timestamp,
     ) -> Result<(), Error> {
-        // Each bucket costs at least one point, including a partial first bucket.
-        let span = (remaining.saturating_sub(1) as u64)
-            .saturating_mul(self.spec.resolution_micros().get());
-        let mut end = if self.single_bucket {
-            window.end()
-        } else {
-            Timestamp::new(
-                window
-                    .end()
-                    .micros()
-                    .saturating_add(i64::try_from(span).unwrap_or(i64::MAX)),
-            )?
-            .min(self.end)
-        };
-        let result = self.fetch(store, window.start(), end).await;
-        let mut rows = match result {
-            // Local validation or a provider cap in a later bucket must not decide this bucket.
-            Err(e) if end > window.end() && !matches!(e, Error::Deadline | Error::Unauthorized) => {
-                self.single_bucket = true;
-                end = window.end();
-                self.fetch(store, window.start(), end).await?
+        let width = self.spec.resolution_micros().get();
+        let tail = through.micros().abs_diff(window.end().micros());
+        let mut count = (1 + tail.div_ceil(width)).min(self.max_buckets);
+        let (mut rows, mut end) = loop {
+            let span = i64::try_from((count - 1).saturating_mul(width)).unwrap_or(i64::MAX);
+            let end = Timestamp::new(window.end().micros().saturating_add(span))?.min(through);
+            let cutoff = batch_deadline(store, self.deadline, count > 1)?;
+            let read = self.fetch(store, window.start(), end, cutoff);
+            match store.bounded(cutoff, read).await {
+                Err(e) if count > 1 && e != Error::Unauthorized => {
+                    count = count.div_ceil(2);
+                    self.max_buckets = count;
+                }
+                result => break (result?, end),
             }
-            result => result?,
         };
         if rows.len() > store.limits.max_points.get() as usize {
             let tail = rows
@@ -112,7 +102,7 @@ impl<'a> Run<'a> {
         &mut self,
         store: &Operation<'_, C>,
         window: Interval,
-        remaining: usize,
+        through: Timestamp,
         dependency: &mut i64,
     ) -> Result<Summary, Error> {
         if self.fences.iter().any(|f| {
@@ -141,7 +131,7 @@ impl<'a> Run<'a> {
             seeded_builder(self.spec, window, self.fences, self.prior.as_ref(), limit)?;
         *dependency = start;
         if self.complete_until < window.end() {
-            self.refill(store, window, remaining).await?;
+            self.refill(store, window, through).await?;
         }
         while self
             .rows

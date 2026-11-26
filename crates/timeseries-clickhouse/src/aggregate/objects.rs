@@ -85,7 +85,8 @@ impl<C: Clock> Operation<'_, C> {
 pub(super) struct Reader<'a> {
     remaining: &'a [&'a SummaryRef],
     group_left: usize,
-    objects: Option<Objects>,
+    objects: Objects,
+    max_ids: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -93,21 +94,24 @@ impl<'a> Reader<'a> {
         Self {
             remaining,
             group_left: 0,
-            objects: None,
+            objects: Objects(HashMap::new()),
+            max_ids: 512, // 39 SQL bytes per quoted UUID, independent of response budgets.
         }
     }
 
-    fn group(&self, limits: &crate::Limits) -> (usize, Vec<&'a str>) {
+    fn group(&self, limits: &crate::Limits, through: Timestamp) -> (usize, Vec<&'a str>) {
         let mut seen = HashSet::new();
         let mut ids = Vec::new();
         let mut size = 0u64;
         // Each ID may return a second row as evidence of a duplicate.
         // Bound the SQL text independently of response budgets (39 bytes per quoted UUID).
-        const MAX_IDS: u64 = 512;
-        let capacity = MAX_IDS
+        let capacity = (self.max_ids as u64)
             .min(u64::from(limits.max_points.get()))
             .min((limits.max_scan_rows.get() / 2).max(1));
         for (index, r) in self.remaining.iter().enumerate() {
+            if r.hi > through.micros() {
+                return (index, ids);
+            }
             if !seen.insert(r.object_id.as_str()) {
                 continue;
             }
@@ -126,36 +130,49 @@ impl<'a> Reader<'a> {
         (self.remaining.len(), ids)
     }
 
+    async fn fill<C: Clock>(
+        &mut self,
+        store: &Operation<'_, C>,
+        scope: &Scope,
+        through: Timestamp,
+        deadline: Deadline,
+    ) -> Result<(), Error> {
+        loop {
+            let (count, ids) = self.group(store.limits, through);
+            if ids.is_empty() {
+                return Err(Error::Invariant);
+            }
+            let cutoff = batch_deadline(store, deadline, ids.len() > 1)?;
+            let read = store.summary_objects(scope, &ids, cutoff);
+            match store.bounded(cutoff, read).await {
+                Err(Error::BudgetExceeded | Error::Unavailable | Error::Deadline)
+                    if ids.len() > 1 =>
+                {
+                    self.max_ids = ids.len().div_ceil(2);
+                }
+                result => {
+                    self.objects = result?;
+                    self.group_left = count;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     async fn next<C: Clock>(
         &mut self,
         store: &Operation<'_, C>,
         scope: &Scope,
+        through: Timestamp,
         deadline: Deadline,
     ) -> Result<Summary, Error> {
         let row = *self.remaining.first().ok_or(Error::Invariant)?;
         if self.group_left == 0 {
-            let (count, ids) = self.group(store.limits);
-            self.group_left = count;
-            self.objects = match store.summary_objects(scope, &ids, deadline).await {
-                // Per-query resource/parser limits and RowBinary errors in later rows
-                // cannot decide this object. Narrow once under the same read deadline.
-                Err(Error::BudgetExceeded | Error::Unavailable) if ids.len() > 1 => None,
-                result => Some(result?),
-            };
+            self.fill(store, scope, through, deadline).await?;
         }
         self.group_left -= 1;
         self.remaining = &self.remaining[1..];
-        let singleton;
-        let objects = match &self.objects {
-            Some(batch) => batch,
-            None => {
-                singleton = store
-                    .summary_objects(scope, &[&row.object_id], deadline)
-                    .await?;
-                &singleton
-            }
-        };
-        objects.value(
+        self.objects.value(
             &row.object_id,
             row.lo,
             row.hi,
@@ -168,6 +185,7 @@ impl<'a> Reader<'a> {
         store: &Operation<'_, C>,
         scope: &Scope,
         path: &[&SummaryRef],
+        through: Timestamp,
         attempted: &mut Vec<SummaryRef>,
         deadline: Deadline,
     ) -> Result<Summary, Error> {
@@ -175,7 +193,7 @@ impl<'a> Reader<'a> {
         let mut value: Option<Summary> = None;
         for &r in path {
             attempted.push(r.clone());
-            let summary = self.next(store, scope, deadline).await?;
+            let summary = self.next(store, scope, through, deadline).await?;
             size = size
                 .checked_add(r.payload_bytes)
                 .ok_or(Error::BudgetExceeded)?;
