@@ -5,14 +5,14 @@ source, execution, bounded runner and explicit cross-system at-least-once contra
 RSS message-envelope, MessageRoute, global DI or product read-model dependency.
 
 ```rust
-use rss_projection::{BatchLimit, Event, Position, ProjectionScope, RunLimit, SourceScope};
+use rss_projection::{PageBudget, Event, Position, ProjectionScope, RunLimit, SourceScope};
 use rss_request_context::TenantId;
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
 let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
 let source = SourceScope::new(tenant, "orders")?;
 let scope = ProjectionScope::new(source.clone(), "totals", "v1")?;
 let event = Event::new(source, Position::new(0)?, "fact-1", vec![1])?;
-let limit = RunLimit::new(BatchLimit::new(100)?, 10_000)?;
+let limit = RunLimit::new(PageBudget::new(100, Event::MAX_PAYLOAD_BYTES)?, 10_000)?;
 # Ok(())
 # }
 ```
@@ -23,6 +23,13 @@ let limit = RunLimit::new(BatchLimit::new(100)?, 10_000)?;
   order. A source with retention returns HistoryExpired for a cursor below its retained boundary.
   Recovery requires a generation baseline covering the lost prefix. Positions are not comparable across tenants/sources. The runner validates the complete
   fetched batch before admitting effects. `None` precedes the first event; position zero is legal.
+- Callers select rows and total encoded `Event::payload()` bytes for each page. Both limits
+  apply to every read. Item metadata and attached application data have separate costs. A source
+  returns the ordered prefix that fits, including zero-byte payloads at the byte boundary.
+  `ReadPage::Events(vec![])` means exhausted. If the very first event exceeds the full page,
+  `ReadPage::Blocked` gives its position and exact byte length. Both runners return
+  `Stop::PayloadBudget` with this evidence. Inspect the stop even after `into_result()?`:
+  use a larger page to resume at the acknowledged checkpoint. Event allowance is per invocation.
 - `Execution` represents a provider-bound generation/session and exposes its verified
   `DefinitionIdentity`. Providers must bind this identity before granting authority and verify
   it on checkpoint reads and writes, before effects. `run` loads its checkpoint, reads

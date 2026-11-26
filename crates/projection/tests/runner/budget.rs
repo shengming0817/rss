@@ -54,9 +54,9 @@ impl Source for Waiting {
         &self,
         _: &SourceScope,
         _: Option<Position>,
-        _: BatchLimit,
+        _: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, Error> {
+    ) -> Result<ReadPage<Event>, Error> {
         self.wait(control).await
     }
 }
@@ -110,7 +110,7 @@ async fn read_port(
             .await
             .map(|_| ()),
         1 => ports
-            .read(ports.0.scope().source(), None, BatchLimit::new(1)?, control)
+            .read(ports.0.scope().source(), None, PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?, control)
             .await
             .map(|_| ()),
         2 => ports.checkpoint(control).await.map(|_| ()),
@@ -165,12 +165,12 @@ impl Source for EmptyAtDeadline<'_> {
         &self,
         _: &SourceScope,
         _: Option<Position>,
-        _: BatchLimit,
+        _: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, Error> {
+    ) -> Result<ReadPage<Event>, Error> {
         control.check()?;
         self.0.0.store(10, Ordering::SeqCst);
-        Ok(vec![]) // Models expiry between provider return and runner validation.
+        Ok(ReadPage::Events(vec![])) // Models expiry between provider return and runner validation.
     }
 }
 #[tokio::test]
@@ -183,7 +183,7 @@ async fn terminal_budget_checks_preserve_confirmed_progress() -> anyhow::Result<
         &EmptyAtDeadline(&timer),
         &execution,
         &control,
-        RunLimit::new(BatchLimit::new(1)?, 1)?,
+        RunLimit::new(PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?, 1)?,
     )
     .await;
     assert_eq!(report.stop, Stop::Failed(ErrorKind::Deadline.into()));
@@ -200,7 +200,7 @@ async fn terminal_budget_checks_preserve_confirmed_progress() -> anyhow::Result<
         &source,
         &execution,
         &control,
-        RunLimit::new(BatchLimit::new(2)?, 2)?,
+        RunLimit::new(PageBudget::new(2, Event::MAX_PAYLOAD_BYTES)?, 2)?,
     );
     let observation = work.observation();
     let report = work.await;
@@ -323,7 +323,7 @@ async fn composition_preserves_owner_settlement_and_remote_effects() -> anyhow::
             &source,
             &execution,
             &control,
-            RunLimit::new(BatchLimit::new(1)?, 1)?,
+            RunLimit::new(PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?, 1)?,
         )
         .await;
         assert_eq!(report.stop, Stop::Failed(expected.into()));

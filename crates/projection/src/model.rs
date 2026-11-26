@@ -57,7 +57,7 @@ impl Position {
         self.0
     }
 }
-/// Bounded source fetch size.
+/// Bounded record count for a read or a settlement batch.
 #[derive(Debug, Clone, Copy)]
 pub struct BatchLimit(u32);
 impl BatchLimit {
@@ -73,6 +73,39 @@ impl BatchLimit {
     pub const fn get(self) -> u32 {
         self.0
     }
+}
+/// Caller-selected limits for each source page. Bytes count only encoded event payloads.
+#[derive(Debug, Clone, Copy)]
+pub struct PageBudget {
+    rows: BatchLimit,
+    payload_bytes: u32,
+}
+impl PageBudget {
+    /// Allow 1–1024 rows and a positive number of encoded payload bytes per page.
+    pub fn new(rows: u32, payload_bytes: u32) -> Result<Self, Error> {
+        if payload_bytes == 0 {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
+        Ok(Self { rows: BatchLimit::new(rows)?, payload_bytes })
+    }
+    /// Maximum event count, independently of payload sizes.
+    pub const fn rows(self) -> u32 { self.rows.get() }
+    /// Maximum sum of `Event::payload().len()` across this page.
+    pub const fn payload_bytes(self) -> u32 { self.payload_bytes }
+}
+
+/// Result of one ordered source read. A short nonempty page can have a successor.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReadPage<I> {
+    /// Committed prefix. Empty only when the cursor has no visible successor.
+    Events(Vec<I>),
+    /// The first successor cannot fit in a fresh page. No body or progress is returned.
+    Blocked {
+        /// Position of the first successor.
+        position: Position,
+        /// Exact encoded payload length needed to admit it.
+        required_bytes: u32,
+    },
 }
 /// A single ordered journal, scoped to one tenant. This is not authentication evidence.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -249,6 +282,9 @@ impl AsRef<Event> for Event {
     }
 }
 impl Event {
+    /// Maximum encoded application payload of a single event, in bytes.
+    pub const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
+
     /// Attach typed data to this exact event for one local handoff.
     pub fn with_data<T>(self, data: T) -> EventWith<T> {
         EventWith(std::sync::Arc::new(EventData { event: self, data }))
@@ -263,7 +299,7 @@ impl Event {
     ) -> Result<Self, Error> {
         let id = id.into();
         validate_name(&id)?;
-        if payload.len() > 1_048_576 {
+        if payload.len() > Self::MAX_PAYLOAD_BYTES as usize {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
         Ok(Self {

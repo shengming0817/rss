@@ -55,17 +55,24 @@ impl Source for Journal {
         &self,
         _: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, Error> {
+    ) -> Result<ReadPage<Event>, Error> {
         control.check()?;
-        Ok(self
-            .0
-            .iter()
-            .filter(|e| after.is_none_or(|p| e.position() > p))
-            .take(limit.get() as usize)
-            .cloned()
-            .collect())
+        let mut events = Vec::new();
+        let mut bytes = limit.payload_bytes() as usize;
+        for event in self.0.iter().filter(|e| after.is_none_or(|p| e.position() > p)).take(limit.rows() as usize) {
+            let size = event.payload().len();
+            if size > bytes {
+                if events.is_empty() {
+                    return Ok(ReadPage::Blocked { position: event.position(), required_bytes: size as u32 });
+                }
+                break;
+            }
+            bytes -= size;
+            events.push(event.clone());
+        }
+        Ok(ReadPage::Events(events))
     }
 }
 struct Memory {
@@ -136,7 +143,7 @@ async fn resumes_from_zero_and_stops_at_total_event_budget() -> anyhow::Result<(
     let clock = Clock(AtomicU64::new(0));
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(10), &cancel);
-    let limit = RunLimit::new(BatchLimit::new(100)?, 2)?;
+    let limit = RunLimit::new(PageBudget::new(100, Event::MAX_PAYLOAD_BYTES)?, 2)?;
     let first = run(&source, &execution, &control, limit).await;
     assert_eq!(first.applied, 2);
     assert_eq!(first.stop, Stop::EventLimit);
@@ -178,7 +185,7 @@ async fn malformed_batches_are_rejected_before_any_effect() -> anyhow::Result<()
             &Journal(events),
             &execution,
             &Control::new(&clock, Duration::from_secs(10), &cancel),
-            RunLimit::new(BatchLimit::new(10)?, 10)?,
+            RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
         )
         .await;
         assert_eq!(report.stop, Stop::Failed(reason));
@@ -205,7 +212,7 @@ async fn replay_has_immutable_empty_and_nonempty_boundaries() -> anyhow::Result<
             &source,
             &execution,
             &Control::new(&clock, Duration::from_secs(10), &cancel),
-            RunLimit::new(BatchLimit::new(10)?, 10)?,
+            RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
         )
         .await;
         assert_eq!(report.stop, Stop::CaughtUp);
@@ -238,7 +245,7 @@ async fn cancellation_deadline_and_fencing_admit_no_effects() -> anyhow::Result<
             &source,
             &execution,
             &Control::new(&clock, Duration::from_secs(10), &cancel),
-            RunLimit::new(BatchLimit::new(10)?, 10)?,
+            RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
         )
         .await;
         assert_eq!(report.stop, Stop::Failed(cause));
@@ -411,7 +418,7 @@ async fn total_deadline_is_not_reset_between_events() -> anyhow::Result<()> {
         &source,
         &execution,
         &Control::new(&clock, Duration::from_secs(10), &cancel),
-        RunLimit::new(BatchLimit::new(10)?, 10)?,
+        RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
     )
     .await;
     assert_eq!(report.applied, 2);
@@ -438,9 +445,9 @@ impl Source for BlockedSource {
         &self,
         _: &SourceScope,
         _: Option<Position>,
-        _: BatchLimit,
+        _: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, Error> {
+    ) -> Result<ReadPage<Event>, Error> {
         control.check()?;
         self.entered.notify_one();
         control.run(std::future::pending()).await
@@ -459,7 +466,7 @@ async fn cancellation_interrupts_a_blocked_source() -> anyhow::Result<()> {
         &source,
         &execution,
         &control,
-        RunLimit::new(BatchLimit::new(10)?, 10)?,
+        RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
     );
     let cancellation = async {
         source.entered.notified().await;
@@ -484,7 +491,7 @@ async fn missing_replay_end_is_not_reported_as_complete() -> anyhow::Result<()> 
         &source,
         &execution,
         &Control::new(&clock, Duration::from_secs(10), &cancel),
-        RunLimit::new(BatchLimit::new(10)?, 10)?,
+        RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
     )
     .await;
     assert_eq!(
@@ -534,7 +541,7 @@ async fn filtered_events_advance_and_consume_total_budget() -> anyhow::Result<()
         &source,
         &execution,
         &control,
-        RunLimit::new(BatchLimit::new(1)?, 2)?,
+        RunLimit::new(PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?, 2)?,
     )
     .await
     .into_result()?;
@@ -605,7 +612,7 @@ async fn atomic_page_honors_exact_replay_end_and_event_budget() -> anyhow::Resul
             &source,
             &exec,
             &c,
-            RunLimit::new(BatchLimit::new(3)?, budget)?,
+            RunLimit::new(PageBudget::new(3, Event::MAX_PAYLOAD_BYTES)?, budget)?,
         )
         .await;
         assert_eq!(
@@ -619,3 +626,6 @@ async fn atomic_page_honors_exact_replay_end_and_event_budget() -> anyhow::Resul
     }
     Ok(())
 }
+
+#[path = "runner/page.rs"]
+mod page;
