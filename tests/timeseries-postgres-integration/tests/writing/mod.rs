@@ -1,4 +1,5 @@
 mod measure;
+mod mixed;
 mod prepare_measure;
 use super::*;
 #[tokio::test]

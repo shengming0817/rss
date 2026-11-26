@@ -266,25 +266,141 @@ pub(crate) fn provider_error(stage: &str, error: clickhouse::error::Error) -> Er
 
 // Read failures do not have the ambiguous-commit semantics of INSERT failures.
 // ref: ClickHouse src/Common/ErrorCodes.cpp@v25.8.12.129-lts
-pub(crate) fn read_error(error: clickhouse::error::Error) -> Error {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadFailure {
+    Capacity,
+    QueryLength,
+    Other(Error),
+}
+
+impl From<Error> for ReadFailure {
+    fn from(error: Error) -> Self {
+        Self::Other(error)
+    }
+}
+impl From<ReadFailure> for Error {
+    fn from(failure: ReadFailure) -> Self {
+        match failure {
+            ReadFailure::Capacity => Self::BudgetExceeded,
+            ReadFailure::QueryLength => Self::Unavailable,
+            ReadFailure::Other(error) => error,
+        }
+    }
+}
+
+pub(crate) fn read_error(error: clickhouse::error::Error) -> ReadFailure {
     use clickhouse::error::Error as ChError;
     match error {
-        ChError::TimedOut => Error::Deadline,
-        ChError::BadResponse(message) => match message
-            .strip_prefix("Code: ")
-            .and_then(|s| s.split_once('.'))
-            .and_then(|(code, _)| code.parse::<u32>().ok())
-        {
-            Some(158 | 241 | 307 | 396) => Error::BudgetExceeded,
-            Some(159 | 160) => Error::Deadline,
-            _ => Error::Unavailable,
-        },
-        _ => Error::Unavailable,
+        ChError::TimedOut => ReadFailure::Other(Error::Deadline),
+        ChError::BadResponse(message) => {
+            let diagnostic = message
+                .strip_prefix("Code: ")
+                .and_then(|s| s.split_once('.'));
+            match diagnostic {
+                Some(("158" | "307", _)) => ReadFailure::Capacity,
+                Some(("396", tail)) if tail.starts_with(" DB::Exception: Limit for result exceeded, max ") => ReadFailure::Capacity,
+                Some(("396", _)) => ReadFailure::Other(Error::BudgetExceeded),
+                Some(("241", tail)) if tail.starts_with(" DB::Exception: Query memory limit exceeded:") => ReadFailure::Capacity,
+                Some(("241", _)) => ReadFailure::Other(Error::BudgetExceeded),
+                Some(("159" | "160", _)) => ReadFailure::Other(Error::Deadline),
+                // ClickHouse uses SYNTAX_ERROR for *all* parser errors. Only this
+                // lexical diagnostic can be remedied by shortening a generated IN list.
+                Some(("62", tail))
+                    if tail.starts_with(" DB::Exception: Max query size exceeded (can be increased with the `max_query_size` setting):") =>
+                {
+                    ReadFailure::QueryLength
+                }
+                _ => ReadFailure::Other(Error::Unavailable),
+            }
+        }
+        _ => ReadFailure::Other(Error::Unavailable),
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "isolated release-mode canonical reconstruction allocation count"]
+    fn raw_reconstruction_allocations() -> anyhow::Result<()> {
+        use rss_request_context::TenantId;
+        use std::hint::black_box;
+        let scope = Scope::new(
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+            Id::new("metrics")?,
+        );
+        for width in [0, 64] {
+            let dims = (0..width)
+                .map(|n| Ok((Id::new(format!("dim-{n}"))?, Id::new("value")?)))
+                .collect::<Result<std::collections::BTreeMap<_, _>, Error>>()?;
+            let definition = Definition::new(DefinitionSpec {
+                scope: scope.clone(),
+                key: Id::new("temperature")?,
+                version: 1,
+                unit: Id::new("unit")?,
+                metric: Metric::Gauge {
+                    number: NumberKind::U64,
+                },
+                dimensions: DimensionRules {
+                    allowed: dims.keys().cloned().collect(),
+                    required: Default::default(),
+                    max_count: width,
+                    max_value_bytes: 256,
+                    max_total_bytes: 32768,
+                },
+            })?;
+            let sample = Sample::new(SampleInput {
+                stream: Stream::new(scope.clone(), Id::new("source")?, Id::new("gen")?),
+                series: Series::new(definition, Id::new("device")?, Id::new("resource")?, dims)?,
+                id: Id::new("point")?,
+                sequence: 1,
+                observed_at: Timestamp::new(1)?,
+                interval: None,
+                reading: Reading::Valid(Value::Number(Number::U64(1))),
+            })?;
+            let raw = Raw::new(&sample, 2, 1)?;
+            assert_eq!(raw.sample()?, sample);
+            let rebuild = allocation_counter::measure(|| {
+                drop(black_box(Raw::new(black_box(&sample), 2, 1)));
+            });
+            let full = allocation_counter::measure(|| {
+                drop(black_box(black_box(&raw).sample()));
+            });
+            println!(
+                "RAW_ALLOC dims={width} json={} rebuild_allocs={} rebuild_bytes={} full_allocs={} full_bytes={} peak_bytes={}",
+                raw.payload.len(),
+                rebuild.count_total,
+                rebuild.bytes_total,
+                full.count_total,
+                full.bytes_total,
+                full.bytes_max
+            );
+            assert!(full.count_total >= rebuild.count_total && rebuild.count_total > 0);
+        }
+        Ok(())
+    }
+    #[test]
+    fn only_query_local_memory_and_parser_length_can_shrink() {
+        let classified =
+            |message: &str| read_error(clickhouse::error::Error::BadResponse(message.into()));
+        assert_eq!(
+            classified("Code: 241. DB::Exception: Query memory limit exceeded: would use 100 MiB"),
+            ReadFailure::Capacity
+        );
+        assert_eq!(
+            classified("Code: 241. DB::Exception: User memory limit exceeded: would use 100 MiB"),
+            ReadFailure::Other(Error::BudgetExceeded)
+        );
+        assert_eq!(
+            classified(
+                "Code: 62. DB::Exception: Max query size exceeded (can be increased with the `max_query_size` setting): Syntax error"
+            ),
+            ReadFailure::QueryLength
+        );
+        assert_eq!(
+            classified("Code: 62. DB::Exception: Syntax error"),
+            ReadFailure::Other(Error::Unavailable)
+        );
+    }
     #[test]
     fn reads_classify_budgets_and_time_without_exposing_provider_text() {
         for (code, expected) in [
@@ -297,20 +413,22 @@ mod tests {
             (60, Error::Unavailable),
         ] {
             assert_eq!(
-                read_error(clickhouse::error::Error::BadResponse(format!(
+                Error::from(read_error(clickhouse::error::Error::BadResponse(format!(
                     "Code: {code}. DB::Exception: private query"
-                ))),
+                )))),
                 expected
             );
         }
         for message in ["private Code: 158.", "Code: 158x.", "Code: 158"] {
             assert_eq!(
-                read_error(clickhouse::error::Error::BadResponse(message.into())),
+                Error::from(read_error(clickhouse::error::Error::BadResponse(
+                    message.into()
+                ))),
                 Error::Unavailable
             );
         }
         assert_eq!(
-            read_error(clickhouse::error::Error::TimedOut),
+            Error::from(read_error(clickhouse::error::Error::TimedOut)),
             Error::Deadline
         );
     }

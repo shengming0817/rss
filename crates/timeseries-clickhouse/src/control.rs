@@ -56,8 +56,16 @@ async fn invalidation_targets(
     max: u32,
 ) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
     let selection = String::from_utf8(bytes(selection)?).map_err(|_| Error::Invariant)?;
-    let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND dependency_start<$6 AND dirty_from IS DISTINCT FROM 0 AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
-        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(window.start().micros()).bind(i64::from(max)+1).bind(selection).bind(window.end().micros()).fetch_all(c).await.map_err(sql_error)?;
+    let rows = sqlx::query(include_str!("invalidation_targets.sql"))
+        .bind(s.tenant().to_string())
+        .bind(s.namespace().as_str())
+        .bind(window.start().micros())
+        .bind(i64::from(max) + 1)
+        .bind(selection)
+        .bind(window.end().micros())
+        .fetch_all(c)
+        .await
+        .map_err(sql_error)?;
     #[cfg(feature = "integration")]
     crate::measurement::record(|m| m.candidates += rows.len());
     if rows.len() > max as usize {
@@ -79,24 +87,15 @@ pub(crate) struct Fence {
     pub until: Option<i64>,
     pub restored: bool,
 }
+pub(crate) fn has_fences(count: i64, max: u32) -> Result<bool, Error> {
+    if count > i64::from(max) {
+        return Err(Error::BudgetExceeded);
+    }
+    Ok(count > 0)
+}
 pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<Vec<Fence>, Error> {
     let rows=sqlx::query("SELECT id,kind,selection::text,lo,hi,restore_until,restored FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 ORDER BY lo,id LIMIT $3")
         .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(i64::from(max)+1).fetch_all(c).await.map_err(sql_error)?;
-    #[cfg(feature = "integration")]
-    crate::measurement::record(|m| {
-        use sqlx::ValueRef;
-        m.fence_rows += rows.len();
-        for row in &rows {
-            for i in 0..row.len() {
-                if let Ok(value) = row.try_get_raw(i)
-                    && !value.is_null()
-                    && let Ok(bytes) = value.as_bytes()
-                {
-                    m.fence_bytes += bytes.len();
-                }
-            }
-        }
-    });
     if rows.len() > max as usize {
         return Err(Error::BudgetExceeded);
     }
@@ -194,11 +193,14 @@ pub(crate) async fn put_fence(
     sqlx::query("INSERT INTO rss_ts_ch.fences(tenant_id,namespace,id,kind,selection,lo,hi,restore_until) VALUES($1::text::uuid,$2,$3,$4,$5::text::jsonb,$6,$7,$8)")
         .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(r.id().as_str()).bind(kind).bind(String::from_utf8(bytes(selection)?).map_err(|_|Error::Invariant)?).bind(window.start().micros()).bind(window.end().micros()).bind(until).execute(&mut *c).await.map_err(sql_error)?;
     // Reject new distinct frontiers atomically, before poisoning future reads.
-    let count:i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 LIMIT $3) bounded")
-        .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(i64::from(max)+1).fetch_one(&mut *c).await.map_err(sql_error)?;
-    if count > i64::from(max) {
-        return Err(Error::BudgetExceeded);
-    }
+    let count = sqlx::query_scalar(include_str!("fence_count.sql"))
+        .bind(r.scope().tenant().to_string())
+        .bind(r.scope().namespace().as_str())
+        .bind(i64::from(max) + 1)
+        .fetch_one(&mut *c)
+        .await
+        .map_err(sql_error)?;
+    has_fences(count, max)?;
     if kind == "pruned" {
         fence_changed(c, r.scope()).await?;
     }

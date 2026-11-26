@@ -69,7 +69,14 @@ async fn replay_precedence_and_namespace_fence_budget() -> anyhow::Result<()> {
         Error::Conflict
     );
     assert_eq!(
-        write_error(&f.store, batch("expired", vec![point, altered])?).await?,
+        write_error(
+            &f.store,
+            batch(
+                "expired",
+                vec![sample(&d, "later-hit", 19, 4)?, altered, point]
+            )?
+        )
+        .await?,
         Error::HistoryExpired
     );
     assert_eq!(watermarks(&f).await?, before);

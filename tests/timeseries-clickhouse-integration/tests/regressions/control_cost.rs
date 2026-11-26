@@ -60,10 +60,10 @@ async fn frontiers(
 
 fn print_write(name: &str, related: i32, noise: i32, c: Counters) {
     println!(
-        "control-write case={name} related={related} noise={noise} rows={} field_bytes={} window_endpoint_checks={} build_cpu_ns={} match_cpu_ns={} locked_us={}",
+        "control-write case={name} related={related} noise={noise} rows={} field_bytes={} bind_field_bytes={} build_cpu_ns={} match_cpu_ns={} locked_us={}",
         c.fence_rows,
         c.fence_bytes,
-        c.window_endpoint_checks,
+        c.fence_input_bytes,
         c.build_cpu.as_nanos(),
         c.match_cpu.as_nanos(),
         c.locked.as_micros()
@@ -129,6 +129,33 @@ async fn fixed_admission() -> anyhow::Result<()> {
             print_write("early", related, noise, c);
         }
     }
+    frontiers(&f, &d, 1, 64, false).await?;
+    let samples = (0..Batch::MAX_SAMPLES)
+        .map(|n| sample(&d, &format!("capacity-{n}"), 1000 + n as i64, 1))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let b = batch("capacity", samples)?;
+    let mut caps = limits()?;
+    // The proof SELECT returns two SHA-256 hex strings and selector columns per row.
+    caps.max_bytes = NonZeroU32::new(u32::try_from(b.encoded_len())?).ok_or(Error::Invariant)?;
+    let store = Fixture::connect_options(
+        &f.ch,
+        f.pool.clone(),
+        TENANT,
+        "ch_reader",
+        "ch_writer",
+        caps,
+    )
+    .await?;
+    let req = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+    let (result, c) = measure(thread_cpu, store.write(&req, deadline()?)).await;
+    assert_eq!(
+        confirmed(result?)?.new_samples() as usize,
+        Batch::MAX_SAMPLES
+    );
+    assert!(c.fence_rows == 0);
+    print_write("max-samples", 1, 64, c);
+    dense_fences(&f, &d, &store).await?;
+    single_requested_key(&f, &d).await?;
     same_resource_cost(&f, &d).await?;
     Ok(())
 }
@@ -291,6 +318,8 @@ async fn invalidation_load(noise: usize) -> anyhow::Result<()> {
         )
         .await?;
     }
+    f.maintain("plan-clean", cache.clone()).await?;
+    explain_maintenance(&f, &spec, noise).await?;
     for hits in [0, 1, 8] {
         let tag = format!("{noise}-{hits}");
         f.maintain(&format!("clean-{tag}"), cache.clone()).await?;
@@ -327,4 +356,164 @@ async fn invalidation_load(noise: usize) -> anyhow::Result<()> {
         .await?;
     }
     Ok(())
+}
+
+async fn explain_maintenance(f: &Fixture, spec: &SummarySpec, noise: usize) -> anyhow::Result<()> {
+    let mut tx = f.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *tx)
+        .await?;
+    let plan = concat!(
+        "EXPLAIN (ANALYZE, BUFFERS) ",
+        include_str!("../../../../crates/timeseries-clickhouse/src/invalidation_targets.sql")
+    );
+    let lines: Vec<String> = sqlx::query_scalar(plan)
+        .bind(TENANT)
+        .bind("metrics")
+        .bind(0i64)
+        .bind(101i64)
+        .bind(serde_json::to_string(&spec.selection())?)
+        .bind(10i64)
+        .fetch_all(&mut *tx)
+        .await?;
+    println!("maint-plan noise={noise} {}", lines.join("\n"));
+    tx.rollback().await?;
+    Ok(())
+}
+
+// The input is identical for both plans; only the 64 co-located selector matches change.
+async fn dense_fences(f: &Fixture, d: &Definition, store: &OwnedStore) -> anyhow::Result<()> {
+    frontiers(f, d, 64, 0, false).await?;
+    sqlx::query("UPDATE rss_ts_ch.fences SET lo=0,hi=10000")
+        .execute(&f.admin)
+        .await?;
+    let points = (0..Batch::MAX_SAMPLES)
+        .map(|n| sample(d, &format!("dense-{n}"), 1000 + n as i64, 1))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let b = batch("dense-witness", points)?;
+    let req = Authorized::<Batch>::verify(&authority(TENANT)?, b.clone())?;
+    let (blocked, c) = measure(thread_cpu, store.write(&req, deadline()?)).await;
+    assert_eq!(blocked.err(), Some(Error::HistoryExpired));
+    assert_eq!(c.fence_rows, 1);
+    print_write("dense-hit", 64, 0, c);
+    explain_write(f, &b, "dense-hit").await?;
+    let input = b.samples()[0].input();
+    let different = Selection::Resource {
+        scope: d.spec().scope.clone(),
+        subject: input.series.subject().clone(),
+        resource: input.series.resource().clone(),
+        keys: [id("other-key")?].into(),
+    };
+    sqlx::query("UPDATE rss_ts_ch.fences SET selection=$1::text::jsonb")
+        .bind(serde_json::to_string(&different)?)
+        .execute(&f.admin)
+        .await?;
+    explain_write(f, &b, "dense-miss").await?;
+    let (accepted, c) = measure(thread_cpu, store.write(&req, deadline()?)).await;
+    assert_eq!(
+        confirmed(accepted?)?.new_samples() as usize,
+        Batch::MAX_SAMPLES
+    );
+    assert_eq!(c.fence_rows, 0);
+    print_write("dense-miss", 0, 64, c);
+    Ok(())
+}
+async fn single_requested_key(f: &Fixture, d: &Definition) -> anyhow::Result<()> {
+    // All 64 fences overlap the same sample. Returning no witness is valid only
+    // if none of their 64 keys match; admitting an empty intersection as a wildcard is wrong.
+    let point = sample(d, "key-probe", 1000, 1)?;
+    let input = point.input();
+    let mut keys = (0..64)
+        .map(|n| id(&format!("unrequested-{n}")))
+        .collect::<anyhow::Result<std::collections::BTreeSet<_>>>()?;
+    let pair = (
+        input.series.subject().clone(),
+        input.series.resource().clone(),
+    );
+    let selection = |keys| Selection::Resource {
+        scope: d.spec().scope.clone(),
+        subject: pair.0.clone(),
+        resource: pair.1.clone(),
+        keys,
+    };
+    let original = batch("key-probe", vec![point])?;
+    let replace = "UPDATE rss_ts_ch.fences SET selection=$1::text::jsonb";
+    sqlx::query(replace)
+        .bind(serde_json::to_string(&selection(keys.clone()))?)
+        .execute(&f.admin)
+        .await?;
+    explain_write(f, &original, "one-key-disjoint").await?;
+    let (accepted, c) = measure(thread_cpu, f.write(&original)).await;
+    assert_eq!(confirmed(accepted?)?.new_samples(), 1);
+    assert_eq!(c.fence_rows, 0);
+    print_write("one-key-disjoint", 0, 64, c);
+    keys.pop_last();
+    keys.insert(d.spec().key.clone());
+    sqlx::query(replace)
+        .bind(serde_json::to_string(&selection(keys))?)
+        .execute(&f.admin)
+        .await?;
+    let matched = batch("key-hit", vec![sample(d, "key-hit", 1000, 1)?])?;
+    explain_write(f, &matched, "one-key-present").await?;
+    let req = Authorized::<Batch>::verify(&authority(TENANT)?, matched)?;
+    let (rejected, c) = measure(thread_cpu, f.store.write(&req, deadline()?)).await;
+    assert_eq!(rejected.err(), Some(Error::HistoryExpired));
+    assert_eq!(c.fence_rows, 1);
+    print_write("one-key-present", 64, 0, c);
+    Ok(())
+}
+async fn explain_write(f: &Fixture, b: &Batch, label: &str) -> anyhow::Result<()> {
+    use sqlx::Row;
+    let mut tx = f.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *tx)
+        .await?;
+    let plan = concat!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ",
+        include_str!("../../../../crates/timeseries-clickhouse/src/write/blocked_sample.sql")
+    );
+    let count = b.samples().len();
+    let row = sqlx::query(plan)
+        .bind(TENANT)
+        .bind("metrics")
+        .bind(serde_json::to_string(b.stream())?)
+        .bind(vec![serde_json::to_string(&b.samples()[0].input().series)?])
+        .bind(vec![1i32; count])
+        .bind((1000..1000 + i64::try_from(count)?).collect::<Vec<_>>())
+        .bind((0..i32::try_from(count)?).collect::<Vec<_>>())
+        .fetch_one(&mut *tx)
+        .await?;
+    let plan: serde_json::Value = serde_json::from_slice(
+        row.try_get_raw(0)?
+            .as_bytes()
+            .map_err(anyhow::Error::from_boxed)?,
+    )?;
+    let work = maximum_node_work(&plan[0]["Plan"]);
+    // Individual passes fit within the input populations. Expanding point ×
+    // fence (262144) or every unrelated key for a single probe (4096) exceeds the bound.
+    assert!(
+        work <= (count as u64 + 64) * 3,
+        "{label} node visited {work}"
+    );
+    println!(
+        "dense-plan {label} samples={count} node_work={work} ms={} buffers={} plan={}",
+        plan[0]["Execution Time"], plan[0]["Plan"]["Shared Hit Blocks"], plan
+    );
+    tx.rollback().await?;
+    Ok(())
+}
+fn maximum_node_work(plan: &serde_json::Value) -> u64 {
+    let value = |key: &str| plan[key].as_u64().unwrap_or_default();
+    let work = value("Actual Loops")
+        * (value("Actual Rows")
+            + value("Rows Removed by Filter")
+            + value("Rows Removed by Join Filter"));
+    plan["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(maximum_node_work)
+        .fold(work, u64::max)
 }

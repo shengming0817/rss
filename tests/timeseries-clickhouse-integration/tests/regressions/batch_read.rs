@@ -185,6 +185,7 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
         serde_json::to_value(split.buckets)?,
         oracle(all.request(), &samples)?
     );
+    required_failures(&proxy, &store, &fine).await?;
     // Populate separated islands, keeping a raw gap between them.
     cache(&f, &fine, 0, 160).await?;
     cache(&f, &fine, 320, 480).await?;
@@ -197,6 +198,7 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     measure
         .page("full", &all, &samples, Some(1280), (1, 0))
         .await?;
+    required_failures(&proxy, &store, &fine).await?;
     let coarse = aggregate(&spec(20)?, window(0, 1280)?, 64, AggregateOp::Sum)?;
     measure
         .page("fragmented", &coarse, &samples, Some(1280), (1, 0))
@@ -253,6 +255,63 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     Ok(())
 }
 
+async fn required_failures(
+    proxy: &transport::Proxy,
+    store: &OwnedStore,
+    fine: &SummarySpec,
+) -> anyhow::Result<()> {
+    for limit in [4, 128] {
+        let query = aggregate(fine, window(0, 1280)?, limit, AggregateOp::Sum)?;
+        for (message, error) in [
+            ("service unavailable", Error::Unavailable),
+            ("Code: 60. DB::Exception: UNKNOWN_TABLE", Error::Unavailable),
+            (
+                "Code: 497. DB::Exception: ACCESS_DENIED",
+                Error::Unavailable,
+            ),
+            ("Code: 62. DB::Exception: Syntax error", Error::Unavailable),
+            (
+                "Code: 396. DB::Exception: Limit for temporary files size exceeded (would consume 12 / 10 bytes)",
+                Error::BudgetExceeded,
+            ),
+            (
+                "Code: 241. DB::Exception: User memory limit exceeded: would use more",
+                Error::BudgetExceeded,
+            ),
+            (
+                "Code: 241. DB::Exception: (total) memory limit exceeded: would use more",
+                Error::BudgetExceeded,
+            ),
+        ] {
+            proxy.fail_reads(Some((message, None))).await;
+            assert_eq!(
+                store.aggregate(&query, None, deadline()?).await.err(),
+                Some(error)
+            );
+            assert_eq!(proxy.slow_reads(), 1, "{message} width {limit}");
+        }
+    }
+    proxy.fail_reads(None).await;
+    Ok(())
+}
+async fn optional_failure(
+    proxy: &transport::Proxy,
+    store: &OwnedStore,
+    query: &Authorized<AggregateQuery>,
+    expected: &serde_json::Value,
+    width: u64,
+) -> anyhow::Result<()> {
+    proxy
+        .fail_reads(Some(("service unavailable", Some(width))))
+        .await;
+    let result = store.aggregate(query, None, deadline()?).await;
+    let failures = proxy.slow_reads();
+    proxy.fail_reads(None).await;
+    assert_eq!(failures, 1);
+    assert_eq!(&serde_json::to_value(result?.buckets)?, expected);
+    Ok(())
+}
+
 async fn sparse_state_reads(
     f: &Fixture,
     proxy: &transport::Proxy,
@@ -291,6 +350,7 @@ async fn sparse_state_reads(
             "twelve sparse minute buckets should batch: {requests}"
         );
         assert_eq!(serde_json::to_value(page.buckets)?, expected);
+        optional_failure(proxy, store, &all, &expected, MINUTE as u64).await?;
         proxy.delay_wide_reads(MINUTE as u64);
         let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
         let recovered = store.aggregate(&all, None, cutoff).await;
@@ -475,6 +535,7 @@ async fn bounded_groups_isolate_dense_buckets_and_release_a_cancelled_reader() -
         .fetch_one(&f.admin)
         .await?;
     caps.max_bytes = NonZeroU32::new(u32::try_from(largest)? + 320).ok_or(Error::Invariant)?;
+    let group_budget = caps.max_bytes.get() as usize;
     let tight = proxy.store_with_limits(f.pool.clone(), caps).await?;
     let page = tight.aggregate(&all, None, deadline()?).await?;
     assert_eq!(serde_json::to_value(page.buckets)?, expected);
@@ -485,7 +546,23 @@ async fn bounded_groups_isolate_dense_buckets_and_release_a_cancelled_reader() -
     drop(read);
     // The first SELECT reached CH; the caller must release the sole permit on drop.
     assert_eq!(proxy.take_page_reads().await.len(), 1);
-    let resumed = tight.aggregate(&all, None, deadline()?).await?;
+    let wire = proxy.wire_bytes();
+    let (resumed, m) = rss_timeseries_clickhouse::measurement::measure(
+        || Duration::ZERO,
+        tight.aggregate(&all, None, deadline()?),
+    )
+    .await;
+    let resumed = resumed?;
+    eprintln!(
+        "group-handoff groups={} previous_bytes={} largest_bytes={} max_group_budget={group_budget} page_http_bytes={}",
+        m.summary_groups,
+        m.previous_group_bytes,
+        m.largest_group_bytes,
+        proxy.wire_bytes() - wire
+    );
+    assert_eq!(m.previous_group_bytes, 0);
+    assert!(m.largest_group_bytes <= group_budget);
+    assert!(m.summary_groups > 1 && m.largest_group_bytes >= largest as usize);
     assert_eq!(serde_json::to_value(resumed.buckets)?, expected);
     let reads = proxy.take_page_reads().await;
     assert!(reads.len() > 1 && reads.iter().all(|(_, summary)| *summary));

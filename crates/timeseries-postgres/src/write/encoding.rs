@@ -53,6 +53,8 @@ pub(super) async fn prepare(
     budget: Budget,
     permit: crate::prepare::Permit,
 ) -> Result<PreparedBatch, Error> {
+    #[cfg(feature = "integration")]
+    let _encoding = measurement::Encoding::enter();
     let clock = &store.clock;
     let horizon = store.limits.replay_micros.get();
     budget.remaining(clock)?;

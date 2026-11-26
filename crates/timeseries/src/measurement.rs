@@ -17,6 +17,24 @@ pub struct Total {
     pub elapsed: Duration,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CapacitySample {
+    pub at: Instant,
+    pub slots: u32,
+    pub bytes: u32,
+    pub queued: usize,
+    pub granted: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PreparationWait {
+    pub class: Option<&'static str>,
+    pub weight: u32,
+    pub queued: Instant,
+    pub granted: Instant,
+    pub resumed: Instant,
+}
+
 #[derive(Debug, Default)]
 pub struct Report {
     pub probe_stages: BTreeMap<(&'static str, &'static str), Total>,
@@ -28,6 +46,11 @@ pub struct Report {
     pub peak_live_bytes: usize,
     pub reserved_bytes: usize,
     pub peak_reserved_bytes: usize,
+    pub granted_batches: usize,
+    pub capacity_samples: Vec<CapacitySample>,
+    pub preparation_waits: Vec<PreparationWait>,
+    pub encoders: usize,
+    pub peak_encoders: usize,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -61,6 +84,36 @@ impl Session {
             Self::current()
         } else {
             Self(0)
+        }
+    }
+    // Called under the adapter's capacity lock. Analyze the timeline after the
+    // workload so recording a transition never walks outstanding waiters.
+    pub fn capacity(self, slots: u32, bytes: u32, queued: usize) -> Option<Started> {
+        let mut sampled = None;
+        self.update(|r| {
+            let at = observed_now();
+            r.capacity_samples.push(CapacitySample {
+                at,
+                slots,
+                bytes,
+                queued,
+                granted: r.granted_batches,
+            });
+            sampled = Some(Started(self, at));
+        });
+        sampled
+    }
+    pub fn preparation_wait(self, weight: u32, queued: Option<Started>, granted: Option<Started>) {
+        if let (Some(queued), Some(granted)) = (queued, granted) {
+            self.update(|r| {
+                r.preparation_waits.push(PreparationWait {
+                    class: PROBE.get(),
+                    weight,
+                    queued: queued.1,
+                    granted: granted.1,
+                    resumed: observed_now(),
+                })
+            });
         }
     }
     pub fn update(self, f: impl FnOnce(&mut Report)) {

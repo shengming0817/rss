@@ -7,7 +7,6 @@ use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::{PgConnection, Row, postgres::PgRow};
 mod admission;
-mod fences;
 mod publication;
 
 /// Provider progress is separate from the immutable successful admission receipt.
@@ -177,17 +176,36 @@ impl<C: Clock> Operation<'_, C> {
         .ok_or(Error::Unavailable)?;
         sqlx::query("INSERT INTO rss_ts_ch.streams(tenant_id,namespace,source,generation) VALUES($1::text::uuid,$2,$3,$4) ON CONFLICT DO NOTHING")
             .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).execute(&mut *c).await.map_err(sql_error)?;
-        let closed:bool=sqlx::query_scalar("SELECT closed FROM rss_ts_ch.streams WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4")
-            .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
+        let max = self.limits.max_fences.get();
+        let (closed, count): (bool, i64) = sqlx::query_as(concat!(
+            "SELECT closed, (",
+            include_str!("fence_count.sql"),
+            ") FROM rss_ts_ch.streams WHERE tenant_id=$1::text::uuid AND namespace=$2
+               AND source=$4 AND generation=$5"
+        ))
+        .bind(scope.tenant().to_string())
+        .bind(scope.namespace().as_str())
+        .bind(i64::from(max) + 1)
+        .bind(s.source().as_str())
+        .bind(s.generation().as_str())
+        .fetch_one(&mut *c)
+        .await
+        .map_err(sql_error)?;
         if closed {
             return Err(Error::HistoryExpired);
         }
-        let fences = control::fences(c, scope, self.limits.max_fences.get()).await?;
+        let has_fences = control::has_fences(count, max)?;
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| {
+            // tenant and namespace are already bound for the stream-state read.
+            m.fence_input_bytes += 8;
+            m.fence_bytes += 8;
+        });
         let received = now(c).await?;
         let rows = admission::admit(
             c,
             b,
-            &fences,
+            has_fences,
             received,
             revision,
             self.limits.max_points.get(),
