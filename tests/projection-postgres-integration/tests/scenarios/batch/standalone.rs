@@ -7,7 +7,6 @@ pub(super) async fn verify(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    skips_settlement(store, owner, control).await?;
     let s = scope("standalone", TENANT)?;
     let exec = worker(
         store,
@@ -107,7 +106,7 @@ pub(super) async fn verify(
 
 // Even on a store admitted before DDL drift, an omitted settlement result
 // must roll back the first page's already-staged business writes.
-async fn skips_settlement(
+pub(super) async fn skips_settlement(
     store: &PgStore,
     owner: &PgPool,
     c: &Control<'_, Clock>,

@@ -87,6 +87,7 @@ pub(crate) async fn verify(
     if let Some(shape) = std::env::var_os("RSS_PROJECTION_SPACE") {
         space::measure(fixture, owner, c, &shape.to_string_lossy()).await?;
     }
+    standalone::skips_settlement(store, owner, c).await?;
     standalone::verify(store, owner, c).await?;
     Box::pin(visibility::verify(store, owner, c)).await?;
     atomic(store, owner, c).await?;
