@@ -187,6 +187,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS 
 DECLARE scan rss_reconcile.scans; page refcursor; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
  cutoff timestamptz; page_limit bigint; examined integer:=0;
  probe_limit integer; sampled_entities text[]; sampled_tickets bigint[];
+ next_sample integer:=1; hinted_entities text[];
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -204,8 +205,9 @@ BEGIN
  -- for more and a sentinel to distinguish a complete sample from a truncated one.
  cutoff:=clock_timestamp();
  page_limit:=scan_budget::bigint+1;
- probe_limit:=least(n,scan_budget)+2;
- SELECT array_agg(entity),array_agg(queue_ticket) INTO sampled_entities,sampled_tickets
+ -- A claim page (including its lookahead) may still be the complete due set.
+ probe_limit:=least(n::bigint+1,page_limit)+1;
+ SELECT array_agg(entity ORDER BY queue_ticket),array_agg(queue_ticket ORDER BY queue_ticket) INTO sampled_entities,sampled_tickets
  FROM (SELECT entity,queue_ticket FROM rss_reconcile.targets
        WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL AND GREATEST(next_run,lease_until)<=cutoff
        ORDER BY GREATEST(next_run,lease_until) LIMIT probe_limit) AS due_sample;
@@ -228,7 +230,21 @@ BEGIN
   IF examined=scan_budget OR cardinality(claims)=n THEN more:=true; EXIT; END IF;
   examined:=examined+1;
   scan.cursor_ticket:=candidate.queue_ticket;
-  IF NOT candidate.eligible THEN CONTINUE; END IF;
+  IF NOT candidate.eligible THEN
+   -- This ticket moved the cursor. Use its free lock attempt for a due ticket
+   -- ahead of it without declaring the intervening tickets visited.
+   WHILE sampled_tickets[next_sample]<=scan.cursor_ticket LOOP
+    next_sample:=next_sample+1;
+   END LOOP;
+   IF sampled_tickets[next_sample] IS NULL OR sampled_tickets[next_sample]>scan.high_watermark THEN CONTINUE; END IF;
+   candidate.entity:=sampled_entities[next_sample];
+   candidate.queue_ticket:=sampled_tickets[next_sample];
+   next_sample:=next_sample+1;
+   hinted_entities:=array_append(hinted_entities,candidate.entity);
+  ELSIF candidate.entity=ANY(hinted_entities) THEN
+   -- The stream can catch up even to a previously locked or busy hint.
+   CONTINUE;
+  END IF;
   BEGIN
    SELECT * INTO row FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND entity=candidate.entity FOR UPDATE NOWAIT;
    at_time:=clock_timestamp();
