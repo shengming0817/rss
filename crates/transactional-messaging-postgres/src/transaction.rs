@@ -370,16 +370,28 @@ impl PgRuntime {
     }
     async fn check_outbox_policy(&self, cutoff: Deadline) -> Result<(), PgError> {
         let mut query = sqlx::query_scalar::<_, bool>(include_str!("outbox_policy_probe.sql"));
-        for name in ["protect_policy_change", "lock_outbox_policy", "outbox_policy_present",
-            "settle_outbox", "archive_claim", "archive_purge"] {
-            query = query.bind(crate::consumer_profile::function_body(crate::MIGRATION_SQL, name)?);
+        for name in [
+            "protect_policy_change",
+            "lock_outbox_policy",
+            "outbox_policy_present",
+            "settle_outbox",
+            "archive_claim",
+            "archive_purge",
+        ] {
+            query = query.bind(crate::consumer_profile::function_body(
+                crate::MIGRATION_SQL,
+                name,
+            )?);
         }
         let valid = within(&self.timer, cutoff, |_| query.fetch_one(&self.pool))
-            .await?.map_err(PgError::probe)?;
+            .await?
+            .map_err(PgError::probe)?;
         if valid {
             Ok(())
         } else {
-            Err(PgError::IncompatibleStorageContract(PgStorageContractFailure::Policy))
+            Err(PgError::IncompatibleStorageContract(
+                PgStorageContractFailure::Policy,
+            ))
         }
     }
 

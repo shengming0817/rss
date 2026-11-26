@@ -965,22 +965,34 @@ ALTER FUNCTION rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,
 
 CREATE FUNCTION rss_transactional_messaging.settle_outbox(p_tenant uuid,p_seq bigint,p_token uuid,p_lease_us bigint,p_disposition text,p_dr uuid)
 RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
-DECLARE n timestamptz; remaining bigint;
+DECLARE n timestamptz; remaining bigint; attempts integer; next_count integer; next_retry timestamptz;
 BEGIN
  SELECT delivery_us INTO remaining FROM outbox_lease(p_tenant,p_seq,p_token,p_lease_us,0,p_dr);
  IF NOT FOUND THEN RETURN 'lost_lease'; END IF;
  IF p_disposition NOT IN ('published','retry','dead_letter') THEN RAISE EXCEPTION 'invalid settlement' USING ERRCODE='22023'; END IF;
  n:=clock_timestamp();
+ IF p_disposition='retry' AND (p_dr IS NULL OR remaining>0) THEN
+  -- outbox_lease already holds the relevant row locks. Read the pre-settlement count.
+  IF p_dr IS NULL THEN
+   SELECT retry_count INTO STRICT attempts FROM outbox WHERE seq=p_seq AND tenant_id=p_tenant;
+  ELSE
+   SELECT retry_count INTO STRICT attempts FROM dr_members WHERE tenant_id=p_tenant AND operation_id=p_dr AND outbox_seq=p_seq;
+  END IF;
+  -- Positive int4 initial and cap: at shift 31 even a base of one exceeds every cap,
+  -- and the largest possible intermediate is below 2^62.
+  SELECT n + least(retry_max_seconds::bigint, retry_initial_seconds::bigint << least(attempts,31))*interval '1 second'
+   INTO STRICT next_retry FROM policy WHERE revision=1;
+  next_count:=least(attempts::bigint+1,2147483647)::integer;
+ END IF;
  IF p_dr IS NULL THEN
   UPDATE outbox SET recovery_version=recovery_version+CASE WHEN p_disposition='dead_letter' THEN 1 ELSE 0 END,
    status=CASE WHEN p_disposition='retry' THEN 'pending' ELSE p_disposition END,
-   retry_count=retry_count+CASE WHEN p_disposition='retry' THEN 1 ELSE 0 END,
-   retry_after=CASE WHEN p_disposition='retry' THEN n+LEAST(3600,1::bigint<<LEAST(retry_count,12))*interval '1 second' ELSE retry_after END,
+   retry_count=coalesce(next_count,retry_count),retry_after=coalesce(next_retry,retry_after),
    lease_token=NULL,lease_until=NULL WHERE seq=p_seq AND tenant_id=p_tenant;
  ELSE
   UPDATE dr_members SET block_reason=CASE WHEN p_disposition='published' OR (p_disposition='retry' AND remaining>0) THEN NULL WHEN remaining<=0 THEN 'deadline_expired' ELSE 'permanent_publish_failure' END,
    status=CASE WHEN p_disposition='published' THEN 'completed' WHEN p_disposition='retry' AND remaining>0 THEN 'pending' ELSE 'blocked' END,
-   retry_after=n+LEAST(3600,1::bigint<<LEAST(retry_count,12))*interval '1 second',retry_count=retry_count+1,
+   retry_count=coalesce(next_count,retry_count),retry_after=coalesce(next_retry,retry_after),
    lease_token=NULL,lease_until=NULL WHERE tenant_id=p_tenant AND operation_id=p_dr AND outbox_seq=p_seq;
  END IF;
  RETURN 'settled';

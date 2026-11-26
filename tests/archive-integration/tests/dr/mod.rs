@@ -3,6 +3,11 @@ use super::*;
 struct SwitchAfterInspection<'a> {
     real: &'a rss_transactional_messaging_recovery_s3::S3ArchiveStore,
     owner: &'a sqlx::PgPool,
+    change: Change,
+}
+enum Change {
+    Epoch,
+    Retention,
 }
 impl ArchiveObjectStore for SwitchAfterInspection<'_> {
     async fn put(&self, p: &Prepared, d: OperationDeadline) -> Result<Object, Error> {
@@ -15,14 +20,12 @@ impl ArchiveObjectStore for SwitchAfterInspection<'_> {
         d: OperationDeadline,
     ) -> Result<Option<Observation>, Error> {
         let actual = self.real.inspect(o, b, d).await?;
-        // Isolate the archive race: DR's full atomic apply is proved by postgres-integration/dr.
-        sqlx::query(
-            "UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid",
-        )
-        .bind(tenant().to_string())
-        .execute(self.owner)
-        .await
-        .map_err(|_| Error::Unavailable)?;
+        match self.change {
+            Change::Epoch => sqlx::query("UPDATE rss_transactional_messaging.tenant_epoch SET epoch=2 WHERE tenant_id=$1::uuid")
+                .bind(tenant().to_string()).execute(self.owner).await,
+            Change::Retention => sqlx::query("UPDATE rss_transactional_messaging.policy SET receipt_retention_seconds=3*604800")
+                .execute(self.owner).await,
+        }.map_err(|_| Error::Unavailable)?;
         Ok(actual)
     }
 }
@@ -33,13 +36,18 @@ pub async fn run(
     owner: &sqlx::PgPool,
     _config: &PgConfig,
 ) -> anyhow::Result<()> {
+    Box::pin(retention_change(repository, store, owner)).await?;
     let recorded = recorded_before_switch(repository, store, owner).await?;
     let id = seed(owner, "dr-race").await?;
     let r = request(id, 1, Hold::Release).await?;
     let raced = invoke(
         repository,
         crate::execution(r.request().tenant(), 1),
-        &SwitchAfterInspection { real: store, owner },
+        &SwitchAfterInspection {
+            real: store,
+            owner,
+            change: Change::Epoch,
+        },
         &r,
     )
     .await;
@@ -87,6 +95,53 @@ pub async fn run(
     assert!(!is_hot(owner, id).await?);
     let verified:i64=sqlx::query_scalar("SELECT o.verified_epoch FROM rss_transactional_messaging.archive_objects o JOIN rss_transactional_messaging.archive_jobs j ON j.tenant_id=o.tenant_id AND j.generation=o.generation WHERE j.dead_letter_id=$1::uuid").bind(id.to_string()).fetch_one(owner).await?;
     assert_eq!(verified, 2);
+    Ok(())
+}
+
+async fn retention_change(
+    repository: &PgArchiveRepository,
+    store: &rss_transactional_messaging_recovery_s3::S3ArchiveStore,
+    owner: &sqlx::PgPool,
+) -> anyhow::Result<()> {
+    let id = seed(owner, "archive-policy-change").await?;
+    let r = request(id, 1, Hold::Release).await?;
+    let binding = crate::execution(tenant(), 1);
+    let result = invoke(
+        repository,
+        binding,
+        &SwitchAfterInspection {
+            real: store,
+            owner,
+            change: Change::Retention,
+        },
+        &r,
+    )
+    .await;
+    assert_eq!(
+        result.fold(|_| None, Some, Some, Some, Some, Some),
+        Some(Error::Retention)
+    );
+    assert!(is_hot(owner, id).await?);
+    let fault: Option<String> = sqlx::query_scalar(
+        "SELECT fault FROM rss_transactional_messaging.archive_jobs WHERE operation_id=$1::uuid",
+    )
+    .bind(r.request().operation().to_string())
+    .fetch_one(owner)
+    .await?;
+    assert!(fault.is_none());
+    expire(owner, &r).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.policy SET receipt_retention_seconds=604800")
+        .execute(owner)
+        .await?;
+    assert_eq!(
+        settled(invoke(repository, binding, store, &r).await)?,
+        Outcome::Purged
+    );
+    let covered: bool=sqlx::query_scalar("SELECT (o.object->>'retainUntil')::bigint > extract(epoch FROM p.receipt_floor_until)
+         FROM rss_transactional_messaging.archive_jobs j JOIN rss_transactional_messaging.archive_objects o USING(tenant_id,generation)
+         CROSS JOIN rss_transactional_messaging.policy p WHERE j.operation_id=$1::uuid")
+        .bind(r.request().operation().to_string()).fetch_one(owner).await?;
+    assert!(covered);
     Ok(())
 }
 

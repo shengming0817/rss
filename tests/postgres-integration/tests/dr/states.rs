@@ -145,9 +145,19 @@ pub async fn run(
             .await?
             .is_empty()
     );
+    let before: i64 =
+        sqlx::query_scalar("SELECT (extract(epoch FROM clock_timestamp())*1000000)::bigint")
+            .fetch_one(owner)
+            .await?;
     outbox4
         .settle(claim, OutboxSettlement::Retry, deadline())
         .await?;
+    let (retry_us, observed_us, count): (i64,i64,i32) = sqlx::query_as(
+        "SELECT (extract(epoch FROM retry_after)*1000000)::bigint,(extract(epoch FROM clock_timestamp())*1000000)::bigint,retry_count
+         FROM rss_transactional_messaging.dr_members WHERE message_id='published' AND operation_id=$1::uuid")
+        .bind(p.request().operation().to_string()).fetch_one(owner).await?;
+    assert!((before..=observed_us).contains(&(retry_us - 3_000_000)));
+    assert_eq!(count, 1);
     assert_eq!(status(&store3, &p).await?, vec![MemberStatus::Pending]);
     let retry = outbox4.next_wakeup(binding(4)?, deadline()).await?;
     assert!(

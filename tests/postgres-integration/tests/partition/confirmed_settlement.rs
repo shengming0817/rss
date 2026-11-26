@@ -8,7 +8,9 @@ pub(super) async fn run(
     owner: &PgPool,
 ) -> anyhow::Result<()> {
     // Sequence visibility survives rollback and witnesses that real settlement reached UPDATE.
-    sqlx::raw_sql("CREATE SEQUENCE public.settle_seen; CREATE FUNCTION public.observe_confirmed() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN PERFORM nextval('public.settle_seen'); RETURN NEW; END $$;
+    sqlx::raw_sql("CREATE SEQUENCE public.settle_seen; CREATE FUNCTION public.observe_confirmed() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN PERFORM nextval('public.settle_seen');
+        IF NEW.message_id='confirmed-OtherLock' THEN RAISE EXCEPTION 'fixture busy' USING ERRCODE='55P03',CONSTRAINT='other_lock'; END IF;
+        RETURN NEW; END $$;
         CREATE TRIGGER observe_confirmed BEFORE UPDATE OF status ON rss_transactional_messaging.outbox
         FOR EACH ROW WHEN (OLD.domain='confirmed-relay' AND NEW.status='published') EXECUTE FUNCTION public.observe_confirmed()")
         .execute(owner).await?;
@@ -22,6 +24,8 @@ pub(super) async fn run(
         Mode::Expiry,
         Mode::Deadline,
         Mode::RollbackFailed,
+        Mode::OtherLock,
+        Mode::UnknownCommit,
     ] {
         scenario(&runtime, &store, raw, owner, mode).await?;
     }
@@ -35,6 +39,8 @@ enum Mode {
     Expiry,
     Deadline,
     RollbackFailed,
+    OtherLock,
+    UnknownCommit,
 }
 
 async fn claimed(
@@ -88,7 +94,12 @@ async fn scenario(
     let tenant = message(&name).metadata().tenant_id();
     let claim = claimed(store, raw, &name).await?;
     let mut writer = sql_tx(raw, tenant).await?;
-    sql_prepare(&mut writer, serde_json::json!([["confirmed-relay", name]])).await?;
+    if mode != Mode::UnknownCommit {
+        sql_prepare(&mut writer, serde_json::json!([["confirmed-relay", name]])).await?;
+    }
+    if mode == Mode::UnknownCommit {
+        runtime.inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    }
     sqlx::query("SELECT setval('public.settle_seen',1,false)")
         .execute(owner)
         .await?;
@@ -135,7 +146,9 @@ async fn assert_result(
         Mode::Release => None,
         Mode::Expiry => Some(MessagingErrorKind::OwnershipLost),
         Mode::Deadline => Some(MessagingErrorKind::DeadlineElapsed),
-        Mode::RollbackFailed => Some(MessagingErrorKind::Transient),
+        Mode::RollbackFailed | Mode::OtherLock | Mode::UnknownCommit => {
+            Some(MessagingErrorKind::Transient)
+        }
     };
     assert_eq!(kind, expected);
     let status: String = sqlx::query_scalar(
@@ -146,13 +159,22 @@ async fn assert_result(
     .await?;
     assert_eq!(
         status,
-        if mode == Mode::Release {
+        if matches!(mode, Mode::Release | Mode::UnknownCommit) {
             "published"
         } else {
             "publishing"
         }
     );
+    if matches!(
+        mode,
+        Mode::OtherLock | Mode::UnknownCommit | Mode::RollbackFailed
+    ) {
+        let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM public.settle_seen")
+            .fetch_one(owner)
+            .await?;
+        assert_eq!(attempts, 1);
+    }
     // Isolate the next scenario from this deliberately expired retained claim.
-    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id=$1").bind(name).execute(owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='resolved',lease_token=NULL,lease_until=NULL WHERE message_id=$1 AND status='publishing'").bind(name).execute(owner).await?;
     Ok(())
 }

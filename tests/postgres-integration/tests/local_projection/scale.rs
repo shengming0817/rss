@@ -322,16 +322,26 @@ impl Progress {
 async fn scan_matrix(f: &Fixture) -> anyhow::Result<()> {
     for (capacity, scan) in [(4_i32, 2_i32), (4, 8), (1, 8)] {
         let mut tx = f.raw_worker.begin().await?;
-        let plan: serde_json::Value = sqlx::query_scalar("SELECT public.explain_heads($1::uuid,'orders',$2)")
-            .bind(tenant().to_string()).bind(scan).fetch_one(&mut *tx).await?;
+        let plan: serde_json::Value =
+            sqlx::query_scalar("SELECT public.explain_heads($1::uuid,'orders',$2)")
+                .bind(tenant().to_string())
+                .bind(scan)
+                .fetch_one(&mut *tx)
+                .await?;
         let root = &plan[0]["Plan"];
         assert_eq!(root["Actual Rows"].as_i64(), Some(i64::from(scan)));
-        let started = std::time::Instant::now();
+        let timer = Timer::new();
+        let started = timer.now();
         let rows: Vec<i64> = sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)")
             .bind(tenant().to_string()).bind(capacity).bind(scan).fetch_all(&mut *tx).await?;
         assert_eq!(rows.len(), capacity.min(scan) as usize);
-        println!("first claim limit={capacity} budget={scan} elapsed={:?} examined={} shared_hits={} shared_reads={}",
-            started.elapsed(), examined(root), root["Shared Hit Blocks"], root["Shared Read Blocks"]);
+        println!(
+            "first claim limit={capacity} budget={scan} elapsed={:?} examined={} shared_hits={} shared_reads={}",
+            timer.now() - started,
+            examined(root),
+            root["Shared Hit Blocks"],
+            root["Shared Read Blocks"]
+        );
         tx.rollback().await?;
     }
     Ok(())
@@ -402,8 +412,11 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
             batch.scan_progress(),
             rss_transactional_messaging::outbox::OutboxScanProgress::Continue
         );
-        let cursor: i64 = sqlx::query_scalar("SELECT source_seq FROM rss_transactional_messaging.outbox_scan WHERE domain='orders'")
-            .fetch_one(&f.owner).await?;
+        let cursor: i64 = sqlx::query_scalar(
+            "SELECT source_seq FROM rss_transactional_messaging.outbox_scan WHERE domain='orders'",
+        )
+        .fetch_one(&f.owner)
+        .await?;
         assert_eq!(cursor, locked[page * 128 - 1]);
         let rows = futures::StreamExt::collect::<Vec<_>>(batch).await;
         assert!(
@@ -587,7 +600,10 @@ async fn nested_profiles(f: &Fixture) -> anyhow::Result<()> {
                     assert_eq!(rows.len(), limit as usize);
                     tx.rollback().await?;
                     if attempt == 0 {
-                        println!("first claim scan={scan} limit={limit} elapsed_us={}", (timer.now()-at).as_micros());
+                        println!(
+                            "first claim scan={scan} limit={limit} elapsed_us={}",
+                            (timer.now() - at).as_micros()
+                        );
                     } else {
                         latency.push((timer.now() - at).as_micros());
                     }

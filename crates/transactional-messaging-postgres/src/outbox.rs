@@ -178,7 +178,10 @@ impl PgOutboxScanBudget {
 
     fn for_claim(fixed: Option<Self>, capacity: i32) -> i32 {
         // The measured default from #3281 and #3288.
-        fixed.map_or_else(|| capacity.saturating_mul(4).clamp(64, 1024), |v| i32::from(v.0))
+        fixed.map_or_else(
+            || capacity.saturating_mul(4).clamp(64, 1024),
+            |v| i32::from(v.0),
+        )
     }
 }
 
@@ -509,7 +512,9 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         };
         // No other task can renew this move-only claim after settlement starts.
         let lease = *claim.lease_us.get_mut();
-        let mut delay = Duration::from_millis(5);
+        const ALLOCATOR_INITIAL_WAIT: Duration = Duration::from_millis(5);
+        const ALLOCATOR_MAX_WAIT: Duration = Duration::from_millis(100);
+        let mut delay = ALLOCATOR_INITIAL_WAIT;
         loop {
             let mut allocator_busy = false;
             let attempt = runtime
@@ -549,7 +554,7 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
             let wake = Deadline::from_timeout(&runtime.timer, delay)
                 .map_err(|_| PgError::invariant().port())?;
             within(&runtime.timer, cutoff, |_| runtime.timer.sleep_until(wake)).await?;
-            delay = (delay * 2).min(Duration::from_millis(100));
+            delay = delay.saturating_mul(2).min(ALLOCATOR_MAX_WAIT);
         }
     }
 }

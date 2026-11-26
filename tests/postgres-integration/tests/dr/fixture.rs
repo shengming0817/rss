@@ -10,7 +10,11 @@ pub async fn seed_terminal(owner: &sqlx::PgPool) -> anyhow::Result<()> {
 }
 
 pub async fn install_current(owner: sqlx::PgPool) -> anyhow::Result<sqlx::PgPool> {
-    sqlx::raw_sql(MIGRATION_SQL).execute(&owner).await?;
+    let mut install = owner.begin().await?;
+    sqlx::raw_sql("SET LOCAL rss.install_window_seconds='7200'; SET LOCAL rss.install_retry_initial_seconds='3'; SET LOCAL rss.install_retry_max_seconds='3'")
+        .execute(&mut *install).await?;
+    sqlx::raw_sql(MIGRATION_SQL).execute(&mut *install).await?;
+    install.commit().await?;
     sqlx::raw_sql("INSERT INTO rss_transactional_messaging.storage_lineage VALUES(true,decode(repeat('01',16),'hex'),decode(repeat('02',16),'hex')); INSERT INTO rss_transactional_messaging.tenant_epoch VALUES('11111111-1111-1111-1111-111111111111',1); GRANT USAGE ON SCHEMA rss_transactional_messaging TO dr_runtime,dr_operator; GRANT SELECT ON rss_transactional_messaging.policy TO dr_runtime; GRANT SELECT,INSERT,UPDATE,DELETE ON rss_transactional_messaging.inbox TO dr_runtime; GRANT SELECT ON rss_transactional_messaging.outbox TO dr_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb),rss_transactional_messaging.append_outbox(bytea,jsonb) TO dr_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO dr_runtime,dr_operator; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint),rss_transactional_messaging.next_outbox_wakeup(uuid,text),rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid) TO dr_runtime; GRANT EXECUTE ON FUNCTION rss_transactional_messaging.apply_dr(uuid,bytea,text,jsonb,jsonb,bigint),rss_transactional_messaging.read_dr(uuid,bytea) TO dr_operator;").execute(&owner).await?;
     seed_terminal(&owner).await?;
     Ok(owner)
