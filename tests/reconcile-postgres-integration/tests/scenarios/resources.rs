@@ -92,12 +92,19 @@ async fn queued_young(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<Target> {
     let young_scope = scope("fair-young")?;
+    // With two future tickets in front, the first two attempts come from the
+    // truncated due sample. The registered old waiter is in a different scope.
+    for entity in ["future-1", "future-2"] {
+        wake(store, &young_scope, entity, &[], c).await?;
+    }
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=now()+interval '1 hour' WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity LIKE 'future-%'").bind(TENANT).bind(young_scope.reconciler()).execute(owner).await?;
     let young = wake(store, &young_scope, "young", &["fair:a"], c).await?;
     let separate = wake(store, &young_scope, "separate", &["fair:c"], c).await?;
-    claim_uncontended(store, owner, &separate, c).await?;
     for n in 0..3 {
         wake(store, &young_scope, &format!("new-{n}"), &["fair:a"], c).await?;
     }
+    claim_uncontended(store, owner, &separate, c).await?;
+    assert!(declarations(owner, &young).await?[0].1.is_some());
     blocked(store, &young_scope, c).await?;
     Ok(young)
 }
@@ -111,7 +118,7 @@ async fn claim_uncontended(
     assert_eq!(fresh.len(), 1);
     assert!(fresh[0].1.is_none());
     let batch = store
-        .claim_due(separate.scope(), 2, 64, Duration::from_secs(5), c)
+        .claim_due(separate.scope(), 2, 2, Duration::from_secs(5), c)
         .await?;
     assert_eq!(batch.claims.len(), 1);
     assert_eq!(batch.claims[0].target().entity(), separate.entity());

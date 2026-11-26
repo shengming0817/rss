@@ -30,8 +30,10 @@ pub trait DurableStore: Send + Sync {
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
     /// Atomically claim due or expired unfinished work. Return at most limit unique targets
-    /// within scope, visiting at most scan_budget candidates. Mint a new epoch and capture
-    /// wake version. Never claim a live lease. Limits are positive; limit is at most 1024.
+    /// within scope. Process at most scan_budget scan positions, attempting at most one
+    /// target per position. The provider may use a separate bounded lookup to locate
+    /// candidates for those positions. Mint a new epoch and capture
+    /// wake version. Never claim a live lease. Limits are positive; limit is at most [`crate::MAX_CLAIM_BATCH_SIZE`].
     fn claim_due<T: Timer>(
         &self,
         scope: &Scope,

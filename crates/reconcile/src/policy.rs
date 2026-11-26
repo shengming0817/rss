@@ -1,5 +1,9 @@
 use crate::{Error, ErrorKind};
 use std::time::Duration;
+
+/// Largest supported claim batch. The host chooses the actual batch and concurrency.
+pub const MAX_CLAIM_BATCH_SIZE: usize = 1024;
+
 /// Validated execution limits. No unbounded or zero-delay mode.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
@@ -18,7 +22,7 @@ pub struct Policy {
 #[derive(Debug, Clone, Copy)]
 pub struct PolicyConfig {
     pub concurrency: usize,
-    /// Maximum claims per request, independently of concurrency (1..=1024).
+    /// Maximum claims per request, independently of concurrency (1 through [`MAX_CLAIM_BATCH_SIZE`]).
     pub claim_batch_size: usize,
     /// Positive candidate scan budget; provider representation is checked separately.
     pub scan_budget: u32,
@@ -52,7 +56,7 @@ impl TryFrom<PolicyConfig> for Policy {
         } = config;
         let valid = |d: Duration| !d.is_zero() && d.subsec_nanos().is_multiple_of(1_000_000);
         if concurrency == 0
-            || !(1..=1024).contains(&claim_batch_size)
+            || !(1..=MAX_CLAIM_BATCH_SIZE).contains(&claim_batch_size)
             || scan_budget == 0
             || ![lease, attempt, scan, idle_scan, backoff, cap]
                 .into_iter()
@@ -109,7 +113,7 @@ impl Policy {
     pub const fn claim_batch_size(&self) -> usize {
         self.claim_batch_size
     }
-    /// Maximum candidates visited in one provider scan.
+    /// Maximum scan positions processed in one provider call.
     pub const fn scan_budget(&self) -> u32 {
         self.scan_budget
     }

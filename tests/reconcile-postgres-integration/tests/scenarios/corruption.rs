@@ -18,7 +18,7 @@ pub(super) async fn run(
             )
             .await?;
     }
-    rejects_invalid_claim_limits(pool).await?;
+    claim_limits(store, pool, c).await?;
     schema_rejects_invalid_rows(owner).await?;
     check_definitions(pool, owner, &scope, c).await?;
     catalog_states(pool, owner, &scope, c).await?;
@@ -27,24 +27,76 @@ pub(super) async fn run(
     exhausted_epoch(store, owner, c).await
 }
 
-async fn rejects_invalid_claim_limits(pool: &PgPool) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(TENANT)
-        .execute(&mut *tx)
-        .await?;
-    let error = sqlx::query("SELECT * FROM rss_reconcile.claim_due($1::uuid,'limits',$2,$2,60000)")
-        .bind(TENANT)
-        .bind(i32::MAX)
-        .execute(&mut *tx)
-        .await
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("accepted invalid claim limit"))?;
-    assert_eq!(
-        error.as_database_error().and_then(|e| e.code()).as_deref(),
-        Some("P1003")
+async fn claim_limits(
+    store: &PgStore,
+    pool: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let scope = Scope::new(TenantId::parse(TENANT)?, "limits")?;
+    let lease = Duration::from_secs(60);
+    // The same deployed values and capability endpoints enter all three contracts.
+    for (limit, budget, valid) in [
+        (0, 128, false),
+        (1, 1, true),
+        (32, 128, true),
+        (32, 1, true),
+        (1024, 4096, true),
+        (1025, 4096, false),
+        (1, 0, false),
+        (1, i32::MAX, true),
+        (i32::MAX, i32::MAX, false),
+    ] {
+        let config = PolicyConfig {
+            claim_batch_size: limit as usize,
+            scan_budget: budget as u32,
+            ..policy_config()
+        };
+        let expected = (!valid).then_some(ErrorKind::InvalidInput);
+        assert_eq!(Policy::try_from(config).err().map(|e| e.kind()), expected);
+        let batch = store
+            .claim_due(
+                &scope,
+                config.claim_batch_size,
+                config.scan_budget,
+                lease,
+                c,
+            )
+            .await;
+        assert_eq!(batch.err().map(|e| e.kind()), expected);
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(TENANT)
+            .execute(&mut *tx)
+            .await?;
+        let raw =
+            sqlx::query("SELECT * FROM rss_reconcile.claim_due($1::uuid,'limits',$2,$3,60000)")
+                .bind(TENANT)
+                .bind(limit)
+                .bind(budget)
+                .execute(&mut *tx)
+                .await;
+        if valid {
+            raw?;
+        } else {
+            let error = raw
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("SQL accepted invalid claim limits"))?;
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("P1003")
+            );
+        }
+        tx.rollback().await?;
+    }
+    let config = PolicyConfig {
+        scan_budget: u32::MAX,
+        ..policy_config()
+    };
+    assert_eq!(Policy::try_from(config)?.scan_budget(), u32::MAX);
+    assert_kind(
+        store.claim_due(&scope, 1, u32::MAX, lease, c).await,
+        ErrorKind::InvalidInput,
     );
-    tx.rollback().await?;
     Ok(())
 }
 
@@ -222,7 +274,7 @@ async fn recovery(
     // Observe durable finish, using the existing caller budget rather than a performance cutoff.
     let stop = CancellationToken::new();
     tokio::select! {
-        result = rss_reconcile::run(&restarted, &business, scope, policy()?, c, &stop, |event| eprintln!("corruption recovery: {event:?}")) => {
+        result = rss_reconcile::run(&restarted, &business, scope, Policy::try_from(policy_config())?, c, &stop, |event| eprintln!("corruption recovery: {event:?}")) => {
             anyhow::bail!("worker stopped before durable recovery: {:?}", result?);
         }
         result = tokio::time::timeout(c.remaining(), wait_for_recovery(owner, scope, c)) => { result??; }
@@ -318,8 +370,8 @@ async fn exhausted_epoch(
     Ok(())
 }
 
-fn policy() -> Result<Policy, Error> {
-    Policy::try_from(PolicyConfig {
+fn policy_config() -> PolicyConfig {
+    PolicyConfig {
         claim_batch_size: 64,
         scan_budget: 64,
         concurrency: 2,
@@ -330,7 +382,7 @@ fn policy() -> Result<Policy, Error> {
         initial_backoff: Duration::from_millis(10),
         max_backoff: Duration::from_millis(20),
         max_attempts: 2,
-    })
+    }
 }
 struct Observations(Mutex<HashSet<Target>>);
 impl Observations {
@@ -382,7 +434,7 @@ async fn worker_rejects(
         store,
         &business,
         scope,
-        policy()?,
+        Policy::try_from(policy_config())?,
         &c.child(Duration::from_secs(1)),
         &CancellationToken::new(),
         |_| {},

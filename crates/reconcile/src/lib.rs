@@ -10,7 +10,7 @@ mod worker;
 pub use control::{Control, Timer};
 pub use diff::{ActualState, ConvergeAction, DesiredState, DriftKind, ReconcileDiff};
 pub use model::{Completion, Error, ErrorKind, Scope, Target};
-pub use policy::{Policy, PolicyConfig};
+pub use policy::{MAX_CLAIM_BATCH_SIZE, Policy, PolicyConfig};
 pub use ports::{Claim, DurableStore, Reconciler};
 pub use resources::{ClaimBatch, ReconcileStep, ResourceSet};
 pub use worker::{Observation, Report, Stage, run, run_batch, run_with_notify};

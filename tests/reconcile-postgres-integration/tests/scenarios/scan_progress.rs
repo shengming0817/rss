@@ -47,7 +47,9 @@ pub(super) async fn run(
     let before = position(owner, scope).await?;
     live_and_future(store, owner, c, &t, before).await?;
     empty_and_locked(store, owner, c, &t).await?;
-    windows(store, owner, c).await
+    windows(store, owner, c).await?;
+    sampled_window(store, owner, c).await?;
+    locked_sample(store, owner, c).await
 }
 async fn live_and_future(
     store: &PgStore,
@@ -137,7 +139,8 @@ async fn seed_window(
     let old = Target::new(scope.clone(), "old")?;
     let locked = Target::new(scope.clone(), "locked")?;
     let last = Target::new(scope.clone(), "last")?;
-    for target in [&old, &locked, &last] {
+    let future = Target::new(scope.clone(), "future")?;
+    for target in [&old, &locked, &future, &last] {
         store.wake(target, &keys, c).await?;
     }
     sqlx::query("UPDATE rss_reconcile.targets SET next_run=clock_timestamp()+interval '1 hour' WHERE tenant_id=$1::uuid AND reconciler=$2")
@@ -175,12 +178,10 @@ async fn rediscover_wakes(
     watermark: i64,
 ) -> anyhow::Result<()> {
     let scope = old.scope();
-    let keys = ResourceSet::empty(scope.tenant());
     let lease = Duration::from_secs(60);
-    // The old target keeps its already-passed ticket. The new one is above this watermark.
-    store.wake(old, &keys, c).await?;
-    let new = Target::new(scope.clone(), "new")?;
-    store.wake(&new, &keys, c).await?;
+    wake_next_window(store, owner, c, old).await?;
+    let skipped = store.claim_due(scope, 1, 1, lease, c).await?;
+    assert!(skipped.claims.is_empty() && skipped.more);
     let tail = store.claim_due(scope, 1, 1, lease, c).await?;
     assert_eq!(tail.claims.len(), 1);
     assert_eq!(tail.claims[0].target(), last);
@@ -188,9 +189,96 @@ async fn rediscover_wakes(
     let end = position(owner, scope).await?;
     assert_eq!((end.0, end.1), (watermark, watermark));
 
-    let next = store.claim_due(scope, 3, i32::MAX as u32, lease, c).await?;
-    let targets: Vec<_> = next.claims.iter().map(Claim::target).collect();
-    assert_eq!(targets, [old, &new]);
+    let next = store.claim_due(scope, 4, i32::MAX as u32, lease, c).await?;
+    assert_eq!(entities(&next), [old.entity(), "new-1", "new-2", "new-3"]);
     assert!(!next.more);
+    Ok(())
+}
+
+async fn wake_next_window(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    old: &Target,
+) -> anyhow::Result<()> {
+    let scope = old.scope();
+    let keys = ResourceSet::empty(scope.tenant());
+    store.wake(old, &keys, c).await?;
+    for entity in ["new-1", "new-2", "new-3"] {
+        store
+            .wake(&Target::new(scope.clone(), entity)?, &keys, c)
+            .await?;
+    }
+    // All three earliest samples are beyond the open window. The future
+    // position before "last" may not borrow any of them.
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=now()-interval '1 hour' WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity LIKE 'new-%'")
+        .bind(TENANT).bind(scope.reconciler()).execute(owner).await?;
+    Ok(())
+}
+
+async fn seed_sample(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    name: &str,
+) -> anyhow::Result<(Scope, i64)> {
+    let scope = Scope::new(TenantId::parse(TENANT)?, name)?;
+    let keys = ResourceSet::empty(scope.tenant());
+    for entity in ["future-1", "future-2", "old", "a", "b", "c", "d"] {
+        store
+            .wake(&Target::new(scope.clone(), entity)?, &keys, c)
+            .await?;
+    }
+    // The earliest four due times omit "old", which has the oldest due ticket.
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=now()+CASE WHEN entity LIKE 'future-%' THEN interval '1 hour' WHEN entity='old' THEN interval '-1 minute' ELSE interval '-1 hour' END WHERE tenant_id=$1::uuid AND reconciler=$2")
+        .bind(TENANT).bind(name).execute(owner).await?;
+    let frontier: i64 = sqlx::query_scalar("SELECT queue_ticket FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity='future-2'")
+        .bind(TENANT).bind(name).fetch_one(owner).await?;
+    Ok((scope, frontier))
+}
+
+fn entities(batch: &ClaimBatch<PgClaim>) -> Vec<&str> {
+    batch
+        .claims
+        .iter()
+        .map(|claim| claim.target().entity())
+        .collect()
+}
+
+async fn sampled_window(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let (scope, frontier) = seed_sample(store, owner, c, "due-sample").await?;
+    let lease = Duration::from_secs(60);
+    let first = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert_eq!(entities(&first), ["a", "b"]);
+    assert!(first.more);
+    assert_eq!(position(owner, &scope).await?.0, frontier);
+    let second = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert_eq!(entities(&second), ["old", "c"]);
+    let tail = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert_eq!(entities(&tail), ["d"]);
+    assert!(!tail.more);
+    Ok(())
+}
+
+async fn locked_sample(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let (scope, frontier) = seed_sample(store, owner, c, "locked-sample").await?;
+    let mut held = owner.begin().await?;
+    sqlx::query("SELECT FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity IN ('a','b','c','d') FOR UPDATE")
+        .bind(TENANT).bind(scope.reconciler()).execute(&mut *held).await?;
+    let lease = Duration::from_secs(60);
+    let first = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert!(first.claims.is_empty() && first.more);
+    assert_eq!(position(owner, &scope).await?.0, frontier);
+    let second = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert_eq!(entities(&second), ["old"]);
+    held.rollback().await?;
     Ok(())
 }
