@@ -417,7 +417,7 @@ Grant the current Outbox signatures:
 
 ```sql
 GRANT EXECUTE ON FUNCTION
- rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint),
+ rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint),
  rss_transactional_messaging.next_outbox_wakeup(uuid,text),
  rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid),
  rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid),
@@ -574,7 +574,10 @@ its default remains 64 and it does not alter request authorization or digest ide
 
 ### Bounded claim work and Published body retention
 
-A claim examines at most `max(64, min(4 * limit, 1024))` admitted candidate headers.
+Use `PgOutboxStore::with_scan_budget` or `PgLocalProjection::with_scan_budget` with
+`PgOutboxScanBudget::new(1..=1024)` (pass a single header count). The window may be smaller
+than claim capacity. The default from #3281/#3288 is `clamp(4 * capacity, 64, 1024)`.
+SQL callers supply both limits to `claim_outbox(tenant, domain, capacity, scan_budget, ttl_ms)`.
 Each indexed lane reads at most the remaining budget before the merged window is capped;
 the current DR plan has its separate 1024-member bound. Generation-index seeks check the earliest retry time in up to five distinct generations.
 A current generation or a future retry cannot prove historical work is due. An inconclusive

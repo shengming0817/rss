@@ -124,10 +124,10 @@ pub(super) async fn install_explain(f: &Fixture) -> anyhow::Result<()> {
             .replace("p_seq", "0::bigint")
             .replace("p_lane", "0::integer")
             .replace("p_through", "statement_timestamp()")
-            .replace("p_take", "64::integer")
+            .replace("p_take", "$3::integer")
     );
     let ddl = format!(
-        "GRANT CREATE ON SCHEMA public TO rss_tmsg_relay; CREATE FUNCTION public.explain_heads(p_tenant uuid,p_domain text) RETURNS json LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $explain$ DECLARE plan json; BEGIN EXECUTE '{}' INTO plan USING p_tenant,p_domain; RETURN plan; END $explain$; ALTER FUNCTION public.explain_heads(uuid,text) OWNER TO rss_tmsg_relay; REVOKE ALL ON FUNCTION public.explain_heads(uuid,text) FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.explain_heads(uuid,text) TO projection_worker; REVOKE CREATE ON SCHEMA public FROM rss_tmsg_relay;",
+        "GRANT CREATE ON SCHEMA public TO rss_tmsg_relay; CREATE FUNCTION public.explain_heads(p_tenant uuid,p_domain text,p_budget integer) RETURNS json LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $explain$ DECLARE plan json; BEGIN EXECUTE '{}' INTO plan USING p_tenant,p_domain,p_budget; RETURN plan; END $explain$; ALTER FUNCTION public.explain_heads(uuid,text,integer) OWNER TO rss_tmsg_relay; REVOKE ALL ON FUNCTION public.explain_heads(uuid,text,integer) FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.explain_heads(uuid,text,integer) TO projection_worker; REVOKE CREATE ON SCHEMA public FROM rss_tmsg_relay;",
         query.replace('\'', "''")
     );
     sqlx::raw_sql(sqlx::AssertSqlSafe(ddl))
@@ -153,7 +153,7 @@ pub(super) async fn explain(f: &Fixture, label: &str) -> anyhow::Result<f64> {
         .await?;
     let mut tx = f.raw_worker.begin().await?;
     let plan: serde_json::Value =
-        sqlx::query_scalar("SELECT public.explain_heads($1::uuid,'orders')")
+        sqlx::query_scalar("SELECT public.explain_heads($1::uuid,'orders',64)")
             .bind(tenant().to_string())
             .fetch_one(&mut *tx)
             .await?;
@@ -166,7 +166,7 @@ pub(super) async fn explain(f: &Fixture, label: &str) -> anyhow::Result<f64> {
 async fn capacity(f: &Fixture) -> anyhow::Result<()> {
     let mut first = f.raw_worker.begin().await?;
     let first_rows: Vec<i64> = sqlx::query_scalar(
-        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
+        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,64,60000)",
     )
     .bind(tenant().to_string())
     .fetch_all(&mut *first)
@@ -174,7 +174,7 @@ async fn capacity(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(first_rows.len(), 1);
     let mut second = f.raw_worker.begin().await?;
     let others: Vec<i64> = sqlx::query_scalar(
-        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',101,60000)",
+        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',101,404,60000)",
     )
     .bind(tenant().to_string())
     .fetch_all(&mut *second)
@@ -319,6 +319,24 @@ impl Progress {
     }
 }
 
+async fn scan_matrix(f: &Fixture) -> anyhow::Result<()> {
+    for (capacity, scan) in [(4_i32, 2_i32), (4, 8), (1, 8)] {
+        let mut tx = f.raw_worker.begin().await?;
+        let plan: serde_json::Value = sqlx::query_scalar("SELECT public.explain_heads($1::uuid,'orders',$2)")
+            .bind(tenant().to_string()).bind(scan).fetch_one(&mut *tx).await?;
+        let root = &plan[0]["Plan"];
+        assert_eq!(root["Actual Rows"].as_i64(), Some(i64::from(scan)));
+        let started = std::time::Instant::now();
+        let rows: Vec<i64> = sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)")
+            .bind(tenant().to_string()).bind(capacity).bind(scan).fetch_all(&mut *tx).await?;
+        assert_eq!(rows.len(), capacity.min(scan) as usize);
+        println!("first claim limit={capacity} budget={scan} elapsed={:?} examined={} shared_hits={} shared_reads={}",
+            started.elapsed(), examined(root), root["Shared Hit Blocks"], root["Shared Read Blocks"]);
+        tx.rollback().await?;
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::cognitive_complexity,
     reason = "The lock window, arrivals and revisit assertions form one sequential provider scenario."
@@ -326,7 +344,7 @@ impl Progress {
 pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
     for _ in 0..3 {
         let empty: Vec<i64> = sqlx::query_scalar(
-            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
+            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,64,60000)",
         )
         .bind(tenant().to_string())
         .fetch_all(&f.raw_worker)
@@ -343,7 +361,8 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
         );
     }
     append(f, "window", 0, 258, 0).await?;
-    // Reserve 32 real projection slots so each empty scan gets a 128-header budget.
+    scan_matrix(f).await?;
+    // One projection permit can drive a full, independently sized scan window.
     let runtime = Arc::new(
         PgRuntime::connect_consumer(
             f.config.clone().with_pool_limits(0, 33),
@@ -361,17 +380,20 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
         },
     )
     .await?;
+    let projection = Arc::into_inner(projection)
+        .ok_or_else(|| anyhow::anyhow!("fixture owns its projection"))?
+        .with_scan_budget(PgOutboxScanBudget::new(128)?);
     let validator = Validator;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=statement_timestamp()-interval '1 day' WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
     let mut held = f.owner.begin().await?;
     let locked:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'window-%' ORDER BY seq LIMIT 256 FOR UPDATE")
         .fetch_all(&mut *held).await?;
-    for _ in 0..2 {
+    for page in 1..=2 {
         let batch = projection
             .project_batch(
                 crate::execution(tenant(), 1),
                 &validator,
-                NonZeroUsize::try_from(32usize)?,
+                NonZeroUsize::MIN,
                 deadline(),
                 Duration::from_secs(5),
             )
@@ -380,6 +402,9 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
             batch.scan_progress(),
             rss_transactional_messaging::outbox::OutboxScanProgress::Continue
         );
+        let cursor: i64 = sqlx::query_scalar("SELECT source_seq FROM rss_transactional_messaging.outbox_scan WHERE domain='orders'")
+            .fetch_one(&f.owner).await?;
+        assert_eq!(cursor, locked[page * 128 - 1]);
         let rows = futures::StreamExt::collect::<Vec<_>>(batch).await;
         assert!(
             rows.is_empty(),
@@ -388,7 +413,7 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
     }
     let mut claim = f.raw_worker.begin().await?;
     let rows: Vec<i64> = sqlx::query_scalar(
-        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
+        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,64,60000)",
     )
     .bind(tenant().to_string())
     .fetch_all(&mut *claim)
@@ -404,7 +429,7 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
     for n in 0..10 {
         append(f, "arrival", n, 1, 0).await?;
         let rows: Vec<i64> = sqlx::query_scalar(
-            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,60000)",
+            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',1,64,60000)",
         )
         .bind(tenant().to_string())
         .fetch_all(&f.raw_worker)
@@ -511,7 +536,7 @@ async fn finish_retired_sweep(f: &Fixture) -> anyhow::Result<()> {
     for _ in 0..2 {
         let mut tx = f.raw_worker.begin().await?;
         let rows: Vec<i64> = sqlx::query_scalar(
-            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',32,60000)",
+            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',32,128,60000)",
         )
         .bind(tenant().to_string())
         .fetch_all(&mut *tx)
@@ -530,30 +555,12 @@ async fn finish_retired_sweep(f: &Fixture) -> anyhow::Result<()> {
     anyhow::bail!("retired fixture did not finish its sweep")
 }
 
-// Compare production claim bodies on identical rows/indexes. The baseline gets the
-// candidate indexes too, so this isolates SQL work rather than attributing index gains.
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "Measure the same controlled provider states with both installed claim bodies, restoring the candidate afterward."
-)]
 async fn nested_profiles(f: &Fixture) -> anyhow::Result<()> {
     use sqlx::Connection as _;
     let _ = tracing_subscriber::fmt()
         .with_env_filter("sqlx::postgres::notice=info")
         .with_ansi(false)
         .try_init();
-    let original=tokio::process::Command::new("/usr/bin/git").args(["show","d87fa3ab555483f2cb40dad371423d0ae5cdf773:crates/transactional-messaging-postgres/migrations/install.sql"]).output().await?;
-    anyhow::ensure!(original.status.success());
-    let baseline = String::from_utf8(original.stdout)?;
-    let candidate:String=sqlx::query_scalar("SELECT pg_get_functiondef('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'::regprocedure)").fetch_one(&f.owner).await?;
-    let body = baseline
-        .split_once("CREATE FUNCTION rss_transactional_messaging.claim_outbox(")
-        .ok_or_else(|| anyhow::anyhow!("baseline claim"))?
-        .1
-        .split_once("ALTER FUNCTION rss_transactional_messaging.claim_outbox")
-        .ok_or_else(|| anyhow::anyhow!("baseline end"))?
-        .0;
-    let old = format!("CREATE OR REPLACE FUNCTION rss_transactional_messaging.claim_outbox({body}");
     for scenario in ["wide", "leases-dr"] {
         if scenario == "leases-dr" {
             sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 minute',automatic_retry_deadline=clock_timestamp()+interval '1 day',retry_after=clock_timestamp()-interval '1 hour' WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'scale-null-%' ORDER BY seq LIMIT 192)").execute(&f.owner).await?;
@@ -564,10 +571,7 @@ async fn nested_profiles(f: &Fixture) -> anyhow::Result<()> {
             sqlx::query("INSERT INTO rss_transactional_messaging.dr_members(tenant_id,operation_id,ordinal,message_id,consumer_group,fingerprint,outbox_seq,status) SELECT tenant_id,'00000000-0000-0000-0000-000000003281',(row_number() OVER(ORDER BY seq)-1)::integer,message_id,'',fingerprint,seq,'pending' FROM rss_transactional_messaging.outbox WHERE status='published' AND payload IS NOT NULL ORDER BY seq LIMIT 512").execute(&f.owner).await?;
             explain(f, "512 current DR / mixed leases").await?;
         }
-        for (name, sql) in [("baseline", old.clone()), ("candidate", candidate.clone())] {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
-                .execute(&f.owner)
-                .await?;
+        for scan in [64_i32, 128] {
             for limit in [1, 32] {
                 let mut plain =
                     sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
@@ -579,15 +583,17 @@ async fn nested_profiles(f: &Fixture) -> anyhow::Result<()> {
                 for attempt in 0..11 {
                     let at = timer.now();
                     let mut tx = plain.begin().await?;
-                    let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,60000)").bind(tenant().to_string()).bind(limit).fetch_all(&mut *tx).await?;
+                    let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)").bind(tenant().to_string()).bind(limit).bind(scan).fetch_all(&mut *tx).await?;
                     assert_eq!(rows.len(), limit as usize);
                     tx.rollback().await?;
-                    if attempt > 0 {
+                    if attempt == 0 {
+                        println!("first claim scan={scan} limit={limit} elapsed_us={}", (timer.now()-at).as_micros());
+                    } else {
                         latency.push((timer.now() - at).as_micros());
                     }
                 }
                 distribution(
-                    &format!("claim-transaction-{name}-{scenario}"),
+                    &format!("claim-transaction-{scan}-{scenario}"),
                     limit as usize,
                     &mut latency,
                 );
@@ -595,9 +601,9 @@ async fn nested_profiles(f: &Fixture) -> anyhow::Result<()> {
                 let mut c =
                     sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
                 sqlx::raw_sql("LOAD 'auto_explain'; SET auto_explain.log_min_duration=0; SET auto_explain.log_nested_statements=on; SET auto_explain.log_analyze=on; SET auto_explain.log_buffers=on; SET auto_explain.log_timing=off; SET auto_explain.log_format=json; SET auto_explain.log_level=notice; SET SESSION AUTHORIZATION projection_worker;").execute(&mut c).await?;
-                println!("claim-profile revision={name} scenario={scenario} limit={limit}");
+                println!("claim-profile scan_budget={scan} scenario={scenario} limit={limit}");
                 let mut tx = c.begin().await?;
-                let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,60000)").bind(tenant().to_string()).bind(limit).fetch_all(&mut *tx).await?;
+                let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)").bind(tenant().to_string()).bind(limit).bind(scan).fetch_all(&mut *tx).await?;
                 assert_eq!(rows.len(), limit as usize);
                 tx.rollback().await?;
                 c.close().await?;

@@ -2,7 +2,7 @@
 SELECT to_regclass('rss_transactional_messaging.storage_lineage') IS NOT NULL
  AND to_regclass('rss_transactional_messaging.tenant_epoch') IS NOT NULL
  AND to_regclass('rss_transactional_messaging.dr_members') IS NOT NULL
- AND NOT EXISTS(SELECT FROM (VALUES ('claim_outbox','uuid,text,integer,bigint'),
+ AND NOT EXISTS(SELECT FROM (VALUES ('claim_outbox','uuid,text,integer,integer,bigint'),
   ('outbox_lease','uuid,bigint,uuid,bigint,bigint,uuid'),('settle_outbox','uuid,bigint,uuid,bigint,text,uuid')
  ) f(name,arguments) LEFT JOIN pg_proc p ON p.pronamespace='rss_transactional_messaging'::regnamespace AND p.proname=f.name
  WHERE p.oid IS NULL OR p.oid IS DISTINCT FROM to_regprocedure('rss_transactional_messaging.'||f.name||'('||f.arguments||')'))

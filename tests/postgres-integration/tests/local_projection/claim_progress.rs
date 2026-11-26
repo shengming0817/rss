@@ -98,6 +98,7 @@ async fn tail(
         .collect::<HashSet<_>>();
     let mut ids = HashSet::new();
     let mut hits = Vec::new();
+    let started = std::time::Instant::now();
     for call in 1..=expected
         .last()
         .ok_or_else(|| anyhow::anyhow!("missing expected hit"))?
@@ -113,6 +114,9 @@ async fn tail(
         if batch.is_empty() {
             assert_eq!(batch.scan_progress(), OutboxScanProgress::Continue);
         } else {
+            if hits.is_empty() {
+                println!("first eligible claim after {call} calls in {:?}", started.elapsed());
+            }
             hits.push((call, batch.len()));
         }
         for claim in batch {

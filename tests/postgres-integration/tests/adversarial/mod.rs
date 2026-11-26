@@ -319,7 +319,7 @@ pub(super) async fn run(
         .execute(&mut *raw)
         .await?;
     let claimed = sqlx::query_scalar::<_,i64>(
-        "SELECT count(*) FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,9223372036854776)",
+        "SELECT count(*) FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,64,9223372036854776)",
     )
     .fetch_one(&mut *raw)
     .await;
@@ -330,7 +330,7 @@ pub(super) async fn run(
     sqlx::query("ROLLBACK TO SAVEPOINT invalid_claim")
         .execute(&mut *raw)
         .await?;
-    let lease: (i64, String, i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,60000)").fetch_one(&mut *raw).await?;
+    let lease: (i64, String, i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox(current_setting('rss.tenant_id')::uuid,'ttl-bound',1,64,60000)").fetch_one(&mut *raw).await?;
     for invalid in [-1_i64, 9_223_372_036_854_776, i64::MAX] {
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM rss_transactional_messaging.outbox_lease(current_setting('rss.tenant_id')::uuid,$1,$2::uuid,$3,$4,NULL)",
@@ -423,14 +423,14 @@ pub(super) async fn run(
             "scheduling capability exposure must reject admission"
         );
     }
-    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) TO PUBLIC").execute(owner).await?;
+    sqlx::raw_sql("GRANT EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint) TO PUBLIC").execute(owner).await?;
     assert!(
         PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await
             .is_err(),
         "PUBLIC definer entry must fail connect"
     );
-    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) FROM PUBLIC; GRANT rss_tmsg_relay TO tmsg_runtime").execute(owner).await?;
+    sqlx::raw_sql("REVOKE EXECUTE ON FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint) FROM PUBLIC; GRANT rss_tmsg_relay TO tmsg_runtime").execute(owner).await?;
     assert!(
         PgRuntime::connect(config.clone(), Timer::new(), fence_fixture::storage())
             .await

@@ -20,7 +20,7 @@ columns(relation, name, type, nullable) AS (VALUES
  ('outbox','retry_after','timestamp with time zone',false), ('outbox','lease_token','uuid',true),
  ('outbox','lease_until','timestamp with time zone',true), ('outbox','automatic_retry_deadline','timestamp with time zone',true), ('outbox','recovery_version','bigint',false)),
 functions(signature) AS (VALUES
- ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'),
+ ('rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint)'),
  ('rss_transactional_messaging.next_outbox_wakeup(uuid,text)'),
  ('rss_transactional_messaging.outbox_lease(uuid,bigint,uuid,bigint,bigint,uuid)'),
  ('rss_transactional_messaging.settle_outbox(uuid,bigint,uuid,bigint,text,uuid)')),
@@ -87,7 +87,7 @@ expected_policies(relation, name, roles, predicate, permissive) AS (
    AND p.prosecdef AND p.proowner=(SELECT oid FROM relay_role)
    AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
    AND NOT has_function_privilege(current_user,p.oid,'EXECUTE'))),
- ('functions', pg_get_function_result(to_regprocedure('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)'))
+ ('functions', pg_get_function_result(to_regprocedure('rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint)'))
    IS NOT DISTINCT FROM 'TABLE(seq bigint, tenant_id uuid, message_id text, domain text, partition_key text, lease_token uuid, lease_until timestamp with time zone, envelope jsonb, payload bytea, fingerprint bytea, dr_operation uuid, remaining_us bigint, delivery_us bigint)'),
  ('functions', NOT EXISTS(SELECT FROM pg_proc p
   WHERE p.pronamespace='rss_transactional_messaging'::regnamespace AND p.proname='append_outbox'

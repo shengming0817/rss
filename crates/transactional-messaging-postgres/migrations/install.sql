@@ -666,7 +666,7 @@ LANGUAGE sql STABLE AS $f$
  -- Seek the first retry time of each lease generation by the generation/retry index.
  -- Stop on proof of due history. The fifth distinct generation is lookahead: when
  -- inconclusive, the normal bounded cursor inspects headers with conservative pacing.
- WITH RECURSIVE leases AS NOT MATERIALIZED (
+ WITH RECURSIVE probe(max_generations) AS (VALUES (5)), leases AS NOT MATERIALIZED (
   SELECT claim_epoch,claim_lineage,retry_after FROM rss_transactional_messaging.outbox
   WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='publishing'
  ), binding AS (
@@ -677,10 +677,10 @@ LANGUAGE sql STABLE AS $f$
   SELECT g.*,p.step+1 FROM generations p CROSS JOIN binding b CROSS JOIN LATERAL (
    SELECT claim_epoch,claim_lineage,retry_after FROM leases WHERE (claim_epoch,claim_lineage)>(p.epoch,p.lineage)
    ORDER BY claim_epoch,claim_lineage,retry_after LIMIT 1
-  ) g WHERE p.step<5 AND ((p.epoch,p.lineage)=(b.epoch,b.lineage) OR p.first_retry>p_through)
+  ) g WHERE p.step<(SELECT max_generations FROM probe) AND ((p.epoch,p.lineage)=(b.epoch,b.lineage) OR p.first_retry>p_through)
  ), history AS MATERIALIZED (
   SELECT coalesce(bool_or((g.epoch,g.lineage)<>(b.epoch,b.lineage) AND g.first_retry<=p_through),false) AS due,
-         count(*)=5 AS uncertain FROM generations g CROSS JOIN binding b
+         count(*)=(SELECT max_generations FROM probe) AS uncertain FROM generations g CROSS JOIN binding b
  ), current_dr AS MATERIALIZED (
   SELECT d.*,src.partition_key,src.partition_seq FROM rss_transactional_messaging.dr_plans p
   JOIN rss_transactional_messaging.dr_members d USING(tenant_id,operation_id)
@@ -731,18 +731,17 @@ LANGUAGE sql STABLE AS $f$
 $f$;
 ALTER FUNCTION rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer) OWNER TO rss_tmsg_relay;
 
-CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain text,p_limit integer,p_ttl_ms bigint)
+CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain text,p_limit integer,p_scan_budget integer,p_ttl_ms bigint)
 RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,payload bytea,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
  progress outbox_scan; frontier outbox_scan; examined integer:=0;
  owns_progress boolean; had_cursor boolean; resumed boolean; exhausted boolean:=false; contested boolean:=false; historical_due boolean:=false; action text:='complete';
- scan_limit integer:=greatest(64,least(p_limit::bigint*4,1024))::integer;
  candidates NO SCROLL CURSOR FOR
-  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit) ORDER BY source_seq,lane;
+  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,p_scan_budget) ORDER BY source_seq,lane;
 BEGIN
  PERFORM check_execution();
- IF p_domain IS NULL OR octet_length(p_domain) NOT BETWEEN 1 AND 255 OR (p_domain COLLATE "C") ~ '[^A-Za-z0-9_.:-]' OR p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
+ IF p_domain IS NULL OR octet_length(p_domain) NOT BETWEEN 1 AND 255 OR (p_domain COLLATE "C") ~ '[^A-Za-z0-9_.:-]' OR p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_scan_budget IS NULL OR p_scan_budget NOT BETWEEN 1 AND 1024 OR p_ttl_ms IS NULL OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
  -- Transaction-local result metadata, read by the private adapter before commit.
  PERFORM set_config('rss.outbox_scan_progress','complete',true);
  IF consumer_scope_domain() IS NOT NULL AND consumer_scope_domain()<>p_domain THEN RETURN; END IF;
@@ -759,7 +758,7 @@ BEGIN
  frontier:=progress;
  OPEN candidates;
  LOOP
-  EXIT WHEN used>=p_limit OR examined>=scan_limit;
+  EXIT WHEN used>=p_limit OR examined>=p_scan_budget;
   FETCH NEXT FROM candidates INTO r;
   IF NOT FOUND THEN exhausted:=true; EXIT; END IF;
   examined:=examined+1; historical_due:=r.historical_due;
@@ -791,12 +790,12 @@ BEGIN
  END LOOP;
  -- At exact claim capacity a short window can also be exhausted. Look ahead
  -- inside the admitted metadata only; never lock or advance past this header.
- IF used>=p_limit AND examined<scan_limit THEN
+ IF used>=p_limit AND examined<p_scan_budget THEN
   FETCH NEXT FROM candidates INTO r;
   exhausted:=NOT FOUND;
  END IF;
  CLOSE candidates;
- IF used>=p_limit OR (owns_progress AND examined=scan_limit AND (used>0 OR contested OR historical_due)) THEN
+ IF used>=p_limit OR (owns_progress AND examined=p_scan_budget AND (used>0 OR contested OR historical_due)) THEN
   action:='continue';
  ELSIF NOT owns_progress OR (used=0 AND (contested OR resumed OR NOT exhausted)) THEN
   action:='retry_later';
@@ -808,7 +807,7 @@ BEGIN
   ELSE
    -- Locks are taken in source order. A capacity stop can leave earlier eligibility
    -- keys unvisited. Keep the window entrance and its frozen horizon in that case.
-   IF examined=scan_limit THEN progress:=frontier; END IF;
+   IF examined=p_scan_budget THEN progress:=frontier; END IF;
    INSERT INTO outbox_scan AS s(tenant_id,domain,epoch,lineage,through_at,eligible_at,source_seq,lane)
     VALUES(p_tenant,p_domain,e,l,progress.through_at,progress.eligible_at,progress.source_seq,progress.lane)
     ON CONFLICT ON CONSTRAINT outbox_scan_pkey DO UPDATE SET epoch=excluded.epoch,lineage=excluded.lineage,through_at=excluded.through_at,eligible_at=excluded.eligible_at,source_seq=excluded.source_seq,lane=excluded.lane
@@ -817,7 +816,7 @@ BEGIN
  END IF;
 END $f$;
 
-ALTER FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) OWNER TO rss_tmsg_relay;
+ALTER FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint) OWNER TO rss_tmsg_relay;
 
 -- Host retention is an additional restriction; it never opens the original delivery window.
 CREATE FUNCTION rss_transactional_messaging.reclaim_published_bodies(p_before_us bigint,p_after bigint,p_limit integer,p_verify_bytes bigint)

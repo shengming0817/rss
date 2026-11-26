@@ -163,11 +163,31 @@ impl OutboxWakeup {
         self.next_deadline
     }
 }
+/// Maximum candidate headers admitted to one PostgreSQL claim window.
+#[derive(Clone, Copy, Debug)]
+pub struct PgOutboxScanBudget(u16);
+
+impl PgOutboxScanBudget {
+    /// Select a fixed window of 1–1024 headers, independently of claim capacity.
+    pub fn new(headers: u16) -> Result<Self, PgError> {
+        if !(1..=1024).contains(&headers) {
+            return Err(PgError::InvalidScanBudget);
+        }
+        Ok(Self(headers))
+    }
+
+    fn for_claim(fixed: Option<Self>, capacity: i32) -> i32 {
+        // The measured default from #3281 and #3288.
+        fixed.map_or_else(|| capacity.saturating_mul(4).clamp(64, 1024), |v| i32::from(v.0))
+    }
+}
+
 /// PostgreSQL outbox, generic over the selected publisher's receipt evidence.
 pub struct PgOutboxStore<R> {
     writer: PgOutboxWriter,
     pub(crate) lease_ms: i64,
     budget: DeliveryBudget,
+    scan_budget: Option<PgOutboxScanBudget>,
     receipt: PhantomData<fn() -> R>,
 }
 impl<R> PgOutboxStore<R> {
@@ -181,9 +201,17 @@ impl<R> PgOutboxStore<R> {
             writer: PgOutboxWriter::new(runtime, domain),
             lease_ms: milliseconds(budget.lease_ttl())?,
             budget,
+            scan_budget: None,
             receipt: PhantomData,
         })
     }
+    /// Override the default candidate window for every claim on this store.
+    #[must_use]
+    pub fn with_scan_budget(mut self, budget: PgOutboxScanBudget) -> Self {
+        self.scan_budget = Some(budget);
+        self
+    }
+
     /// Read unresolved dead letters for one explicitly selected tenant and this domain.
     /// The host decides how unresolved records affect its admission policy.
     pub async fn has_dead_letters(
@@ -409,14 +437,15 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         let cutoff = Deadline::from_timeout(&self.writer.runtime.timer, deadline.timeout())
             .map_err(|_| PgError::invariant().port())?;
         let count = i32::try_from(limit.get()).map_err(|_| PgError::invariant().port())?;
+        let scan = PgOutboxScanBudget::for_claim(self.scan_budget, count);
         let ttl = self.lease_ms;
         let tenant = binding.tenant();
         let domain = self.writer.domain.as_str().to_owned();
         #[cfg(feature = "recovery")]
         let started = self.writer.runtime.timer.now();
         let (batch, progress) = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
-                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, payload, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
-                    .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(&mut *connection).await?;
+                let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, payload, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4,$5)")
+                    .bind(tenant.to_string()).bind(&domain).bind(count).bind(scan).bind(ttl).fetch_all(&mut *connection).await?;
                 use rss_transactional_messaging::outbox::OutboxScanProgress;
                 let action: String = sqlx::query_scalar("SELECT current_setting('rss.outbox_scan_progress')")
                     .fetch_one(&mut *connection).await?;

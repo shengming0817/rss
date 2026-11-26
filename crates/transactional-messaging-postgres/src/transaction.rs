@@ -108,6 +108,9 @@ pub enum PgError {
     /// Lease must be positive whole milliseconds representable as PostgreSQL interval microseconds.
     #[error("invalid PostgreSQL lease duration")]
     InvalidLeaseDuration,
+    /// Candidate scan budget must be between one and 1024 headers.
+    #[error("invalid PostgreSQL Outbox candidate scan budget")]
+    InvalidScanBudget,
     /// PostgreSQL statement and lock timeouts use signed 32-bit milliseconds.
     #[error("PostgreSQL operation timeout is not representable")]
     InvalidOperationTimeout,

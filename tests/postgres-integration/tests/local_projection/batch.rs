@@ -604,7 +604,7 @@ pub(super) async fn head_admission(f: &Fixture) -> anyhow::Result<()> {
             "NULL::uuid AS dr_operation",
         ),
         (
-            "rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)",
+            "rss_transactional_messaging.claim_outbox(uuid,text,integer,integer,bigint)",
             "FOR UPDATE SKIP LOCKED",
             "FOR UPDATE",
         ),

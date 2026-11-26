@@ -871,7 +871,7 @@ async fn renewal_and_expiry(f: &Fixture) -> anyhow::Result<()> {
 async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     direct_scope_predicate(f).await?;
     f.append("foreign-domain", "other").await?;
-    let foreign: (i64,String,i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,'other',1,5000)")
+    let foreign: (i64,String,i64) = sqlx::query_as("SELECT seq,lease_token::text,(extract(epoch FROM lease_until)*1000000)::bigint FROM rss_transactional_messaging.claim_outbox($1::uuid,'other',1,64,5000)")
         .bind(tenant().to_string()).fetch_one(&f.owner).await?;
     let mut tx = f.raw_worker.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target','01010101010101010101010101010101',true),set_config('rss.storage_lineage','02020202020202020202020202020202',true),set_config('rss.execution_epoch','1',true)").bind(tenant().to_string()).execute(&mut *tx).await?;
@@ -885,7 +885,7 @@ async fn scoped_permissions(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     assert_eq!(count, 0, "SET ROLE must not widen the login domain");
     let claims = sqlx::query(
-        "SELECT * FROM rss_transactional_messaging.claim_outbox($1::uuid,'other',1,2000)",
+        "SELECT * FROM rss_transactional_messaging.claim_outbox($1::uuid,'other',1,64,2000)",
     )
     .bind(tenant().to_string())
     .fetch_all(&mut *tx)
