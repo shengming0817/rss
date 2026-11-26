@@ -430,7 +430,7 @@ impl InboxDriver for InboxFixture {
     }
 
     async fn active_claim(&self) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
-        Ok(IdempotencyDisposition::InProgress)
+        Ok(IdempotencyDisposition::InProgress { retry_after: None })
     }
 
     async fn other_group_claim(
@@ -455,7 +455,7 @@ impl InboxDriver for InboxFixture {
         &self,
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(if self.is(Defect::InboxClaimCrashBeforeCommit) {
-            IdempotencyDisposition::InProgress
+            IdempotencyDisposition::InProgress { retry_after: None }
         } else {
             IdempotencyDisposition::Acquired(())
         })

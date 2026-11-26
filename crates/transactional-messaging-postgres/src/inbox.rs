@@ -1,12 +1,12 @@
 //! Durable inbox identity and lease CAS adapted from baseline cotx/eventing.rs.
 use crate::transaction::PoolAccess;
 use crate::{PgError, PgRuntime, PgTransaction, transaction::settled};
-use rss_request_context::Clock as _;
+use rss_request_context::{Clock as _, Deadline};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
-    inbox::{ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
+    inbox::{ClaimAdmission, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus},
     message::{ContractIdentity, MessageFingerprint},
-    policy::{LeaseRenewalPolicy, OperationDeadline},
+    policy::{LeaseRenewalPolicy, OperationDeadline, within},
     transaction::{RejectKind, TerminalDisposition, TerminalReceipt},
 };
 use sqlx::{Row as _, postgres::PgRow};
@@ -50,6 +50,14 @@ impl PgInboxClaim {
             && self.binding.tenant() == self.identity.tenant_id()
     }
 }
+/// A single-use reservation on the originating runtime's ordinary connection capacity.
+pub struct PgClaimPermit {
+    slot: tokio::sync::OwnedSemaphorePermit,
+    binding: rss_transactional_messaging::fence::ExecutionBinding,
+    identity: ConsumerIdentity,
+    cutoff: Deadline,
+}
+
 /// PostgreSQL inbox. Lease duration uses exact PostgreSQL interval microseconds.
 pub struct PgInboxStore {
     pub(crate) runtime: Arc<PgRuntime>,
@@ -119,30 +127,41 @@ pub(crate) fn receipt(
         })
         .transpose()
 }
+const READ_RECEIPT: &str =
+    "SELECT contract, fingerprint, disposition FROM rss_transactional_messaging.inbox
+    WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3";
+const READ_CONFLICT: &str = "SELECT contract, fingerprint, disposition,
+    CASE WHEN disposition IS NULL AND isfinite(lease_until) THEN
+        GREATEST(0, extract(epoch FROM lease_until) - extract(epoch FROM clock_timestamp()))::float8
+    END AS retry_seconds FROM rss_transactional_messaging.inbox
+    WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3";
+
 async fn read(
     transaction: &mut PgTransaction<'_>,
     identity: &ConsumerIdentity,
+    query: &'static str,
 ) -> Result<Option<PgRow>, PgError> {
-    Ok(sqlx::query("SELECT contract, fingerprint, disposition FROM rss_transactional_messaging.inbox WHERE tenant_id=$1::uuid AND message_id=$2 AND consumer_group=$3")
-        .bind(identity.tenant_id().to_string()).bind(identity.message_id().as_str()).bind(identity.group().as_str())
-        .fetch_optional(&mut *transaction.connection).await?)
+    Ok(sqlx::query(query)
+        .bind(identity.tenant_id().to_string())
+        .bind(identity.message_id().as_str())
+        .bind(identity.group().as_str())
+        .fetch_optional(&mut *transaction.connection)
+        .await?)
 }
 
 impl PgInboxStore {
     pub(crate) async fn claim_with_access(
         &self,
         binding: rss_transactional_messaging::fence::ExecutionBinding,
-        identity: &ConsumerIdentity,
-        deadline: OperationDeadline,
+        identity: ConsumerIdentity,
+        cutoff: Deadline,
         access: PoolAccess<'_>,
     ) -> Result<IdempotencyDisposition<PgInboxClaim>, MessagingError> {
         if binding.tenant() != identity.tenant_id() {
             return Err(PgError::lost().port());
         }
-        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
-        let identity = identity.clone();
         let lease_ms = self.lease_ms;
-        settled(
+        let (mut outcome, observed) = settled(
             self.runtime
                 .transaction_with_access(
                     binding,
@@ -163,24 +182,47 @@ impl PgInboxStore {
                                 .fetch_optional(&mut *tx.connection)
                                 .await?;
                             if let Some(row) = row {
-                                return Ok(IdempotencyDisposition::Acquired(PgInboxClaim {
-                                    slot: std::sync::Mutex::new(None),
-                                    binding: *tx.binding(),
-                                    identity,
-                                    token: row.try_get("token")?,
-                                }));
+                                return Ok((
+                                    IdempotencyDisposition::Acquired(PgInboxClaim {
+                                        slot: std::sync::Mutex::new(None),
+                                        binding: *tx.binding(),
+                                        identity,
+                                        token: row.try_get("token")?,
+                                    }),
+                                    tx.timer.now(),
+                                ));
                             }
-                            let row = read(tx, &identity).await?.ok_or_else(PgError::invariant)?;
-                            Ok(match receipt(&row, &identity)? {
-                                Some(value) => IdempotencyDisposition::Terminal(value),
-                                None => IdempotencyDisposition::InProgress,
-                            })
+                            let observed = tx.timer.now();
+                            let row = read(tx, &identity, READ_CONFLICT)
+                                .await?
+                                .ok_or_else(PgError::invariant)?;
+                            Ok((
+                                match receipt(&row, &identity)? {
+                                    Some(value) => IdempotencyDisposition::Terminal(value),
+                                    None => IdempotencyDisposition::InProgress {
+                                        retry_after: row
+                                            .try_get::<Option<f64>, _>("retry_seconds")?
+                                            .and_then(|seconds| {
+                                                Duration::try_from_secs_f64(seconds).ok()
+                                            }),
+                                    },
+                                },
+                                observed,
+                            ))
                         })
                     },
                 )
                 .await,
         )
-        .map_err(PgError::port)
+        .map_err(PgError::port)?;
+        if let IdempotencyDisposition::InProgress {
+            retry_after: Some(delay),
+        } = &mut outcome
+        {
+            *delay =
+                delay.saturating_sub(self.runtime.timer.now().saturating_duration_since(observed));
+        }
+        Ok(outcome)
     }
 }
 pub(crate) async fn lock_identity(
@@ -235,26 +277,55 @@ impl InboxStore for PgInboxStore {
         self.policy
     }
     type Claim = PgInboxClaim;
-    async fn claim(
+    type Permit = PgClaimPermit;
+
+    fn reserve_claim(
         &self,
         binding: rss_transactional_messaging::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
         deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, Self::Permit>, MessagingError> {
         if binding.tenant() != identity.tenant_id() {
             return Err(PgError::lost().port());
         }
         self.runtime
             .validate_binding(binding)
             .map_err(PgError::port)?;
-        let Some(permit) = self.runtime.try_claim_slot().map_err(PgError::port)? else {
-            return Ok(IdempotencyDisposition::CapacityBusy);
+        let cutoff = self.runtime.cutoff(deadline).map_err(PgError::port)?;
+        let identity = identity.clone();
+        let reserve = move |slot| PgClaimPermit {
+            slot,
+            binding,
+            identity,
+            cutoff,
         };
+        match self.runtime.try_claim_slot().map_err(PgError::port)? {
+            Some(slot) => Ok(ClaimAdmission::Ready(reserve(slot))),
+            None => Ok(ClaimAdmission::Waiting(Box::pin(async move {
+                let slot = within(&self.runtime.timer, cutoff, |_| {
+                    self.runtime.ordinary_slot()
+                })
+                .await?
+                .map_err(|error| PgError::from(error).port())?;
+                Ok(reserve(slot))
+            }))),
+        }
+    }
+
+    async fn claim(
+        &self,
+        permit: Self::Permit,
+    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let outcome = self
-            .claim_with_access(binding, identity, deadline, PoolAccess::Reserved(&permit))
+            .claim_with_access(
+                permit.binding,
+                permit.identity,
+                permit.cutoff,
+                PoolAccess::Reserved(&permit.slot),
+            )
             .await?;
         if let IdempotencyDisposition::Acquired(claim) = &outcome {
-            claim.return_slot(permit);
+            claim.return_slot(permit.slot);
         }
         Ok(outcome)
     }
@@ -272,7 +343,7 @@ impl InboxStore for PgInboxStore {
             self.runtime
                 .local_tx(binding, deadline, move |tx| {
                     Box::pin(async move {
-                        read(tx, &identity)
+                        read(tx, &identity, READ_RECEIPT)
                             .await?
                             .map(|row| receipt(&row, &identity))
                             .transpose()

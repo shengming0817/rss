@@ -361,9 +361,14 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
         let binding = binding(&message);
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {
@@ -387,9 +392,14 @@ async fn consumer_receipt(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
         assert!(matches!(
             inbox
                 .claim(
-                    crate::execution((binding.identity()).tenant_id(), 1),
-                    binding.identity(),
-                    deadline()
+                    inbox
+                        .reserve_claim(
+                            crate::execution((binding.identity()).tenant_id(), 1),
+                            binding.identity(),
+                            deadline()
+                        )?
+                        .acquire()
+                        .await?
                 )
                 .await?,
             IdempotencyDisposition::Terminal(_)

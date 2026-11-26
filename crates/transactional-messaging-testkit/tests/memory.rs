@@ -342,7 +342,7 @@ async fn memory_outbox_uses_core_identity_and_fencing() -> TestResult {
 #[tokio::test]
 async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResult {
     let clock = FakeClock::new();
-    let store = MemoryInboxStore::new();
+    let store = MemoryInboxStore::new(clock.clone());
     let message = envelope("message-inbox", b"payload")?;
     let identity = ConsumerIdentity::new(
         message.metadata().tenant_id(),
@@ -350,11 +350,35 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
         message.id().clone(),
         message.metadata().contract().clone(),
     );
+    let execution = crate::execution(identity.tenant_id(), 1);
+    let zero = OperationDeadline::from_remaining(Duration::ZERO);
+    assert_eq!(
+        store
+            .reserve_claim(execution, &identity, zero)
+            .err()
+            .map(|e| e.kind()),
+        Some(MessagingErrorKind::DeadlineElapsed)
+    );
+    let short = OperationDeadline::from_remaining(Duration::from_millis(1));
+    let expired = store
+        .reserve_claim(execution, &identity, short)?
+        .acquire()
+        .await?;
+    clock.advance(short.timeout())?;
+    assert_eq!(
+        store.claim(expired).await.err().map(|e| e.kind()),
+        Some(MessagingErrorKind::DeadlineElapsed)
+    );
     let claim = match store
         .claim(
-            crate::execution(identity.tenant_id(), 1),
-            &identity,
-            deadline(&clock)?,
+            store
+                .reserve_claim(
+                    crate::execution(identity.tenant_id(), 1),
+                    &identity,
+                    deadline(&clock)?,
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     {
@@ -364,12 +388,17 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         store
             .claim(
-                crate::execution(identity.tenant_id(), 1),
-                &identity,
-                deadline(&clock)?
+                store
+                    .reserve_claim(
+                        crate::execution(identity.tenant_id(), 1),
+                        &identity,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
-        IdempotencyDisposition::InProgress
+        IdempotencyDisposition::InProgress { .. }
     ));
     assert!(matches!(
         store.extend(&claim, deadline(&clock)?).await?,
@@ -383,9 +412,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
 
     let successor = match store
         .claim(
-            crate::execution(identity.tenant_id(), 1),
-            &identity,
-            deadline(&clock)?,
+            store
+                .reserve_claim(
+                    crate::execution(identity.tenant_id(), 1),
+                    &identity,
+                    deadline(&clock)?,
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     {
@@ -412,9 +446,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         store
             .claim(
-                crate::execution(identity.tenant_id(), 1),
-                &identity,
-                deadline(&clock)?
+                store
+                    .reserve_claim(
+                        crate::execution(identity.tenant_id(), 1),
+                        &identity,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Terminal(_)
@@ -430,9 +469,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     store.expire(&identity);
     let IdempotencyDisposition::Terminal(receipt) = store
         .claim(
-            crate::execution(identity.tenant_id(), 1),
-            &identity,
-            deadline(&clock)?,
+            store
+                .reserve_claim(
+                    crate::execution(identity.tenant_id(), 1),
+                    &identity,
+                    deadline(&clock)?,
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     else {
@@ -449,9 +493,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         store
             .claim(
-                crate::execution(other.tenant_id(), 1),
-                &other,
-                deadline(&clock)?
+                store
+                    .reserve_claim(
+                        crate::execution(other.tenant_id(), 1),
+                        &other,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Acquired(_)
@@ -464,9 +513,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         store
             .claim(
-                crate::execution(identity.tenant_id(), 1),
-                &identity,
-                deadline(&clock)?
+                store
+                    .reserve_claim(
+                        crate::execution(identity.tenant_id(), 1),
+                        &identity,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Terminal(_)
@@ -474,20 +528,30 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         store
             .claim(
-                crate::execution(other.tenant_id(), 1),
-                &other,
-                deadline(&clock)?
+                store
+                    .reserve_claim(
+                        crate::execution(other.tenant_id(), 1),
+                        &other,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Terminal(_)
     ));
 
-    let releasable = MemoryInboxStore::new();
+    let releasable = MemoryInboxStore::new(clock.clone());
     let claim = match releasable
         .claim(
-            crate::execution(identity.tenant_id(), 1),
-            &identity,
-            deadline(&clock)?,
+            releasable
+                .reserve_claim(
+                    crate::execution(identity.tenant_id(), 1),
+                    &identity,
+                    deadline(&clock)?,
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     {
@@ -498,15 +562,20 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         releasable
             .claim(
-                crate::execution(identity.tenant_id(), 1),
-                &identity,
-                deadline(&clock)?
+                releasable
+                    .reserve_claim(
+                        crate::execution(identity.tenant_id(), 1),
+                        &identity,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Acquired(_)
     ));
 
-    let collision_store = MemoryInboxStore::new();
+    let collision_store = MemoryInboxStore::new(clock.clone());
     let first_message = envelope("c", b"payload")?;
     let first_identity = ConsumerIdentity::new(
         first_message.metadata().tenant_id(),
@@ -524,9 +593,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         collision_store
             .claim(
-                crate::execution(first_identity.tenant_id(), 1),
-                &first_identity,
-                deadline(&clock)?
+                collision_store
+                    .reserve_claim(
+                        crate::execution(first_identity.tenant_id(), 1),
+                        &first_identity,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Acquired(_)
@@ -534,9 +608,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         collision_store
             .claim(
-                crate::execution(second_identity.tenant_id(), 1),
-                &second_identity,
-                deadline(&clock)?
+                collision_store
+                    .reserve_claim(
+                        crate::execution(second_identity.tenant_id(), 1),
+                        &second_identity,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Acquired(_)
@@ -557,9 +636,14 @@ async fn memory_inbox_reclaims_and_returns_core_terminal_receipts() -> TestResul
     assert!(matches!(
         collision_store
             .claim(
-                crate::execution(changed_schema_identity.tenant_id(), 1),
-                &changed_schema_identity,
-                deadline(&clock)?
+                collision_store
+                    .reserve_claim(
+                        crate::execution(changed_schema_identity.tenant_id(), 1),
+                        &changed_schema_identity,
+                        deadline(&clock)?
+                    )?
+                    .acquire()
+                    .await?
             )
             .await?,
         IdempotencyDisposition::Acquired(_)

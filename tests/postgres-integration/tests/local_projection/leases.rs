@@ -125,7 +125,12 @@ async fn inbox_contention(f: &Fixture, p: &PgLocalProjection<Effect, Key>) -> an
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
     let IdempotencyDisposition::Acquired(held) = other
-        .claim(execution(tenant(), 1), &identity, deadline())
+        .claim(
+            other
+                .reserve_claim(execution(tenant(), 1), &identity, deadline())?
+                .acquire()
+                .await?,
+        )
         .await?
     else {
         anyhow::bail!("external consumer did not acquire Inbox")

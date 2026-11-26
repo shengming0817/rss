@@ -4,6 +4,7 @@
 // reason: canonical live-provider fixtures must fail loudly when typed identities drift.
 
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
+use rss_transactional_messaging::inbox::ClaimAdmission;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -176,12 +177,16 @@ impl InboxStore for LiveInbox {
     }
     type Claim = ();
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &rss_transactional_messaging::inbox::ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(()))
     }
 
@@ -446,13 +451,13 @@ async fn consume_ambiguous_retries(
     deliveries: &mut ManagedDeliveryStream<AmqpDeliveries>,
     subscription: &SubscriptionIdentity,
 ) -> Result<usize, LiveConformanceFailure> {
-    let store = MemoryInboxStore::new();
+    let timer = FakeClock::new();
+    let store = MemoryInboxStore::new(timer.clone());
     let effects = Arc::new(AtomicUsize::new(0));
     let transaction = RecordingInboxTx {
         store: store.clone(),
         effects: Arc::clone(&effects),
     };
-    let timer = FakeClock::new();
     let emitter = NoopEmitter;
     let execution = ConsumerExecution::new(
         ConsumerGroup::parse("ambiguous-consumer").expect("group"),

@@ -2,6 +2,7 @@
 // reason: fixed canonical fixtures must fail loudly if their identity or protocol invariants drift.
 
 use rss_request_context::{Clock, Deadline, ExecutionTimer};
+use rss_transactional_messaging::inbox::ClaimAdmission;
 mod support;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -418,6 +419,7 @@ struct Proof;
 struct Claim;
 
 struct FakeInbox {
+    capacity: Option<Arc<tokio::sync::Notify>>,
     disposition: Mutex<Option<IdempotencyDisposition<Claim>>>,
     lease: LeaseStatus,
 }
@@ -433,12 +435,16 @@ impl InboxStore for ClaimErrorInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Err(MessagingError::new(
             MessagingErrorKind::Invariant,
             std::io::Error::other("primary claim failure"),
@@ -480,12 +486,16 @@ impl InboxStore for ExtendErrorInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
     }
 
@@ -528,21 +538,25 @@ impl InboxStore for FakeInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        match &self.capacity {
+            Some(gate) => Ok(ClaimAdmission::Waiting(Box::pin(async {
+                gate.notified().await;
+                Ok(())
+            }))),
+            None => Ok(ClaimAdmission::Ready(())),
+        }
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let mut state = self.disposition.lock().expect("lock");
-        match *state {
-            Some(IdempotencyDisposition::CapacityBusy) => {
-                return Ok(IdempotencyDisposition::CapacityBusy);
-            }
-            Some(IdempotencyDisposition::InProgress) => {
-                return Ok(IdempotencyDisposition::InProgress);
-            }
-            _ => {}
+        if let Some(IdempotencyDisposition::InProgress { retry_after }) = *state {
+            return Ok(IdempotencyDisposition::InProgress { retry_after });
         }
         state.take().ok_or_else(|| {
             MessagingError::new(
@@ -694,6 +708,7 @@ async fn duplicate_returns_original_terminal_receipt_without_handler_call() {
         TerminalDisposition::Succeeded,
     );
     let inbox = FakeInbox {
+        capacity: None,
         disposition: Mutex::new(Some(IdempotencyDisposition::Terminal(receipt))),
         lease: LeaseStatus::Held {
             remaining: Duration::from_secs(30),
@@ -747,6 +762,7 @@ async fn duplicate_authored_drift_rejects_without_handler_call() {
         TerminalDisposition::Succeeded,
     );
     let inbox = FakeInbox {
+        capacity: None,
         disposition: Mutex::new(Some(IdempotencyDisposition::Terminal(receipt))),
         lease: LeaseStatus::Held {
             remaining: Duration::from_secs(30),
@@ -802,6 +818,7 @@ async fn stale_claim_abandons_without_effect_or_broker_settlement() {
     let message = envelope(|_| {});
     let group = ConsumerGroup::parse("orders-projection").expect("group");
     let inbox = FakeInbox {
+        capacity: None,
         disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
         lease: LeaseStatus::Lost,
     };
@@ -885,6 +902,7 @@ async fn provider_lease_shorter_than_the_renewal_schedule_is_a_hard_fence() {
     let abandoned = Arc::new(AtomicUsize::new(0));
     let error = consume_once(
         &FakeInbox {
+            capacity: None,
             disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
             lease: LeaseStatus::Held {
                 remaining: Duration::from_secs(1),
@@ -1008,6 +1026,7 @@ async fn only_confirmed_transient_rollback_retries_locally() {
     let message = envelope(|_| {});
     let group = ConsumerGroup::parse("orders-projection").expect("group");
     let inbox = FakeInbox {
+        capacity: None,
         disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
         lease: LeaseStatus::Held {
             remaining: Duration::from_secs(30),
@@ -1067,6 +1086,7 @@ async fn only_confirmed_transient_rollback_retries_locally() {
 async fn rejected_effect_commits_receipt_before_reject_settlement() {
     let group = ConsumerGroup::parse("orders-projection").expect("group");
     let inbox = FakeInbox {
+        capacity: None,
         disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
         lease: LeaseStatus::Held {
             remaining: Duration::from_secs(30),
@@ -1112,6 +1132,7 @@ async fn rejected_effect_commits_receipt_before_reject_settlement() {
 async fn settlement_io_failure_does_not_reexecute_or_change_durable_outcome() {
     let group = ConsumerGroup::parse("orders-projection").expect("group");
     let inbox = FakeInbox {
+        capacity: None,
         disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
         lease: LeaseStatus::Held {
             remaining: Duration::from_secs(30),
@@ -1288,6 +1309,7 @@ async fn consume_once_fault_matrix_is_bounded_and_never_acks_uncertain_outcomes(
     ) in cases
     {
         let inbox = FakeInbox {
+            capacity: None,
             disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
             lease: LeaseStatus::Held {
                 remaining: Duration::from_secs(30),
@@ -1380,12 +1402,16 @@ impl InboxStore for PendingInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         if self.stage == PendingInboxStage::Claim {
             self.started.fetch_add(1, Ordering::SeqCst);
             return std::future::pending().await;
@@ -1816,6 +1842,7 @@ async fn duplicate_ack_timeout_attempts_exactly_one_settlement_without_handler()
         async move {
             consume_once(
                 &FakeInbox {
+                    capacity: None,
                     disposition: Mutex::new(Some(IdempotencyDisposition::Terminal(receipt))),
                     lease: LeaseStatus::Lost,
                 },
@@ -1920,12 +1947,16 @@ impl InboxStore for RenewingInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.claim
             .lock()
             .expect("claim lock")
@@ -2210,12 +2241,16 @@ impl InboxStore for RenewalErrorAfterInitialInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
     }
 
@@ -2351,12 +2386,16 @@ impl InboxStore for TransientThenAcquiredInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
             Err(MessagingError::new(
                 MessagingErrorKind::Transient,
@@ -2494,6 +2533,7 @@ async fn claim_deadline_replaces_stream_and_mints_a_fresh_delivery_budget() {
         std::num::NonZeroU16::MIN,
         Arc::clone(&source),
         Arc::new(FakeInbox {
+            capacity: None,
             disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
             lease: LeaseStatus::Held {
                 remaining: Duration::from_secs(30),
@@ -2540,12 +2580,16 @@ impl InboxStore for BlockingClaimInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         self.started.fetch_add(1, Ordering::SeqCst);
         self.gate.notified().await;
         Ok(IdempotencyDisposition::Acquired(Claim))
@@ -3149,12 +3193,16 @@ impl InboxStore for UnlimitedInbox {
     }
     type Claim = Claim;
 
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         _binding: rss_transactional_messaging::fence::ExecutionBinding,
         _identity: &ConsumerIdentity,
         _deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         Ok(IdempotencyDisposition::Acquired(Claim))
     }
 
@@ -3650,15 +3698,19 @@ impl InboxStore for ScopedInbox {
     fn lease_policy(&self) -> rss_transactional_messaging::policy::LeaseRenewalPolicy {
         UnlimitedInbox.lease_policy()
     }
-    async fn claim(
+    type Permit = ();
+    fn reserve_claim(
         &self,
         binding: rss_transactional_messaging::fence::ExecutionBinding,
         identity: &ConsumerIdentity,
-        deadline: OperationDeadline,
-    ) -> Result<IdempotencyDisposition<Claim>, MessagingError> {
+        _deadline: OperationDeadline,
+    ) -> Result<ClaimAdmission<'_, ()>, MessagingError> {
         assert_eq!(binding.tenant(), identity.tenant_id());
         self.0.lock().expect("scopes").push(binding);
-        UnlimitedInbox.claim(binding, identity, deadline).await
+        Ok(ClaimAdmission::Ready(()))
+    }
+    async fn claim(&self, (): ()) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+        UnlimitedInbox.claim(()).await
     }
     async fn read_terminal(
         &self,
@@ -3789,15 +3841,9 @@ fn wrong_execution_tenant_requeues_instead_of_rejecting_message_content() {
 
 #[tokio::test(start_paused = true)]
 async fn busy_claims_retain_one_delivery_until_the_operation_cutoff() {
-    for (claim, expected) in [
-        (
-            IdempotencyDisposition::InProgress,
-            ProcessingDisposition::InProgress,
-        ),
-        (
-            IdempotencyDisposition::CapacityBusy,
-            ProcessingDisposition::CapacityBusy,
-        ),
+    for expected in [
+        ProcessingDisposition::InProgress,
+        ProcessingDisposition::CapacityBusy,
     ] {
         let msg = envelope(|_| {});
         let sub = subscription(&msg);
@@ -3816,7 +3862,11 @@ async fn busy_claims_retain_one_delivery_until_the_operation_cutoff() {
         );
         let recorder = RecordingSettlement::new();
         let inbox = FakeInbox {
-            disposition: Mutex::new(Some(claim)),
+            capacity: (expected == ProcessingDisposition::CapacityBusy)
+                .then(|| Arc::new(tokio::sync::Notify::new())),
+            disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+                retry_after: None,
+            })),
             lease: LeaseStatus::Lost,
         };
         let tx = FakeTx {
@@ -3858,8 +3908,10 @@ async fn standard_budget_reclaims_released_capacity_on_the_original_delivery() {
         consumer_policy(),
         &emitter,
     );
+    let gate = Arc::new(tokio::sync::Notify::new());
     let inbox = FakeInbox {
-        disposition: Mutex::new(Some(IdempotencyDisposition::CapacityBusy)),
+        capacity: Some(gate.clone()),
+        disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
         lease: LeaseStatus::Held {
             remaining: Duration::from_secs(30),
         },
@@ -3881,9 +3933,10 @@ async fn standard_budget_reclaims_released_capacity_on_the_original_delivery() {
             .await
             .is_err()
     );
-    *inbox.disposition.lock().expect("disposition") = Some(IdempotencyDisposition::Acquired(Claim));
+    gate.notify_one();
+    let released = timer.now();
     assert_eq!(
-        tokio::time::timeout(Duration::from_millis(251), attempt)
+        tokio::time::timeout(Duration::from_millis(1), attempt)
             .await
             .expect("recheck")
             .expect("consume"),
@@ -3900,5 +3953,196 @@ async fn standard_budget_reclaims_released_capacity_on_the_original_delivery() {
         })
         .collect();
     assert_eq!(durations.len(), 1);
-    assert!((Duration::from_secs(1)..=Duration::from_millis(1251)).contains(&durations[0]));
+    assert_eq!(timer.now(), released);
+    assert_eq!(durations[0], Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn local_permit_ready_at_cutoff_requeues_without_starting_claim() {
+    let msg = envelope(|_| {});
+    let sub = subscription(&msg);
+    let timer = ManualTimer::new();
+    struct ExpireOnTransfer<'a>(&'a ManualTimer, Duration);
+    impl TransactionalMessagingEmitter for ExpireOnTransfer<'_> {
+        fn emit(&self, event: TransactionalMessagingObservation) {
+            if matches!(
+                event,
+                TransactionalMessagingObservation::ConsumerClaimCapacityBusy
+            ) {
+                self.0.advance(self.1);
+            }
+        }
+    }
+    let budget = consumer_policy().budget();
+    let emitter = ExpireOnTransfer(&timer, budget.total() - budget.settlement_reserve());
+    let execution = ConsumerExecution::new(
+        ConsumerGroup::parse("cutoff-race").expect("group"),
+        &TrustedIngress,
+        &sub,
+        &timer,
+        consumer_policy(),
+        &emitter,
+    );
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let inbox = FakeInbox {
+        capacity: Some(gate.clone()),
+        disposition: Mutex::new(Some(IdempotencyDisposition::Acquired(Claim))),
+        lease: LeaseStatus::Lost,
+    };
+    let tx = FakeTx {
+        calls: Arc::new(AtomicUsize::new(0)),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let recorder = RecordingSettlement::new();
+    let attempt = consume_once(
+        &inbox,
+        &tx,
+        &execution,
+        Delivery::new(msg, recorder.clone()),
+    );
+    tokio::pin!(attempt);
+    gate.notify_one();
+    assert_eq!(
+        attempt.await.expect("busy settlement"),
+        ProcessingDisposition::CapacityBusy
+    );
+    assert!(
+        inbox
+            .disposition
+            .lock()
+            .expect("claim not started")
+            .is_some()
+    );
+    assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
+    assert_eq!(recorder.abandon_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn simultaneous_deliveries_spread_their_final_remote_claims() {
+    struct ProbeTimes<'a> {
+        timer: &'a RealtimeClock,
+        probes: Mutex<Vec<std::time::Instant>>,
+    }
+    impl TransactionalMessagingEmitter for ProbeTimes<'_> {
+        fn emit(&self, observation: TransactionalMessagingObservation) {
+            if matches!(
+                observation,
+                TransactionalMessagingObservation::ConsumerClaimInProgress
+            ) {
+                self.probes
+                    .lock()
+                    .expect("probe times")
+                    .push(self.timer.now());
+            }
+        }
+    }
+    let timer = RealtimeClock::new();
+    let start = timer.now();
+    let inbox = FakeInbox {
+        capacity: None,
+        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+            retry_after: None,
+        })),
+        lease: LeaseStatus::Lost,
+    };
+    let tx = FakeTx {
+        calls: Arc::new(AtomicUsize::new(0)),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let attempts = (0..8).map(|_| async {
+        let msg = envelope(|_| {});
+        let sub = subscription(&msg);
+        let times = ProbeTimes {
+            timer: &timer,
+            probes: Mutex::new(Vec::new()),
+        };
+        let execution = ConsumerExecution::new(
+            ConsumerGroup::parse("same-start").expect("group"),
+            &TrustedIngress,
+            &sub,
+            &timer,
+            consumer_policy(),
+            &times,
+        );
+        let recorder = RecordingSettlement::new();
+        let result = consume_once(
+            &inbox,
+            &tx,
+            &execution,
+            Delivery::new(msg, recorder.clone()),
+        )
+        .await;
+        assert_eq!(result.expect("busy"), ProcessingDisposition::InProgress);
+        assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
+        let probes = times.probes.into_inner().expect("probe times");
+        assert!((12..=16).contains(&probes.len()));
+        let final_probe = *probes.last().expect("last probe");
+        let elapsed = final_probe.saturating_duration_since(start);
+        // Tokio's paused timer wakes at millisecond resolution.
+        assert!((Duration::from_millis(7500)..=Duration::from_millis(7751)).contains(&elapsed));
+        final_probe
+    });
+    let times = futures::future::join_all(attempts).await;
+    assert!(times.windows(2).any(|pair| pair[0] != pair[1]));
+    assert_eq!(tx.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn reachable_lease_expiry_allows_the_original_delivery_to_finish() {
+    let timer = ManualTimer::new();
+    let msg = envelope(|_| {});
+    let sub = subscription(&msg);
+    let execution = ConsumerExecution::new(
+        ConsumerGroup::parse("lease-expiry").expect("group"),
+        &TrustedIngress,
+        &sub,
+        &timer,
+        consumer_policy(),
+        &NoopEmitter,
+    );
+    let inbox = FakeInbox {
+        capacity: None,
+        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+            retry_after: None,
+        })),
+        lease: LeaseStatus::Held {
+            remaining: Duration::from_secs(30),
+        },
+    };
+    let tx = FakeTx {
+        calls: Arc::new(AtomicUsize::new(0)),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let recorder = RecordingSettlement::new();
+    let attempt = consume_once(
+        &inbox,
+        &tx,
+        &execution,
+        Delivery::new(msg, recorder.clone()),
+    );
+    tokio::pin!(attempt);
+    // Advance through the normal bands, then present a lease expiring at 7.700 s.
+    for millis in [5, 10, 20, 40, 80, 160, 320, 640, 1280, 2000, 2345] {
+        assert!(futures::poll!(&mut attempt).is_pending());
+        timer.advance(Duration::from_millis(millis));
+    }
+    *inbox.disposition.lock().expect("state") = Some(IdempotencyDisposition::InProgress {
+        retry_after: Some(Duration::from_millis(800)),
+    });
+    assert!(futures::poll!(&mut attempt).is_pending());
+    timer.advance(Duration::from_micros(799_999));
+    assert!(futures::poll!(&mut attempt).is_pending());
+    assert!(recorder.settlements().is_empty());
+    timer.advance(Duration::from_micros(1));
+    *inbox.disposition.lock().expect("lease expired") =
+        Some(IdempotencyDisposition::Acquired(Claim));
+    timer.advance(Duration::from_millis(50));
+    assert!(matches!(
+        futures::poll!(&mut attempt),
+        std::task::Poll::Ready(Ok(ProcessingDisposition::Committed(
+            TerminalDisposition::Succeeded
+        )))
+    ));
+    assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
+    assert_eq!(tx.calls.load(Ordering::SeqCst), 1);
 }

@@ -81,9 +81,14 @@ pub(super) async fn run(
         let binding = binding(&message);
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {
@@ -144,9 +149,14 @@ pub(super) async fn run(
         let identity = binding.identity().clone();
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution(identity.tenant_id(), 1),
-                &identity,
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution(identity.tenant_id(), 1),
+                        &identity,
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {

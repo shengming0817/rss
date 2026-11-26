@@ -60,7 +60,12 @@ completion; one subscription serializes verified tenant/domain/partition keys th
 A rejected terminal head retires that subscription before starting queued successors.
 Each new subscription starts with empty partition queues.
 Queued and busy deliveries count toward the same window and keep their original deadlines.
-A live claim or unstarted capacity wait keeps the handle unacknowledged and rechecks at one quarter of the operation budget, clamped to 1–250 ms, until the original cutoff.
+A delivery waiting for ordinary capacity holds its unsettled handle and wakes when its permit transfers.
+For a live remote claim, the first probe waits 2.5–5 ms. Subsequent randomized intervals double up
+to 1–2 s. A short provider lease estimate can advance the probe by one tier. Each wait ends at the
+original operation cutoff. The final probe also uses per-delivery jitter. It runs at most once, leaving at least
+one quarter of the original operation budget (capped at 250 ms) scheduled for I/O. A lease estimate
+inside the remaining probe window sets its earliest eligible wake. A known busy timeout requeues once. A durable claim error abandons the delivery.
 The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.
 The same loop
 runs on an application's Tokio host or through the optional RSS lifecycle bridge.

@@ -331,8 +331,8 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
             .inbox
             .claim_with_access(
                 binding.execution(),
-                binding.identity(),
-                remaining(self, cutoff),
+                binding.identity().clone(),
+                cutoff,
                 crate::transaction::PoolAccess::Ordinary,
             )
             .await
@@ -341,9 +341,7 @@ impl<H: PgConsumerEffect<Vec<u8>>, K: Aead + Send + Sync> PgLocalProjection<H, K
         // a wait for Inbox must not overturn a matching durable terminal receipt.
         let claim = match acquired {
             IdempotencyDisposition::Acquired(claim) => claim,
-            // Projection waits for admission before the durable claim query.
-            IdempotencyDisposition::CapacityBusy => return Err(PgError::invariant()),
-            IdempotencyDisposition::InProgress => {
+            IdempotencyDisposition::InProgress { .. } => {
                 self.outbox
                     .settle(source, OutboxSettlement::Retry, remaining(self, cutoff))
                     .await

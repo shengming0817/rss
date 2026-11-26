@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::inbox::{
-    ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
+    ClaimAdmission, ConsumerGroup, IdempotencyDisposition, InboxStore, LeaseStatus,
 };
 use rss_transactional_messaging::message::{PartitionIdentity, SubscriptionIdentity};
 use rss_transactional_messaging::observability::{
@@ -231,7 +231,7 @@ where
         };
     let claim = wait_for_claim(inbox, execution, &binding, deadlines.operation()).await;
     match claim {
-        Ok(busy @ (IdempotencyDisposition::CapacityBusy | IdempotencyDisposition::InProgress)) => {
+        Ok(ClaimWait::Busy(busy)) => {
             settle_observed(
                 settlement,
                 SettlementDecision::requeue(),
@@ -240,11 +240,7 @@ where
                 execution.emitter,
             )
             .await?;
-            Ok(if matches!(busy, IdempotencyDisposition::CapacityBusy) {
-                ProcessingDisposition::CapacityBusy
-            } else {
-                ProcessingDisposition::InProgress
-            })
+            Ok(busy)
         }
         Err(error) => {
             emit_runtime_failure(
@@ -261,7 +257,7 @@ where
             )
             .await)
         }
-        Ok(IdempotencyDisposition::Terminal(receipt)) => match binding.validate_terminal(receipt) {
+        Ok(ClaimWait::Terminal(receipt)) => match binding.validate_terminal(receipt) {
             Ok(terminal) => {
                 let disposition = terminal.disposition();
                 settle_observed(
@@ -290,7 +286,7 @@ where
                 Ok(ProcessingDisposition::Rejected(failure))
             }
         },
-        Ok(IdempotencyDisposition::Acquired(claim)) => {
+        Ok(ClaimWait::Acquired(claim)) => {
             process_acquired(
                 inbox,
                 transaction,
@@ -308,42 +304,67 @@ where
     }
 }
 
-// Recheck busy admission on its own clock. A long lease interval can exceed the
-// entire operation budget; recomputing a fraction of remaining time would spin near expiry.
+enum ClaimWait<C> {
+    Busy(ProcessingDisposition),
+    Acquired(C),
+    Terminal(rss_transactional_messaging::transaction::TerminalReceipt),
+}
+
 async fn wait_for_claim<I, V, R, E>(
     inbox: &I,
     execution: &ConsumerExecution<'_, V, R, E>,
     binding: &VerifiedConsumerBinding,
     cutoff: Deadline,
-) -> Result<IdempotencyDisposition<I::Claim>, MessagingError>
+) -> Result<ClaimWait<I::Claim>, MessagingError>
 where
     I: InboxStore,
     R: ExecutionTimer,
     E: TransactionalMessagingEmitter,
 {
     let budget = execution.policy.budget();
-    let interval = ((budget.total() - budget.settlement_reserve()) / 4)
-        .clamp(Duration::from_millis(1), Duration::from_millis(250));
+    let probe_reserve =
+        ((budget.total() - budget.settlement_reserve()) / 4).min(Duration::from_millis(250));
+    // Both cutoffs were minted from the same original operation budget.
+    let last_probe = Deadline::at(cutoff.instant() - probe_reserve);
     let mut capacity_wait = None;
+    let mut backoff = None;
+    let mut known_busy = None;
     let result = loop {
-        let claim = within(execution.timer, cutoff, |deadline| {
-            inbox.claim(binding.execution(), binding.identity(), deadline)
-        })
-        .await
-        .and_then(std::convert::identity);
-        match &claim {
-            Ok(IdempotencyDisposition::CapacityBusy) => {
-                capacity_wait.get_or_insert_with(|| execution.timer.now());
-                execution
-                    .emitter
-                    .emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
+        let attempt = claim_once(
+            inbox,
+            execution,
+            binding,
+            cutoff,
+            &mut capacity_wait,
+            &mut known_busy,
+        )
+        .await;
+        let retry_after = match attempt {
+            Ok(IdempotencyDisposition::Acquired(claim)) => break Ok(ClaimWait::Acquired(claim)),
+            Ok(IdempotencyDisposition::Terminal(receipt)) => {
+                break Ok(ClaimWait::Terminal(receipt));
             }
-            Ok(IdempotencyDisposition::InProgress) => execution
-                .emitter
-                .emit(TransactionalMessagingObservation::ConsumerClaimInProgress),
-            _ => break claim,
-        }
-        let wake = cutoff.capped(execution.timer, interval);
+            Ok(IdempotencyDisposition::InProgress { retry_after }) => retry_after,
+            Err(error) => {
+                if error.kind() == MessagingErrorKind::DeadlineElapsed
+                    && let Some(busy) = known_busy
+                {
+                    break Ok(ClaimWait::Busy(busy));
+                }
+                break Err(error);
+            }
+        };
+        known_busy = Some(ProcessingDisposition::InProgress);
+        execution
+            .emitter
+            .emit(TransactionalMessagingObservation::ConsumerClaimInProgress);
+        let left = last_probe
+            .remaining(execution.timer.now())
+            .unwrap_or_default();
+        let delay = backoff
+            .get_or_insert_with(ClaimBackoff::new)
+            .next(retry_after, left);
+        let wake = delay.map_or(cutoff, |delay| last_probe.capped(execution.timer, delay));
         if within(execution.timer, cutoff, |_| {
             execution.timer.sleep_until(wake)
         })
@@ -354,17 +375,168 @@ where
                 .unwrap_or_default()
                 .is_zero()
         {
-            break claim;
+            break Ok(ClaimWait::Busy(ProcessingDisposition::InProgress));
         }
     };
-    if let Some(start) = capacity_wait {
+    if let Some(duration) = capacity_wait {
         execution
             .emitter
-            .emit(TransactionalMessagingObservation::ConsumerCapacityWait {
-                duration: execution.timer.now().saturating_duration_since(start),
-            });
+            .emit(TransactionalMessagingObservation::ConsumerCapacityWait { duration });
     }
     result
+}
+
+async fn claim_once<I, V, R, E>(
+    inbox: &I,
+    execution: &ConsumerExecution<'_, V, R, E>,
+    binding: &VerifiedConsumerBinding,
+    cutoff: Deadline,
+    capacity_wait: &mut Option<Duration>,
+    known_busy: &mut Option<ProcessingDisposition>,
+) -> Result<IdempotencyDisposition<I::Claim>, MessagingError>
+where
+    I: InboxStore,
+    R: ExecutionTimer,
+    E: TransactionalMessagingEmitter,
+{
+    let timer = execution.timer;
+    let mut waiting_since = None;
+    let started = &mut waiting_since;
+    let waiting_busy = &mut *known_busy;
+    let emitter = execution.emitter;
+    let permit = within(timer, cutoff, |deadline| async move {
+        match inbox.reserve_claim(binding.execution(), binding.identity(), deadline)? {
+            ClaimAdmission::Ready(permit) => Ok(permit),
+            ClaimAdmission::Waiting(wait) => {
+                *started = Some(timer.now());
+                *waiting_busy = Some(ProcessingDisposition::CapacityBusy);
+                emitter.emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
+                wait.await
+            }
+        }
+    })
+    .await
+    .and_then(std::convert::identity);
+    if let Some(start) = waiting_since {
+        let elapsed = timer.now().saturating_duration_since(start);
+        *capacity_wait = Some(capacity_wait.unwrap_or_default().saturating_add(elapsed));
+    }
+    let permit = permit?;
+    // The timeout-first watchdog may expire after permit transfer but before this poll.
+    within(timer, cutoff, |_| async {
+        *known_busy = None;
+        inbox.claim(permit).await
+    })
+    .await?
+}
+
+struct ClaimBackoff {
+    base: Duration,
+    random: std::hash::RandomState,
+    probe: u64,
+    final_scheduled: bool,
+}
+
+impl ClaimBackoff {
+    const FIRST: Duration = Duration::from_micros(2500);
+    fn new() -> Self {
+        Self {
+            base: Self::FIRST,
+            random: std::hash::RandomState::new(),
+            probe: 0,
+            final_scheduled: false,
+        }
+    }
+
+    fn next(&mut self, hint: Option<Duration>, until_final: Duration) -> Option<Duration> {
+        use std::hash::BuildHasher as _;
+        if self.final_scheduled || until_final.is_zero() {
+            return None;
+        }
+        // One earlier tier for a near expiry; a constantly renewed short lease still backs off.
+        let lower = hint
+            .unwrap_or(self.base)
+            .clamp((self.base / 2).max(Self::FIRST), self.base);
+        self.base = (self.base * 2).min(Duration::from_secs(1));
+        let sample = self.random.hash_one(self.probe);
+        self.probe = self.probe.wrapping_add(1);
+        if until_final <= lower * 2 {
+            // Spend the final probe once and spread its wake before the reserved I/O window.
+            self.final_scheduled = true;
+            return Some(Self::final_delay(hint, until_final, sample));
+        }
+        Some(lower + Duration::from_nanos(sample % (lower.as_nanos() as u64)))
+    }
+
+    fn final_delay(hint: Option<Duration>, latest: Duration, sample: u64) -> Duration {
+        let fallback = (latest / 4).min(Duration::from_millis(250));
+        // If eligibility fits, spend the last probe at or after it. An owner can still
+        // release early, so keep a bounded fallback when eligibility is beyond our cutoff.
+        let width = hint
+            .and_then(|lease| latest.checked_sub(lease))
+            .map_or(fallback, |after_expiry| fallback.min(after_expiry));
+        latest - Duration::from_nanos(sample % (width.as_nanos() as u64 + 1))
+    }
+}
+
+#[cfg(test)]
+mod claim_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn last_probe_keeps_the_available_io_window_once_the_tier_reaches_it() {
+        let mut backoff = ClaimBackoff::new();
+        backoff.base = Duration::from_secs(1);
+        let latest = Duration::from_millis(1250);
+        let final_delay = backoff.next(Some(Duration::from_secs(1)), latest);
+        assert!(
+            matches!(final_delay, Some(delay) if (Duration::from_secs(1)..=latest).contains(&delay))
+        );
+        assert_eq!(backoff.next(None, latest), None);
+    }
+
+    #[test]
+    fn final_jitter_respects_reachable_expiry_at_both_edges() {
+        let latest = Duration::from_millis(850);
+        let hint = Duration::from_millis(800);
+        assert_eq!(
+            ClaimBackoff::final_delay(Some(hint), latest, 50_000_000),
+            hint
+        );
+        assert_eq!(ClaimBackoff::final_delay(Some(hint), latest, 0), latest);
+        assert_eq!(
+            ClaimBackoff::final_delay(Some(latest), latest, u64::MAX),
+            latest
+        );
+        assert_eq!(
+            ClaimBackoff::final_delay(Some(Duration::MAX), latest, 100_000_000),
+            Duration::from_millis(750)
+        );
+    }
+
+    #[test]
+    fn lease_hint_recovers_one_tier_and_jitter_continues_at_the_cap() {
+        for (hint, cap_floor) in [(None, 1000), (Some(Duration::ZERO), 500)] {
+            let mut backoff = ClaimBackoff::new();
+            let mut plateau = Vec::new();
+            for index in 0..24 {
+                let base =
+                    (ClaimBackoff::FIRST * (1u32 << index.min(10))).min(Duration::from_secs(1));
+                let floor = if hint.is_some() {
+                    (base / 2).max(ClaimBackoff::FIRST)
+                } else {
+                    base
+                };
+                let delay = backoff.next(hint, Duration::MAX).unwrap_or_default();
+                assert!((floor..floor * 2).contains(&delay));
+                if index > 10 {
+                    assert!(delay >= Duration::from_millis(cap_floor));
+                    plateau.push(delay);
+                }
+            }
+            assert!(plateau.windows(2).any(|pair| pair[0] != pair[1]));
+        }
+    }
 }
 
 struct AcquiredDelivery<P, S, C> {

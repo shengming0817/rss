@@ -541,7 +541,7 @@ mod consumer {
 
     use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
     use rss_transactional_messaging::inbox::{
-        ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
+        ClaimAdmission, ConsumerIdentity, IdempotencyDisposition, InboxStore, LeaseStatus,
     };
     use rss_transactional_messaging::message::MessageFingerprint;
     use rss_transactional_messaging::policy::OperationDeadline;
@@ -595,23 +595,19 @@ mod consumer {
     #[derive(Clone)]
     pub struct MemoryInboxStore {
         inner: Arc<Mutex<InboxState>>,
+        clock: Arc<dyn rss_request_context::Clock>,
         lease: Duration,
     }
 
-    impl Default for MemoryInboxStore {
-        fn default() -> Self {
+    impl MemoryInboxStore {
+        /// Construct an empty store in the supplied monotonic time domain.
+        #[must_use]
+        pub fn new(clock: impl rss_request_context::Clock + 'static) -> Self {
             Self {
                 inner: Arc::new(Mutex::new(InboxState::default())),
+                clock: Arc::new(clock),
                 lease: Duration::from_secs(30),
             }
-        }
-    }
-
-    impl MemoryInboxStore {
-        /// Construct an empty store.
-        #[must_use]
-        pub fn new() -> Self {
-            Self::default()
         }
 
         /// Persist a terminal receipt as if it committed atomically with a handler effect.
@@ -649,6 +645,13 @@ mod consumer {
         }
     }
 
+    /// A validated in-memory claim reservation tied to the creating store.
+    pub struct MemoryClaimPermit {
+        store: Arc<Mutex<InboxState>>,
+        cutoff: rss_request_context::Deadline,
+        identity: ConsumerIdentity,
+    }
+
     impl InboxStore for MemoryInboxStore {
         #[allow(clippy::expect_used)]
         // reason: this provider's fixed 30-second test lease always admits a renewal schedule.
@@ -658,25 +661,64 @@ mod consumer {
         }
         type Claim = (ConsumerIdentity, u64);
 
-        async fn claim(
+        type Permit = MemoryClaimPermit;
+
+        fn reserve_claim(
             &self,
             binding: rss_transactional_messaging::fence::ExecutionBinding,
             identity: &ConsumerIdentity,
-            _deadline: OperationDeadline,
-        ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+            deadline: OperationDeadline,
+        ) -> Result<ClaimAdmission<'_, Self::Permit>, MessagingError> {
             if binding.tenant() != identity.tenant_id() {
                 return Err(MessagingError::new(
                     MessagingErrorKind::OwnershipLost,
                     std::io::Error::other("fixture execution tenant mismatch"),
                 ));
             }
+            if deadline.timeout().is_zero() {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::DeadlineElapsed,
+                    MemoryConsumerError,
+                ));
+            }
+            let cutoff = rss_request_context::Deadline::from_timeout(
+                self.clock.as_ref(),
+                deadline.timeout(),
+            )
+            .map_err(|error| MessagingError::new(MessagingErrorKind::Invariant, error))?;
+            Ok(ClaimAdmission::Ready(MemoryClaimPermit {
+                cutoff,
+                store: self.inner.clone(),
+                identity: identity.clone(),
+            }))
+        }
+
+        async fn claim(
+            &self,
+            permit: Self::Permit,
+        ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
+            if !Arc::ptr_eq(&permit.store, &self.inner) {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::Invariant,
+                    std::io::Error::other("wrong inbox reservation"),
+                ));
+            }
+            let identity = &permit.identity;
             let key = identity_key(identity);
             let mut state = self
                 .inner
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if permit.cutoff.is_expired(self.clock.now()) {
+                return Err(MessagingError::new(
+                    MessagingErrorKind::DeadlineElapsed,
+                    MemoryConsumerError,
+                ));
+            }
             match state.records.get(&key) {
-                Some(InboxRecord::Claimed { .. }) => Ok(IdempotencyDisposition::InProgress),
+                Some(InboxRecord::Claimed { .. }) => {
+                    Ok(IdempotencyDisposition::InProgress { retry_after: None })
+                }
                 Some(InboxRecord::Terminal {
                     identity,
                     fingerprint,
@@ -883,4 +925,4 @@ mod consumer {
 }
 
 #[cfg(feature = "consumer")]
-pub use consumer::{MemoryInboxStore, RecordingSettlement};
+pub use consumer::{MemoryClaimPermit, MemoryInboxStore, RecordingSettlement};

@@ -172,22 +172,26 @@ async fn consumer(clock: &FakeClock) -> anyhow::Result<()> {
         message.id().clone(),
         message.metadata().contract().clone(),
     );
-    let store = MemoryInboxStore::new();
-    let deadline = OperationDeadline::from_cutoff(
-        Deadline::from_timeout(clock, Duration::from_secs(5))?,
-        clock,
-    );
-    let IdempotencyDisposition::Acquired(claim) =
-        store.claim(binding()?, &identity, deadline).await?
-    else {
+    let store = MemoryInboxStore::new(clock.clone());
+    let cutoff = Deadline::from_timeout(clock, Duration::from_secs(5))?;
+    let remaining = || OperationDeadline::from_cutoff(cutoff, clock);
+    let permit = store
+        .reserve_claim(binding()?, &identity, remaining())?
+        .acquire()
+        .await?;
+    let IdempotencyDisposition::Acquired(claim) = store.claim(permit).await? else {
         anyhow::bail!("initial claim was not acquired")
     };
+    let duplicate = store
+        .reserve_claim(binding()?, &identity, remaining())?
+        .acquire()
+        .await?;
     assert!(matches!(
-        store.claim(binding()?, &identity, deadline).await?,
-        IdempotencyDisposition::InProgress
+        store.claim(duplicate).await?,
+        IdempotencyDisposition::InProgress { .. }
     ));
     store.expire(&identity);
-    assert_eq!(store.extend(&claim, deadline).await?, LeaseStatus::Lost);
+    assert_eq!(store.extend(&claim, remaining()).await?, LeaseStatus::Lost);
     uncertain_consumer(clock, message).await?;
     Ok(())
 }
@@ -269,7 +273,7 @@ async fn uncertain_consumer(
     let transaction = UncertainTx(AtomicUsize::new(0));
     assert_eq!(
         consume_once(
-            &MemoryInboxStore::new(),
+            &MemoryInboxStore::new(clock.clone()),
             &transaction,
             &execution,
             Delivery::new(message, settlement.clone())

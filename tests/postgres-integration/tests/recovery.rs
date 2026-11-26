@@ -106,9 +106,14 @@ async fn capture(
     )?;
     let claim = inbox
         .claim(
-            crate::execution((binding.identity()).tenant_id(), 1),
-            binding.identity(),
-            deadline(),
+            inbox
+                .reserve_claim(
+                    crate::execution((binding.identity()).tenant_id(), 1),
+                    binding.identity(),
+                    deadline(),
+                )?
+                .acquire()
+                .await?,
         )
         .await
         .context("capture inbox claim")?;
@@ -260,9 +265,14 @@ async fn run() -> anyhow::Result<()> {
         matches!(
             inbox
                 .claim(
-                    crate::execution((b.identity()).tenant_id(), 1),
-                    b.identity(),
-                    deadline()
+                    inbox
+                        .reserve_claim(
+                            crate::execution((b.identity()).tenant_id(), 1),
+                            b.identity(),
+                            deadline()
+                        )?
+                        .acquire()
+                        .await?
                 )
                 .await?,
             IdempotencyDisposition::Terminal(_)
@@ -1047,9 +1057,14 @@ async fn capture_failures(runtime: Arc<PgRuntime>, owner: &sqlx::PgPool) -> anyh
         )?;
         let IdempotencyDisposition::Acquired(claim) = inbox
             .claim(
-                crate::execution((binding.identity()).tenant_id(), 1),
-                binding.identity(),
-                deadline(),
+                inbox
+                    .reserve_claim(
+                        crate::execution((binding.identity()).tenant_id(), 1),
+                        binding.identity(),
+                        deadline(),
+                    )?
+                    .acquire()
+                    .await?,
             )
             .await?
         else {
@@ -1533,9 +1548,14 @@ async fn replay_partition_race(
     )?;
     let IdempotencyDisposition::Acquired(claim) = inbox
         .claim(
-            crate::execution((verified.identity()).tenant_id(), 1),
-            verified.identity(),
-            deadline(),
+            inbox
+                .reserve_claim(
+                    crate::execution((verified.identity()).tenant_id(), 1),
+                    verified.identity(),
+                    deadline(),
+                )?
+                .acquire()
+                .await?,
         )
         .await?
     else {
