@@ -271,6 +271,10 @@ async fn required_failures(
             ),
             ("Code: 62. DB::Exception: Syntax error", Error::Unavailable),
             (
+                "Code: 396. DB::Exception: Limit for temporary files size exceeded (would consume 12 / 10 bytes)",
+                Error::BudgetExceeded,
+            ),
+            (
                 "Code: 241. DB::Exception: User memory limit exceeded: would use more",
                 Error::BudgetExceeded,
             ),

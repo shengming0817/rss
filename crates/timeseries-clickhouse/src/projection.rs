@@ -297,7 +297,9 @@ pub(crate) fn read_error(error: clickhouse::error::Error) -> ReadFailure {
                 .strip_prefix("Code: ")
                 .and_then(|s| s.split_once('.'));
             match diagnostic {
-                Some(("158" | "307" | "396", _)) => ReadFailure::Capacity,
+                Some(("158" | "307", _)) => ReadFailure::Capacity,
+                Some(("396", tail)) if tail.starts_with(" DB::Exception: Limit for result exceeded, max ") => ReadFailure::Capacity,
+                Some(("396", _)) => ReadFailure::Other(Error::BudgetExceeded),
                 Some(("241", tail)) if tail.starts_with(" DB::Exception: Query memory limit exceeded:") => ReadFailure::Capacity,
                 Some(("241", _)) => ReadFailure::Other(Error::BudgetExceeded),
                 Some(("159" | "160", _)) => ReadFailure::Other(Error::Deadline),
