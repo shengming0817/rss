@@ -18,12 +18,34 @@ pub(super) async fn run(
             )
             .await?;
     }
+    rejects_invalid_claim_limits(pool).await?;
     schema_rejects_invalid_rows(owner).await?;
     check_definitions(pool, owner, &scope, c).await?;
     catalog_states(pool, owner, &scope, c).await?;
     damaged_row(store, pool, owner, &scope, c).await?;
     exhausted_wake(store, owner, c).await?;
     exhausted_epoch(store, owner, c).await
+}
+
+async fn rejects_invalid_claim_limits(pool: &PgPool) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *tx)
+        .await?;
+    let error = sqlx::query("SELECT * FROM rss_reconcile.claim_due($1::uuid,'limits',$2,$2,60000)")
+        .bind(TENANT)
+        .bind(i32::MAX)
+        .execute(&mut *tx)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("accepted invalid claim limit"))?;
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("P1003")
+    );
+    tx.rollback().await?;
+    Ok(())
 }
 
 async fn snapshot(owner: &PgPool, reconciler: &str) -> anyhow::Result<Vec<String>> {

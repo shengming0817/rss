@@ -37,8 +37,11 @@ def notice_counts(diag, counts):
     for node in nodes(root):
         loops = node.get("Actual Loops", 0)
         if node.get("Relation Name") == "targets" and "Scan" in node["Node Type"]:
-            counts["target_rows_examined"] += loops * sum(node.get(key, 0) for key in
+            examined = loops * sum(node.get(key, 0) for key in
                 ("Actual Rows", "Rows Removed by Filter", "Rows Removed by Index Recheck"))
+            counts["target_rows_examined"] += examined
+            if "LIMIT probe_limit" in sql or "LIMIT page_limit" in sql:
+                counts["candidate_reads"] += examined
         if node["Node Type"] == "LockRows" and "entity=candidate.entity FOR UPDATE NOWAIT" in sql:
             counts["completed_lock_queries"] += loops
             counts["target_locks"] += loops * node["Actual Rows"]
@@ -67,10 +70,12 @@ def seed(admin, future, due, skew=0):
     admin.execute("ANALYZE rss_reconcile.targets")
 
 
-def first(conn, budget=128, pause=0, call=CALL):
+def first(conn, budget=128, pause=0, call=CALL, after_page=None):
     start = time.perf_counter_ns()
     for page in range(1, 10002):
         count, more, entity = conn.execute(call, (TENANT, budget)).fetchone()
+        if after_page is not None:
+            after_page()
         if count or not more:
             return page, entity, (time.perf_counter_ns()-start)//1000
         if pause:
@@ -87,9 +92,15 @@ def observed_first(conn, budget=128):
             notice_counts(diag, counts)
         except (ValueError, KeyError, TypeError) as error:
             errors.append(error)
+    previous = 0
+    def after_page():
+        nonlocal previous
+        current = counts["candidate_reads"]
+        counts["max_page_candidate_reads"] = max(counts["max_page_candidate_reads"], current - previous)
+        previous = current
     conn.add_notice_handler(collect)
     try:
-        pages, entity, _ = first(conn, budget)
+        pages, entity, _ = first(conn, budget, after_page=after_page)
     finally:
         conn.remove_notice_handler(collect)
     if errors:
@@ -104,7 +115,11 @@ def compare(admin, runtime, instrumented, revision, future, due, skew=0):
     assert entity == (str(future+1) if due else None)
     assert counts["nested_sql"] > 0 and counts["buffers"] > 0
     if revision != BASE:
-        assert pages == 1 and counts["completed_lock_queries"] == counts["target_locks"] == int(bool(due))
+        assert counts["completed_lock_queries"] == counts["target_locks"] == int(bool(due))
+        if due <= 2:
+            assert pages == 1
+        elif future >= 10000:
+            assert 0 < counts["max_page_candidate_reads"] <= 132, counts
     elif future == 10000 and due <= 1:
         assert pages == 79 and counts["target_locks"] == future+due
     times = []
@@ -116,7 +131,7 @@ def compare(admin, runtime, instrumented, revision, future, due, skew=0):
     print(f"DUE revision={revision} future={future} eligible={due} skew={skew} pages={pages} "
           f"examined={counts['target_rows_examined']} completed_lock_queries={counts['completed_lock_queries']} "
           f"locked={counts['target_locks']} sql={counts['nested_sql']} buffers={counts['buffers']} "
-          f"median_us={statistics.median(times)}", flush=True)
+          f"max_candidate_reads={counts['max_page_candidate_reads']} median_us={statistics.median(times)}", flush=True)
 
 
 def window_costs(admin, instrumented, revision):
@@ -133,6 +148,47 @@ def window_costs(admin, instrumented, revision):
         if revision != BASE:
             # The large budget and inactive ticket suffix must not force a pass over 10k rows.
             assert counts["target_rows_examined"] < 512, counts
+            if distribution == "past-cursor":
+                pages, entity, suffix = observed_first(instrumented, budget)
+                assert entity is None and pages == (10000-129+budget-1)//budget
+                assert suffix["target_locks"] == 0 and 0 < suffix["max_page_candidate_reads"] <= 132
+                print(f"FUTURE_SUFFIX pages={pages} counts={dict(suffix)}", flush=True)
+
+
+def deep_progress(admin, runtime, instrumented, revision):
+    seed(admin, 0, 500000)
+    admin.execute("UPDATE rss_reconcile.targets SET next_run=now()-interval '1 day'+queue_ticket*interval '1 ms'")
+    admin.execute("ANALYZE rss_reconcile.targets")
+    admin.execute("UPDATE rss_reconcile.scans SET cursor_ticket=450000,high_watermark=500000")
+    runtime.execute("SET statement_timeout='20ms'")
+    try:
+        for ticket in range(450001, 450004):
+            count, more, entity = runtime.execute(CALL, (TENANT, 128)).fetchone()
+            assert (count, more, entity) == (1, True, str(ticket))
+    finally:
+        runtime.execute("RESET statement_timeout")
+    cursor = admin.execute("SELECT cursor_ticket FROM rss_reconcile.scans").fetchone()[0]
+    assert cursor == 450003
+    pages, entity, counts = observed_first(instrumented)
+    assert pages == 1 and entity == "450004"
+    if revision != BASE:
+        assert 0 < counts["max_page_candidate_reads"] <= 132, counts
+    print(f"DEEP revision={revision} timeout_ms=20 cursor={cursor} counts={dict(counts)}", flush=True)
+
+
+def hot_progress(admin, runtime, instrumented):
+    seed(admin, 0, 10001)
+    admin.execute("SELECT setval('rss_reconcile.queue_tickets',10001)")
+    runtime.execute("SELECT rss_reconcile.wake(%s,'holder','holder',ARRAY['hot'])", (TENANT,))
+    runtime.execute("SELECT * FROM rss_reconcile.claim_due(%s,'holder',1,128,600000)", (TENANT,))
+    admin.execute("""INSERT INTO rss_reconcile.target_resources(tenant_id,reconciler,entity,resource)
+        SELECT tenant_id,reconciler,entity,'hot' FROM rss_reconcile.targets
+        WHERE reconciler='profile' AND queue_ticket<=10000""")
+    admin.execute("ANALYZE rss_reconcile.target_resources")
+    pages, entity, counts = observed_first(instrumented)
+    assert (pages, entity) == (79, "10001")
+    assert 0 < counts["max_page_candidate_reads"] <= 132, counts
+    print(f"HOT_WAITERS blocked=10000 first_page={pages} counts={dict(counts)}", flush=True)
 
 
 def renewal(admin, runtime, revision):
@@ -219,8 +275,11 @@ def main():
                     if revision == head:
                         for due in (1, 127, 128, 129, 1024):
                             compare(admin, runtime, instrumented, revision, 10000, due, skew=10000)
+                        compare(admin, runtime, instrumented, revision, 100000, 2)
+                        hot_progress(admin, runtime, instrumented)
                         wake_strategies(admin, runtime)
                     window_costs(admin, instrumented, revision)
+                    deep_progress(admin, runtime, instrumented, revision)
                     renewal(admin, runtime, revision)
 
 
