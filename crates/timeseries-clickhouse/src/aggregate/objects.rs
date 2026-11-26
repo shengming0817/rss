@@ -80,8 +80,11 @@ impl<C: Clock> Operation<'_, C> {
         }
         #[cfg(feature = "integration")]
         crate::measurement::record(|m| {
-            let capacity = objects.values().filter_map(|value| value.as_ref().ok())
-                .map(|row| row.payload.capacity()).sum();
+            let capacity = objects
+                .values()
+                .filter_map(|value| value.as_ref().ok())
+                .map(|row| row.payload.capacity())
+                .sum();
             m.largest_group_bytes = m.largest_group_bytes.max(capacity);
             m.summary_groups += 1;
         });
@@ -158,12 +161,20 @@ impl<'a> Reader<'a> {
             };
             #[cfg(feature = "integration")]
             crate::measurement::record(|m| {
-                let previous = self.objects.0.values().filter_map(|value| value.as_ref().ok())
-                    .map(|row| row.payload.capacity()).sum();
+                let previous = self
+                    .objects
+                    .0
+                    .values()
+                    .filter_map(|value| value.as_ref().ok())
+                    .map(|row| row.payload.capacity())
+                    .sum();
                 m.previous_group_bytes = m.previous_group_bytes.max(previous);
             });
             let read = store.summary_objects(scope, &ids, cutoff);
-            match budget.group(store, cutoff, speculative, ids.len() > 1, true, read).await? {
+            match budget
+                .group(store, cutoff, speculative, ids.len() > 1, true, read)
+                .await?
+            {
                 Group::Required => continue,
                 Group::Smaller => self.max_ids = ids.len().div_ceil(2),
                 Group::Ready(objects) => {
@@ -194,7 +205,9 @@ impl<'a> Reader<'a> {
             row.hi,
             usize::try_from(row.payload_bytes).map_err(|_| Error::Invariant)?,
         );
-        if self.group_left == 0 { self.objects.0.clear(); }
+        if self.group_left == 0 {
+            self.objects.0.clear();
+        }
         value
     }
 

@@ -268,28 +268,68 @@ async fn publication_settles_the_installation_window_at_its_upper_bound() -> any
     assert!(matches!(invalid, Err(sqlx::Error::Database(e)) if e.code().as_deref()==Some("23514")));
     let d = definition(TENANT)?;
     f.register(&d).await?;
-    let head = stream_batch(&d, "head", "head", 1)?;
-    f.store.inject_next_fault(Fault::AfterPrepare);
-    assert!(matches!(f.write(&head).await?, Outcome::Unknown));
-    for n in 2..=16 {
-        let name = format!("stream{n}");
+    let proxy = transport::Proxy::new(&f.ch).await?;
+    let store = proxy.store(f.pool.clone()).await?;
+    let auth = authority(TENANT)?;
+    for slots in [16, 2] {
+        if slots == 2 {
+            sqlx::query("UPDATE rss_ts_ch.installation SET max_pending_batches=2")
+                .execute(&f.admin)
+                .await?;
+        }
+        let head = stream_batch(&d, &format!("head-{slots}"), "head", 1)?;
+        let request = Authorized::<Batch>::verify(&auth, head)?;
+        proxy.arm(4);
+        let began = Timer.now();
+        let mut write = Box::pin(store.write(&request, deadline()?));
+        tokio::select! { r=&mut write => anyhow::bail!("head missed gate: {r:?}"), ready=proxy.wait_held()=>ready?, }
+        let prior:i64 = sqlx::query_scalar("SELECT published FROM rss_ts_ch.namespaces WHERE tenant_id=$1::text::uuid AND namespace='metrics'")
+            .bind(TENANT).fetch_one(&f.admin).await?;
+        let mut verified = Vec::new();
+        for n in 2..=slots {
+            let name = format!("stream{slots}-{n}");
+            let b = stream_batch(&d, &name, &name, n)?;
+            assert!(matches!(f.write(&b).await?, Outcome::Unknown));
+            let when = Timer.now();
+            let lookup = Authorized::<ReceiptQuery>::verify(&auth, receipt_query(&b)?)?;
+            assert_eq!(
+                f.store.progress(&lookup, deadline()?).await?,
+                rss_timeseries_clickhouse::ProjectionProgress::Verified
+            );
+            assert!(matches!(
+                f.store.receipt(&lookup, deadline()?).await?,
+                Lookup::NotVisible
+            ));
+            verified.push((lookup, when));
+        }
+        let blocked = f.write(&stream_batch(&d, "full", "full", 17)?).await;
+        assert!(matches!(blocked, Err(e) if e.downcast_ref::<Error>()==Some(&Error::Unavailable)));
+        let released:i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.batches WHERE phase='verified' AND payload IS NULL AND projection IS NULL")
+            .fetch_one(&f.admin).await?;
+        assert_eq!(released, slots - 1);
+        proxy.release();
+        confirmed(write.await?)?;
+        let published = Timer.now();
+        let watermark:i64 = sqlx::query_scalar("SELECT published FROM rss_ts_ch.namespaces WHERE tenant_id=$1::text::uuid AND namespace='metrics'")
+            .bind(TENANT).fetch_one(&f.admin).await?;
+        assert_eq!(watermark, prior + slots);
+        for (q, at) in verified {
+            assert!(matches!(
+                f.store.receipt(&q, deadline()?).await?,
+                Lookup::Found(_)
+            ));
+            println!(
+                "publication slots={slots} prefix={prior}..{watermark} verified_wait_us={} head_us={}",
+                (published - at).as_micros(),
+                (published - began).as_micros()
+            );
+        }
+        let name = format!("stream{slots}-{slots}");
         assert!(matches!(
-            f.write(&stream_batch(&d, &name, &name, n)?).await?,
-            Outcome::Unknown
+            f.write(&stream_batch(&d, &name, &name, slots)?).await?,
+            Outcome::Replay(_)
         ));
     }
-    let blocked = f.write(&stream_batch(&d, "full", "full", 17)?).await;
-    assert!(matches!(blocked, Err(e) if e.downcast_ref::<Error>()==Some(&Error::Unavailable)));
-    let released: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.batches WHERE phase='verified' AND payload IS NULL AND projection IS NULL").fetch_one(&f.admin).await?;
-    assert_eq!(released, 15);
-    confirmed(f.write(&head).await?)?;
-    let published: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM rss_ts_ch.batches WHERE phase='published'")
-            .fetch_one(&f.admin)
-            .await?;
-    assert_eq!(published, 16);
-    let last = stream_batch(&d, "stream16", "stream16", 16)?;
-    assert!(matches!(f.write(&last).await?, Outcome::Replay(_)));
     Ok(())
 }
 

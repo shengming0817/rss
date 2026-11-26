@@ -274,7 +274,9 @@ pub(crate) enum ReadFailure {
 }
 
 impl From<Error> for ReadFailure {
-    fn from(error: Error) -> Self { Self::Other(error) }
+    fn from(error: Error) -> Self {
+        Self::Other(error)
+    }
 }
 impl From<ReadFailure> for Error {
     fn from(failure: ReadFailure) -> Self {
@@ -291,13 +293,19 @@ pub(crate) fn read_error(error: clickhouse::error::Error) -> ReadFailure {
     match error {
         ChError::TimedOut => ReadFailure::Other(Error::Deadline),
         ChError::BadResponse(message) => {
-            let diagnostic = message.strip_prefix("Code: ").and_then(|s| s.split_once('.'));
+            let diagnostic = message
+                .strip_prefix("Code: ")
+                .and_then(|s| s.split_once('.'));
             match diagnostic {
                 Some(("158" | "241" | "307" | "396", _)) => ReadFailure::Capacity,
                 Some(("159" | "160", _)) => ReadFailure::Other(Error::Deadline),
                 // ClickHouse uses SYNTAX_ERROR for *all* parser errors. Only this
                 // lexical diagnostic can be remedied by shortening a generated IN list.
-                Some(("62", tail)) if tail.starts_with(" DB::Exception: Max query size exceeded:") => ReadFailure::QueryLength,
+                Some(("62", tail))
+                    if tail.starts_with(" DB::Exception: Max query size exceeded:") =>
+                {
+                    ReadFailure::QueryLength
+                }
                 _ => ReadFailure::Other(Error::Unavailable),
             }
         }
@@ -307,6 +315,65 @@ pub(crate) fn read_error(error: clickhouse::error::Error) -> ReadFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "isolated release-mode canonical reconstruction allocation count"]
+    fn raw_reconstruction_allocations() -> anyhow::Result<()> {
+        use rss_request_context::TenantId;
+        use std::hint::black_box;
+        let scope = Scope::new(
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+            Id::new("metrics")?,
+        );
+        for width in [0, 64] {
+            let dims = (0..width)
+                .map(|n| Ok((Id::new(format!("dim-{n}"))?, Id::new("value")?)))
+                .collect::<Result<std::collections::BTreeMap<_, _>, Error>>()?;
+            let definition = Definition::new(DefinitionSpec {
+                scope: scope.clone(),
+                key: Id::new("temperature")?,
+                version: 1,
+                unit: Id::new("unit")?,
+                metric: Metric::Gauge {
+                    number: NumberKind::U64,
+                },
+                dimensions: DimensionRules {
+                    allowed: dims.keys().cloned().collect(),
+                    required: Default::default(),
+                    max_count: width,
+                    max_value_bytes: 256,
+                    max_total_bytes: 32768,
+                },
+            })?;
+            let sample = Sample::new(SampleInput {
+                stream: Stream::new(scope.clone(), Id::new("source")?, Id::new("gen")?),
+                series: Series::new(definition, Id::new("device")?, Id::new("resource")?, dims)?,
+                id: Id::new("point")?,
+                sequence: 1,
+                observed_at: Timestamp::new(1)?,
+                interval: None,
+                reading: Reading::Valid(Value::Number(Number::U64(1))),
+            })?;
+            let raw = Raw::new(&sample, 2, 1)?;
+            assert_eq!(raw.sample()?, sample);
+            let rebuild = allocation_counter::measure(|| {
+                drop(black_box(Raw::new(black_box(&sample), 2, 1)));
+            });
+            let full = allocation_counter::measure(|| {
+                drop(black_box(black_box(&raw).sample()));
+            });
+            println!(
+                "RAW_ALLOC dims={width} json={} rebuild_allocs={} rebuild_bytes={} full_allocs={} full_bytes={} peak_bytes={}",
+                raw.payload.len(),
+                rebuild.count_total,
+                rebuild.bytes_total,
+                full.count_total,
+                full.bytes_total,
+                full.bytes_max
+            );
+            assert!(full.count_total >= rebuild.count_total && rebuild.count_total > 0);
+        }
+        Ok(())
+    }
     #[test]
     fn reads_classify_budgets_and_time_without_exposing_provider_text() {
         for (code, expected) in [
@@ -327,7 +394,9 @@ mod tests {
         }
         for message in ["private Code: 158.", "Code: 158x.", "Code: 158"] {
             assert_eq!(
-                Error::from(read_error(clickhouse::error::Error::BadResponse(message.into()))),
+                Error::from(read_error(clickhouse::error::Error::BadResponse(
+                    message.into()
+                ))),
                 Error::Unavailable
             );
         }

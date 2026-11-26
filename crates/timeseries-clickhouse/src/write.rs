@@ -184,7 +184,8 @@ impl<C: Clock> Operation<'_, C> {
         let has_fences = control::fence_count(c, scope, self.limits.max_fences.get()).await? > 0;
         #[cfg(feature = "integration")]
         crate::measurement::record(|m| {
-            m.fence_input_bytes += scope.tenant().to_string().len() + scope.namespace().as_str().len() + 8;
+            m.fence_input_bytes +=
+                scope.tenant().to_string().len() + scope.namespace().as_str().len() + 8;
             m.fence_bytes += 8;
         });
         let received = now(c).await?;

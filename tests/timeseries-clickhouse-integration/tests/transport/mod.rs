@@ -355,10 +355,14 @@ async fn serve(
     let reads_page = reads_summary
         || sql.contains("FROM rss_ts_ch.raw FINAL")
         || body_sql.contains("FROM rss_ts_ch.raw FINAL");
-    if reads_page && let Some((message, width)) = *state.failure.lock().await
-        && width.is_none_or(|width| wide_read(&sql, width) || wide_read(&body_sql, width)) {
+    if reads_page
+        && let Some((message, width)) = *state.failure.lock().await
+        && width.is_none_or(|width| wide_read(&sql, width) || wide_read(&body_sql, width))
+    {
         state.slow_reads.fetch_add(1, Ordering::SeqCst);
-        return Response::builder().status(500).body(Full::new(Bytes::from_static(message.as_bytes())))
+        return Response::builder()
+            .status(500)
+            .body(Full::new(Bytes::from_static(message.as_bytes())))
             .map_err(std::io::Error::other);
     }
     if reads_raw {

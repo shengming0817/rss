@@ -56,8 +56,16 @@ async fn invalidation_targets(
     max: u32,
 ) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
     let selection = String::from_utf8(bytes(selection)?).map_err(|_| Error::Invariant)?;
-    let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND dependency_start<$6 AND dirty_from IS DISTINCT FROM 0 AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
-        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(window.start().micros()).bind(i64::from(max)+1).bind(selection).bind(window.end().micros()).fetch_all(c).await.map_err(sql_error)?;
+    let rows = sqlx::query(include_str!("invalidation_targets.sql"))
+        .bind(s.tenant().to_string())
+        .bind(s.namespace().as_str())
+        .bind(window.start().micros())
+        .bind(i64::from(max) + 1)
+        .bind(selection)
+        .bind(window.end().micros())
+        .fetch_all(c)
+        .await
+        .map_err(sql_error)?;
     #[cfg(feature = "integration")]
     crate::measurement::record(|m| m.candidates += rows.len());
     if rows.len() > max as usize {
@@ -79,7 +87,11 @@ pub(crate) struct Fence {
     pub until: Option<i64>,
     pub restored: bool,
 }
-pub(crate) async fn fence_count(c: &mut PgConnection, scope: &Scope, max: u32) -> Result<i64, Error> {
+pub(crate) async fn fence_count(
+    c: &mut PgConnection,
+    scope: &Scope,
+    max: u32,
+) -> Result<i64, Error> {
     let count:i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 LIMIT $3) bounded")
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(i64::from(max)+1).fetch_one(&mut *c).await.map_err(sql_error)?;
     if count > i64::from(max) {

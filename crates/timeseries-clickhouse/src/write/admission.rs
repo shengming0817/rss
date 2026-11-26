@@ -47,7 +47,7 @@ pub(super) async fn admit(
     let mut new_ids = Vec::new();
     let mut digests = Vec::new();
     let mut frontiers = BTreeMap::new();
-    for (position,sample) in batch.samples().iter().enumerate() {
+    for (position, sample) in batch.samples().iter().enumerate() {
         let input = sample.input();
         let digest = sample.digest()?;
         if let Some(old) = existing.get(input.id.as_str()) {
@@ -108,7 +108,11 @@ pub(super) async fn admit(
     Ok(rows)
 }
 
-async fn blocked_sample(c: &mut PgConnection, batch: &Batch, existing: &HashMap<String,Vec<u8>>) -> Result<Option<usize>,Error> {
+async fn blocked_sample(
+    c: &mut PgConnection,
+    batch: &Batch,
+    existing: &HashMap<String, Vec<u8>>,
+) -> Result<Option<usize>, Error> {
     #[cfg(feature = "integration")]
     let started = crate::measurement::cpu_start();
     let stream = batch.stream();
@@ -121,9 +125,11 @@ async fn blocked_sample(c: &mut PgConnection, batch: &Batch, existing: &HashMap<
     let mut times = Vec::new();
     let mut positions = Vec::new();
     let mut previous = None;
-    for (pos,sample) in batch.samples().iter().enumerate() {
+    for (pos, sample) in batch.samples().iter().enumerate() {
         let input = sample.input();
-        if existing.contains_key(input.id.as_str()) { continue; }
+        if existing.contains_key(input.id.as_str()) {
+            continue;
+        }
         if previous != Some(&input.series) {
             series.push(serde_json::to_string(&input.series).map_err(|_| Error::Invariant)?);
             previous = Some(&input.series);
@@ -135,21 +141,38 @@ async fn blocked_sample(c: &mut PgConnection, batch: &Batch, existing: &HashMap<
     #[cfg(feature = "integration")]
     crate::measurement::record(|m| {
         // Binary bind field payloads: 20-byte array header, 4-byte element length.
-        m.fence_input_bytes += tenant.len()+namespace.len()+stream.len()+80
-            +series.iter().map(|s| 4+s.len()).sum::<usize>()+28*positions.len();
+        m.fence_input_bytes += tenant.len()
+            + namespace.len()
+            + stream.len()
+            + 80
+            + series.iter().map(|s| 4 + s.len()).sum::<usize>()
+            + 28 * positions.len();
         m.build_cpu += crate::measurement::elapsed(started);
     });
-    let witness: Option<(i32,String,i64,i64)> = sqlx::query_as(include_str!("blocked_sample.sql"))
-        .bind(tenant).bind(namespace).bind(stream).bind(series).bind(serials).bind(times).bind(positions)
-        .fetch_optional(c).await.map_err(sql_error)?;
-    let Some((pos, doc, lo, hi)) = witness else { return Ok(None); };
+    let witness: Option<(i32, String, i64, i64)> =
+        sqlx::query_as(include_str!("blocked_sample.sql"))
+            .bind(tenant)
+            .bind(namespace)
+            .bind(stream)
+            .bind(series)
+            .bind(serials)
+            .bind(times)
+            .bind(positions)
+            .fetch_optional(c)
+            .await
+            .map_err(sql_error)?;
+    let Some((pos, doc, lo, hi)) = witness else {
+        return Ok(None);
+    };
     #[cfg(feature = "integration")]
     let started = crate::measurement::cpu_start();
     let position = usize::try_from(pos).map_err(|_| Error::Invariant)?;
     let sample = batch.samples().get(position).ok_or(Error::Invariant)?;
     let selection: Selection = crate::transaction::decode(doc.as_bytes())?;
     let at = sample.input().observed_at.micros();
-    if !selection.matches(sample) || !(lo..hi).contains(&at) { return Err(Error::Invariant); }
+    if !selection.matches(sample) || !(lo..hi).contains(&at) {
+        return Err(Error::Invariant);
+    }
     #[cfg(feature = "integration")]
     crate::measurement::record(|m| {
         m.fence_bytes += 20 + doc.len();

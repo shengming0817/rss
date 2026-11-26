@@ -141,27 +141,33 @@ async fn byte_limit_applies_with_free_slots_and_close_wakes_waiters() -> anyhow:
     pending(second.as_mut()).await?;
     assert_eq!(f.store.available_preparation(), one);
     assert_eq!(f.store.preparation_phases(), phases);
-    let small = Authorized::<Batch>::verify(&authority(TENANT)?,batch("bypass",vec![sample(&d,"bypass",1,1)?])?)?;
-    let mut bypass = Box::pin(f.store.write(&small,deadline()?));
+    let small = Authorized::<Batch>::verify(
+        &authority(TENANT)?,
+        batch("bypass", vec![sample(&d, "bypass", 1, 1)?])?,
+    )?;
+    let mut bypass = Box::pin(f.store.write(&small, deadline()?));
     pending(bypass.as_mut()).await?;
     assert_eq!(f.store.available_preparation().0, one.0 - 1);
     drop(bypass);
-    let mut third = Box::pin(f.store.write(&small,deadline()?));
+    let mut third = Box::pin(f.store.write(&small, deadline()?));
     pending(third.as_mut()).await?;
-    assert_eq!(f.store.available_preparation(),one);
+    assert_eq!(f.store.available_preparation(), one);
     drop(second);
     // Cancelling the head grants the waiting successor before it is polled.
     assert_eq!(f.store.available_preparation().0, one.0 - 1);
     drop(third);
-    assert_eq!(f.store.available_preparation(),one);
-    let mut expiring = Box::pin(f.store.write(&req,Deadline::from_timeout(&Timer,Duration::from_secs(1))?));
+    assert_eq!(f.store.available_preparation(), one);
+    let mut expiring = Box::pin(f.store.write(
+        &req,
+        Deadline::from_timeout(&Timer, Duration::from_secs(1))?,
+    ));
     pending(expiring.as_mut()).await?;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(2)).await;
-    assert_eq!(expiring.await.err(),Some(Error::Deadline));
+    assert_eq!(expiring.await.err(), Some(Error::Deadline));
     tokio::time::resume();
-    assert_eq!(f.store.available_preparation(),one);
-    let mut second = Box::pin(f.store.write(&req,deadline()?));
+    assert_eq!(f.store.available_preparation(), one);
+    let mut second = Box::pin(f.store.write(&req, deadline()?));
     pending(second.as_mut()).await?;
     let mut closing = Box::pin(f.store.close(deadline()?));
     pending(closing.as_mut()).await?;

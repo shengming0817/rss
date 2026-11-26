@@ -383,18 +383,35 @@ fn lookahead(
 }
 // Only range-dependent capacity errors authorize another split. Optional work
 // is paid for once across cached/raw runs and PG revalidation of the page.
-enum Group<T> { Ready(T), Required, Smaller }
+enum Group<T> {
+    Ready(T),
+    Required,
+    Smaller,
+}
 impl ReadBudget {
     async fn group<T, C: Clock>(
-        &mut self, store: &Operation<'_, C>, cutoff: Deadline, speculative: bool,
-        splittable: bool, shorter_sql: bool, read: impl Future<Output=Result<T, ReadFailure>>,
+        &mut self,
+        store: &Operation<'_, C>,
+        cutoff: Deadline,
+        speculative: bool,
+        splittable: bool,
+        shorter_sql: bool,
+        read: impl Future<Output = Result<T, ReadFailure>>,
     ) -> Result<Group<T>, Error> {
-        let result = store.bounded(cutoff, async { Ok(read.await) }).await
-            .map_err(ReadFailure::from).and_then(|result| result);
+        let result = store
+            .bounded(cutoff, async { Ok(read.await) })
+            .await
+            .map_err(ReadFailure::from)
+            .and_then(|result| result);
         match result {
             Ok(value) => Ok(Group::Ready(value)),
-            Err(failure) if splittable && (failure == ReadFailure::Capacity
-                    || shorter_sql && failure == ReadFailure::QueryLength) => Ok(Group::Smaller),
+            Err(failure)
+                if splittable
+                    && (failure == ReadFailure::Capacity
+                        || shorter_sql && failure == ReadFailure::QueryLength) =>
+            {
+                Ok(Group::Smaller)
+            }
             Err(_) if speculative => {
                 self.prefetch_until = None;
                 Ok(Group::Required)

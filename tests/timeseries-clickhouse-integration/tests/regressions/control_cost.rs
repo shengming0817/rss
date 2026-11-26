@@ -129,6 +129,40 @@ async fn fixed_admission() -> anyhow::Result<()> {
             print_write("early", related, noise, c);
         }
     }
+    frontiers(&f, &d, 1, 64, false).await?;
+    let samples = (0..Batch::MAX_SAMPLES)
+        .map(|n| sample(&d, &format!("capacity-{n}"), 1000, 1))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let b = batch("capacity", samples)?;
+    let (result, c) = measure(thread_cpu, f.write(&b)).await;
+    assert_eq!(
+        confirmed(result?)?.new_samples() as usize,
+        Batch::MAX_SAMPLES
+    );
+    assert!(c.fence_rows == 0);
+    print_write("max-samples", 1, 64, c);
+    let mut tx = f.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *tx)
+        .await?;
+    let plan = concat!(
+        "EXPLAIN (ANALYZE, BUFFERS) ",
+        include_str!("../../../../crates/timeseries-clickhouse/src/write/blocked_sample.sql")
+    );
+    let count = b.samples().len();
+    let lines: Vec<String> = sqlx::query_scalar(plan)
+        .bind(TENANT)
+        .bind("metrics")
+        .bind(serde_json::to_string(b.stream())?)
+        .bind(vec![serde_json::to_string(&b.samples()[0].input().series)?])
+        .bind(vec![1i32; count])
+        .bind(vec![1000i64; count])
+        .bind((0..i32::try_from(count)?).collect::<Vec<_>>())
+        .fetch_all(&mut *tx)
+        .await?;
+    println!("write-plan samples={count} {}", lines.join("\n"));
+    tx.rollback().await?;
     same_resource_cost(&f, &d).await?;
     Ok(())
 }
@@ -291,6 +325,27 @@ async fn invalidation_load(noise: usize) -> anyhow::Result<()> {
         )
         .await?;
     }
+    f.maintain("plan-clean", cache.clone()).await?;
+    let mut tx = f.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *tx)
+        .await?;
+    let plan = concat!(
+        "EXPLAIN (ANALYZE, BUFFERS) ",
+        include_str!("../../../../crates/timeseries-clickhouse/src/invalidation_targets.sql")
+    );
+    let lines: Vec<String> = sqlx::query_scalar(plan)
+        .bind(TENANT)
+        .bind("metrics")
+        .bind(0i64)
+        .bind(101i64)
+        .bind(serde_json::to_string(&spec.selection())?)
+        .bind(10i64)
+        .fetch_all(&mut *tx)
+        .await?;
+    println!("maint-plan noise={noise} {}", lines.join("\n"));
+    tx.rollback().await?;
     for hits in [0, 1, 8] {
         let tag = format!("{noise}-{hits}");
         f.maintain(&format!("clean-{tag}"), cache.clone()).await?;

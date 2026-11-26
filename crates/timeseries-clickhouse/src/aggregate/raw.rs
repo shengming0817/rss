@@ -76,7 +76,10 @@ impl<'a> Run<'a> {
                 budget.deadline
             };
             let read = self.fetch(store, window.start(), end, cutoff);
-            match budget.group(store, cutoff, speculative, count > 1, false, read).await? {
+            match budget
+                .group(store, cutoff, speculative, count > 1, false, read)
+                .await?
+            {
                 Group::Required => continue,
                 Group::Smaller => self.max_buckets = count.div_ceil(2),
                 Group::Ready(rows) => break (rows, end),

@@ -255,14 +255,25 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     Ok(())
 }
 
-async fn required_failures(proxy: &transport::Proxy, store: &OwnedStore, fine: &SummarySpec) -> anyhow::Result<()> {
+async fn required_failures(
+    proxy: &transport::Proxy,
+    store: &OwnedStore,
+    fine: &SummarySpec,
+) -> anyhow::Result<()> {
     for limit in [4, 128] {
-        let query = aggregate(fine, window(0,1280)?, limit, AggregateOp::Sum)?;
-        for message in ["service unavailable", "Code: 60. DB::Exception: UNKNOWN_TABLE",
-                        "Code: 497. DB::Exception: ACCESS_DENIED", "Code: 62. DB::Exception: Syntax error"] {
-            proxy.fail_reads(Some((message,None))).await;
-            assert_eq!(store.aggregate(&query,None,deadline()?).await.err(),Some(Error::Unavailable));
-            assert_eq!(proxy.slow_reads(),1,"{message} width {limit}");
+        let query = aggregate(fine, window(0, 1280)?, limit, AggregateOp::Sum)?;
+        for message in [
+            "service unavailable",
+            "Code: 60. DB::Exception: UNKNOWN_TABLE",
+            "Code: 497. DB::Exception: ACCESS_DENIED",
+            "Code: 62. DB::Exception: Syntax error",
+        ] {
+            proxy.fail_reads(Some((message, None))).await;
+            assert_eq!(
+                store.aggregate(&query, None, deadline()?).await.err(),
+                Some(Error::Unavailable)
+            );
+            assert_eq!(proxy.slow_reads(), 1, "{message} width {limit}");
         }
     }
     proxy.fail_reads(None).await;
@@ -306,9 +317,11 @@ async fn sparse_state_reads(
             "twelve sparse minute buckets should batch: {requests}"
         );
         assert_eq!(serde_json::to_value(page.buckets)?, expected);
-        proxy.fail_reads(Some(("service unavailable", Some(MINUTE as u64)))).await;
+        proxy
+            .fail_reads(Some(("service unavailable", Some(MINUTE as u64))))
+            .await;
         let recovered = store.aggregate(&all, None, deadline()?).await?;
-        assert_eq!(proxy.slow_reads(),1,"{label} optional failure");
+        assert_eq!(proxy.slow_reads(), 1, "{label} optional failure");
         assert_eq!(serde_json::to_value(recovered.buckets)?, expected);
         proxy.fail_reads(None).await;
         proxy.delay_wide_reads(MINUTE as u64);
@@ -506,10 +519,19 @@ async fn bounded_groups_isolate_dense_buckets_and_release_a_cancelled_reader() -
     // The first SELECT reached CH; the caller must release the sole permit on drop.
     assert_eq!(proxy.take_page_reads().await.len(), 1);
     let wire = proxy.wire_bytes();
-    let (resumed, m) = rss_timeseries_clickhouse::measurement::measure(|| Duration::ZERO,
-        tight.aggregate(&all, None, deadline()?)).await;
+    let (resumed, m) = rss_timeseries_clickhouse::measurement::measure(
+        || Duration::ZERO,
+        tight.aggregate(&all, None, deadline()?),
+    )
+    .await;
     let resumed = resumed?;
-    eprintln!("group-handoff groups={} previous_bytes={} largest_bytes={} http_bytes={}", m.summary_groups, m.previous_group_bytes, m.largest_group_bytes, proxy.wire_bytes()-wire);
+    eprintln!(
+        "group-handoff groups={} previous_bytes={} largest_bytes={} http_bytes={}",
+        m.summary_groups,
+        m.previous_group_bytes,
+        m.largest_group_bytes,
+        proxy.wire_bytes() - wire
+    );
     assert_eq!(m.previous_group_bytes, 0);
     assert!(m.summary_groups > 1 && m.largest_group_bytes >= largest as usize);
     assert_eq!(serde_json::to_value(resumed.buckets)?, expected);
