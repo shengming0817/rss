@@ -1,7 +1,7 @@
 -- Fresh installation by a dedicated NOSUPERUSER NOBYPASSRLS owner.
 -- ref: tokio-rs/tokio tokio/src/sync/batch_semaphore.rs@tokio-1.48.0 (old waiter first).
 CREATE SCHEMA rss_reconcile;
-COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:3';
+COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:4';
 
 CREATE TABLE rss_reconcile.targets (
     tenant_id uuid NOT NULL,
@@ -71,6 +71,7 @@ CREATE TABLE rss_reconcile.scans (
  reconciler text NOT NULL CHECK(reconciler ~ '^[A-Za-z0-9_.:-]{1,255}$'),
  cursor_ticket bigint NOT NULL DEFAULT 0 CHECK(cursor_ticket>=0),
  high_watermark bigint NOT NULL DEFAULT 0 CHECK(high_watermark>=cursor_ticket),
+ locked_hint_through bigint NOT NULL DEFAULT 0 CHECK(locked_hint_through BETWEEN 0 AND high_watermark),
  PRIMARY KEY(tenant_id,reconciler)
 );
 
@@ -200,6 +201,7 @@ BEGIN
  IF scan.cursor_ticket>=scan.high_watermark THEN
   SELECT coalesce(max(queue_ticket),0) INTO scan.high_watermark FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL;
   scan.cursor_ticket:=0;
+  scan.locked_hint_through:=0;
  END IF;
  -- Only a complete scope sample can skip ticket ranges. Reserve a lookahead
  -- for more and a sentinel to distinguish a complete sample from a truncated one.
@@ -234,16 +236,22 @@ BEGIN
    -- This ticket moved the cursor. Use its free lock attempt for a due ticket
    -- ahead of it without declaring the intervening tickets visited.
    IF NOT hints_prepared THEN
-    -- A registered waiter gets its next resource check on the ordinary ticket
-    -- stream. Filter only the bounded sample, once on the first borrowed slot.
+    -- Check only the bounded remote sample. A durable wait suppresses a
+    -- hint while its blocker still exists; release or expiry can reopen it.
     SELECT array_agg(s.entity ORDER BY s.ticket),array_agg(s.ticket ORDER BY s.ticket)
      INTO sampled_entities,sampled_tickets
      FROM unnest(sampled_entities,sampled_tickets) AS s(entity,ticket)
-     WHERE s.ticket>scan.cursor_ticket AND s.ticket<=scan.high_watermark AND (
-      -- Registration sets the same ticket on every declaration atomically.
-      SELECT d.waiting_ticket FROM rss_reconcile.target_resources d
-      WHERE d.tenant_id=t AND d.reconciler=r AND d.entity=s.entity ORDER BY d.resource LIMIT 1
-     ) IS DISTINCT FROM s.ticket;
+     WHERE s.ticket>greatest(scan.cursor_ticket,scan.locked_hint_through) AND s.ticket<=scan.high_watermark
+      AND NOT EXISTS(
+       SELECT FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r
+        AND d.entity=s.entity AND d.waiting_ticket=s.ticket AND (
+         EXISTS(SELECT FROM rss_reconcile.target_resources w WHERE w.tenant_id=d.tenant_id
+          AND w.resource=d.resource AND w.waiting_ticket<d.waiting_ticket)
+         OR EXISTS(SELECT FROM rss_reconcile.resources o JOIN rss_reconcile.targets holder
+          ON (holder.tenant_id,holder.reconciler,holder.entity)=(o.tenant_id,o.owner_reconciler,o.owner_entity)
+          WHERE o.tenant_id=d.tenant_id AND o.resource=d.resource AND holder.token=o.owner_token
+           AND holder.epoch=o.owner_epoch AND holder.lease_until>cutoff)
+        ));
     hints_prepared:=true;
    END IF;
    WHILE sampled_tickets[next_sample]<=scan.cursor_ticket LOOP
@@ -288,15 +296,21 @@ BEGIN
    UPDATE rss_reconcile.resources o SET owner_reconciler=r,owner_entity=row.entity,owner_token=row.token,owner_epoch=row.epoch
     FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r AND d.entity=row.entity AND (o.tenant_id,o.resource)=(d.tenant_id,d.resource);
    claims:=array_append(claims,row);
-  EXCEPTION WHEN lock_not_available THEN NULL; -- An unacquired candidate consumes no execution slot.
+  EXCEPTION WHEN lock_not_available THEN
+   -- Unlike a logical waiter, NOWAIT cannot record anything on the target.
+   -- Hints are ordered; the normal ticket stream can still revisit this prefix.
+   IF NOT candidate.eligible THEN scan.locked_hint_through:=candidate.queue_ticket; END IF;
   END;
  END LOOP;
  CLOSE page;
- IF NOT more THEN scan.cursor_ticket:=scan.high_watermark; END IF;
+ IF NOT more THEN
+  scan.cursor_ticket:=scan.high_watermark;
+  scan.locked_hint_through:=0;
+ END IF;
  -- Locks remain necessary; only a changed durable scan position needs a new tuple version.
- UPDATE rss_reconcile.scans AS persisted SET cursor_ticket=scan.cursor_ticket,high_watermark=scan.high_watermark
+ UPDATE rss_reconcile.scans AS persisted SET cursor_ticket=scan.cursor_ticket,high_watermark=scan.high_watermark,locked_hint_through=scan.locked_hint_through
  WHERE persisted.tenant_id=t AND persisted.reconciler=r
-  AND (persisted.cursor_ticket,persisted.high_watermark) IS DISTINCT FROM (scan.cursor_ticket,scan.high_watermark);
+  AND (persisted.cursor_ticket,persisted.high_watermark,persisted.locked_hint_through) IS DISTINCT FROM (scan.cursor_ticket,scan.high_watermark,scan.locked_hint_through);
  RETURN NEXT;
 END $$;
 

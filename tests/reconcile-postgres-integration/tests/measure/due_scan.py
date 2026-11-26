@@ -83,7 +83,7 @@ def first(conn, budget=128, pause=0, call=CALL, after_page=None, limit=1):
     raise RuntimeError("round failed to terminate")
 
 
-def observed_first(conn, budget=128, limit=1):
+def observed_first(conn, budget=128, limit=1, call=CALL):
     counts = Counter()
     errors = []
     def collect(diag):
@@ -100,7 +100,7 @@ def observed_first(conn, budget=128, limit=1):
         previous = current
     conn.add_notice_handler(collect)
     try:
-        pages, entity, _, returned = first(conn, budget, after_page=after_page, limit=limit)
+        pages, entity, _, returned = first(conn, budget, after_page=after_page, limit=limit, call=call)
         counts["returned"] = returned
     finally:
         conn.remove_notice_handler(collect)
@@ -196,8 +196,7 @@ def hot_progress(admin, runtime, instrumented):
     print(f"HOT_WAITERS blocked=10000 first_page={pages} counts={dict(counts)}", flush=True)
 
 
-def blocked_remote_sample(admin, runtime, instrumented, revision):
-    future = 100000
+def mixed_queue(admin, runtime, future):
     seed(admin, future, 4)
     admin.execute("SELECT setval('rss_reconcile.queue_tickets',%s)", (future + 4,))
     runtime.execute("SELECT rss_reconcile.wake(%s,'holder','holder',ARRAY['hot'])", (TENANT,))
@@ -206,15 +205,55 @@ def blocked_remote_sample(admin, runtime, instrumented, revision):
     admin.execute("""INSERT INTO rss_reconcile.target_resources(tenant_id,reconciler,entity,resource)
         SELECT tenant_id,reconciler,entity,'hot' FROM rss_reconcile.targets
         WHERE reconciler='profile' AND queue_ticket>%s""", (future + 1,))
-    pages, entity, counts = observed_first(instrumented)
-    assert (pages, entity) == (future // 128 + 1, str(future + 1))
-    assert counts["target_locks"] == (1 if revision == BASE else 4), counts
-    print(f"MIXED revision={revision} pages={pages} first={entity} locks={counts['target_locks']} "
-          f"candidates={counts['candidate_reads']} peak={counts['max_page_candidate_reads']}", flush=True)
+
+
+def release_holder(runtime):
     runtime.execute("""SELECT rss_reconcile.release(tenant_id,reconciler,entity,token,epoch)
         FROM rss_reconcile.targets WHERE tenant_id=%s AND reconciler='holder'""", (TENANT,))
-    # The regular stream must recheck a registered waiter when it reaches the ticket.
-    assert first(runtime)[1] == str(future + 2)
+
+
+def blocked_remote_sample(admin, runtime, instrumented, revision):
+    future = 100000
+    for blocker in ("lease", "protect", "target"):
+        mixed_queue(admin, runtime, future)
+        with admin.transaction():
+            if blocker == "protect":
+                assert admin.execute("""SELECT rss_reconcile.lock_execution(tenant_id,reconciler,entity,token,epoch,binding_revision)
+                    FROM rss_reconcile.targets WHERE tenant_id=%s AND reconciler='holder'""", (TENANT,)).fetchone()[0]
+            if blocker == "target":
+                admin.execute("""SELECT FROM rss_reconcile.targets WHERE tenant_id=%s AND reconciler='profile'
+                    AND queue_ticket>%s FOR UPDATE""", (TENANT, future + 1))
+            if revision == BASE:
+                pages, entity, counts = observed_first(instrumented)
+            else:
+                before = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0]
+                pages, entity, counts = observed_first(instrumented, call=CALL.replace("rss_reconcile.claim_due", "lock_probe.claim_due"))
+                attempted = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0] - before
+                assert attempted == 4, (blocker, attempted)
+            assert (pages, entity) == (future // 128 + 1, str(future + 1))
+            assert counts["target_locks"] == (1 if revision == BASE or blocker == "target" else 4), counts
+            print(f"MIXED revision={revision} blocker={blocker} pages={pages} first={entity} "
+                  f"locks={counts['target_locks']} candidates={counts['candidate_reads']} peak={counts['max_page_candidate_reads']}", flush=True)
+        release_holder(runtime)
+        # The ordinary stream rechecks both registered waiters and suppressed NOWAIT hints.
+        assert first(runtime)[1] == str(future + 2)
+
+
+def early_unblock(admin, runtime):
+    future = 100000
+    for unblock in ("release", "expiry"):
+        mixed_queue(admin, runtime, future)
+        assert runtime.execute(CALL, (TENANT, 1, 128)).fetchone() == (0, True, None)
+        registered = admin.execute("""SELECT count(*) FROM rss_reconcile.target_resources WHERE tenant_id=%s
+            AND reconciler='profile' AND waiting_ticket IS NOT NULL""", (TENANT,)).fetchone()[0]
+        assert registered == 3
+        if unblock == "release":
+            release_holder(runtime)
+        else:
+            admin.execute("UPDATE rss_reconcile.targets SET lease_until=now()-interval '1 second' WHERE tenant_id=%s AND reconciler='holder'", (TENANT,))
+        pages, entity, _, count = first(runtime)
+        assert (pages, entity, count) == (1, str(future + 2), 1)
+        print(f"UNBLOCK mode={unblock} pages={pages} first={entity} registered={registered}", flush=True)
 
 
 def renewal(admin, runtime, revision):
@@ -317,6 +356,7 @@ def main():
                         compare(admin, runtime, instrumented, revision, 100000, 2)
                         hot_progress(admin, runtime, instrumented)
                         wake_strategies(admin, runtime)
+                        early_unblock(admin, runtime)
                     blocked_remote_sample(admin, runtime, instrumented, revision)
                     window_costs(admin, instrumented, revision)
                     deep_progress(admin, runtime, instrumented, revision)
