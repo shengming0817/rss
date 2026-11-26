@@ -661,9 +661,27 @@ ALTER FUNCTION rss_transactional_messaging.outbox_candidates(uuid,text,timestamp
 -- Metadata is capped before generation/DR filtering and before source row locking.
 -- The old exact wakeup helper remains separate: a hint never advances the claim cursor.
 CREATE FUNCTION rss_transactional_messaging.outbox_claim_window(p_tenant uuid,p_domain text,p_at timestamptz,p_seq bigint,p_lane integer,p_through timestamptz,p_take integer)
-RETURNS TABLE(source_seq bigint,dr_operation uuid,eligible_at timestamptz,lane integer,runnable boolean)
+RETURNS TABLE(source_seq bigint,dr_operation uuid,eligible_at timestamptz,lane integer,runnable boolean,historical_due boolean)
 LANGUAGE sql STABLE AS $f$
- WITH current_dr AS MATERIALIZED (
+ -- Seek the first retry time of each lease generation by the generation/retry index.
+ -- Stop on proof of due history. The fifth distinct generation is lookahead: when
+ -- inconclusive, the normal bounded cursor inspects headers with conservative pacing.
+ WITH RECURSIVE leases AS NOT MATERIALIZED (
+  SELECT claim_epoch,claim_lineage,retry_after FROM rss_transactional_messaging.outbox
+  WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='publishing'
+ ), binding AS (
+  SELECT nullif(current_setting('rss.execution_epoch',true),'')::bigint AS epoch,decode(current_setting('rss.storage_lineage',true),'hex') AS lineage
+ ), generations(epoch,lineage,first_retry,step) AS (
+  (SELECT claim_epoch,claim_lineage,retry_after,1 FROM leases ORDER BY claim_epoch,claim_lineage,retry_after LIMIT 1)
+  UNION ALL
+  SELECT g.*,p.step+1 FROM generations p CROSS JOIN binding b CROSS JOIN LATERAL (
+   SELECT claim_epoch,claim_lineage,retry_after FROM leases WHERE (claim_epoch,claim_lineage)>(p.epoch,p.lineage)
+   ORDER BY claim_epoch,claim_lineage,retry_after LIMIT 1
+  ) g WHERE p.step<5 AND ((p.epoch,p.lineage)=(b.epoch,b.lineage) OR p.first_retry>p_through)
+ ), history AS MATERIALIZED (
+  SELECT coalesce(bool_or((g.epoch,g.lineage)<>(b.epoch,b.lineage) AND g.first_retry<=p_through),false) AS due,
+         count(*)=5 AS uncertain FROM generations g CROSS JOIN binding b
+ ), current_dr AS MATERIALIZED (
   SELECT d.*,src.partition_key,src.partition_seq FROM rss_transactional_messaging.dr_plans p
   JOIN rss_transactional_messaging.dr_members d USING(tenant_id,operation_id)
   JOIN rss_transactional_messaging.outbox src ON src.seq=d.outbox_seq AND src.tenant_id=d.tenant_id
@@ -692,16 +710,7 @@ LANGUAGE sql STABLE AS $f$
     (claim_epoch,claim_lineage) IS DISTINCT FROM (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex')),partition_key,partition_seq
    FROM rss_transactional_messaging.outbox
    WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='publishing'
-    -- A publishing head has non-null generation keys. Two index range seeks can
-    -- rule out the whole historical lane without walking current leases in retry order.
-    AND (EXISTS (SELECT FROM rss_transactional_messaging.outbox g
-      WHERE g.tenant_id=p_tenant AND g.domain=p_domain AND (g.partition_head OR g.partition_key IS NULL)
-       AND g.status='publishing' AND (g.claim_epoch,g.claim_lineage) <
-        (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex')))
-     OR EXISTS (SELECT FROM rss_transactional_messaging.outbox g
-      WHERE g.tenant_id=p_tenant AND g.domain=p_domain AND (g.partition_head OR g.partition_key IS NULL)
-       AND g.status='publishing' AND (g.claim_epoch,g.claim_lineage) >
-        (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex'))))
+    AND (SELECT due OR uncertain FROM history)
     AND (retry_after,seq)>(p_at,CASE WHEN p_lane<2 AND p_seq>0 THEN p_seq-1 ELSE p_seq END)
     AND retry_after<=p_through ORDER BY retry_after,seq LIMIT p_take)
   UNION ALL
@@ -717,7 +726,7 @@ LANGUAGE sql STABLE AS $f$
  ), scan_window AS MATERIALIZED (SELECT * FROM heads ORDER BY at,seq,lane LIMIT p_take)
  SELECT w.seq,w.op,w.at,w.lane,w.runnable AND (w.op IS NOT NULL OR NOT EXISTS(
   SELECT FROM current_dr d
-  WHERE d.outbox_seq=w.seq OR (d.partition_key=w.partition_key AND d.partition_seq<w.partition_seq)))
+  WHERE d.outbox_seq=w.seq OR (d.partition_key=w.partition_key AND d.partition_seq<w.partition_seq))), (SELECT due FROM history)
  FROM scan_window w ORDER BY w.at,w.seq,w.lane
 $f$;
 ALTER FUNCTION rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer) OWNER TO rss_tmsg_relay;
@@ -727,7 +736,7 @@ RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_ke
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
  progress outbox_scan; frontier outbox_scan; examined integer:=0;
- owns_progress boolean; had_cursor boolean; resumed boolean; exhausted boolean:=false; action text:='complete';
+ owns_progress boolean; had_cursor boolean; resumed boolean; exhausted boolean:=false; contested boolean:=false; historical_due boolean:=false; action text:='complete';
  scan_limit integer:=greatest(64,least(p_limit::bigint*4,1024))::integer;
  candidates NO SCROLL CURSOR FOR
   SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit) ORDER BY source_seq,lane;
@@ -753,21 +762,21 @@ BEGIN
   EXIT WHEN used>=p_limit OR examined>=scan_limit;
   FETCH NEXT FROM candidates INTO r;
   IF NOT FOUND THEN exhausted:=true; EXIT; END IF;
-  examined:=examined+1;
+  examined:=examined+1; historical_due:=r.historical_due;
   IF (r.eligible_at,r.source_seq,r.lane)>(frontier.eligible_at,frontier.source_seq,frontier.lane) THEN
    frontier.eligible_at:=r.eligible_at; frontier.source_seq:=r.source_seq; frontier.lane:=r.lane;
   END IF;
   IF NOT r.runnable THEN CONTINUE; END IF;
   SELECT * INTO o FROM outbox src WHERE src.seq=r.source_seq AND src.tenant_id=p_tenant
    AND src.domain=p_domain FOR UPDATE SKIP LOCKED;
-  IF NOT FOUND THEN CONTINUE; END IF;
+  IF NOT FOUND THEN contested:=true; CONTINUE; END IF;
   n:=clock_timestamp();
   IF r.dr_operation IS NULL THEN
-   IF NOT (o.status='pending' OR (o.status='publishing' AND (o.lease_until<=n OR o.claim_epoch<>e OR o.claim_lineage IS DISTINCT FROM l))) OR o.retry_after>n OR NOT (o.partition_head OR o.partition_key IS NULL) THEN CONTINUE; END IF;
+   IF NOT (o.status='pending' OR (o.status='publishing' AND (o.lease_until<=n OR o.claim_epoch<>e OR o.claim_lineage IS DISTINCT FROM l))) OR o.retry_after>n OR NOT (o.partition_head OR o.partition_key IS NULL) THEN contested:=true; CONTINUE; END IF;
    UPDATE outbox src SET status='publishing',lease_token=gen_random_uuid(),lease_until=n+(p_ttl_ms::text || ' milliseconds')::interval,automatic_retry_deadline=COALESCE(src.automatic_retry_deadline,n+interval '24 hours') WHERE src.seq=o.seq RETURNING * INTO o;
   ELSE
    SELECT * INTO m FROM dr_members x WHERE x.tenant_id=p_tenant AND x.operation_id=r.dr_operation AND x.outbox_seq=o.seq FOR UPDATE SKIP LOCKED;
-   IF NOT FOUND OR NOT (m.status='pending' OR (m.status='publishing' AND m.lease_until<=n)) OR m.retry_after>n THEN CONTINUE; END IF;
+   IF NOT FOUND OR NOT (m.status='pending' OR (m.status='publishing' AND m.lease_until<=n)) OR m.retry_after>n THEN contested:=true; CONTINUE; END IF;
    IF o.automatic_retry_deadline IS NULL OR o.automatic_retry_deadline<=n THEN
     UPDATE dr_members x SET status='blocked',block_reason='deadline_expired',lease_token=NULL,lease_until=NULL WHERE x.tenant_id=p_tenant AND x.operation_id=r.dr_operation AND x.outbox_seq=o.seq; CONTINUE;
    END IF;
@@ -787,9 +796,9 @@ BEGIN
   exhausted:=NOT FOUND;
  END IF;
  CLOSE candidates;
- IF used>=p_limit OR (owns_progress AND examined=scan_limit) THEN
+ IF used>=p_limit OR (owns_progress AND examined=scan_limit AND (used>0 OR contested OR historical_due)) THEN
   action:='continue';
- ELSIF NOT owns_progress OR (used=0 AND (examined>0 OR resumed)) THEN
+ ELSIF NOT owns_progress OR (used=0 AND (contested OR resumed OR NOT exhausted)) THEN
   action:='retry_later';
  END IF;
  PERFORM set_config('rss.outbox_scan_progress',action,true);

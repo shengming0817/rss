@@ -576,14 +576,16 @@ its default remains 64 and it does not alter request authorization or digest ide
 
 A claim examines at most `max(64, min(4 * limit, 1024))` admitted candidate headers.
 Each indexed lane reads at most the remaining budget before the merged window is capped;
-the current DR plan has its separate 1024-member bound. Two generation-index range seeks skip the historical lease lane when all leases are current.
+the current DR plan has its separate 1024-member bound. Generation-index seeks check the earliest retry time in up to five distinct generations.
+A current generation or a future retry cannot prove historical work is due. An inconclusive
+lookahead falls back to the bounded header window with paced retries.
 Each sweep binds its execution epoch, lineage and upper eligibility time. A new generation starts a fresh sweep. A full window advances the tenant/domain cursor.
 A capacity stop preserves the window entrance because source lock order can differ from eligibility
 order. Reaching the end clears the cursor so the next sweep can revisit skipped heads.
 Cursor contention permits opportunistic source claims with `SKIP LOCKED`. Partition order
 and DR barriers remain authoritative.
 
-An empty `Continue` batch indicates committed forward progress. The default worker runs up to
+An empty `Continue` batch indicates committed forward progress past lock contention or toward time-eligible historical work. The default worker runs up to
 eight of these scans before a 100ms pause. An empty `RetryLater` requests a short pause after
 contention or a fruitless sweep. `Complete` permits the normal idle interval. Caller-driven relay
 and local Projection expose this action before the batch is consumed. A Projection batch

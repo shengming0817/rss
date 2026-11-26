@@ -180,12 +180,16 @@ pub async fn run(
         status(&store3, &p).await?,
         vec![MemberStatus::Blocked(BlockReason::PermanentPublishFailure)]
     );
-    assert!(
-        outbox4
+    for _ in 0..3 {
+        let idle = outbox4
             .claim_partition_heads(binding(4)?, two, deadline())
-            .await?
-            .is_empty()
-    );
+            .await?;
+        assert!(idle.is_empty());
+        assert_eq!(
+            idle.scan_progress(),
+            rss_transactional_messaging::outbox::OutboxScanProgress::Complete
+        );
+    }
     let blocked = outbox4.next_wakeup(binding(4)?, deadline()).await?;
     assert!(
         !blocked.due_now() && blocked.next_deadline().is_none(),

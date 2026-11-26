@@ -154,9 +154,10 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     scale::explain(f, "10,000 live leases in the current generation").await?;
     let original = snapshot(f).await?;
     current_generation(f, &store).await?;
-    mixed_generation(f, &store).await?;
+    mixed_generation(f, store.clone()).await?;
+    late_generation(f, &store).await?;
     assert_eq!(snapshot(f).await?, original);
-    sqlx::query("DELETE FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'live-prefix-%' OR message_id LIKE 'eligible-tail-%' OR message_id='future-history-0'").execute(&f.owner).await?;
+    sqlx::query("DELETE FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'live-prefix-%' OR message_id LIKE 'eligible-tail-%' OR message_id LIKE 'future-history-%'").execute(&f.owner).await?;
     Ok(())
 }
 
@@ -182,11 +183,60 @@ async fn all_leased(f: &Fixture, store: Arc<PgOutboxStore<()>>) -> anyhow::Resul
     idle_worker(store).await
 }
 
-async fn mixed_generation(f: &Fixture, store: &PgOutboxStore<()>) -> anyhow::Result<()> {
+async fn mixed_generation(f: &Fixture, store: Arc<PgOutboxStore<()>>) -> anyhow::Result<()> {
     append(f, "future-history", 0, 1).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 hour',retry_after=clock_timestamp()+interval '1 day' WHERE message_id='future-history-0'").execute(&f.owner).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET claim_lineage=decode(repeat('03',16),'hex') WHERE message_id='future-history-0'").execute(&f.owner).await?;
     reset_tail(f).await?;
+    tail(&store, &[(1, 32), (2, 32), (3, 1)], 65).await?;
+    idle_worker(store.clone()).await?;
+    scale::explain(f, "empty mixed generation with a future retry").await?;
+    reset_tail(f).await?;
+    // A genuinely due historical source after the live prefix, held by another
+    // transaction, keeps the bounded scan active while the 65 unlocked items drain.
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=statement_timestamp()-interval '1 hour' WHERE message_id='future-history-0'").execute(&f.owner).await?;
+    let mut source_lock = f.owner.begin().await?;
+    sqlx::query("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id='future-history-0' FOR UPDATE").execute(&mut *source_lock).await?;
+    contended_progress(f, &store).await?;
+    tail(&store, &[(79, 32), (80, 32), (81, 1)], 65).await?;
+    source_lock.rollback().await?;
+    Ok(())
+}
+
+// More distinct generations than the fixed index-probe budget. A due generation
+// outside the probe must still be discovered; speculative empty pages are paced.
+async fn late_generation(f: &Fixture, store: &PgOutboxStore<()>) -> anyhow::Result<()> {
+    append(f, "future-history", 1, 7).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=statement_timestamp()+interval '1 hour',retry_after=statement_timestamp()+interval '1 day',automatic_retry_deadline=statement_timestamp()+interval '1 day' WHERE message_id LIKE 'future-history-%'").execute(&f.owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET claim_epoch=2+split_part(message_id,'-',3)::bigint, retry_after=CASE WHEN message_id='future-history-6' THEN statement_timestamp()-interval '1 minute' ELSE retry_after END WHERE message_id LIKE 'future-history-%'").execute(&f.owner).await?;
+    for call in 1..=81 {
+        let batch = store
+            .claim_partition_heads(
+                crate::execution(tenant(), 1),
+                32usize.try_into()?,
+                deadline(),
+            )
+            .await?;
+        if batch.is_empty() {
+            assert_eq!(batch.scan_progress(), OutboxScanProgress::RetryLater);
+        } else {
+            assert!(call > 1);
+            assert_eq!(batch.len(), 1);
+            let claim = batch
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("missing historical claim"))?;
+            assert_eq!(
+                PgOutboxStore::<()>::message(&claim).message_id().as_str(),
+                "future-history-6"
+            );
+            return Ok(());
+        }
+    }
+    anyhow::bail!("historical head beyond the generation probe was starved")
+}
+
+async fn contended_progress(f: &Fixture, store: &PgOutboxStore<()>) -> anyhow::Result<()> {
     let mut held = f.raw_worker.begin().await?;
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended('rss-tmsg-claim:'||$1||':orders',0))",
@@ -204,7 +254,7 @@ async fn mixed_generation(f: &Fixture, store: &PgOutboxStore<()>) -> anyhow::Res
     assert!(blocked.is_empty());
     assert_eq!(blocked.scan_progress(), OutboxScanProgress::RetryLater);
     held.rollback().await?;
-    tail(store, &[(79, 32), (80, 32), (81, 1)], 65).await?;
+
     Ok(())
 }
 
