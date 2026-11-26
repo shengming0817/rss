@@ -1,6 +1,6 @@
 //! Fixed release-mode workload. Run with the testkit launcher, --ignored and --nocapture.
 use super::*;
-use rss_timeseries_clickhouse::measurement::{Counters, measure};
+use rss_timeseries_clickhouse::measurement::measure;
 use rustix::time::{ClockId, clock_gettime};
 
 fn thread_cpu() -> Duration {
@@ -106,7 +106,7 @@ async fn fixed_admission() -> anyhow::Result<()> {
             let b = batch("early", vec![sample(&d, "blocked", 1000, 1)?])?;
             let (result, c) = measure(thread_cpu, f.write(&b)).await;
             assert!(matches!(
-                result.unwrap_err().downcast_ref::<Error>(),
+                result.err().and_then(|e| e.downcast::<Error>().ok()),
                 Some(Error::HistoryExpired)
             ));
             print_write("early", related, noise, c);
