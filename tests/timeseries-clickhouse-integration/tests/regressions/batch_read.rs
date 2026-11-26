@@ -485,7 +485,12 @@ async fn bounded_groups_isolate_dense_buckets_and_release_a_cancelled_reader() -
     drop(read);
     // The first SELECT reached CH; the caller must release the sole permit on drop.
     assert_eq!(proxy.take_page_reads().await.len(), 1);
-    let resumed = tight.aggregate(&all, None, deadline()?).await?;
+    let wire = proxy.wire_bytes();
+    let (resumed, m) = rss_timeseries_clickhouse::measurement::measure(|| Duration::ZERO,
+        tight.aggregate(&all, None, deadline()?)).await;
+    let resumed = resumed?;
+    eprintln!("group-handoff groups={} previous_bytes={} largest_bytes={} http_bytes={}", m.summary_groups, m.previous_group_bytes, m.largest_group_bytes, proxy.wire_bytes()-wire);
+    assert!(m.summary_groups > 1 && m.largest_group_bytes >= largest as usize);
     assert_eq!(serde_json::to_value(resumed.buckets)?, expected);
     let reads = proxy.take_page_reads().await;
     assert!(reads.len() > 1 && reads.iter().all(|(_, summary)| *summary));

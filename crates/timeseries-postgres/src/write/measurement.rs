@@ -74,3 +74,21 @@ impl<'q, T: Encode<'q, Postgres>> Encode<'q, Postgres> for Observed<'_, T> {
         Ok(result)
     }
 }
+
+/// Number of preparation futures currently inside the encoding phase.
+pub(super) struct Encoding(Session);
+impl Encoding {
+    pub(super) fn enter() -> Self {
+        let session = Session::current();
+        session.update(|r| {
+            r.encoders += 1;
+            r.peak_encoders = r.peak_encoders.max(r.encoders);
+        });
+        Self(session)
+    }
+}
+impl Drop for Encoding {
+    fn drop(&mut self) {
+        self.0.update(|r| r.encoders -= 1);
+    }
+}

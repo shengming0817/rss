@@ -57,17 +57,24 @@ impl Capacity {
             .acquire_owned()
             .await
             .map_err(|_| Error::Unavailable)?;
+        #[cfg(feature = "integration")]
+        rss_timeseries::measurement::record("slot_wait", start, 0, 0);
+        #[cfg(feature = "integration")]
+        let byte_start = rss_timeseries::measurement::timer();
         let bytes = self
             .bytes
             .clone()
-            .acquire_many_owned(weight)
-            .await
+            .acquire_many_owned(weight);
+        #[cfg(feature = "integration")]
+        let bytes = observe_wait(bytes);
+        let bytes = bytes.await
             .map_err(|_| Error::Unavailable)?;
         #[cfg(feature = "integration")]
         let session = rss_timeseries::measurement::Session::detailed();
         #[cfg(feature = "integration")]
         {
-            rss_timeseries::measurement::record("permit_wait", start, 0, 0);
+            rss_timeseries::measurement::record("byte_wait", byte_start, 0, 0);
+            rss_timeseries::measurement::record("permit_wait", start, weight as usize, 0);
             session.update(|r| {
                 r.reserved_bytes += weight as usize;
                 r.peak_reserved_bytes = r.peak_reserved_bytes.max(r.reserved_bytes);
@@ -93,4 +100,29 @@ impl Capacity {
             self.bytes.available_permits(),
         )
     }
+}
+
+#[cfg(feature = "integration")]
+async fn observe_wait<T>(future: impl Future<Output = T>) -> T {
+    use rss_timeseries::measurement::Session;
+    struct Waiting(Session);
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            self.0.update(|r| r.slots_waiting_bytes -= 1);
+        }
+    }
+    let mut future = std::pin::pin!(future);
+    let mut waiting = None;
+    std::future::poll_fn(|cx| {
+        let state = future.as_mut().poll(cx);
+        if state.is_pending() && waiting.is_none() {
+            let session = Session::current();
+            session.update(|r| {
+                r.slots_waiting_bytes += 1;
+                r.peak_slots_waiting_bytes = r.peak_slots_waiting_bytes.max(r.slots_waiting_bytes);
+            });
+            waiting = Some(Waiting(session));
+        }
+        state
+    }).await
 }

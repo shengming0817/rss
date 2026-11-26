@@ -3,6 +3,9 @@ use std::{cell::Cell, future::Future, time::Duration};
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Counters {
+    pub previous_group_bytes: usize,
+    pub largest_group_bytes: usize,
+    pub summary_groups: usize,
     pub fence_rows: usize,
     pub fence_bytes: usize,
     pub build_cpu: Duration,

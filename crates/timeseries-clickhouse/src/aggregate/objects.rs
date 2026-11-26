@@ -78,6 +78,13 @@ impl<C: Clock> Operation<'_, C> {
                 }
             }
         }
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| {
+            let capacity = objects.values().filter_map(|value| value.as_ref().ok())
+                .map(|row| row.payload.capacity()).sum();
+            m.largest_group_bytes = m.largest_group_bytes.max(capacity);
+            m.summary_groups += 1;
+        });
         Ok(Objects(objects))
     }
 }
@@ -149,6 +156,12 @@ impl<'a> Reader<'a> {
             } else {
                 budget.deadline
             };
+            #[cfg(feature = "integration")]
+            crate::measurement::record(|m| {
+                let previous = self.objects.0.values().filter_map(|value| value.as_ref().ok())
+                    .map(|row| row.payload.capacity()).sum();
+                m.previous_group_bytes = m.previous_group_bytes.max(previous);
+            });
             let read = store.summary_objects(scope, &ids, cutoff);
             match store.bounded(cutoff, read).await {
                 Err(Error::Deadline) if speculative => budget.prefetch_until = None,
