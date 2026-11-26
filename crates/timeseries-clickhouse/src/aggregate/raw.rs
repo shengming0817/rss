@@ -36,7 +36,7 @@ impl<'a> Run<'a> {
         start: Timestamp,
         end: Timestamp,
         cutoff: Deadline,
-    ) -> Result<Vec<ReadRow>, Error> {
+    ) -> Result<Vec<ReadRow>, ReadFailure> {
         let condition = format!(
             "{} AND revision<={} AND observed_at>={} AND observed_at<{}{}",
             selection(&self.spec.selection())?,
@@ -76,12 +76,10 @@ impl<'a> Run<'a> {
                 budget.deadline
             };
             let read = self.fetch(store, window.start(), end, cutoff);
-            match store.bounded(cutoff, read).await {
-                Err(Error::Deadline) if speculative => budget.prefetch_until = None,
-                Err(e) if count > 1 && !matches!(e, Error::Unauthorized | Error::Deadline) => {
-                    self.max_buckets = count.div_ceil(2);
-                }
-                result => break (result?, end),
+            match budget.group(store, cutoff, speculative, count > 1, false, read).await? {
+                Group::Required => continue,
+                Group::Smaller => self.max_buckets = count.div_ceil(2),
+                Group::Ready(rows) => break (rows, end),
             }
         };
         if rows.len() > store.limits.max_points.get() as usize {

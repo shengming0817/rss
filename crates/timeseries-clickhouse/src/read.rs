@@ -3,7 +3,7 @@ use crate::{
     control::{self, Fence},
     cursor::Position,
     page::{Dependencies, ReadBudget, Recheck, Request, View},
-    projection::{RAW_FIELDS, Raw, hex, literal},
+    projection::{RAW_FIELDS, Raw, ReadFailure, hex, literal},
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
@@ -92,7 +92,7 @@ impl<C: Clock> Operation<'_, C> {
         order: &str,
         limit: u32,
         deadline: Deadline,
-    ) -> Result<Vec<ReadRow>, Error> {
+    ) -> Result<Vec<ReadRow>, ReadFailure> {
         let sql = format!(
             "SELECT {RAW_FIELDS} FROM rss_ts_ch.raw FINAL WHERE {condition} ORDER BY {order} LIMIT {}",
             u64::from(limit) + 1
@@ -104,7 +104,7 @@ impl<C: Clock> Operation<'_, C> {
         sql: &str,
         limit: u32,
         deadline: Deadline,
-    ) -> Result<Vec<ReadRow>, Error> {
+    ) -> Result<Vec<ReadRow>, ReadFailure> {
         let mut cursor = self
             .ch_query(self.reader.query_raw(sql), deadline)?
             .fetch::<Raw>()
@@ -114,9 +114,9 @@ impl<C: Clock> Operation<'_, C> {
         while let Some(row) = cursor.next().await.map_err(crate::projection::read_error)? {
             size = size
                 .checked_add(row.payload.len())
-                .ok_or(Error::BudgetExceeded)?;
+                .ok_or(ReadFailure::Capacity)?;
             if size > self.limits.max_bytes.get() as usize || rows.len() > limit as usize {
-                return Err(Error::BudgetExceeded);
+                return Err(ReadFailure::Capacity);
             }
             rows.push(ReadRow {
                 revision: row.revision,

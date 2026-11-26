@@ -47,7 +47,7 @@ impl<C: Clock> Operation<'_, C> {
         scope: &Scope,
         ids: &[&str],
         deadline: Deadline,
-    ) -> Result<Objects, Error> {
+    ) -> Result<Objects, ReadFailure> {
         let ids = ids
             .iter()
             .map(|id| literal(id))
@@ -69,7 +69,7 @@ impl<C: Clock> Operation<'_, C> {
                 Entry::Vacant(slot) => {
                     size += row.payload.len() as u64;
                     if size > u64::from(self.limits.max_bytes.get()) {
-                        return Err(Error::BudgetExceeded);
+                        return Err(ReadFailure::Capacity);
                     }
                     slot.insert(Ok(row));
                 }
@@ -163,13 +163,11 @@ impl<'a> Reader<'a> {
                 m.previous_group_bytes = m.previous_group_bytes.max(previous);
             });
             let read = store.summary_objects(scope, &ids, cutoff);
-            match store.bounded(cutoff, read).await {
-                Err(Error::Deadline) if speculative => budget.prefetch_until = None,
-                Err(Error::BudgetExceeded | Error::Unavailable) if ids.len() > 1 => {
-                    self.max_ids = ids.len().div_ceil(2);
-                }
-                result => {
-                    self.objects = result?;
+            match budget.group(store, cutoff, speculative, ids.len() > 1, true, read).await? {
+                Group::Required => continue,
+                Group::Smaller => self.max_ids = ids.len().div_ceil(2),
+                Group::Ready(objects) => {
+                    self.objects = objects;
                     self.group_left = count;
                     return Ok(());
                 }
@@ -190,12 +188,14 @@ impl<'a> Reader<'a> {
         }
         self.group_left -= 1;
         self.remaining = &self.remaining[1..];
-        self.objects.value(
+        let value = self.objects.value(
             &row.object_id,
             row.lo,
             row.hi,
             usize::try_from(row.payload_bytes).map_err(|_| Error::Invariant)?,
-        )
+        );
+        if self.group_left == 0 { self.objects.0.clear(); }
+        value
     }
 
     pub(super) async fn merge<C: Clock>(

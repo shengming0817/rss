@@ -25,6 +25,7 @@ struct State {
     wire_bytes: Arc<AtomicU64>,
     page_reads: Mutex<Vec<(String, bool)>>,
     hold_sql: Mutex<Option<String>>,
+    failure: Mutex<Option<(&'static str, Option<u64>)>>,
     bucket_width: AtomicU64,
     slow_reads: AtomicUsize,
     mode: AtomicU8,

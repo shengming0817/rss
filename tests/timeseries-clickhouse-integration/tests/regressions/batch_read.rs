@@ -490,6 +490,7 @@ async fn bounded_groups_isolate_dense_buckets_and_release_a_cancelled_reader() -
         tight.aggregate(&all, None, deadline()?)).await;
     let resumed = resumed?;
     eprintln!("group-handoff groups={} previous_bytes={} largest_bytes={} http_bytes={}", m.summary_groups, m.previous_group_bytes, m.largest_group_bytes, proxy.wire_bytes()-wire);
+    assert_eq!(m.previous_group_bytes, 0);
     assert!(m.summary_groups > 1 && m.largest_group_bytes >= largest as usize);
     assert_eq!(serde_json::to_value(resumed.buckets)?, expected);
     let reads = proxy.take_page_reads().await;
