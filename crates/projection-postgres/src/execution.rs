@@ -322,7 +322,11 @@ async fn apply_event<H: PgEffect>(
     if duplicate {
         return Ok(ApplyOutcome::Duplicate);
     }
-    match effect.apply(tx, &claim.scope, event).await.map_err(|error| error.0)? {
+    match effect
+        .apply(tx, &claim.scope, event)
+        .await
+        .map_err(|error| error.0)?
+    {
         PgEffectOutcome::Applied => Ok(ApplyOutcome::Applied),
         PgEffectOutcome::Filtered => Ok(ApplyOutcome::Filtered),
     }
