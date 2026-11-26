@@ -724,21 +724,20 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
         &budget_cancel,
     );
     let tenant = rss_request_context::TenantId::parse(TENANT)?;
-    let grant = rss_observation::JournalReadGrant::verify(&Trusted, tenant)?;
-    let wrong =
-        rss_projection::SourceScope::new(rss_request_context::TenantId::parse(OTHER)?, "rebuilt")?;
-    assert!(
-        matches!(rss_observation_postgres::PgSource::new(input.store.clone(), grant, wrong, rss_observation::Batch::MAX_ENCODED_BYTES), Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
-    );
-    assert!(matches!(
-        rss_observation_postgres::PgSource::new(
-            input.store.clone(),
-            rss_observation::JournalReadGrant::verify(&Trusted, tenant)?,
-            rss_projection::SourceScope::new(tenant, "rebuilt")?,
-            rss_observation::Batch::MAX_ENCODED_BYTES - 1,
-        ),
-        Err(e) if e.kind() == rss_observation::ErrorKind::InvalidInput
-    ));
+    let max = rss_observation::Batch::MAX_ENCODED_BYTES;
+    for (scope_tenant, budget, expected) in [
+        (OTHER, max, rss_observation::ErrorKind::Unauthorized),
+        (TENANT, max - 1, rss_observation::ErrorKind::InvalidInput),
+    ] {
+        let scope = rss_projection::SourceScope::new(
+            rss_request_context::TenantId::parse(scope_tenant)?,
+            "rebuilt",
+        )?;
+        let grant = rss_observation::JournalReadGrant::verify(&Trusted, tenant)?;
+        let result =
+            rss_observation_postgres::PgSource::new(input.store.clone(), grant, scope, budget);
+        assert_eq!(result.err().map(|e| e.kind()), Some(expected));
+    }
     let rebuilt = rss_observation_postgres::PgSource::new(
         input.store.clone(),
         rss_observation::JournalReadGrant::verify(&Trusted, tenant)?,

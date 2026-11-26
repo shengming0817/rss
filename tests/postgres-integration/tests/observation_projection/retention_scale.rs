@@ -95,7 +95,8 @@ async fn bounded_candidate_scan() -> anyhow::Result<()> {
 #[tokio::test]
 async fn retention_window_cost() -> anyhow::Result<()> {
     use rss_observation::{Id, LookupOutcome, ObservationStore, ReadGrant};
-    use std::time::Instant;
+    use rss_projection::Timer as _;
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
 
     let f = Fixture::new().await?;
     let store = f.store().await?;
@@ -130,7 +131,8 @@ async fn retention_window_cost() -> anyhow::Result<()> {
             .bind(invalid)
             .execute(&mut *tx)
             .await
-            .unwrap_err();
+            .err()
+            .context("maintenance accepted an invalid SQL window")?;
         assert_eq!(
             error.as_database_error().and_then(|e| e.code()).as_deref(),
             Some("OB005")
@@ -151,10 +153,10 @@ async fn retention_window_cost() -> anyhow::Result<()> {
             // full maintenance transaction. Roll back so the API times its own work.
             let id = Id::new(start.to_string())?;
             let lookup = || async {
-                let timer = Instant::now();
+                let started = clock.now();
                 let outcome = store.lookup(&read, &id, deadline()).await?;
                 assert!(matches!(outcome, LookupOutcome::Found(_)));
-                Ok::<_, anyhow::Error>(timer.elapsed().as_micros())
+                Ok::<_, anyhow::Error>((clock.now() - started).as_micros())
             };
             let receive = async |seq: u64| -> anyhow::Result<u128> {
                 let input = batch(
@@ -164,10 +166,10 @@ async fn retention_window_cost() -> anyhow::Result<()> {
                     "all",
                     Body::Snapshot(vec![]),
                 )?;
-                let timer = Instant::now();
+                let started = clock.now();
                 let outcome = store.receive(&input, deadline()).await?;
                 assert!(outcome.record().decision().outcome().is_applicable());
-                Ok(timer.elapsed().as_micros())
+                Ok((clock.now() - started).as_micros())
             };
             let baseline = lookup().await?;
             let write_baseline = receive(0).await?;
@@ -194,11 +196,11 @@ async fn retention_window_cost() -> anyhow::Result<()> {
                 "retention_foreground operation=lookup candidates={count} baseline_us={baseline} concurrent_us={concurrent}"
             );
         }
-        let timer = Instant::now();
+        let started = clock.now();
         let page = maint.reclaim(grant()?, window, deadline()).await?;
         println!(
             "retention_cost limit={limit} page={page:?} transaction_us={}",
-            timer.elapsed().as_micros()
+            (clock.now() - started).as_micros()
         );
         assert_eq!((page.scanned, page.reclaimed), (count, count));
         assert_eq!(page.released_bytes, sizes[start..end].iter().sum::<u64>());
