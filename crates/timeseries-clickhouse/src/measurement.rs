@@ -10,7 +10,7 @@ pub struct Counters {
     pub fence_bytes: usize,
     pub build_cpu: Duration,
     pub match_cpu: Duration,
-    pub window_endpoint_checks: usize,
+    pub fence_input_bytes: usize,
     pub candidates: usize,
     pub updated: u64,
     pub locked: Duration,

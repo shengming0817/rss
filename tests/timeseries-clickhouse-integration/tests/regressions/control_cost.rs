@@ -60,10 +60,10 @@ async fn frontiers(
 
 fn print_write(name: &str, related: i32, noise: i32, c: Counters) {
     println!(
-        "control-write case={name} related={related} noise={noise} rows={} field_bytes={} window_endpoint_checks={} build_cpu_ns={} match_cpu_ns={} locked_us={}",
+        "control-write case={name} related={related} noise={noise} rows={} field_bytes={} bind_field_bytes={} build_cpu_ns={} match_cpu_ns={} locked_us={}",
         c.fence_rows,
         c.fence_bytes,
-        c.window_endpoint_checks,
+        c.fence_input_bytes,
         c.build_cpu.as_nanos(),
         c.match_cpu.as_nanos(),
         c.locked.as_micros()
