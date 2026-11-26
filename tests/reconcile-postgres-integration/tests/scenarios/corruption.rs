@@ -78,7 +78,9 @@ async fn claim_limits(
         if valid {
             raw?;
         } else {
-            let error = raw.expect_err("SQL accepted invalid claim limits");
+            let error = raw
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("SQL accepted invalid claim limits"))?;
             assert_eq!(
                 error.as_database_error().and_then(|e| e.code()).as_deref(),
                 Some("P1003")
