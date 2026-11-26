@@ -70,3 +70,17 @@ fn only_historically_applicable_records_cross_the_seam() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn bounded_retention_window() -> Result<(), rss_observation::Error> {
+    use rss_observation::{ErrorKind, ScanWindow};
+    for limit in [0, 65, u8::MAX] {
+        assert_eq!(
+            ScanWindow::new(None, limit).err().map(|error| error.kind()),
+            Some(ErrorKind::InvalidInput)
+        );
+    }
+    assert_eq!(ScanWindow::new(None, 1)?.after(), None);
+    assert_eq!(ScanWindow::new(Some(u64::MAX), 64)?.after(), Some(u64::MAX));
+    Ok(())
+}

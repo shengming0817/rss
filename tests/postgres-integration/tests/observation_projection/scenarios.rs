@@ -1,6 +1,8 @@
 use super::fixture::*;
 mod settlement;
-use rss_observation::{Body, Change, Id, ObservationStore, ReadGrant, ReceiveOutcome};
+use rss_observation::{
+    Body, Change, Id, LookupOutcome, ObservationStore, ReadGrant, ReceiveOutcome,
+};
 use rss_projection::{
     BatchLimit, Control, Event, Execution, GenerationStart, Position, ProjectionScope, ReplayBound,
     RunLimit, Source,
@@ -405,7 +407,10 @@ async fn concurrent_pair(
             deadline(),
         )
         .await?;
-    assert_eq!(first.is_none(), rollback);
+    assert!(matches!(
+        (first, rollback),
+        (LookupOutcome::NotFound, true) | (LookupOutcome::Found(_), false)
+    ));
     let events = source
         .read(source.scope(), before, BatchLimit::new(10)?, control)
         .await?;
@@ -598,14 +603,16 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
                 deadline(),
             )
             .await?;
-        let current = store
+        let LookupOutcome::Found(current) = store
             .lookup(
                 &ReadGrant::verify(&Trusted, next)?,
                 input.batch().id(),
                 deadline(),
             )
             .await?
-            .ok_or_else(|| anyhow::anyhow!("missing current receipt"))?;
+        else {
+            anyhow::bail!("missing current receipt")
+        };
         assert_same_record(&current, accepted.record());
     }
     let all = source
@@ -620,14 +627,16 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
         source.resolve(event, &control).await?.record(),
         receipt.record(),
     );
-    let retired = store
+    let LookupOutcome::Found(retired) = store
         .lookup(
             &ReadGrant::verify(&Trusted, stream.clone())?,
             input.batch().id(),
             deadline(),
         )
         .await?
-        .ok_or_else(|| anyhow::anyhow!("missing retired receipt"))?;
+    else {
+        anyhow::bail!("missing retired receipt")
+    };
     assert_same_record(&retired, receipt.record());
     Ok(())
 }

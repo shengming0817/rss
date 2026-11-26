@@ -79,6 +79,7 @@ fn operation_error(error: rss_projection::Error) -> PgOperationError {
         | ErrorKind::RollbackFailed => {
             PgOperationError::unavailable(phase, sqlstate.as_deref(), position, error)
         }
+        ErrorKind::HistoryExpired => PgOperationError::history_expired(position, error),
         ErrorKind::InvalidInput
         | ErrorKind::ScopeMismatch
         | ErrorKind::OutOfOrder

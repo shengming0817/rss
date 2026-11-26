@@ -20,6 +20,15 @@ pub enum Access<'a> {
         /// Exact stream.
         scope: &'a Scope,
     },
+    /// Release eligible history in one retired stream under host-proven tenant progress.
+    Maintain {
+        /// Exact tenant and retired stream.
+        scope: &'a Scope,
+        /// Inclusive Unix-second upper bound on minimum retention expiry.
+        cutoff: i64,
+        /// Inclusive safe tenant journal position; zero protects all journal entries.
+        release_through: i64,
+    },
     /// Read all historically applicable records in this tenant's journal.
     ReadJournal {
         /// Trusted tenant selected by the host, never inferred from a report.

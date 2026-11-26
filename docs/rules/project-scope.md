@@ -14,7 +14,8 @@ rss-reconcile 拥有独立 target 的持久调度、claim/epoch fencing 与租�
 资源协调不替代业务锁或授权，不引入独立调度器、产品租约或远端效果撤销承诺。
 
 Observation 核心拥有来自离线、多来源生产者的可靠接收、报告语义、流身份与快照/增量完整性；
-`rss-observation-postgres` 拥有组件 schema 和原子持久化。核心不依赖 provider、命令库或 telemetry。
+`rss-observation-postgres` 拥有组件 schema 和原子持久化。核心拥有显式授权的退休历史保留边界，PG adapter 执行有界回收、身份围栏和租户日志下界。
+产品证明受保护 checkpoint 与重建基线的覆盖并调度维护。核心不依赖 provider、命令库或 telemetry。
 
 rss-runtime 拥有局部生命周期作用域、即时资源接管、阶段注册、普通/deferred 取消、
 受控任务与专用线程、有界 LIFO 关闭、可恢复等待及独立的执行/关闭结果。

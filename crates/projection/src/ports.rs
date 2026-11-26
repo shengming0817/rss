@@ -16,6 +16,7 @@ pub trait Source: Send + Sync {
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<Option<Position>, Error>> + Send;
     /// Read strictly increasing positions after the cursor, at most limit records.
+    /// Return HistoryExpired if the retained suffix cannot cover this cursor, even on an empty page.
     fn read<T: Timer>(
         &self,
         scope: &SourceScope,

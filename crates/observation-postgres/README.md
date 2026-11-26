@@ -9,7 +9,7 @@ connection or arbitrary SQL callback is exposed by the observation API.
 ## Installation and privileges
 
 An external migrator executes `MIGRATION_SQL` using a dedicated NOSUPERUSER NOBYPASSRLS schema owner.
-Runtime receives schema USAGE, SELECT on streams and batches, and function EXECUTE, without table DML, TRUNCATE,
+Runtime receives schema USAGE, SELECT on streams, journals and batches, and function EXECUTE, without table DML, TRUNCATE,
 owner-role membership, CREATE or RLS bypass. Tables use FORCE RLS and transaction-local tenant
 scope. Functions have fixed search paths and revoke PUBLIC execute. The runtime is trusted
 companion infrastructure; a tenant GUC is isolation inside that boundary, not authentication of
@@ -18,18 +18,19 @@ an attacker who already possesses its database credentials.
 ```sql
 -- Run as the external owner after installing MIGRATION_SQL; provision roles separately.
 GRANT USAGE ON SCHEMA rss_observation TO observation_runtime;
-GRANT SELECT ON rss_observation.streams, rss_observation.batches TO observation_runtime;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation TO observation_runtime;
+GRANT SELECT ON rss_observation.streams, rss_observation.batches, rss_observation.journals TO observation_runtime;
+GRANT EXECUTE ON FUNCTION rss_observation.activate(text,numeric,text,text), rss_observation.lock_stream(text), rss_observation.commit_batch(text,text,numeric,bytea,bytea,bigint,text,text,numeric,boolean) TO observation_runtime;
 ```
 
 Install `MIGRATION_SQL` in a fresh schema as one transaction. Runtime admission verifies storage
-revision 3, its catalog definitions and effective privileges, including those on the tenant
-admission and journal tables.
+revision 4, its catalog definitions and effective privileges, including those on the tenant
+admission and journal tables. Both pool constructors check roles the login can assume or administer,
+including indirect membership administration grants.
 
 ## Transaction and recovery
 
 `activate` locks the object lifecycle and atomically creates a never-used stream epoch with policy
-and initial state. Registration switches prevent old sources from writing; old immutable receipts
+and initial state. Registration switches prevent old sources from writing; retained receipts
 remain readable. The expected revision is global to the object's lifecycle, not its producer
 sequence. Exact activation replay returns its original revision without reactivating an old epoch.
 
@@ -42,7 +43,7 @@ through settlement. Rollback releases the position for reuse. Projection can onl
 positions in allocation order. Activation creates the tenant admission row once. Inapplicable
 reports take a shared lock on that row through settlement and keep a NULL position. Allocating
 the last position closes admission in the same transaction, after earlier admitted reports settle.
-Later activations preserve closure. Exhaustion rejects every new report and exact replay still
+Later activations preserve closure. Exhaustion rejects every new report and retained exact replay still
 returns the original receipt. The batch itself is the immutable journal entry; there is
 no copied event payload, outbox, publication state or background worker. SQL functions enforce expected
 revision and atomic writes; only the Rust core owns snapshot/delta decisions.
@@ -65,11 +66,24 @@ return `CommitUnknown`, and during rollback they return `RollbackFailed`. Cancel
 a future closes its unconfirmed connection. Runtime budgets outside PostgreSQL's positive signed-integer millisecond range are rejected before acquisition; watchdogs use the remaining time rounded up to milliseconds. The server
 clock owns receipt time and baseline expiry; the host-injected clock owns the operation budget.
 
-Core `u64` producer sequence and revision use checked PostgreSQL `numeric(20,0)` without bigint
-narrowing. The store retains all reports/receipts/retired epochs and has no cleanup API. Replay retention
-is a minimum guarantee; an existing receipt does not expire. Baseline validity is separate and
-only a new higher complete snapshot restores an expired baseline. The independent server journal position uses the signed bigint range supported by Projection.
-There is no consumer release acknowledgment or cleanup API.
+## Retired stream maintenance
+
+Provision a separate maintenance login with schema USAGE and EXECUTE on
+`rss_observation.reclaim(text,bigint,bigint,numeric,integer)`. Adopt its dedicated pool with
+`PgMaintenance::new`. Runtime and maintenance admission both verify the role split, RLS and storage revision.
+Each `ObservationMaintenance::reclaim` call requires a freshly verified `MaintenanceGrant`, an absolute
+deadline and a `ScanWindow` (1–64 identities). The grant binds exact scope, latest permissible
+retention expiry in server Unix seconds and the host-confirmed safe tenant journal position.
+The host coordinates consumer checkpoints, fixed replays, baseline recovery and new generation admission.
+Zero protects every journal entry while allowing eligible failed or partial reports to expire.
+
+Only retired streams qualify. The page inspects identities by producer sequence, including already
+released or ineligible entries. The database clears eligible raw reports, policy and decisions in
+the same transaction as the journal floor update. Use `last_examined` after an acknowledged page;
+stop on `finished`. Retry the same window after an uncertain commit. Start a fresh sweep when the
+host extends either bound. Released bytes count canonical report bytes; PostgreSQL VACUUM owns space reuse.
+Scope, batch ID, sequence, fingerprint, log position and activation history continue to fence reuse.
+Lookup returns Found, Expired or NotFound. Exact replay of an expired identity returns HistoryExpired.
 
 ## Composition and verification
 
@@ -107,9 +121,11 @@ source lineage (the example uses `rss.observation.v1`), reuses it across restart
 after rebuilding the input journal. This does not authenticate database provenance. Source lineage
 is independent of Reference v1 encoding, producer epoch and source-local positions.
 The flag controls dependencies and APIs only: every installation and every receive uses the same
-revision-3 journal, including when this feature is disabled. `high_water` and `read` query visible
-immutable batch positions, never producer sequence, wall-clock time or current lifecycle state.
-Historical applicable records remain replayable after retirement, expiry or NeedSnapshot.
+revision-4 journal. `bounds` reads the durable committed high-water and the last released position.
+Each page checks this floor in the same statement snapshot. A cursor equal to the floor may continue;
+an earlier cursor gets HistoryExpired, including an empty page. Exact references use per-batch evidence,
+so a retained active record below the floor can still resolve. Initialize a new generation with `GenerationStart::after`, a host-prepared read model and
+complete deduplication receipts at or beyond the floor. The old generation keeps its original start.
 
 `read` validates rows one at a time and emits bounded immutable version-1 references containing
 Scope, batch ID and the full Observation fingerprint. Event IDs are ASCII hex fingerprints. No
@@ -143,7 +159,7 @@ query and reconstruction inside the enclosing transaction's internally checked c
 
 For another system, resolve before sending and compose existing `AtLeastOnce`; destination
 idempotency and conditional-write/fencing remain the consumer's responsibility. Local checkpoint
-ownership cannot fence an in-flight remote write. All referenced records remain retained.
+ownership cannot fence an in-flight remote write. The host includes remote consumers in its release decision.
 Tenant journal order is delivery order, never MDM source priority or cross-source fact authority.
 
 ## Runnable consumer example

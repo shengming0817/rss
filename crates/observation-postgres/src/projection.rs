@@ -13,8 +13,23 @@ use rss_projection_postgres::PgTransaction;
 use serde::Serialize;
 use sqlx::{Row, postgres::PgRow};
 use std::sync::Arc;
-const LOOKUP: &str = "SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
-const READ: &str = "SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND applicable AND ($2::bigint IS NULL OR log_position>$2) ORDER BY log_position LIMIT $3";
+const LOOKUP: &str = "SELECT raw IS NULL AS expired,scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
+// One MVCC snapshot also returns the floor on an empty or expired page.
+const READ: &str = "SELECT j.expired_through,b.* FROM rss_observation.journals j
+ LEFT JOIN LATERAL (
+   SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position
+   FROM rss_observation.batches WHERE tenant_id=j.tenant_id AND applicable AND log_position>$2
+     AND $2>=j.expired_through ORDER BY log_position LIMIT $3
+ ) b ON true WHERE j.tenant_id=$1::uuid ORDER BY b.log_position";
+
+/// Tenant journal coordinates from one committed snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JournalBounds {
+    /// Last position whose removal invalidates earlier page cursors; None before any release.
+    pub expired_through: Option<Position>,
+    /// Highest committed position, retained even when every body has expired.
+    pub high_water: Option<Position>,
+}
 /// Tenant-authorized immutable source. The adopted Observation store owns the pool lifecycle.
 /// Reauthorize a new grant for each host operation; cancel/join workers before revocation.
 pub struct PgSource<C> {
@@ -102,6 +117,24 @@ impl<C: Clock> PgSource<C> {
                 }
             })
     }
+    /// Read the effective lower boundary and committed high-water for the authorized journal.
+    pub async fn bounds<T: Timer>(
+        &self,
+        control: &Control<'_, T>,
+    ) -> Result<JournalBounds, rss_projection::Error> {
+        let tenant = self.grant.tenant();
+        self.transact(control, move |connection,_| Box::pin(async move {
+            let row:Option<(i64,i64)>=sqlx::query_as("SELECT expired_through,last_position FROM rss_observation.journals WHERE tenant_id=$1::uuid")
+                .bind(tenant.to_string()).fetch_optional(connection).await.map_err(sql_error)?;
+            match row {
+                None => Ok(JournalBounds {expired_through:None, high_water:None}),
+                Some((floor,head)) => Ok(JournalBounds {
+                    expired_through:(floor!=0).then(||position(floor)).transpose()?,
+                    high_water:Some(position(head)?),
+                })
+            }
+        })).await
+    }
     /// Resolve in an Observation-owned, caller-budgeted read transaction. Remote targets must
     /// resolve before sending and remain explicitly at least once with target-side deduplication.
     pub async fn resolve<T: Timer>(
@@ -168,12 +201,7 @@ impl<C: Clock> Source for PgSource<C> {
         control: &Control<'_, T>,
     ) -> Result<Option<Position>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
-        let tenant = self.grant.tenant();
-        self.transact(control, move |connection, _| Box::pin(async move {
-            let value: Option<i64> = sqlx::query_scalar("SELECT max(log_position) FROM rss_observation.batches WHERE tenant_id=$1::uuid AND applicable")
-                .bind(tenant.to_string()).fetch_one(connection).await.map_err(sql_error)?;
-            value.map(position).transpose().map_err(BridgeError::from)
-        })).await
+        Ok(self.bounds(control).await?.high_water)
     }
     async fn read<T: Timer>(
         &self,
@@ -189,12 +217,23 @@ impl<C: Clock> Source for PgSource<C> {
             Box::pin(async move {
                 let mut rows = sqlx::query(READ)
                     .bind(tenant.to_string())
-                    .bind(after.map(|p| p.get() as i64))
+                    .bind(after.map_or(0, |p| p.get() as i64))
                     .bind(i64::from(limit.get()))
                     .fetch(connection);
                 let mut events = Vec::new();
                 while let Some(row) = rows.try_next().await.map_err(sql_error)? {
                     budget()?;
+                    let floor: i64 = row.try_get("expired_through").map_err(sql_error)?;
+                    if after.map_or(0, |p| p.get() as i64) < floor {
+                        return Err(expired(position(floor)?));
+                    }
+                    if row
+                        .try_get::<Option<i64>, _>("log_position")
+                        .map_err(sql_error)?
+                        .is_none()
+                    {
+                        continue;
+                    }
                     let (pos, record) = restore_row(row)?;
                     events.push(
                         event_for(&scope, pos, &record).map_err(|e| restore_error(Some(pos), e))?,
@@ -248,12 +287,42 @@ fn restore_row(row: PgRow) -> Result<(Position, ApplicableRecord), BridgeError> 
     .map_err(|e| restore_error(Some(pos), e))?;
     Ok((pos, record))
 }
+fn expired(pos: Position) -> BridgeError {
+    BridgeError(rss_projection::Error::provider(
+        rss_projection::ErrorKind::HistoryExpired,
+        Phase::Restore,
+        None,
+        Some(pos),
+        ErrorKind::HistoryExpired,
+    ))
+}
 fn resolve_row(row: Option<PgRow>, event: &Event) -> Result<ApplicableRecord, BridgeError> {
     let row =
         row.ok_or_else(|| restore_error(Some(event.position()), ErrorKind::Invariant.into()))?;
+    if row.try_get("expired").map_err(sql_error)? {
+        let pos = event.position();
+        let identity = (|| -> Result<Event, Error> {
+            let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)?;
+            let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)?;
+            let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(sql_error)?;
+            let fingerprint = fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?;
+            reference_event(event.source(), pos, &scope, &id, fingerprint)
+        })()
+        .map_err(|e| restore_error(Some(pos), e))?;
+        validate_reference(event, &identity)?;
+        return Err(expired(pos));
+    }
     let (pos, record) = restore_row(row)?;
+    validate_reference(
+        event,
+        &event_for(event.source(), pos, &record).map_err(|e| restore_error(Some(pos), e))?,
+    )?;
+    Ok(record)
+}
+fn validate_reference(event: &Event, original: &Event) -> Result<(), BridgeError> {
+    let pos = event.position();
     // Reconstruct the only accepted encoding. No permissive parser or alternate identity.
-    if event_for(event.source(), pos, &record).map_err(|e| restore_error(Some(pos), e))? != *event {
+    if event != original {
         return Err(BridgeError(rss_projection::Error::provider(
             rss_projection::ErrorKind::InvalidInput,
             Phase::Restore,
@@ -262,7 +331,7 @@ fn resolve_row(row: Option<PgRow>, event: &Event) -> Result<ApplicableRecord, Br
             Error::new(ErrorKind::InvalidInput),
         )));
     }
-    Ok(record)
+    Ok(())
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -278,18 +347,32 @@ fn event_for(
     record: &ApplicableRecord,
 ) -> Result<Event, Error> {
     let record = record.record();
-    if scope.tenant() != record.scope().tenant() {
+    reference_event(
+        scope,
+        position,
+        record.scope(),
+        record.batch().id(),
+        record.batch().fingerprint(record.scope())?,
+    )
+}
+fn reference_event(
+    source: &SourceScope,
+    position: Position,
+    scope: &Scope,
+    batch_id: &Id,
+    fingerprint: [u8; 32],
+) -> Result<Event, Error> {
+    if source.tenant() != scope.tenant() {
         return Err(ErrorKind::Invariant.into());
     }
-    let fingerprint = record.batch().fingerprint(record.scope())?;
     let id: String = fingerprint.iter().map(|b| format!("{b:02x}")).collect();
     let payload = serde_json::to_vec(&Reference {
         version: 1,
-        scope: record.scope(),
-        batch_id: record.batch().id(),
+        scope,
+        batch_id,
         fingerprint,
     })?;
-    Event::new(scope.clone(), position, id, payload).map_err(projection_error)
+    Event::new(source.clone(), position, id, payload).map_err(projection_error)
 }
 fn projection_error(error: rss_projection::Error) -> Error {
     Error::provider(ErrorKind::Invariant, error)
@@ -301,6 +384,7 @@ fn source_error(error: Error) -> rss_projection::Error {
         ErrorKind::Deadline => (Kind::Deadline, Phase::Operation),
         ErrorKind::CommitUnknown => (Kind::CommitUnknown, Phase::Commit),
         ErrorKind::RollbackFailed => (Kind::RollbackFailed, Phase::Rollback),
+        ErrorKind::HistoryExpired => (Kind::HistoryExpired, Phase::Restore),
         ErrorKind::Storage => (Kind::Unavailable, Phase::Operation),
         ErrorKind::Invariant
         | ErrorKind::InvalidInput

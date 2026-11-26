@@ -34,6 +34,9 @@ pub enum ErrorKind {
     /// Source returned a decreasing or repeated position.
     #[error("projection source out of order")]
     OutOfOrder,
+    /// The requested source history has been released; recover from a covered baseline.
+    #[error("projection source history expired")]
+    HistoryExpired,
     /// Source violated its immutable committed-prefix or batch contract.
     #[error("projection source contract violated")]
     SourceContract,

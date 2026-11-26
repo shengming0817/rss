@@ -1,8 +1,8 @@
 use rss_contract::Timepoint;
 use rss_observation::{
     Access, Authority, Batch, Body, Change, Clock, Coverage, Epoch, Error, ErrorKind, Id,
-    LifecycleGrant, ObservationStore, Policy, ReadGrant, ReceiveOutcome, Registration, Scope,
-    SyncOutcome, VerifiedBatch,
+    LifecycleGrant, LookupOutcome, ObservationStore, Policy, ReadGrant, ReceiveOutcome,
+    Registration, Scope, SyncOutcome, VerifiedBatch,
 };
 use rss_observation_postgres::{Fault, PgStore};
 use rss_request_context::{Deadline, TenantId};
@@ -156,15 +156,16 @@ async fn faults(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<()> {
                 .map(|e| e.kind()),
             Some(expected)
         );
-        assert!(
+        assert!(matches!(
             store
                 .lookup(&read_grant(scope)?, &Id::new(id)?, deadline())
-                .await?
-                .is_none()
-        );
+                .await?,
+            LookupOutcome::NotFound
+        ));
         assert_eq!(cursor(store, scope).await?, Some(1));
     }
-    commit_faults(store, scope).await
+    commit_faults(store, scope).await?;
+    pending_commit_timeout(store, scope).await
 }
 async fn commit_faults(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<()> {
     store.inject_next_fault(Fault::CommitAckLost);
@@ -197,6 +198,9 @@ async fn commit_faults(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<
         Some(7)
     );
     assert_eq!(cursor(store, scope).await?, Some(8));
+    Ok(())
+}
+async fn pending_commit_timeout(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<()> {
     store.inject_next_fault(Fault::CommitPending);
     let short = Deadline::at(Timer.now() + Duration::from_millis(100));
     assert_eq!(
@@ -207,12 +211,12 @@ async fn commit_faults(store: &PgStore<Timer>, scope: &Scope) -> anyhow::Result<
             .map(|e| e.kind()),
         Some(ErrorKind::CommitUnknown)
     );
-    assert!(
+    assert!(matches!(
         store
             .lookup(&read_grant(scope)?, &Id::new("timeout")?, deadline())
-            .await?
-            .is_none()
-    );
+            .await?,
+        LookupOutcome::NotFound
+    ));
     Ok(())
 }
 async fn isolation(store: &PgStore<Timer>, base: &Scope) -> anyhow::Result<()> {
@@ -223,12 +227,12 @@ async fn isolation(store: &PgStore<Timer>, base: &Scope) -> anyhow::Result<()> {
         "epoch-1",
     )?;
     assert_eq!(activate(store, &other, None).await?, 1);
-    assert!(
+    assert!(matches!(
         store
             .lookup(&read_grant(&other)?, &Id::new("s1")?, deadline())
-            .await?
-            .is_none()
-    );
+            .await?,
+        LookupOutcome::NotFound
+    ));
     store
         .receive(&snapshot(&other, "s1", 0)?, deadline())
         .await?;
@@ -267,12 +271,12 @@ async fn epoch_replacement(store: &PgStore<Timer>, base: &Scope) -> anyhow::Resu
 async fn registration_replacement(store: &PgStore<Timer>, source: &Scope) -> anyhow::Result<()> {
     let registration = scope(TENANT, "registration-2", "agent", "epoch-1")?;
     assert_eq!(activate(store, &registration, Some(3)).await?, 4);
-    assert!(
+    assert!(matches!(
         store
             .lookup(&read_grant(&registration)?, &Id::new("s1")?, deadline())
-            .await?
-            .is_none()
-    );
+            .await?,
+        LookupOutcome::NotFound
+    ));
     assert_eq!(
         store
             .receive(&snapshot(source, "late", 1)?, deadline())
@@ -373,18 +377,18 @@ async fn role_checks(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
     schema_checks(admin, pool).await
 }
 async fn schema_checks(admin: &PgPool, pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN sequence TYPE numeric(21,0)")
+    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN received_at DROP NOT NULL")
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_err());
-    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN sequence TYPE numeric(20,0)")
+    sqlx::query("ALTER TABLE rss_observation.batches ALTER COLUMN received_at SET NOT NULL")
         .execute(admin)
         .await?;
     sqlx::query("COMMENT ON SCHEMA rss_observation IS 'unknown-version'")
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_err());
-    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:3'")
+    sqlx::query("COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:4'")
         .execute(admin)
         .await?;
     assert!(PgStore::new(pool.clone(), Timer, deadline()).await.is_ok());
@@ -420,7 +424,7 @@ async fn recovery_process(
             .spawn()?;
         let observed=tokio::time::timeout(Duration::from_secs(15),async{
             loop {
-                if mode=="after" && store.lookup(&read_grant(&s)?,&Id::new(mode)?,deadline()).await?.is_some(){break;}
+                if mode=="after" && matches!(store.lookup(&read_grant(&s)?,&Id::new(mode)?,deadline()).await?,LookupOutcome::Found(_)){break;}
                 if mode=="before"{
                     let ready:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE application_name='observation-crash' AND state='idle in transaction' AND query LIKE '%commit_batch%')").fetch_one(admin).await?;
                     if ready{break;}
@@ -437,7 +441,10 @@ async fn recovery_process(
         let record = store
             .lookup(&read_grant(&s)?, &Id::new(mode)?, deadline())
             .await?;
-        assert_eq!(record.is_some(), mode == "after");
+        assert!(matches!(
+            (record, mode),
+            (LookupOutcome::Found(_), "after") | (LookupOutcome::NotFound, "before")
+        ));
     }
     let input = snapshot(&s, "after", 1)?;
     assert!(matches!(
@@ -575,7 +582,7 @@ async fn prepare(
     sqlx::raw_sql(rss_observation_postgres::MIGRATION_SQL)
         .execute(&owner)
         .await?;
-    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_observation TO obs_runtime; GRANT SELECT ON rss_observation.streams,rss_observation.batches TO obs_runtime; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation TO obs_runtime;").execute(&owner).await?;
+    sqlx::raw_sql("GRANT USAGE ON SCHEMA rss_observation TO obs_runtime; GRANT SELECT ON rss_observation.streams,rss_observation.batches,rss_observation.journals TO obs_runtime; GRANT EXECUTE ON FUNCTION rss_observation.activate(text,numeric,text,text), rss_observation.lock_stream(text), rss_observation.commit_batch(text,text,numeric,bytea,bytea,bigint,text,text,numeric,boolean) TO obs_runtime;").execute(&owner).await?;
     let pool = runtime_pool(params, ca).await?;
     Ok((admin, owner, pool))
 }
@@ -670,12 +677,12 @@ async fn restart(
     store.close(deadline()).await?;
     assert!(store.is_closed());
     let restarted = PgStore::new(runtime_pool(params, ca).await?, Timer, deadline()).await?;
-    assert!(
+    assert!(matches!(
         restarted
             .lookup(&read_grant(base)?, &Id::new("s1")?, deadline())
-            .await?
-            .is_some()
-    );
+            .await?,
+        LookupOutcome::Found(_)
+    ));
     assert!(matches!(
         restarted
             .receive(&snapshot(base, "s1", 0)?, deadline())
@@ -873,12 +880,12 @@ async fn damaged_state(admin: &PgPool, store: &PgStore<Timer>, base: &Scope) -> 
         .bind(s.encode()?)
         .execute(admin)
         .await?;
-    assert!(
+    assert!(matches!(
         store
             .lookup(&read_grant(base)?, &Id::new("s1")?, deadline())
-            .await?
-            .is_some()
-    );
+            .await?,
+        LookupOutcome::Found(_)
+    ));
     Ok(())
 }
 
@@ -953,12 +960,12 @@ async fn pre_effect_lock_deadline(admin: &PgPool, store: &PgStore<Timer>) -> any
         .await;
     blocker.rollback().await?;
     assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Deadline));
-    assert!(
+    assert!(matches!(
         store
             .lookup(&read_grant(&s)?, &Id::new("blocked")?, deadline())
-            .await?
-            .is_none()
-    );
+            .await?,
+        LookupOutcome::NotFound
+    ));
     assert_eq!(cursor(store, &s).await?, Some(1));
     Ok(())
 }
@@ -980,12 +987,12 @@ async fn server_watchdogs(admin: &PgPool, store: &PgStore<Timer>) -> anyhow::Res
         .await;
     assert_eq!(result.err().map(|e| e.kind()), Some(ErrorKind::Deadline));
     assert_eq!(cursor(store, &s).await?, Some(1));
-    assert!(
+    assert!(matches!(
         store
             .lookup(&read_grant(&s)?, &Id::new("cancelled-write")?, deadline())
-            .await?
-            .is_none()
-    );
+            .await?,
+        LookupOutcome::NotFound
+    ));
     Ok(())
 }
 async fn server_lock_wait(
@@ -1033,10 +1040,12 @@ async fn expanded_snapshot(store: &PgStore<Timer>) -> anyhow::Result<()> {
     changes[0] = Change::upsert(Id::new("k0000")?, vec![255; 65537]);
     let input = report(&s, "large", 1, Body::Snapshot(changes))?;
     store.receive(&input, deadline()).await?;
-    let durable = store
+    let LookupOutcome::Found(durable) = store
         .lookup(&read_grant(&s)?, &Id::new("large")?, deadline())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("missing expanded snapshot"))?;
+    else {
+        anyhow::bail!("missing expanded snapshot")
+    };
     assert_eq!(durable.batch(), input.batch());
     assert!(matches!(
         store.receive(&input, deadline()).await?,

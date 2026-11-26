@@ -25,7 +25,7 @@ async fn required_permissions_are_checked() -> anyhow::Result<()> {
         ),
         (
             "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation FROM handoff_runtime",
-            "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_observation TO handoff_runtime",
+            "GRANT EXECUTE ON FUNCTION rss_observation.activate(text,numeric,text,text), rss_observation.lock_stream(text), rss_observation.commit_batch(text,text,numeric,bytea,bytea,bigint,text,text,numeric,boolean) TO handoff_runtime",
         ),
     ] {
         sqlx::raw_sql(revoke).execute(&f.owner).await?;

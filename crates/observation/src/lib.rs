@@ -5,6 +5,8 @@ mod admission;
 mod error;
 mod identity;
 mod report;
+mod retention;
+pub use retention::{MaintenanceGrant, ObservationMaintenance, RetentionPage, ScanWindow};
 mod state;
 mod store;
 pub use admission::{
@@ -14,4 +16,4 @@ pub use error::{Error, ErrorKind};
 pub use identity::{Epoch, Id, Registration, Scope};
 pub use report::{Batch, Body, Change, Coverage};
 pub use state::{Decision, NeedSnapshot, Policy, State, SyncOutcome};
-pub use store::{ApplicableRecord, Clock, ObservationStore, ReceiveOutcome, Record};
+pub use store::{ApplicableRecord, Clock, LookupOutcome, ObservationStore, ReceiveOutcome, Record};

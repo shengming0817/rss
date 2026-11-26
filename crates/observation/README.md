@@ -9,7 +9,7 @@ collector, Inventory or projection dependency.
 
 The product implements `Authority::authorize(Access)` using authenticated context. The closed
 request variants carry their required fields: Submit has Scope/Coverage, Read and Activate have
-Scope, and ReadJournal has TenantId. The former multi-argument authorization signature is removed.
+Scope, ReadJournal has TenantId, and Maintain binds Scope, cutoff and release position. The former multi-argument authorization signature is removed.
 `JournalReadGrant::verify` requires explicit tenant-wide historical journal authority; submission
 or exact-stream read permission never grants a tenant scan. Reauthorize at host operation
 boundaries; cancel/join long-lived workers before revoking an in-process grant. `VerifiedBatch::verify` requires
@@ -74,12 +74,14 @@ At `u64::MAX`, activate a new epoch and establish a snapshot; wrapping sequence 
 plus complete batch and historical `Decision`; it is not the current stream status, Inventory
 update or compliance result. `ObservationStore::state` reads the separately maintained state.
 Exact retries return the original record, even after its epoch retires, provided read/submission
-authority remains valid. Changed content under the same identity conflicts. Neither retry changes
+authority remains valid and the original record is retained. Changed content under the same identity conflicts. Neither retry changes
 cursor nor extends the baseline deadline.
 
 `Policy` requires replay-retention seconds, safety seconds and baseline-validity seconds. The first
-two are minimum retention guarantees, not a TTL that invalidates an existing receipt. V1 retains
-all records and retirement evidence; there is no automatic deletion. Baseline validity uses the
+two are minimum retention guarantees, not a TTL that invalidates an existing receipt. Only explicit authorized maintenance can release a retired record once its server receipt time
+plus retry and safety seconds reaches the authorized cutoff. Journal positions additionally require
+host-confirmed release coverage. Lookup distinguishes Found, Expired and NotFound. Matching an
+expired identity on submission returns HistoryExpired. Changed content under its ID conflicts. Baseline validity uses the
 provider's received time. Expired baselines require a new snapshot, even if an old snapshot is
 replayed. Historically applicable records are the durable projection handoff. `Record::into_applicable`
 returns a private-field `ApplicableRecord` only for a validated Snapshot/Delta decision; failure,

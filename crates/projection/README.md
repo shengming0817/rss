@@ -20,7 +20,8 @@ let limit = RunLimit::new(BatchLimit::new(100)?, 10_000)?;
 ## Execution contracts
 
 - `Source` returns a committed, immutable prefix in strictly increasing source-local position
-  order. Positions are not comparable across tenants/sources. The runner validates the complete
+  order. A source with retention returns HistoryExpired for a cursor below its retained boundary.
+  Recovery requires a generation baseline covering the lost prefix. Positions are not comparable across tenants/sources. The runner validates the complete
   fetched batch before admitting effects. `None` precedes the first event; position zero is legal.
 - `Execution` represents a provider-bound generation/session and exposes its verified
   `DefinitionIdentity`. Providers must bind this identity before granting authority and verify

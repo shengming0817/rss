@@ -406,6 +406,19 @@ pub enum CloseOutcome {
 #[error("{0}")]
 pub struct PgOperationError(#[source] pub(crate) Error);
 impl PgOperationError {
+    /// Reject an effect whose immutable source reference expired before resolution.
+    pub fn history_expired(
+        position: Option<rss_projection::Position>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self(Error::provider(
+            ErrorKind::HistoryExpired,
+            Phase::Restore,
+            None,
+            position,
+            source,
+        ))
+    }
     /// Reject the application operation; the adapter will roll back before returning it.
     pub fn rejected<E: std::error::Error + Send + Sync + 'static>(
         phase: Phase,

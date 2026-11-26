@@ -20,6 +20,15 @@ pub fn source<C: Clock>(
 ) -> Result<rss_observation_postgres::PgSource<C>, Error> {
     rss_observation_postgres::PgSource::new(store, grant, scope)
 }
+pub async fn reclaim<C: Clock>(
+    maintenance: &rss_observation_postgres::PgMaintenance<C>,
+    grant: rss_observation::MaintenanceGrant,
+    window: rss_observation::ScanWindow,
+    deadline: Deadline,
+) -> Result<rss_observation::RetentionPage, Error> {
+    use rss_observation::ObservationMaintenance;
+    maintenance.reclaim(grant, window, deadline).await
+}
 fn main() {}
 
 #[cfg(feature = "observation-projection")]

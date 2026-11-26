@@ -128,9 +128,11 @@ async fn acquired_budget(
     armed: &AtomicBool,
 ) -> anyhow::Result<()> {
     let mut blocker = f.admin.begin().await?;
-    sqlx::query("LOCK TABLE rss_observation.batches IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *blocker)
-        .await?;
+    sqlx::query(
+        "LOCK TABLE rss_observation.journals,rss_observation.batches IN ACCESS EXCLUSIVE MODE",
+    )
+    .execute(&mut *blocker)
+    .await?;
     for stage in 0..3 {
         timer.advance(0);
         armed.store(true, Ordering::SeqCst);
@@ -154,7 +156,7 @@ async fn acquired_budget(
                 .await
                 .context("quarantined backend did not retire")??;
             blocker = f.admin.begin().await?;
-            sqlx::query("LOCK TABLE rss_observation.batches IN ACCESS EXCLUSIVE MODE")
+            sqlx::query("LOCK TABLE rss_observation.journals,rss_observation.batches IN ACCESS EXCLUSIVE MODE")
                 .execute(&mut *blocker)
                 .await?;
         }
