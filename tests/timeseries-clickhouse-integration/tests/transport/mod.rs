@@ -35,6 +35,19 @@ struct State {
     requests: Mutex<Vec<(usize, String)>>,
     raw_threads: Mutex<Vec<(u32, u32)>>,
 }
+impl State {
+    async fn record_threads(&self, uri: &hyper::Uri) {
+        let settings: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()).collect();
+        if let Some(threads) = settings.get("max_threads").and_then(|s| s.parse().ok())
+            && let Some(final_threads) = settings
+                .get("max_final_threads")
+                .and_then(|s| s.parse().ok())
+        {
+            self.raw_threads.lock().await.push((threads, final_threads));
+        }
+    }
+}
 pub(super) struct Proxy {
     pub endpoint: String,
     pub ca: String,
@@ -232,19 +245,7 @@ async fn serve(
         || sql.contains("FROM rss_ts_ch.summaries FINAL")
         || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
     if reads_raw {
-        let settings: std::collections::HashMap<_, _> =
-            url::form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()).collect();
-        if let Some(threads) = settings.get("max_threads").and_then(|s| s.parse().ok())
-            && let Some(final_threads) = settings
-                .get("max_final_threads")
-                .and_then(|s| s.parse().ok())
-        {
-            state
-                .raw_threads
-                .lock()
-                .await
-                .push((threads, final_threads));
-        }
+        state.record_threads(&parts.uri).await;
     }
     let is_insert = ["raw", "summaries"].iter().any(|table| {
         let prefix = format!("INSERT INTO rss_ts_ch.{table}");

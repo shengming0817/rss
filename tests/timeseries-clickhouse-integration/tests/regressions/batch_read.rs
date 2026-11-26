@@ -87,7 +87,7 @@ impl Measure<'_> {
             let before = self.proxy.wire_bytes();
             let start = Timer.now();
             let page = self.store.aggregate(q, None, deadline()?).await?;
-            let elapsed = start.elapsed().as_micros();
+            let elapsed = (Timer.now() - start).as_micros();
             let transferred = self.proxy.wire_bytes() - before;
             assert_eq!(serde_json::to_value(page.buckets)?, expected);
             assert!(page.next.is_none() && page.availability.excluded.is_empty());

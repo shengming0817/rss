@@ -74,7 +74,7 @@ impl<C: Clock> Operation<'_, C> {
                     slot.insert(Ok(row));
                 }
                 Entry::Occupied(mut slot) => {
-                    slot.insert(Err(Error::Invariant));
+                    *slot.get_mut() = Err(Error::Invariant);
                 }
             }
         }
