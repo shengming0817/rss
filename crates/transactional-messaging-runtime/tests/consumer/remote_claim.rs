@@ -44,6 +44,8 @@ struct ProbeInbox<'a> {
     inner: FakeInbox,
     probes: Mutex<Vec<(std::time::Instant, Duration)>>,
     stall_claim: bool,
+    reservations: AtomicUsize,
+    retry_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl<'a> ProbeInbox<'a> {
@@ -61,6 +63,8 @@ impl<'a> ProbeInbox<'a> {
             },
             probes: Mutex::default(),
             stall_claim: false,
+            reservations: AtomicUsize::default(),
+            retry_gate: None,
         }
     }
 
@@ -72,7 +76,7 @@ impl<'a> ProbeInbox<'a> {
 
 impl InboxStore for ProbeInbox<'_> {
     type Claim = Claim;
-    type Permit = OperationDeadline;
+    type Permit = (OperationDeadline, Option<tokio::sync::OwnedSemaphorePermit>);
     fn lease_policy(&self) -> LeaseRenewalPolicy {
         self.inner.lease_policy()
     }
@@ -82,7 +86,18 @@ impl InboxStore for ProbeInbox<'_> {
         _: &ConsumerIdentity,
         deadline: OperationDeadline,
     ) -> Result<ClaimAdmission<'_, Self::Permit>, MessagingError> {
-        Ok(ClaimAdmission::Ready(deadline))
+        if self.reservations.fetch_add(1, Ordering::SeqCst) != 0
+            && let Some(gate) = &self.retry_gate
+        {
+            let gate = gate.clone();
+            return Ok(ClaimAdmission::Waiting(Box::pin(async move {
+                Ok((
+                    deadline,
+                    Some(gate.acquire_owned().await.expect("test semaphore open")),
+                ))
+            })));
+        }
+        Ok(ClaimAdmission::Ready((deadline, None)))
     }
     async fn claim(
         &self,
@@ -90,7 +105,7 @@ impl InboxStore for ProbeInbox<'_> {
     ) -> Result<IdempotencyDisposition<Self::Claim>, MessagingError> {
         let count = {
             let mut probes = self.probes.lock().expect("probes");
-            probes.push((self.clock.now(), permit.timeout()));
+            probes.push((self.clock.now(), permit.0.timeout()));
             probes.len()
         };
         if self.stall_claim && count == 2 {
@@ -297,6 +312,7 @@ async fn remote_ownership_and_cancellation_use_the_original_short_cutoffs() {
                 Action::LateWake => {
                     clock.advance(latest + tick);
                     assert!(futures::poll!(&mut processing).is_pending());
+                    assert_eq!(inbox.reservations.load(Ordering::SeqCst), 1);
                     clock.advance(operation - latest - tick);
                     assert_eq!(
                         processing.await.expect("busy"),
@@ -325,4 +341,147 @@ async fn remote_ownership_and_cancellation_use_the_original_short_cutoffs() {
             assert_eq!(recorder.abandon_count(), 0);
         }
     }
+}
+
+#[tokio::test]
+async fn remote_retry_leaves_the_local_permit_queue_at_its_latest_start() {
+    let wait = tuned();
+    let budget = ExecutionBudget::STANDARD;
+    let operation = budget.total() - budget.settlement_reserve();
+    let latest = operation - wait.final_window(operation);
+    for late_transfer in [false, true] {
+        let clock = ManualTimer::new();
+        let mut inbox = ProbeInbox::busy(&clock, None);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        inbox.retry_gate = Some(gate.clone());
+        let msg = envelope(|_| {});
+        let sub = subscription(&msg);
+        let execution = ConsumerExecution::new(
+            ConsumerGroup::parse("probe").expect("group"),
+            &TrustedIngress,
+            &sub,
+            &clock,
+            ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, budget, wait),
+            &NoopEmitter,
+        );
+        let tx = FakeTx {
+            calls: Arc::default(),
+            disposition: TerminalDisposition::Succeeded,
+        };
+        let recorder = RecordingSettlement::new();
+        let processing = consume_once(
+            &inbox,
+            &tx,
+            &execution,
+            Delivery::new(msg, recorder.clone()),
+        );
+        tokio::pin!(processing);
+        assert!(futures::poll!(&mut processing).is_pending());
+        let wake = clock.next_sleep().expect("ordinary wake");
+        clock.advance(wake);
+        assert!(futures::poll!(&mut processing).is_pending());
+        assert_eq!(inbox.reservations.load(Ordering::SeqCst), 2);
+        let elapsed = if late_transfer {
+            latest + Duration::from_nanos(1)
+        } else {
+            latest
+        };
+        clock.advance(elapsed - wake);
+        if late_transfer {
+            gate.add_permits(1);
+        }
+        assert!(futures::poll!(&mut processing).is_pending());
+        if !late_transfer {
+            gate.add_permits(1);
+        }
+        // A live queued waiter or a held reservation would consume this permit.
+        let slot = gate
+            .try_acquire()
+            .expect("permit available at latest start");
+        drop(slot);
+        assert!(recorder.settlements().is_empty());
+        clock.advance(operation - elapsed);
+        assert_eq!(
+            processing.await.expect("known remote owner"),
+            ProcessingDisposition::InProgress
+        );
+        assert_eq!(inbox.probes.lock().expect("probes").len(), 1);
+        assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
+        assert_eq!(recorder.abandon_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn already_elapsed_remote_wait_yields_before_the_next_claim() {
+    // Every clock observation takes longer than the configured probe interval.
+    struct Ticking(AtomicUsize);
+    impl Clock for Ticking {
+        fn now(&self) -> std::time::Instant {
+            support::epoch() + Duration::from_nanos(self.0.fetch_add(10, Ordering::SeqCst) as u64)
+        }
+    }
+    impl ExecutionTimer for Ticking {
+        async fn sleep_until(&self, at: Deadline) {
+            std::future::poll_fn(|cx| {
+                if at.is_expired(self.now()) {
+                    std::task::Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await
+        }
+    }
+    let timer = Ticking(AtomicUsize::default());
+    let tick = Duration::from_nanos(1);
+    let wait = RemoteClaimWaitPolicy::new(tick, tick, tick).expect("minimum jitter");
+    let msg = envelope(|_| {});
+    let sub = subscription(&msg);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = RecordingEmitter(events.clone());
+    let execution = ConsumerExecution::new(
+        ConsumerGroup::parse("probe").expect("group"),
+        &TrustedIngress,
+        &sub,
+        &timer,
+        ConsumerExecutionPolicy::new(
+            RetryPolicy::STANDARD,
+            ExecutionBudget::new(Duration::from_micros(10), Duration::from_micros(1))
+                .expect("budget"),
+            wait,
+        ),
+        &emitter,
+    );
+    let inbox = FakeInbox {
+        capacity: None,
+        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+            retry_after: None,
+        })),
+        lease: LeaseStatus::Lost,
+    };
+    let tx = FakeTx {
+        calls: Arc::default(),
+        disposition: TerminalDisposition::Succeeded,
+    };
+    let processing = consume_once(
+        &inbox,
+        &tx,
+        &execution,
+        Delivery::new(msg, RecordingSettlement::new()),
+    );
+    tokio::pin!(processing);
+    assert!(futures::poll!(&mut processing).is_pending());
+    assert_eq!(
+        events
+            .lock()
+            .expect("events")
+            .iter()
+            .filter(|e| matches!(
+                e,
+                TransactionalMessagingObservation::ConsumerClaimInProgress
+            ))
+            .count(),
+        1
+    );
 }

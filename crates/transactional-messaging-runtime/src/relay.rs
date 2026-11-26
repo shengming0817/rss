@@ -551,6 +551,8 @@ impl Admission {
     ) -> Option<OutboxClaimBatch<T>> {
         tokio::pin!(request);
         let before = active.len();
+        let full_slice =
+            matches!(*self, Self::Ready(n) if n == config.wait.empty_pages_per_slice.get() - 1);
         let claims = loop {
             tokio::select! {
                 biased;
@@ -563,27 +565,32 @@ impl Admission {
         };
         match claims {
             Ok(batch) => {
-                if let Self::Ready(empty_pages) = *self {
-                    *self = match (batch.is_empty(), batch.scan_progress()) {
-                        (true, OutboxScanProgress::Continue)
-                            if empty_pages < config.wait.empty_pages_per_slice.get() - 1 =>
-                        {
-                            Self::Ready(empty_pages + 1)
+                if matches!(self, Self::Stopped(_)) {
+                    return Some(batch);
+                }
+                match (batch.is_empty(), batch.scan_progress()) {
+                    (true, OutboxScanProgress::Continue) if full_slice => {
+                        self.backoff(clock, emitter, config.wait.continuation_delay);
+                    }
+                    (true, OutboxScanProgress::RetryLater) => {
+                        self.backoff(clock, emitter, config.wait.contention_delay);
+                    }
+                    (true, OutboxScanProgress::Continue) => {
+                        if let Self::Ready(n) = self {
+                            *n += 1;
                         }
-                        (true, OutboxScanProgress::Continue) => Self::delay(
-                            clock,
-                            emitter,
-                            config.wait.continuation_delay,
-                            Self::Backoff,
-                        ),
-                        (true, OutboxScanProgress::RetryLater) => {
-                            Self::delay(clock, emitter, config.wait.contention_delay, Self::Backoff)
+                    }
+                    (true, OutboxScanProgress::Complete)
+                        if active.len() == before && matches!(self, Self::Ready(_)) =>
+                    {
+                        *self =
+                            Self::delay(clock, emitter, config.wait.idle_scan_interval, Self::Idle);
+                    }
+                    _ => {
+                        if let Self::Ready(n) = self {
+                            *n = 0;
                         }
-                        (true, OutboxScanProgress::Complete) if active.len() == before => {
-                            Self::delay(clock, emitter, config.wait.idle_scan_interval, Self::Idle)
-                        }
-                        _ => Self::Ready(0),
-                    };
+                    }
                 }
                 Some(batch)
             }
@@ -627,6 +634,21 @@ impl Admission {
             .map_or_else(|error| Self::Stopped(Some(error)), state)
     }
 
+    // Independent scan and in-flight errors can arrive in either order.
+    fn backoff(
+        &mut self,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+        duration: Duration,
+    ) {
+        let next = Self::delay(clock, emitter, duration, Self::Backoff);
+        if matches!((&*self, &next), (Self::Backoff(old), Self::Backoff(new)) if old.instant() >= new.instant())
+        {
+            return;
+        }
+        *self = next;
+    }
+
     async fn wait(&self, clock: &impl ExecutionTimer) {
         match self {
             Self::Idle(at) | Self::Backoff(at) => clock.sleep_until(*at).await,
@@ -668,7 +690,7 @@ impl Admission {
                 error_kind = error.kind().as_label(),
                 "relay admission backing off"
             );
-            *self = Self::delay(clock, emitter, config.wait.error_backoff, Self::Backoff);
+            self.backoff(clock, emitter, config.wait.error_backoff);
         } else {
             *self = Self::Stopped(Some(error));
         }

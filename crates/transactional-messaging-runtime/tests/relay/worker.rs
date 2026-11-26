@@ -41,8 +41,9 @@ struct ObservedStore {
     fail_call: usize,
     failure: MessagingErrorKind,
     reply: Semaphore,
-    fail_settle: Option<&'static str>,
+    fail_settle: Option<(&'static str, MessagingErrorKind)>,
     settle_calls: AtomicUsize,
+    empty_from: usize,
     empty_until: usize,
     empty_action: OutboxScanProgress,
 }
@@ -64,6 +65,7 @@ impl ObservedStore {
             reply: Semaphore::new(0),
             fail_settle: None,
             settle_calls: 0.into(),
+            empty_from: 1,
             empty_until: 0,
             empty_action: OutboxScanProgress::Complete,
         }
@@ -102,14 +104,14 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
                 std::io::Error::other("scripted claim failure"),
             ));
         }
-        if call <= self.empty_until {
-            return OutboxClaimBatch::try_from_provider(Vec::new(), limit, self.empty_action)
-                .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e));
-        }
-        let batch = self
-            .memory
-            .claim_partition_heads(binding, limit, deadline)
-            .await?;
+        let batch = if (self.empty_from..=self.empty_until).contains(&call) {
+            OutboxClaimBatch::try_from_provider(Vec::new(), limit, self.empty_action)
+                .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))?
+        } else {
+            self.memory
+                .claim_partition_heads(binding, limit, deadline)
+                .await?
+        };
         let owned = self.owned.fetch_add(batch.len(), Ordering::SeqCst) + batch.len();
         self.peak.fetch_max(owned, Ordering::SeqCst);
         if call == self.block_call {
@@ -139,10 +141,12 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
         deadline: OperationDeadline,
     ) -> Result<(), MessagingError> {
         self.settle_calls.fetch_add(1, Ordering::SeqCst);
-        if self.fail_settle == Some(Self::message(&claim).message_id().as_str()) {
+        if let Some((id, kind)) = self.fail_settle
+            && id == Self::message(&claim).message_id().as_str()
+        {
             return Err(MessagingError::new(
-                MessagingErrorKind::OwnershipLost,
-                std::io::Error::other("fenced settlement"),
+                kind,
+                std::io::Error::other("scripted settlement failure"),
             ));
         }
         self.memory.settle(claim, settlement, deadline).await?;
@@ -450,6 +454,69 @@ async fn a_completion_cannot_shorten_error_backoff_and_empty_scans_wait() {
 }
 
 #[tokio::test]
+async fn overlapping_scan_and_settlement_backoffs_keep_the_later_cutoff() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let step = Duration::from_millis(2);
+        for progress in [OutboxScanProgress::Continue, OutboxScanProgress::RetryLater] {
+            for error_first in [false, true] {
+                let mut observed = ObservedStore::new(
+                    if error_first { 2 } else { 0 },
+                    0,
+                    MessagingErrorKind::Transient,
+                );
+                observed.empty_from = 2;
+                observed.empty_until = 2;
+                observed.empty_action = progress;
+                observed.fail_settle = Some(("first", MessagingErrorKind::Transient));
+                let store = Arc::new(observed);
+                store.append("first", "a").await;
+                let policy = RelayWaitPolicy {
+                    empty_pages_per_slice: NonZeroUsize::MIN,
+                    continuation_delay: step * 10,
+                    contention_delay: step * 15,
+                    error_backoff: step * 2,
+                    ..RelayWaitPolicy::STANDARD
+                };
+                let scan_wait = if progress == OutboxScanProgress::Continue {
+                    policy.continuation_delay
+                } else {
+                    policy.contention_delay
+                };
+                let mut run = Run::with_policy(store.clone(), 1, 2, policy);
+                let (_, finish) = run.next().await;
+                support::wait_for_count(&store.calls, 2).await;
+                if !error_first {
+                    run.timer.wait_registered(scan_wait).await;
+                    run.timer.advance(step);
+                }
+                finish.send(()).expect("settle with recoverable error");
+                support::wait_for_count(&store.settle_calls, 1).await;
+                if error_first {
+                    run.timer.advance(step);
+                    store.reply.add_permits(1);
+                }
+                let scan_cutoff = if error_first {
+                    step + scan_wait
+                } else {
+                    scan_wait
+                };
+                run.timer.wait_registered(scan_cutoff).await;
+                run.timer
+                    .advance(scan_cutoff - step - Duration::from_nanos(1));
+                tokio::task::yield_now().await;
+                assert_eq!(store.calls.load(Ordering::SeqCst), 2);
+                run.timer.advance(Duration::from_nanos(1));
+                support::wait_for_count(&store.calls, 3).await;
+                run.stop.cancel();
+                support::join_worker(run.worker).await.expect("stop");
+            }
+        }
+    })
+    .await
+    .expect("bounded overlap scenario");
+}
+
+#[tokio::test]
 async fn fatal_claim_error_stops_admission_and_drains_the_first_claim() {
     tokio::time::timeout(Duration::from_secs(2), async {
         let store = Arc::new(ObservedStore::new(0, 2, MessagingErrorKind::OwnershipLost));
@@ -495,7 +562,7 @@ async fn ready_claims_start_before_refill_and_last_request_fits_the_free_slot() 
 async fn fatal_settlement_during_claim_keeps_its_error_and_drains_the_reply() {
     tokio::time::timeout(Duration::from_secs(2), async {
         let mut observed = ObservedStore::new(2, 0, MessagingErrorKind::Transient);
-        observed.fail_settle = Some("first");
+        observed.fail_settle = Some(("first", MessagingErrorKind::OwnershipLost));
         let store = Arc::new(observed);
         store.append("first", "a").await;
         store.append("second", "b").await;
@@ -551,10 +618,13 @@ async fn unrepresentable_scan_delays_fail_before_claim() {
             Arc::new(NoopEmitter),
             config,
         );
-        let error = worker
-            .run(execution(fixture_tenant(), 1), CancellationToken::new())
-            .await
-            .expect_err("clock overflow");
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            worker.run(execution(fixture_tenant(), 1), CancellationToken::new()),
+        )
+        .await
+        .expect("startup must finish with a frozen clock")
+        .expect_err("clock overflow");
         assert_eq!(error.kind(), MessagingErrorKind::Invariant);
         assert_eq!(store.calls.load(Ordering::SeqCst), 0);
     }

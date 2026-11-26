@@ -369,7 +369,7 @@ where
             .next(retry_after, left);
         let wake = delay.map_or(cutoff, |delay| last_probe.capped(execution.timer, delay));
         if within(execution.timer, cutoff, |_| {
-            execution.timer.sleep_until(wake)
+            wait_for_probe(execution.timer, wake)
         })
         .await
         .is_err()
@@ -387,6 +387,18 @@ where
             .emit(TransactionalMessagingObservation::ConsumerCapacityWait { duration });
     }
     result
+}
+
+// A positive duration can elapse before the very first poll on a fast synchronous
+// provider. In that case also give the executor a turn before trying the store again.
+async fn wait_for_probe(timer: &impl ExecutionTimer, wake: Deadline) {
+    let sleep = timer.sleep_until(wake);
+    tokio::pin!(sleep);
+    if futures::poll!(&mut sleep).is_ready() {
+        tokio::task::yield_now().await;
+    } else {
+        sleep.await;
+    }
 }
 
 async fn claim_once<I, V, R, E>(
@@ -409,13 +421,24 @@ where
     let waiting_busy = &mut *known_busy;
     let emitter = execution.emitter;
     let permit = within(timer, cutoff, |deadline| async move {
+        if latest_retry_start.is_some_and(|latest| timer.now() > latest.instant()) {
+            return Ok(None);
+        }
         match inbox.reserve_claim(binding.execution(), binding.identity(), deadline)? {
-            ClaimAdmission::Ready(permit) => Ok(permit),
+            ClaimAdmission::Ready(permit) => Ok(Some(permit)),
             ClaimAdmission::Waiting(wait) => {
                 *started = Some(timer.now());
-                *waiting_busy = Some(ProcessingDisposition::CapacityBusy);
+                waiting_busy.get_or_insert(ProcessingDisposition::CapacityBusy);
                 emitter.emit(TransactionalMessagingObservation::ConsumerClaimCapacityBusy);
-                wait.await
+                if let Some(latest) = latest_retry_start {
+                    tokio::select! {
+                        biased;
+                        result = wait => result.map(Some),
+                        () = timer.sleep_until(latest) => Ok(None),
+                    }
+                } else {
+                    wait.await.map(Some)
+                }
             }
         }
     })
@@ -428,12 +451,13 @@ where
     let permit = permit?;
     // The timeout-first watchdog may expire after permit transfer but before this poll.
     within(timer, cutoff, |_| async {
-        if latest_retry_start.is_some_and(|latest| timer.now() > latest.instant()) {
-            // A late wake or permit transfer used the final I/O reserve. Keep the known
-            // busy outcome until the original watchdog expires without holding the slot.
-            drop(permit);
+        let Some(permit) = permit
+            .filter(|_| latest_retry_start.is_none_or(|latest| timer.now() <= latest.instant()))
+        else {
+            // The probe window closed. Preserve the known busy outcome until the original
+            // watchdog expires, with neither a queued reservation nor a held permit.
             return std::future::pending().await;
-        }
+        };
         *known_busy = None;
         inbox.claim(permit).await
     })
