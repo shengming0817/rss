@@ -145,7 +145,7 @@ async fn due_scan_profile() -> anyhow::Result<()> {
     let params = db.fixture.params();
     let fixture = serde_json::to_vec(&serde_json::json!({
         "host": params.host, "port": params.port, "dbname": params.database,
-        "user": params.username, "password": params.password, "ca": db.fixture.ca_pem(),
+        "user": params.username, "password": params.password, "ca": db.fixture.ca_pem(), "candidate_sql": MIGRATION_SQL,
     }))?;
     let mut child = tokio::process::Command::new("python3")
         .arg("tests/reconcile-postgres-integration/tests/measure/due_scan.py")

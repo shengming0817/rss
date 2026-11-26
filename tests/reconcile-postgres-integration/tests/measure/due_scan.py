@@ -40,7 +40,7 @@ def notice_counts(diag, counts):
             counts["target_rows_examined"] += loops * sum(node.get(key, 0) for key in
                 ("Actual Rows", "Rows Removed by Filter", "Rows Removed by Index Recheck"))
         if node["Node Type"] == "LockRows" and "entity=candidate.entity FOR UPDATE NOWAIT" in sql:
-            counts["lock_attempts"] += loops
+            counts["completed_lock_queries"] += loops
             counts["target_locks"] += loops * node["Actual Rows"]
 
 
@@ -67,10 +67,10 @@ def seed(admin, future, due, skew=0):
     admin.execute("ANALYZE rss_reconcile.targets")
 
 
-def first(conn, budget=128, pause=0):
+def first(conn, budget=128, pause=0, call=CALL):
     start = time.perf_counter_ns()
     for page in range(1, 10002):
-        count, more, entity = conn.execute(CALL, (TENANT, budget)).fetchone()
+        count, more, entity = conn.execute(call, (TENANT, budget)).fetchone()
         if count or not more:
             return page, entity, (time.perf_counter_ns()-start)//1000
         if pause:
@@ -78,20 +78,33 @@ def first(conn, budget=128, pause=0):
     raise RuntimeError("round failed to terminate")
 
 
-def compare(admin, runtime, instrumented, revision, future, due, skew=0):
+def observed_first(conn, budget=128):
     counts = Counter()
+    errors = []
     def collect(diag):
-        notice_counts(diag, counts)
-    seed(admin, future, due, skew)
-    instrumented.add_notice_handler(collect)
+        # psycopg deliberately suppresses exceptions from notice callbacks.
+        try:
+            notice_counts(diag, counts)
+        except (ValueError, KeyError, TypeError) as error:
+            errors.append(error)
+    conn.add_notice_handler(collect)
     try:
-        pages, entity, _ = first(instrumented)
+        pages, entity, _ = first(conn, budget)
     finally:
-        instrumented.remove_notice_handler(collect)
+        conn.remove_notice_handler(collect)
+    if errors:
+        raise errors[0]
+    assert counts["nested_sql"] and counts["buffers"]
+    return pages, entity, counts
+
+
+def compare(admin, runtime, instrumented, revision, future, due, skew=0):
+    seed(admin, future, due, skew)
+    pages, entity, counts = observed_first(instrumented)
     assert entity == (str(future+1) if due else None)
     assert counts["nested_sql"] > 0 and counts["buffers"] > 0
     if revision != BASE:
-        assert pages == 1 and counts["lock_attempts"] == counts["target_locks"] == int(bool(due))
+        assert pages == 1 and counts["completed_lock_queries"] == counts["target_locks"] == int(bool(due))
     elif future == 10000 and due <= 1:
         assert pages == 79 and counts["target_locks"] == future+due
     times = []
@@ -101,9 +114,25 @@ def compare(admin, runtime, instrumented, revision, future, due, skew=0):
         assert (actual_pages, actual_entity) == (pages, entity)
         times.append(elapsed)
     print(f"DUE revision={revision} future={future} eligible={due} skew={skew} pages={pages} "
-          f"examined={counts['target_rows_examined']} lock_attempts={counts['lock_attempts']} "
+          f"examined={counts['target_rows_examined']} completed_lock_queries={counts['completed_lock_queries']} "
           f"locked={counts['target_locks']} sql={counts['nested_sql']} buffers={counts['buffers']} "
           f"median_us={statistics.median(times)}", flush=True)
+
+
+def window_costs(admin, instrumented, revision):
+    for distribution, budget in [("dense", 2147483647), ("past-cursor", 128)]:
+        seed(admin, 0, 10000)
+        if distribution == "past-cursor":
+            admin.execute("UPDATE rss_reconcile.targets SET next_run=now()+interval '1 hour' WHERE queue_ticket>129")
+            admin.execute("UPDATE rss_reconcile.scans SET cursor_ticket=128,high_watermark=10000")
+            admin.execute("ANALYZE rss_reconcile.targets")
+        pages, entity, counts = observed_first(instrumented, budget)
+        expected = "129" if distribution == "past-cursor" else "1"
+        assert pages == 1 and entity == expected
+        print(f"WINDOW revision={revision} layout={distribution} budget={budget} counts={dict(counts)}", flush=True)
+        if revision != BASE:
+            # The large budget and inactive ticket suffix must not force a pass over 10k rows.
+            assert counts["target_rows_examined"] < 512, counts
 
 
 def renewal(admin, runtime, revision):
@@ -136,6 +165,22 @@ def wake_strategies(admin, runtime):
         time.sleep(float(delay))
         assert first(runtime)[1] == "1"
         print(f"WAKE earliest={earliest} extra_sql={int(earliest)} elapsed_ms={(time.perf_counter()-start)*1000:.2f}")
+    # Nontransactional sequence values count attempts even when NOWAIT rolls back its subtransaction.
+    definition = admin.execute("SELECT pg_get_functiondef('rss_reconcile.claim_due(uuid,text,int,int,bigint)'::regprocedure)").fetchone()[0]
+    anchor = "SELECT * INTO row FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND entity=candidate.entity FOR UPDATE NOWAIT;"
+    assert definition.count(anchor) == 1
+    with admin.transaction():
+        admin.execute("SET LOCAL ROLE reconcile_owner; CREATE SCHEMA lock_probe; CREATE SEQUENCE lock_probe.attempts")
+        admin.execute(definition.replace("FUNCTION rss_reconcile.claim_due(", "FUNCTION lock_probe.claim_due(")
+                      .replace(anchor, "PERFORM nextval('lock_probe.attempts'); " + anchor))
+        admin.execute("GRANT USAGE ON SCHEMA lock_probe TO reconcile_runtime")
+    seed(admin, 0, 5)
+    with admin.transaction():
+        admin.execute("SELECT FROM rss_reconcile.targets WHERE queue_ticket<5 FOR UPDATE")
+        pages, entity, _ = first(runtime, budget=1, call=CALL.replace("rss_reconcile.claim_due", "lock_probe.claim_due"))
+        attempts = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0]
+        assert (pages, entity, attempts) == (5, "5", 5)
+        print(f"LOCKS known_held=4 attempts={attempts} locked=1")
     for pause in (0, 0.01):
         seed(admin, 0, 5)
         with admin.transaction():
@@ -148,6 +193,7 @@ def wake_strategies(admin, runtime):
 def main():
     fixture = json.load(sys.stdin)
     with tempfile.TemporaryDirectory() as directory:
+        compiled_sql = fixture.pop("candidate_sql")
         ca = Path(directory) / "ca.pem"
         ca.write_text(fixture.pop("ca"))
         options = dict(fixture, sslmode="verify-full", sslrootcert=str(ca), autocommit=True,
@@ -155,8 +201,10 @@ def main():
         runtime_options = dict(options, user="reconcile_runtime", password="fixture-only")
         with psycopg.connect(**options) as admin:
             head = subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"], text=True).strip()
+            assert compiled_sql == Path(INSTALL).read_text() == subprocess.check_output(
+                ["/usr/bin/git", "show", f"{head}:{INSTALL}"], text=True), "candidate SQL differs from HEAD"
             for revision in (BASE, head):
-                ddl = subprocess.check_output(["/usr/bin/git", "show", f"{revision}:{INSTALL}"], text=True)
+                ddl = compiled_sql if revision == head else subprocess.check_output(["/usr/bin/git", "show", f"{revision}:{INSTALL}"], text=True)
                 with admin.transaction():
                     admin.execute("DROP SCHEMA rss_reconcile CASCADE; SET LOCAL ROLE reconcile_owner")
                     admin.execute(ddl)
@@ -172,6 +220,7 @@ def main():
                         for due in (1, 127, 128, 129, 1024):
                             compare(admin, runtime, instrumented, revision, 10000, due, skew=10000)
                         wake_strategies(admin, runtime)
+                    window_costs(admin, instrumented, revision)
                     renewal(admin, runtime, revision)
 
 

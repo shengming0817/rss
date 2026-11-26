@@ -184,8 +184,9 @@ END $$;
 CREATE FUNCTION rss_reconcile.claim_due(t uuid,r text,n integer,scan_budget integer,ttl bigint)
 RETURNS TABLE(claims rss_reconcile.targets[],more boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS $$
-DECLARE scan rss_reconcile.scans; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
+DECLARE scan rss_reconcile.scans; page refcursor; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
  cutoff timestamptz; page_limit bigint:=scan_budget::bigint+1; examined integer:=0;
+ probe_limit integer:=least(n,scan_budget)+1; sampled_entities text[]; sampled_tickets bigint[];
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -199,26 +200,26 @@ BEGIN
   SELECT coalesce(max(queue_ticket),0) INTO scan.high_watermark FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL;
   scan.cursor_ticket:=0;
  END IF;
- -- Probe the scope by effective due time, independently of the ticket window.
- -- A complete sample can be sorted cheaply. A truncated sample cannot prove ticket order.
+ -- Bound sampling by the number we can claim, even with a very large scan budget.
  cutoff:=clock_timestamp();
- FOR candidate IN
-  WITH due_sample AS MATERIALIZED (
-   SELECT entity,queue_ticket FROM rss_reconcile.targets
+ SELECT array_agg(entity),array_agg(queue_ticket) INTO sampled_entities,sampled_tickets
+ FROM (SELECT entity,queue_ticket FROM rss_reconcile.targets
+       WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL AND GREATEST(next_run,lease_until)<=cutoff
+        AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark
+       ORDER BY GREATEST(next_run,lease_until) LIMIT probe_limit) AS due_sample;
+ IF cardinality(sampled_tickets)=probe_limit THEN
+  -- An incomplete sample cannot establish ticket order. Stream the eligible window instead.
+  OPEN page NO SCROLL FOR SELECT entity,queue_ticket FROM rss_reconcile.targets
    WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL AND GREATEST(next_run,lease_until)<=cutoff
-   ORDER BY GREATEST(next_run,lease_until) LIMIT page_limit
-  ), density AS (
-   SELECT count(*)=page_limit AS full_page FROM due_sample
-  )
-  SELECT entity,queue_ticket FROM due_sample
-   WHERE NOT (SELECT full_page FROM density) AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark
-  UNION ALL
-  (SELECT entity,queue_ticket FROM rss_reconcile.targets
-   WHERE (SELECT full_page FROM density) AND tenant_id=t AND reconciler=r AND next_run IS NOT NULL
-    AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark AND GREATEST(next_run,lease_until)<=cutoff
-   ORDER BY queue_ticket LIMIT page_limit)
-  ORDER BY queue_ticket
+    AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark
+   ORDER BY queue_ticket LIMIT page_limit;
+ ELSE
+  OPEN page NO SCROLL FOR SELECT entity,queue_ticket
+   FROM unnest(sampled_entities,sampled_tickets) AS sample(entity,queue_ticket) ORDER BY queue_ticket;
+ END IF;
  LOOP
+  FETCH page INTO candidate;
+  EXIT WHEN NOT FOUND;
   -- This extra eligible row is a witness for the next page. Leave its ticket unconsumed.
   IF examined=scan_budget OR cardinality(claims)=n THEN more:=true; EXIT; END IF;
   examined:=examined+1;
@@ -253,6 +254,7 @@ BEGIN
   EXCEPTION WHEN lock_not_available THEN NULL; -- An unacquired candidate consumes no execution slot.
   END;
  END LOOP;
+ CLOSE page;
  IF NOT more THEN scan.cursor_ticket:=scan.high_watermark; END IF;
  -- Locks remain necessary; only a changed durable scan position needs a new tuple version.
  UPDATE rss_reconcile.scans AS persisted SET cursor_ticket=scan.cursor_ticket,high_watermark=scan.high_watermark
