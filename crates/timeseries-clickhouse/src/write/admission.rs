@@ -1,5 +1,6 @@
 //! Set-based admission inside the locked namespace transaction.
 //! ref: transact-rs/sqlx FAQ.md@v0.9.0 (PostgreSQL typed UNNEST).
+use super::fences::AdmissionFences;
 use crate::{control::Fence, definition, projection::Raw, transaction::sql_error};
 use rss_timeseries::*;
 use sqlx::PgConnection;
@@ -26,16 +27,28 @@ pub(super) async fn admit(
     ).bind(scope.tenant().to_string()).bind(scope.namespace().as_str())
      .bind(stream.source().as_str()).bind(stream.generation().as_str()).bind(&ids)
      .fetch_all(&mut *c).await.map_err(sql_error)?.into_iter().collect();
-    let wanted: BTreeSet<_> = batch
+    let new_samples = batch
         .samples()
         .iter()
-        .filter(|s| !existing.contains_key(s.input().id.as_str()))
+        .filter(|s| !existing.contains_key(s.input().id.as_str()));
+    let wanted: BTreeSet<_> = new_samples
+        .clone()
         .map(|s| {
             let d = s.input().series.definition().spec();
             (d.key.as_str(), d.version)
         })
         .collect();
     let definitions = definitions(c, scope, &wanted).await?;
+    let index = if wanted.is_empty() || fences.is_empty() {
+        None
+    } else {
+        #[cfg(feature = "integration")]
+        let start = crate::measurement::cpu_start();
+        let index = AdmissionFences::from_ordered(stream, fences, new_samples);
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| m.build_cpu += crate::measurement::elapsed(start));
+        index
+    };
     let mut rows = Vec::new();
     let mut new_ids = Vec::new();
     let mut digests = Vec::new();
@@ -49,7 +62,7 @@ pub(super) async fn admit(
             }
             continue;
         }
-        if fences.iter().any(|f| f.matches(sample)) {
+        if index.as_ref().is_some_and(|fences| fences.matches(sample)) {
             return Err(Error::HistoryExpired);
         }
         let def = input.series.definition();

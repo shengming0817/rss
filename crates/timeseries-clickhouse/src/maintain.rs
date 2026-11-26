@@ -133,7 +133,11 @@ impl<C: Clock> Operation<'_, C> {
         if r.budget().rows > self.limits.max_points || r.budget().buckets > self.limits.max_points {
             return Err(Error::BudgetExceeded);
         }
+        #[cfg(feature = "integration")]
+        let started = self.clock.now();
         let mut tx = self.begin(r.scope(), true, deadline).await?;
+        #[cfg(feature = "integration")]
+        let locked = self.clock.now();
         let mut external = false;
         let result = async {
             let (mut state, complete) = load(tx.connection(), r).await?;
@@ -263,7 +267,14 @@ impl<C: Clock> Operation<'_, C> {
             Ok(Outcome::Accepted(progress))
         }
         .await;
-        match tx.finish(result, true).await {
+        let settled = tx.finish(result, true).await;
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| {
+            let end = self.clock.now();
+            m.locked += end - locked;
+            m.transaction += end - started;
+        });
+        match settled {
             Ok(v) => Ok(flatten(v)),
             Err(_) if external => Ok(Outcome::Unknown),
             Err(e) => Err(e),

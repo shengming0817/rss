@@ -5128,6 +5128,7 @@ dependencies = [
  "rss-request-context",
  "rss-timeseries",
  "rss-timeseries-clickhouse",
+ "rustix",
  "rustls",
  "rustls-pki-types",
  "serde",
