@@ -231,52 +231,47 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
-        #[cfg(feature = "integration")]
-        crate::read_profile::reading(true);
-        let result = self
-            .transact(control, move |connection, budget| {
-                Box::pin(async move {
-                    let query = sqlx::query(if bytes.is_some() { READ_LOCAL } else { READ })
-                        .bind(tenant.to_string())
-                        .bind(after.map_or(0, |p| p.get() as i64))
-                        .bind(i64::from(limit.get()));
-                    let query = if let Some(bytes) = bytes {
-                        query.bind(bytes)
-                    } else {
-                        query
-                    };
-                    let mut rows = query.fetch(connection);
-                    let mut events = Vec::new();
-                    while let Some(row) = rows.try_next().await.map_err(sql_error)? {
-                        budget()?;
-                        #[cfg(feature = "integration")]
-                        crate::read_profile::row(&row);
-                        let floor: i64 = row.try_get("expired_through").map_err(sql_error)?;
-                        if after.map_or(0, |p| p.get() as i64) < floor {
-                            return Err(expired(position(floor)?));
-                        }
-                        if row
-                            .try_get::<Option<i64>, _>("log_position")
-                            .map_err(sql_error)?
-                            .is_none()
-                        {
-                            continue;
-                        }
-                        let (pos, record, fp) = restore_row(row)?;
-                        events.push(
-                            item(&scope, pos, record, fp)
-                                .map_err(|e| restore_error(Some(pos), e))?,
-                        );
-                        budget()?;
-                        tokio::task::yield_now().await;
+        let operation = self.transact(control, move |connection, budget| {
+            Box::pin(async move {
+                let query = sqlx::query(if bytes.is_some() { READ_LOCAL } else { READ })
+                    .bind(tenant.to_string())
+                    .bind(after.map_or(0, |p| p.get() as i64))
+                    .bind(i64::from(limit.get()));
+                let query = if let Some(bytes) = bytes {
+                    query.bind(bytes)
+                } else {
+                    query
+                };
+                let mut rows = query.fetch(connection);
+                let mut events = Vec::new();
+                while let Some(row) = rows.try_next().await.map_err(sql_error)? {
+                    budget()?;
+                    #[cfg(feature = "integration")]
+                    crate::read_profile::row(&row);
+                    let floor: i64 = row.try_get("expired_through").map_err(sql_error)?;
+                    if after.map_or(0, |p| p.get() as i64) < floor {
+                        return Err(expired(position(floor)?));
                     }
-                    Ok(events)
-                })
+                    if row
+                        .try_get::<Option<i64>, _>("log_position")
+                        .map_err(sql_error)?
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    let (pos, record, fp) = restore_row(row)?;
+                    events.push(
+                        item(&scope, pos, record, fp).map_err(|e| restore_error(Some(pos), e))?,
+                    );
+                    budget()?;
+                    tokio::task::yield_now().await;
+                }
+                Ok(events)
             })
-            .await;
+        });
         #[cfg(feature = "integration")]
-        crate::read_profile::reading(false);
-        result
+        let operation = crate::read_profile::page(operation);
+        operation.await
     }
 }
 // Only this adapter needs to carry projection diagnostics through Observation settlement.

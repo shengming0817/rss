@@ -33,11 +33,18 @@ pub struct ReadProfile {
     pub source: ReadWork,
     /// Borrowed transaction work.
     pub resolver: ReadWork,
-    transition: AtomicU64,
+    phase: std::sync::Mutex<SamplingPhase>,
     page_end: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
+#[derive(Default)]
+struct SamplingPhase {
+    active_pages: usize,
+    transition: u64,
+}
+
 tokio::task_local! {static PROFILE: Arc<ReadProfile>;}
+tokio::task_local! {static IN_PAGE: ();}
 
 impl ReadProfile {
     /// Observe the page boundary before its owned results leave the reader.
@@ -49,7 +56,10 @@ impl ReadProfile {
     }
     /// Monotone phase marker; odd values identify page reads.
     pub fn transition(&self) -> u64 {
-        self.transition.load(Relaxed)
+        self.phase
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .transition
     }
     /// Run the measured operation under this profile.
     pub async fn run<F: Future>(self: &Arc<Self>, operation: F) -> F::Output {
@@ -61,17 +71,43 @@ impl ReadProfile {
     }
 }
 
-pub(crate) fn reading(value: bool) {
-    let _ = PROFILE.try_with(|profile| {
-        if !value && let Some(observe) = &profile.page_end {
-            observe();
+// The guard owns the profile even if a pending future is dropped outside its task-local scope.
+struct PageRead(Arc<ReadProfile>);
+impl PageRead {
+    fn enter(profile: Arc<ReadProfile>) -> Self {
+        {
+            let mut phase = profile.phase.lock().unwrap_or_else(|e| e.into_inner());
+            if phase.active_pages == 0 {
+                phase.transition += 1;
+            }
+            phase.active_pages += 1;
         }
-        profile.transition.fetch_add(1, Relaxed);
-    });
+        Self(profile)
+    }
+}
+impl Drop for PageRead {
+    fn drop(&mut self) {
+        let mut phase = self.0.phase.lock().unwrap_or_else(|e| e.into_inner());
+        phase.active_pages -= 1;
+        if phase.active_pages == 0 {
+            phase.transition += 1;
+        }
+    }
+}
+pub(crate) async fn page<F: Future>(work: F) -> F::Output {
+    let Ok(profile) = PROFILE.try_with(Arc::clone) else {
+        return work.await;
+    };
+    let guard = PageRead::enter(profile);
+    let result = IN_PAGE.scope((), work).await;
+    if let Some(observe) = &guard.0.page_end {
+        observe();
+    }
+    result
 }
 pub(crate) fn count(update: impl FnOnce(&ReadWork)) {
     let _ = PROFILE.try_with(|p| {
-        update(if p.reading_page() {
+        update(if IN_PAGE.try_with(|()| ()).is_ok() {
             &p.source
         } else {
             &p.resolver
@@ -109,4 +145,45 @@ pub(crate) fn row(row: &sqlx::postgres::PgRow) {
             c.raw_bytes.fetch_add(raw.len() as u64, Relaxed);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_a_pending_page_restores_the_sampling_phase() {
+        let profile = Arc::new(ReadProfile::default());
+        let mut stalled = Box::pin(profile.run(page(async {
+            count(|c| {
+                c.raw_bytes.fetch_add(7, Relaxed);
+            });
+            std::future::pending::<()>().await
+        })));
+        assert!(futures::poll!(stalled.as_mut()).is_pending());
+        assert!(profile.reading_page());
+        profile
+            .run(async {
+                count(|c| {
+                    c.raw_bytes.fetch_add(2, Relaxed);
+                });
+            })
+            .await;
+        drop(stalled);
+        assert!(!profile.reading_page());
+        profile
+            .run(async {
+                count(|c| {
+                    c.raw_bytes.fetch_add(3, Relaxed);
+                });
+            })
+            .await;
+        assert_eq!(
+            (
+                profile.source.raw_bytes.load(Relaxed),
+                profile.resolver.raw_bytes.load(Relaxed)
+            ),
+            (7, 5)
+        );
+    }
 }
