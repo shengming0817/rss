@@ -2109,3 +2109,35 @@ async fn batch_preserves_uncertain_settlement_and_durable_retry_classification()
     }
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn stop_during_an_empty_page_prevents_immediate_continuation() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(2), &cancel);
+    let scope = scope()?;
+    let mut store = idle_store();
+    store.scan_delay = Some((0, Duration::from_millis(20)));
+    let business = business(0);
+    let worker = run(
+        &store, &business, &scope, idle_policy(Duration::from_millis(2), Duration::from_secs(1))?,
+        &control, &stop, |_| {},
+    );
+    let interrupt = async {
+        // Stop an in-flight empty page. Insert work with a deadline eligible at its cutoff,
+        // so the fixture returns more=true when the delayed result reaches the worker.
+        tokio::task::yield_now().await;
+        assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+        let target = Target::new(scope.clone(), "next-page")?;
+        store.wake(&target, &ResourceSet::empty(scope.tenant()), &control).await?;
+        store.lock()[0].due = Duration::ZERO;
+        stop.cancel();
+        Ok::<(), Error>(())
+    };
+    let (report, stopped) = tokio::join!(biased; worker, interrupt);
+    stopped?;
+    assert_eq!(report?.converged, 0);
+    assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+    Ok(())
+}

@@ -52,6 +52,10 @@ async fn safety(
 ) -> anyhow::Result<()> {
     for (damage, repair) in [
         (
+            "ALTER INDEX rss_reconcile.targets_due RENAME TO missing_due",
+            "ALTER INDEX rss_reconcile.missing_due RENAME TO targets_due",
+        ),
+        (
             "GRANT UPDATE ON rss_reconcile.targets TO reconcile_runtime",
             "REVOKE UPDATE ON rss_reconcile.targets FROM reconcile_runtime",
         ),
