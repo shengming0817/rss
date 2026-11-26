@@ -71,7 +71,7 @@ CREATE TABLE rss_reconcile.scans (
  reconciler text NOT NULL CHECK(reconciler ~ '^[A-Za-z0-9_.:-]{1,255}$'),
  cursor_ticket bigint NOT NULL DEFAULT 0 CHECK(cursor_ticket>=0),
  high_watermark bigint NOT NULL DEFAULT 0 CHECK(high_watermark>=cursor_ticket),
- locked_hint_through bigint NOT NULL DEFAULT 0 CHECK(locked_hint_through BETWEEN 0 AND high_watermark),
+ hint_backoff_page smallint NOT NULL DEFAULT 0 CHECK(hint_backoff_page BETWEEN 0 AND 63),
  PRIMARY KEY(tenant_id,reconciler)
 );
 
@@ -188,7 +188,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS 
 DECLARE scan rss_reconcile.scans; page refcursor; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
  cutoff timestamptz; page_limit bigint; examined integer:=0;
  probe_limit integer; sampled_entities text[]; sampled_tickets bigint[];
- next_sample integer:=1; stream_sample integer:=1; hints_prepared boolean:=false;
+ next_sample integer:=1; stream_sample integer:=1; hints_prepared boolean:=false; try_hints boolean; hint_lock_conflict boolean:=false;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -201,10 +201,13 @@ BEGIN
  IF scan.cursor_ticket>=scan.high_watermark THEN
   SELECT coalesce(max(queue_ticket),0) INTO scan.high_watermark FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL;
   scan.cursor_ticket:=0;
-  scan.locked_hint_through:=0;
+  scan.hint_backoff_page:=0;
  END IF;
  -- Only a complete scope sample can skip ticket ranges. Reserve a lookahead
  -- for more and a sentinel to distinguish a complete sample from a truncated one.
+ -- After a physical conflict retry on the next page, then at powers of two.
+ -- Cycling through 32..63 caps the interval at 32 calls regardless of ticket gaps.
+ try_hints:=scan.hint_backoff_page IN (0,1,2,4,8,16,32);
  cutoff:=clock_timestamp();
  page_limit:=scan_budget::bigint+1;
  -- A claim page (including its lookahead) may still be the complete due set.
@@ -235,13 +238,14 @@ BEGIN
   IF NOT candidate.eligible THEN
    -- This ticket moved the cursor. Use its free lock attempt for a due ticket
    -- ahead of it without declaring the intervening tickets visited.
+   IF NOT try_hints THEN CONTINUE; END IF;
    IF NOT hints_prepared THEN
     -- Check only the bounded remote sample. A durable wait suppresses a
     -- hint while its blocker still exists; release or expiry can reopen it.
     SELECT array_agg(s.entity ORDER BY s.ticket),array_agg(s.ticket ORDER BY s.ticket)
      INTO sampled_entities,sampled_tickets
      FROM unnest(sampled_entities,sampled_tickets) AS s(entity,ticket)
-     WHERE s.ticket>greatest(scan.cursor_ticket,scan.locked_hint_through) AND s.ticket<=scan.high_watermark
+     WHERE s.ticket>scan.cursor_ticket AND s.ticket<=scan.high_watermark
       AND NOT EXISTS(
        SELECT FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r
         AND d.entity=s.entity AND d.waiting_ticket=s.ticket AND (
@@ -297,20 +301,21 @@ BEGIN
     FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r AND d.entity=row.entity AND (o.tenant_id,o.resource)=(d.tenant_id,d.resource);
    claims:=array_append(claims,row);
   EXCEPTION WHEN lock_not_available THEN
-   -- Unlike a logical waiter, NOWAIT cannot record anything on the target.
-   -- Hints are ordered; the normal ticket stream can still revisit this prefix.
-   IF NOT candidate.eligible THEN scan.locked_hint_through:=candidate.queue_ticket; END IF;
+   -- A stream conflict is already charged to a distinct advancing position.
+   IF NOT candidate.eligible THEN hint_lock_conflict:=true; END IF;
   END;
  END LOOP;
  CLOSE page;
- IF NOT more THEN
-  scan.cursor_ticket:=scan.high_watermark;
-  scan.locked_hint_through:=0;
+ IF NOT more THEN scan.cursor_ticket:=scan.high_watermark; END IF;
+ IF NOT more OR (hints_prepared AND NOT hint_lock_conflict) THEN
+  scan.hint_backoff_page:=0;
+ ELSIF hint_lock_conflict OR scan.hint_backoff_page>0 THEN
+  scan.hint_backoff_page:=CASE WHEN scan.hint_backoff_page=63 THEN 32 ELSE scan.hint_backoff_page+1 END;
  END IF;
  -- Locks remain necessary; only a changed durable scan position needs a new tuple version.
- UPDATE rss_reconcile.scans AS persisted SET cursor_ticket=scan.cursor_ticket,high_watermark=scan.high_watermark,locked_hint_through=scan.locked_hint_through
+ UPDATE rss_reconcile.scans AS persisted SET cursor_ticket=scan.cursor_ticket,high_watermark=scan.high_watermark,hint_backoff_page=scan.hint_backoff_page
  WHERE persisted.tenant_id=t AND persisted.reconciler=r
-  AND (persisted.cursor_ticket,persisted.high_watermark,persisted.locked_hint_through) IS DISTINCT FROM (scan.cursor_ticket,scan.high_watermark,scan.locked_hint_through);
+  AND (persisted.cursor_ticket,persisted.high_watermark,persisted.hint_backoff_page) IS DISTINCT FROM (scan.cursor_ticket,scan.high_watermark,scan.hint_backoff_page);
  RETURN NEXT;
 END $$;
 

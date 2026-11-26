@@ -1,7 +1,7 @@
 WITH expected(table_name,columns,types,required) AS (VALUES
  ('resources',ARRAY['tenant_id','resource','owner_reconciler','owner_entity','owner_token','owner_epoch'],ARRAY['uuid','text','text','text','uuid','bigint'],ARRAY[true,true,false,false,false,false]),
  ('target_resources',ARRAY['tenant_id','reconciler','entity','resource','waiting_ticket'],ARRAY['uuid','text','text','text','bigint'],ARRAY[true,true,true,true,false]),
- ('scans',ARRAY['tenant_id','reconciler','cursor_ticket','high_watermark','locked_hint_through'],ARRAY['uuid','text','bigint','bigint','bigint'],ARRAY[true,true,true,true,true])
+ ('scans',ARRAY['tenant_id','reconciler','cursor_ticket','high_watermark','hint_backoff_page'],ARRAY['uuid','text','bigint','bigint','smallint'],ARRAY[true,true,true,true,true])
 ), actual AS (
  SELECT c.relname::text AS table_name,array_agg(a.attname::text ORDER BY a.attnum) AS columns,
   array_agg(format_type(a.atttypid,a.atttypmod) ORDER BY a.attnum) AS types,array_agg(a.attnotnull ORDER BY a.attnum) AS required
@@ -21,7 +21,7 @@ WITH expected(table_name,columns,types,required) AS (VALUES
  ('scans','CHECK ((reconciler ~ ''^[A-Za-z0-9_.:-]{1,255}$''::text))'),
  ('scans','CHECK ((cursor_ticket >= 0))'),
  ('scans','CHECK ((high_watermark >= cursor_ticket))'),
- ('scans','CHECK (((locked_hint_through >= 0) AND (locked_hint_through <= high_watermark)))')
+ ('scans','CHECK (((hint_backoff_page >= 0) AND (hint_backoff_page <= 63)))')
 ), actual_constraints AS (
  SELECT c.relname::text AS table_name,pg_get_constraintdef(k.oid) AS definition,k.convalidated
  FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace

@@ -223,17 +223,25 @@ def blocked_remote_sample(admin, runtime, instrumented, revision):
             if blocker == "target":
                 admin.execute("""SELECT FROM rss_reconcile.targets WHERE tenant_id=%s AND reconciler='profile'
                     AND queue_ticket>%s FOR UPDATE""", (TENANT, future + 1))
+            attempted = None
             if revision == BASE:
                 pages, entity, counts = observed_first(instrumented)
             else:
                 before = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0]
                 pages, entity, counts = observed_first(instrumented, call=CALL.replace("rss_reconcile.claim_due", "lock_probe.claim_due"))
                 attempted = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0] - before
-                assert attempted == 4, (blocker, attempted)
+                if blocker == "lease":
+                    assert attempted == 4
+                else:
+                    # Three hints per retry page, plus the independent ordinary ticket.
+                    # Six startup probes (normal and backoff pages 1,2,4,8,16),
+                    # then at most one every 32 pages.
+                    assert 4 <= attempted <= 1 + 3 * (6 + (pages + 31) // 32), (blocker, attempted)
             assert (pages, entity) == (future // 128 + 1, str(future + 1))
-            assert counts["target_locks"] == (1 if revision == BASE or blocker == "target" else 4), counts
+            expected_locks = 1 if revision == BASE or blocker == "target" else attempted
+            assert counts["target_locks"] == expected_locks, counts
             print(f"MIXED revision={revision} blocker={blocker} pages={pages} first={entity} "
-                  f"locks={counts['target_locks']} candidates={counts['candidate_reads']} peak={counts['max_page_candidate_reads']}", flush=True)
+                  f"attempts={attempted} locks={counts['target_locks']} candidates={counts['candidate_reads']} peak={counts['max_page_candidate_reads']}", flush=True)
         release_holder(runtime)
         # The ordinary stream rechecks both registered waiters and suppressed NOWAIT hints.
         assert first(runtime)[1] == str(future + 2)
@@ -254,6 +262,27 @@ def early_unblock(admin, runtime):
         pages, entity, _, count = first(runtime)
         assert (pages, entity, count) == (1, str(future + 2), 1)
         print(f"UNBLOCK mode={unblock} pages={pages} first={entity} registered={registered}", flush=True)
+
+
+def short_physical_lock(admin, runtime):
+    future = 100000
+    for blocker in ("target", "protect"):
+        for held_pages in (1, 70):
+            mixed_queue(admin, runtime, future)
+            with admin.transaction():
+                if blocker == "target":
+                    admin.execute("""SELECT FROM rss_reconcile.targets WHERE tenant_id=%s AND reconciler='profile'
+                        AND queue_ticket>%s FOR UPDATE""", (TENANT, future + 1))
+                else:
+                    assert admin.execute("""SELECT rss_reconcile.lock_execution(tenant_id,reconciler,entity,token,epoch,binding_revision)
+                        FROM rss_reconcile.targets WHERE tenant_id=%s AND reconciler='holder'""", (TENANT,)).fetchone()[0]
+                for _ in range(held_pages):
+                    assert runtime.execute(CALL, (TENANT, 1, 128)).fetchone() == (0, True, None)
+            release_holder(runtime)
+            pages, entity, _, returned = first(runtime)
+            assert entity == str(future + 2) and returned == 1
+            assert 1 <= pages <= (1 if held_pages == 1 else 32), (blocker, held_pages, pages)
+            print(f"ROW_UNLOCK mode={blocker} held_pages={held_pages} recovery_pages={pages} first={entity}", flush=True)
 
 
 def renewal(admin, runtime, revision):
@@ -357,6 +386,7 @@ def main():
                         hot_progress(admin, runtime, instrumented)
                         wake_strategies(admin, runtime)
                         early_unblock(admin, runtime)
+                        short_physical_lock(admin, runtime)
                     blocked_remote_sample(admin, runtime, instrumented, revision)
                     window_costs(admin, instrumented, revision)
                     deep_progress(admin, runtime, instrumented, revision)
