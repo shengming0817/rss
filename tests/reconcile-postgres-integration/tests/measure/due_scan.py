@@ -196,6 +196,27 @@ def hot_progress(admin, runtime, instrumented):
     print(f"HOT_WAITERS blocked=10000 first_page={pages} counts={dict(counts)}", flush=True)
 
 
+def blocked_remote_sample(admin, runtime, instrumented, revision):
+    future = 100000
+    seed(admin, future, 4)
+    admin.execute("SELECT setval('rss_reconcile.queue_tickets',%s)", (future + 4,))
+    runtime.execute("SELECT rss_reconcile.wake(%s,'holder','holder',ARRAY['hot'])", (TENANT,))
+    runtime.execute("SELECT * FROM rss_reconcile.claim_due(%s,'holder',1,128,600000)", (TENANT,))
+    # The three earliest due targets share the live resource. The oldest ticket is independent.
+    admin.execute("""INSERT INTO rss_reconcile.target_resources(tenant_id,reconciler,entity,resource)
+        SELECT tenant_id,reconciler,entity,'hot' FROM rss_reconcile.targets
+        WHERE reconciler='profile' AND queue_ticket>%s""", (future + 1,))
+    pages, entity, counts = observed_first(instrumented)
+    assert (pages, entity) == (future // 128 + 1, str(future + 1))
+    assert counts["target_locks"] == (1 if revision == BASE else 4), counts
+    print(f"MIXED revision={revision} pages={pages} first={entity} locks={counts['target_locks']} "
+          f"candidates={counts['candidate_reads']} peak={counts['max_page_candidate_reads']}", flush=True)
+    runtime.execute("""SELECT rss_reconcile.release(tenant_id,reconciler,entity,token,epoch)
+        FROM rss_reconcile.targets WHERE tenant_id=%s AND reconciler='holder'""", (TENANT,))
+    # The regular stream must recheck a registered waiter when it reaches the ticket.
+    assert first(runtime)[1] == str(future + 2)
+
+
 def renewal(admin, runtime, revision):
     seed(admin, 0, 1)
     _, entity, _, _ = first(runtime)
@@ -296,6 +317,7 @@ def main():
                         compare(admin, runtime, instrumented, revision, 100000, 2)
                         hot_progress(admin, runtime, instrumented)
                         wake_strategies(admin, runtime)
+                    blocked_remote_sample(admin, runtime, instrumented, revision)
                     window_costs(admin, instrumented, revision)
                     deep_progress(admin, runtime, instrumented, revision)
                     renewal(admin, runtime, revision)

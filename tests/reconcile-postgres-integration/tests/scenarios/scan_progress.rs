@@ -139,7 +139,8 @@ async fn seed_window(
     let old = Target::new(scope.clone(), "old")?;
     let locked = Target::new(scope.clone(), "locked")?;
     let last = Target::new(scope.clone(), "last")?;
-    for target in [&old, &locked, &last] {
+    let future = Target::new(scope.clone(), "future")?;
+    for target in [&old, &locked, &future, &last] {
         store.wake(target, &keys, c).await?;
     }
     sqlx::query("UPDATE rss_reconcile.targets SET next_run=clock_timestamp()+interval '1 hour' WHERE tenant_id=$1::uuid AND reconciler=$2")
@@ -177,12 +178,10 @@ async fn rediscover_wakes(
     watermark: i64,
 ) -> anyhow::Result<()> {
     let scope = old.scope();
-    let keys = ResourceSet::empty(scope.tenant());
     let lease = Duration::from_secs(60);
-    // The old target keeps its already-passed ticket. The new one is above this watermark.
-    store.wake(old, &keys, c).await?;
-    let new = Target::new(scope.clone(), "new")?;
-    store.wake(&new, &keys, c).await?;
+    wake_next_window(store, owner, c, old).await?;
+    let skipped = store.claim_due(scope, 1, 1, lease, c).await?;
+    assert!(skipped.claims.is_empty() && skipped.more);
     let tail = store.claim_due(scope, 1, 1, lease, c).await?;
     assert_eq!(tail.claims.len(), 1);
     assert_eq!(tail.claims[0].target(), last);
@@ -190,10 +189,30 @@ async fn rediscover_wakes(
     let end = position(owner, scope).await?;
     assert_eq!((end.0, end.1), (watermark, watermark));
 
-    let next = store.claim_due(scope, 3, i32::MAX as u32, lease, c).await?;
-    let targets: Vec<_> = next.claims.iter().map(Claim::target).collect();
-    assert_eq!(targets, [old, &new]);
+    let next = store.claim_due(scope, 4, i32::MAX as u32, lease, c).await?;
+    assert_eq!(entities(&next), [old.entity(), "new-1", "new-2", "new-3"]);
     assert!(!next.more);
+    Ok(())
+}
+
+async fn wake_next_window(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    old: &Target,
+) -> anyhow::Result<()> {
+    let scope = old.scope();
+    let keys = ResourceSet::empty(scope.tenant());
+    store.wake(old, &keys, c).await?;
+    for entity in ["new-1", "new-2", "new-3"] {
+        store
+            .wake(&Target::new(scope.clone(), entity)?, &keys, c)
+            .await?;
+    }
+    // All three earliest samples are beyond the open window. The future
+    // position before "last" may not borrow any of them.
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=now()-interval '1 hour' WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity LIKE 'new-%'")
+        .bind(TENANT).bind(scope.reconciler()).execute(owner).await?;
     Ok(())
 }
 

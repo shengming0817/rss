@@ -187,7 +187,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS 
 DECLARE scan rss_reconcile.scans; page refcursor; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
  cutoff timestamptz; page_limit bigint; examined integer:=0;
  probe_limit integer; sampled_entities text[]; sampled_tickets bigint[];
- next_sample integer:=1; stream_sample integer:=1;
+ next_sample integer:=1; stream_sample integer:=1; hints_prepared boolean:=false;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -233,10 +233,21 @@ BEGIN
   IF NOT candidate.eligible THEN
    -- This ticket moved the cursor. Use its free lock attempt for a due ticket
    -- ahead of it without declaring the intervening tickets visited.
+   IF NOT hints_prepared THEN
+    -- A registered waiter gets its next resource check on the ordinary ticket
+    -- stream. Filter only the bounded sample, once on the first borrowed slot.
+    SELECT array_agg(s.entity ORDER BY s.ticket),array_agg(s.ticket ORDER BY s.ticket)
+     INTO sampled_entities,sampled_tickets
+     FROM unnest(sampled_entities,sampled_tickets) AS s(entity,ticket)
+     WHERE s.ticket>scan.cursor_ticket AND s.ticket<=scan.high_watermark AND NOT EXISTS(
+      SELECT FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r
+       AND d.entity=s.entity AND d.waiting_ticket=s.ticket);
+    hints_prepared:=true;
+   END IF;
    WHILE sampled_tickets[next_sample]<=scan.cursor_ticket LOOP
     next_sample:=next_sample+1;
    END LOOP;
-   IF sampled_tickets[next_sample] IS NULL OR sampled_tickets[next_sample]>scan.high_watermark THEN CONTINUE; END IF;
+   IF sampled_tickets[next_sample] IS NULL THEN CONTINUE; END IF;
    candidate.entity:=sampled_entities[next_sample];
    candidate.queue_ticket:=sampled_tickets[next_sample];
    next_sample:=next_sample+1;
