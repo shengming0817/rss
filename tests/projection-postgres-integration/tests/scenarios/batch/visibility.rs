@@ -58,7 +58,8 @@ pub(super) async fn verify(
             event(&s, 3, "second", b"pause")?,
         ];
         let inspect = async {
-            rec.paused.cancelled().await;
+            let _release_on_error = rec.resume.clone().drop_guard();
+            tokio::time::timeout(Duration::from_secs(5), rec.paused.cancelled()).await?;
             assert_eq!(snapshot(owner, &s).await?, (Some(0), 1, vec![], 0));
             let competing = store.takeover(&s, &DEFINITION, control);
             let release = async {
@@ -72,9 +73,11 @@ pub(super) async fn verify(
                 rec.resume.cancel();
                 Ok::<_, anyhow::Error>(())
             };
-            let (claim, released) = tokio::join!(competing, release);
-            released?;
-            Ok::<_, anyhow::Error>(claim?)
+            let (claim, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::try_join!(async { Ok::<_, anyhow::Error>(competing.await?) }, release)
+            })
+            .await??;
+            Ok::<_, anyhow::Error>(claim)
         };
         let (result, new_claim) = tokio::join!(
             exec.execute_batch(Some(seed.position()), events, control),

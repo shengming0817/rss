@@ -17,16 +17,72 @@ pub(super) async fn verify(
     )
     .await?;
     let first = event(&s, 1, "original", b"original")?;
-    exec.execute_batch(None, vec![first.clone()], control)
-        .await?;
+    exec.execute_batch(None, vec![first], control).await?;
+    let credentials = || {
+        sqlx::query_as::<_,(i64,String)>("SELECT epoch,worker_token::text FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='standalone'").bind(TENANT).fetch_one(owner)
+    };
+    let (old_epoch, old_token) = credentials().await?;
+    store.takeover(&s, &DEFINITION, control).await?;
+    let (epoch, token) = credentials().await?;
     let cases = [
-        (1, vec![2, 3], vec!["new", "original"], "P1003"),
-        (1, vec![2, 3], vec!["within", "within"], "P1003"),
-        (1, vec![3, 2], vec!["first", "second"], "P1004"),
-        (1, vec![2, 10], vec!["first", "second"], "P1004"),
-        (0, vec![2, 3], vec!["first", "second"], "P1002"),
+        (
+            1,
+            vec![2, 3],
+            vec!["new", "original"],
+            epoch,
+            &token,
+            "P1003",
+        ),
+        (
+            1,
+            vec![2, 3],
+            vec!["within", "within"],
+            epoch,
+            &token,
+            "P1003",
+        ),
+        (
+            1,
+            vec![3, 2],
+            vec!["first", "second"],
+            epoch,
+            &token,
+            "P1004",
+        ),
+        (
+            1,
+            vec![2, 10],
+            vec!["first", "second"],
+            epoch,
+            &token,
+            "P1004",
+        ),
+        (
+            0,
+            vec![2, 3],
+            vec!["first", "second"],
+            epoch,
+            &token,
+            "P1002",
+        ),
+        (
+            1,
+            vec![2, 3],
+            vec!["first", "second"],
+            old_epoch,
+            &token,
+            "P1002",
+        ),
+        (
+            1,
+            vec![2, 3],
+            vec!["first", "second"],
+            epoch,
+            &old_token,
+            "P1002",
+        ),
     ];
-    for (expected, positions, ids, code) in cases {
+    for (expected, positions, ids, worker_epoch, worker_token, code) in cases {
         let mut tx = owner.begin().await?;
         sqlx::raw_sql("SET LOCAL ROLE projection_runtime")
             .execute(&mut *tx)
@@ -35,9 +91,9 @@ pub(super) async fn verify(
             .bind(TENANT)
             .execute(&mut *tx)
             .await?;
-        let error=sqlx::query("SELECT rss_projection.finish_batch(tenant_id,source_id,projection_id,generation,epoch,worker_token,$2,$3,$4,$5,definition_identity) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='standalone'")
+        let error=sqlx::query("SELECT rss_projection.finish_batch(tenant_id,source_id,projection_id,generation,$6,$7::uuid,$2,$3,$4,$5,definition_identity) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='standalone'")
             .bind(TENANT).bind(i64::from(expected)).bind(positions.iter().map(|&p|i64::from(p)).collect::<Vec<_>>())
-            .bind(ids).bind(vec![[1_u8;32],[2_u8;32]]).execute(&mut *tx).await.unwrap_err();
+            .bind(ids).bind(vec![[1_u8;32],[2_u8;32]]).bind(worker_epoch).bind(worker_token).execute(&mut *tx).await.unwrap_err();
         assert_eq!(
             error.as_database_error().and_then(|e| e.code()).as_deref(),
             Some(code)

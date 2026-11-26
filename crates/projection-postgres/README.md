@@ -42,11 +42,6 @@ connection through SQLx `close_on_drop`; successful probes return the connection
 Admission failure does not explicitly close other owners' pool clones. Returning from admission
 is not proof that asynchronous connection cleanup or the remote query has already terminated.
 
-This replaces the old one-argument Rust constructor; no overload, default budget, or compatibility
-feature remains. The provider requires schema revision 5. RSS workspace consumers move
-together; independently pinned product consumers, including rss-mdm, must update their callsites
-when upgrading their RSS revision.
-
 ref: launchbadge/sqlx sqlx-core/src/pool/connection.rs@75bc0487eb661da811bb7a3c5d158f1bd463fef4
 
 ## Storage installation

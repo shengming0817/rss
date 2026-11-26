@@ -100,6 +100,13 @@ SELECT
           AND p.proname IN ('initialize','takeover','lock_event','finish_event','lock_batch','finish_batch')
           AND NOT EXISTS (SELECT FROM expected WHERE expected.oid=p.oid)
     )
+    AND (SELECT count(*)=2 AND bool_and(p.prosecdef AND NOT helper.prosecdef
+                AND has_function_privilege(p.proowner,helper.oid,'EXECUTE'))
+        FROM pg_proc p JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid
+            AND d.refclassid='pg_proc'::regclass
+        JOIN pg_proc helper ON helper.oid=d.refobjid
+        WHERE p.pronamespace=to_regnamespace('rss_projection') AND p.proname IN ('lock_batch','finish_batch')
+          AND helper.oid=to_regprocedure('rss_projection.process_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea,boolean)'))
     AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:5'
          FROM pg_namespace WHERE nspname='rss_projection')
 "#).fetch_one(connection).await.map_err(|e| sql_error(e, rss_projection::Phase::Admission))?;

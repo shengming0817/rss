@@ -260,13 +260,17 @@ async fn required_function_permissions(
             "REVOKE EXECUTE ON FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) FROM projection_runtime",
             "GRANT EXECUTE ON FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) TO projection_runtime",
         ),
+        (
+            "ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) SECURITY INVOKER",
+            "ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) SECURITY DEFINER",
+        ),
     ] {
         sqlx::raw_sql(revoke).execute(owner).await?;
         let adoption = PgStore::new(pool.clone(), control).await;
         sqlx::raw_sql(grant).execute(owner).await?;
         assert!(
             matches!(adoption, Err(error) if error.kind() == ErrorKind::StorageContract),
-            "missing EXECUTE must reject store admission"
+            "batch authority and required function privileges must reject drift"
         );
         PgStore::new(pool.clone(), control).await?;
     }

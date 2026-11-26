@@ -245,13 +245,15 @@ BEGIN
 END $$;
 
 CREATE FUNCTION rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea)
-RETURNS boolean[] LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, rss_projection AS $$
-    SELECT rss_projection.process_batch($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false)
-$$;
+RETURNS boolean[] LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, rss_projection
+BEGIN ATOMIC
+    SELECT rss_projection.process_batch($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false);
+END;
 CREATE FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea)
-RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, rss_projection AS $$
-    SELECT rss_projection.process_batch($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
-$$;
+RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, rss_projection
+BEGIN ATOMIC
+    SELECT rss_projection.process_batch($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true);
+END;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_projection FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_projection FROM PUBLIC;
 COMMENT ON SCHEMA rss_projection IS 'rss-projection-postgres:5';

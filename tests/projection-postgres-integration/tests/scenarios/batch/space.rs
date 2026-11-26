@@ -111,20 +111,20 @@ pub(super) async fn measure(
     };
     let temp_before = temp().await?;
     let initial = resident_kib()?;
-    let done = Arc::new(AtomicBool::new(false));
-    let stop = done.clone();
+    let stop = CancellationToken::new();
+    let done = stop.clone().drop_guard();
     let sample = std::thread::spawn(move || -> anyhow::Result<u64> {
         let mut peak = initial;
         loop {
             peak = peak.max(resident_kib()?);
-            if stop.load(Ordering::Acquire) {
+            if stop.is_cancelled() {
                 return Ok(peak);
             }
             std::thread::sleep(Duration::from_millis(2));
         }
     });
     let result = exec.execute_batch(None, events, control).await;
-    done.store(true, Ordering::Release);
+    drop(done);
     let peak = sample
         .join()
         .map_err(|_| anyhow::anyhow!("RSS sampler failed"))??;

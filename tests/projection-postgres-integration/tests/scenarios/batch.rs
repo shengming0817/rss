@@ -140,6 +140,17 @@ async fn retry(
 ) -> anyhow::Result<()> {
     recorder.reject.store(false, Ordering::SeqCst);
     let before = recorder.calls.load(Ordering::SeqCst);
+    let mut reversed = events.clone();
+    reversed.swap(1, 2);
+    assert_eq!(
+        exec.execute_batch(None, reversed, c)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::OutOfOrder
+    );
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), before);
+    assert_eq!(snapshot(owner, s).await?, (None, 0, vec![], 0));
     let mut conflict = events.clone();
     conflict[1] = event(s, 1, "one", b"changed")?;
     assert!(
