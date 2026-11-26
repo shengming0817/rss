@@ -118,6 +118,8 @@ fn authenticated(base: &clickhouse::Client, credentials: &Credentials) -> clickh
 pub struct Limits {
     /// Maximum simultaneous admitted calls across all tenants.
     pub max_in_flight: NonZeroU32,
+    /// Maximum queued calls across this owner. Zero permits only immediate admission.
+    pub max_waiters: u32,
     /// Maximum stored namespace fences and matched fences per request.
     pub max_fences: NonZeroU32,
     /// Weighted admission capacity shared by all tenants on one owner.

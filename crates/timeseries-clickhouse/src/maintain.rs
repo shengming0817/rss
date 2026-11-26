@@ -100,14 +100,7 @@ async fn simple(
             )
             .await?;
             control::fence_changed(c, r.scope()).await?;
-            control::invalidate(
-                c,
-                r.scope(),
-                selection,
-                window.start().micros(),
-                limits.max_points.get(),
-            )
-            .await?;
+            control::invalidate(c, r.scope(), selection, *window, limits.max_points.get()).await?;
         }
         MaintenanceAction::Restore {
             selection,
@@ -120,14 +113,7 @@ async fn simple(
                 return Err(Error::HistoryExpired);
             }
             control::fence_changed(c, r.scope()).await?;
-            control::invalidate(
-                c,
-                r.scope(),
-                selection,
-                window.start().micros(),
-                limits.max_points.get(),
-            )
-            .await?;
+            control::invalidate(c, r.scope(), selection, *window, limits.max_points.get()).await?;
         }
         MaintenanceAction::CloseStream { stream } => {
             sqlx::query("INSERT INTO rss_ts_ch.streams(tenant_id,namespace,source,generation,closed) VALUES($1::text::uuid,$2,$3,$4,true) ON CONFLICT(tenant_id,namespace,source,generation) DO UPDATE SET closed=true")
@@ -188,6 +174,9 @@ impl<C: Clock> Operation<'_, C> {
                 return Ok(Outcome::Accepted(MaintenanceProgress::Blocked {
                     reason: MaintenanceBlock::PendingWrite,
                 }));
+            }
+            if matches!(r.action(), MaintenanceAction::Recompute { .. }) {
+                recompute::check(tx.connection(), r).await?;
             }
             external = state.publish.is_some() || state.cleanup.is_some();
             let revision = tx.revision;

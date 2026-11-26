@@ -53,7 +53,8 @@ async fn issue(
         remove(c, id).await?;
     }
     let digest = projection::hex(p.receipt.identity().digest.as_bytes());
-    let attempt = projection::permit(c, scope, "raw", &digest, p.revision).await?;
+    let attempt =
+        projection::permit(c, &p.receipt.identity().stream, "raw", &digest, p.revision).await?;
     let count = sqlx::query(
         "UPDATE rss_ts_ch.batches SET attempt=$4::text::uuid
         WHERE tenant_id=$1::text::uuid AND namespace=$2 AND revision=$3 AND phase='prepared'

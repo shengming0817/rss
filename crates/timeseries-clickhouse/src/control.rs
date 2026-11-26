@@ -11,10 +11,10 @@ pub(crate) async fn invalidate(
     c: &mut PgConnection,
     s: &Scope,
     selection: &Selection,
-    at: i64,
+    window: Interval,
     max: u32,
 ) -> Result<(), Error> {
-    let rows = invalidation_targets(c, s, selection, at, max).await?;
+    let rows = invalidation_targets(c, s, selection, window, max).await?;
     for row in rows {
         let spec: SummarySpec = decode(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)?;
         if overlaps(selection, &spec.selection()) {
@@ -29,12 +29,12 @@ async fn invalidation_targets(
     c: &mut PgConnection,
     s: &Scope,
     selection: &Selection,
-    at: i64,
+    window: Interval,
     max: u32,
 ) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
     let selection = String::from_utf8(bytes(selection)?).map_err(|_| Error::Invariant)?;
-    let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND dirty_from IS NULL AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
-        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(at).bind(i64::from(max)+1).bind(selection).fetch_all(c).await.map_err(sql_error)?;
+    let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND dependency_start<$6 AND dirty_from IS DISTINCT FROM 0 AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
+        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(window.start().micros()).bind(i64::from(max)+1).bind(selection).bind(window.end().micros()).fetch_all(c).await.map_err(sql_error)?;
     if rows.len() > max as usize {
         return Err(Error::BudgetExceeded);
     }
@@ -92,6 +92,7 @@ pub(crate) async fn visible_fences(
     q: &Query,
     start: i64,
     limits: &crate::Limits,
+    include_restored: bool,
 ) -> Result<Vec<Fence>, Error> {
     use futures::TryStreamExt;
     let sel = q.selection();
@@ -111,6 +112,7 @@ pub(crate) async fn visible_fences(
         .bind(q.window().end().micros())
         .bind(doc)
         .bind(i64::from(limits.max_fences.get()) + 1)
+        .bind(include_restored)
         .fetch(c);
     let mut result = Vec::new();
     let mut remaining = limits.max_bytes.get() as usize;
@@ -135,12 +137,6 @@ pub(crate) async fn fence_changed(c: &mut PgConnection, s: &Scope) -> Result<(),
       .bind(s.tenant().to_string()).bind(s.namespace().as_str()).execute(c).await.map_err(sql_error)?;
     Ok(())
 }
-pub(crate) async fn summary_changed(c: &mut PgConnection, s: &Scope) -> Result<(), Error> {
-    sqlx::query("UPDATE rss_ts_ch.namespaces SET summary_epoch=summary_epoch+1 WHERE tenant_id=$1::text::uuid AND namespace=$2")
-      .bind(s.tenant().to_string()).bind(s.namespace().as_str()).execute(c).await.map_err(sql_error)?;
-    Ok(())
-}
-
 pub(crate) async fn put_fence(
     c: &mut PgConnection,
     r: &MaintenanceRequest,

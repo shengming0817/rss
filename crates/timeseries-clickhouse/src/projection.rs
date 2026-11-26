@@ -90,13 +90,14 @@ pub(crate) struct Attempt {
 }
 pub(crate) async fn permit(
     c: &mut PgConnection,
-    s: &Scope,
+    stream: &rss_timeseries::Stream,
     target: &'static str,
     digest: &str,
     revision: i64,
 ) -> Result<Attempt, Error> {
-    let r=sqlx::query("INSERT INTO rss_ts_ch.attempts(tenant_id,namespace,target,digest,revision) VALUES($1::text::uuid,$2,$3,$4,$5) RETURNING id::text,query_id::text")
-        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(target).bind(digest).bind(revision).fetch_one(c).await.map_err(sql_error)?;
+    let s = stream.scope();
+    let r=sqlx::query("INSERT INTO rss_ts_ch.attempts(tenant_id,namespace,target,digest,revision,source,generation) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7) RETURNING id::text,query_id::text")
+        .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(target).bind(digest).bind(revision).bind(stream.source().as_str()).bind(stream.generation().as_str()).fetch_one(c).await.map_err(sql_error)?;
     Ok(Attempt {
         id: r.try_get("id").map_err(sql_error)?,
         query: r.try_get("query_id").map_err(sql_error)?,
@@ -261,4 +262,56 @@ pub(crate) fn provider_error(stage: &str, error: clickhouse::error::Error) -> Er
     #[cfg(not(feature = "integration"))]
     let _ = (stage, error);
     Error::Unavailable
+}
+
+// Read failures do not have the ambiguous-commit semantics of INSERT failures.
+// ref: ClickHouse src/Common/ErrorCodes.cpp@v25.8.12.129-lts
+pub(crate) fn read_error(error: clickhouse::error::Error) -> Error {
+    use clickhouse::error::Error as ChError;
+    match error {
+        ChError::TimedOut => Error::Deadline,
+        ChError::BadResponse(message) => match message
+            .strip_prefix("Code: ")
+            .and_then(|s| s.split_once('.'))
+            .and_then(|(code, _)| code.parse::<u32>().ok())
+        {
+            Some(158 | 241 | 307 | 396) => Error::BudgetExceeded,
+            Some(159 | 160) => Error::Deadline,
+            _ => Error::Unavailable,
+        },
+        _ => Error::Unavailable,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reads_classify_budgets_and_time_without_exposing_provider_text() {
+        for (code, expected) in [
+            (158, Error::BudgetExceeded),
+            (241, Error::BudgetExceeded),
+            (307, Error::BudgetExceeded),
+            (396, Error::BudgetExceeded),
+            (159, Error::Deadline),
+            (160, Error::Deadline),
+            (60, Error::Unavailable),
+        ] {
+            assert_eq!(
+                read_error(clickhouse::error::Error::BadResponse(format!(
+                    "Code: {code}. DB::Exception: private query"
+                ))),
+                expected
+            );
+        }
+        for message in ["private Code: 158.", "Code: 158x.", "Code: 158"] {
+            assert_eq!(
+                read_error(clickhouse::error::Error::BadResponse(message.into())),
+                Error::Unavailable
+            );
+        }
+        assert_eq!(
+            read_error(clickhouse::error::Error::TimedOut),
+            Error::Deadline
+        );
+    }
 }

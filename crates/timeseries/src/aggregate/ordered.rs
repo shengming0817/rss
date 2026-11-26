@@ -244,7 +244,7 @@ pub(super) fn state_piece(
         .min(window.end()),
     };
     let start = at.max(window.start());
-    let segment = if end >= start {
+    let segment = if end > start || (end == start && inside(at, window)) {
         Some(StateSegment {
             value,
             window: Interval::new(start, end)?,

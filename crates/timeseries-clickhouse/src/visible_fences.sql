@@ -4,7 +4,7 @@ CROSS JOIN (SELECT $7::text::jsonb AS q) request
 WHERE tenant_id=$1::text::uuid AND namespace=$2
   AND coalesce(selection#>>'{series,subject}',selection->>'subject')=$3
   AND coalesce(selection#>>'{series,resource}',selection->>'resource')=$4
-  AND hi>$5 AND lo<$6 AND (kind='pruned' OR (kind='delete' AND NOT restored))
+  AND hi>$5 AND lo<$6 AND (kind='pruned' OR (kind='delete' AND (NOT restored OR $9::boolean)))
   AND CASE
     WHEN selection->>'selection'='exact' AND q->>'selection'='exact' THEN selection=q
     WHEN q->>'selection'='exact' THEN selection->'keys'='[]'::jsonb OR (selection->'keys') ? (q#>>'{series,definition,key}')

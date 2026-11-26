@@ -3,14 +3,13 @@
 CREATE SCHEMA rss_ts_ch;
 CREATE TABLE rss_ts_ch.installation (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
- id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 3 CHECK(version=3),
+ id uuid NOT NULL DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 4 CHECK(version=4),
  max_pending_batches integer NOT NULL DEFAULT 1 CHECK(max_pending_batches BETWEEN 1 AND 16)
 );
 INSERT INTO rss_ts_ch.installation DEFAULT VALUES;
 CREATE TABLE rss_ts_ch.namespaces (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
  fence_epoch bigint NOT NULL DEFAULT 0 CHECK(fence_epoch>=0),
- summary_epoch bigint NOT NULL DEFAULT 0 CHECK(summary_epoch>=0),
  allocated bigint NOT NULL DEFAULT 0 CHECK(allocated>=published),
  published bigint NOT NULL DEFAULT 0 CHECK(published>=0),
  revision bigint NOT NULL DEFAULT 0 CHECK(revision>=0),
@@ -59,12 +58,14 @@ CREATE TABLE rss_ts_ch.identities (
 CREATE TABLE rss_ts_ch.attempts (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL,
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), query_id uuid NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+ source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
  target text NOT NULL CHECK(target IN ('raw','summaries')),
  digest text NOT NULL CHECK(length(digest)=64), revision bigint NOT NULL CHECK(revision>=0),
  allowed boolean NOT NULL DEFAULT true, drained boolean NOT NULL DEFAULT false,
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces,
  CHECK(NOT allowed OR NOT drained)
 );
+CREATE INDEX stream_attempts ON rss_ts_ch.attempts(tenant_id,namespace,source,generation,target);
 CREATE UNIQUE INDEX raw_batch_attempt ON rss_ts_ch.attempts(tenant_id,namespace,revision) WHERE target='raw';
 CREATE TABLE rss_ts_ch.fences (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
@@ -77,7 +78,7 @@ CREATE TABLE rss_ts_ch.fences (
 CREATE INDEX visible_fences ON rss_ts_ch.fences
  (tenant_id,namespace,(coalesce(selection#>>'{series,subject}',selection->>'subject')),
   (coalesce(selection#>>'{series,resource}',selection->>'resource')),lo,hi)
- WHERE kind='pruned' OR (kind='delete' AND NOT restored);
+ WHERE kind IN ('pruned','delete');
 CREATE TABLE rss_ts_ch.plans (
  tenant_id uuid NOT NULL, namespace text COLLATE "C" NOT NULL, id text COLLATE "C" NOT NULL,
  binding bytea NOT NULL CHECK(octet_length(binding)=32), state bytea NOT NULL,
@@ -91,6 +92,8 @@ CREATE TABLE rss_ts_ch.summaries (
  source text COLLATE "C" NOT NULL, generation text COLLATE "C" NOT NULL,
  series text COLLATE "C" NOT NULL CHECK(length(series)=64),
  semantics bytea NOT NULL, spec bytea NOT NULL, lo bigint NOT NULL, hi bigint NOT NULL CHECK(hi>lo),
+ max_input_revision bigint NOT NULL CHECK(max_input_revision>=0),
+ dependency_start bigint NOT NULL CHECK(dependency_start>=0 AND dependency_start<=lo),
  object_id uuid NOT NULL, dirty_from bigint CHECK(dirty_from>=0),
  PRIMARY KEY(tenant_id,namespace,spec_digest,lo),
  FOREIGN KEY(tenant_id,namespace) REFERENCES rss_ts_ch.namespaces

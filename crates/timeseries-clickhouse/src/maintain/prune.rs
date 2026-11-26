@@ -3,7 +3,6 @@ use crate::{projection::literal, read::selection};
 #[derive(Serialize, Deserialize)]
 pub(super) struct Cleanup {
     raw_limit: i64,
-    drained: bool,
     pending_summaries: Vec<String>,
 }
 async fn safe_limit<C: Clock>(
@@ -60,15 +59,12 @@ async fn safe_limit<C: Clock>(
                 .saturating_sub(i64::try_from(spec.lookback()).unwrap_or(i64::MAX))
                 .max(0),
         );
-        if matches!(
-            spec.series().definition().spec().metric,
-            Metric::Bool | Metric::State { .. }
-        ) && spec.coverage() == CoveragePolicy::ObservedOnly
+        if crate::aggregate::needs_prior(&spec)
             && let Some(prior) = store
                 .predecessor(&spec, raw_before, boundary, &fences, deadline)
                 .await?
         {
-            limit = limit.min(prior.input().observed_at.micros());
+            limit = limit.min(prior.sample.input().observed_at.micros());
         }
         let lo = row
             .try_get::<i64, _>("lo")
@@ -128,7 +124,6 @@ pub(super) async fn step<C: Clock>(
         }
         state.cleanup = Some(Cleanup {
             raw_limit: limit,
-            drained: false,
             pending_summaries: Vec::new(),
         });
         return Ok(Step::More(0));
@@ -137,13 +132,14 @@ pub(super) async fn step<C: Clock>(
     if cleanup.raw_limit > limit {
         return Ok(Step::Blocked(MaintenanceBlock::DirtySummary));
     }
-    if !cleanup.drained {
-        let ids=sqlx::query_scalar::<_,String>("SELECT query_id::text FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND NOT allowed AND NOT drained ORDER BY id LIMIT $3")
+    let ids=sqlx::query_scalar::<_,String>("SELECT query_id::text FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND NOT allowed AND NOT drained ORDER BY id LIMIT $3")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(i64::from(r.budget().rows.get())).fetch_all(&mut *c).await.map_err(sql_error)?;
+    if !ids.is_empty() {
         store.drain(&ids, deadline).await?;
-        sqlx::query("DELETE FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND query_id::text=ANY($3) AND NOT allowed")
+        sqlx::query("UPDATE rss_ts_ch.attempts SET drained=true WHERE tenant_id=$1::text::uuid AND namespace=$2 AND query_id::text=ANY($3) AND NOT allowed")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(&ids).execute(&mut *c).await.map_err(sql_error)?;
-        cleanup.drained = ids.len() < r.budget().rows.get() as usize;
+        sqlx::query("DELETE FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND target='raw' AND query_id::text=ANY($3) AND NOT allowed AND drained")
+            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(&ids).execute(&mut *c).await.map_err(sql_error)?;
         return Ok(Step::More(
             u32::try_from(ids.len()).map_err(|_| Error::Invariant)?,
         ));
@@ -240,6 +236,7 @@ async fn prune_summaries<C: Clock>(
                 .join(",")
         );
         delete(store, "summaries", &predicate, deadline).await?;
+        remove_summary_attempts(c, r.scope(), &cleanup.pending_summaries).await?;
         let count = cleanup.pending_summaries.len();
         cleanup.pending_summaries.clear();
         return Ok(Step::More(
@@ -265,14 +262,13 @@ async fn prune_summaries<C: Clock>(
     if !ids.is_empty() {
         sqlx::query("DELETE FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 AND object_id::text=ANY($3)")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(&ids).execute(&mut *c).await.map_err(sql_error)?;
-        control::summary_changed(c, r.scope()).await?;
         cleanup.pending_summaries = ids.clone();
         return Ok(Step::More(
             u32::try_from(ids.len()).map_err(|_| Error::Invariant)?,
         ));
     }
     // Old unreferenced summary objects are also removed, never imported back into canonical refs.
-    let active=sqlx::query_scalar::<_,String>("SELECT object_id::text FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 UNION SELECT id::text FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND allowed AND target='summaries' LIMIT $3")
+    let active=sqlx::query_scalar::<_,String>("SELECT object_id::text FROM rss_ts_ch.summaries WHERE tenant_id=$1::text::uuid AND namespace=$2 UNION SELECT id::text FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND (allowed OR NOT drained) AND target='summaries' LIMIT $3")
         .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(i64::from(store.limits.max_points.get())+1).fetch_all(&mut *c).await.map_err(sql_error)?;
     if active.len() > store.limits.max_points.get() as usize {
         return Err(Error::BudgetExceeded);
@@ -321,11 +317,30 @@ async fn prune_summaries<C: Clock>(
             deadline,
         )
         .await?;
+        remove_summary_attempts(c, r.scope(), &orphans).await?;
         return Ok(Step::More(
             u32::try_from(orphans.len()).map_err(|_| Error::Invariant)?,
         ));
     }
+    // Drained permits with no inserted object can now be retired too. No live
+    // INSERT or orphan object remains, so deleting this proof cannot race a late sink.
+    let removed = sqlx::query("DELETE FROM rss_ts_ch.attempts WHERE id IN (SELECT a.id FROM rss_ts_ch.attempts a WHERE a.tenant_id=$1::text::uuid AND a.namespace=$2 AND a.target='summaries' AND NOT a.allowed AND a.drained AND NOT EXISTS(SELECT FROM rss_ts_ch.summaries s WHERE s.object_id=a.id) LIMIT $3)")
+        .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(i64::from(r.budget().rows.get())).execute(&mut *c).await.map_err(sql_error)?.rows_affected();
+    if removed > 0 {
+        return Ok(Step::More(
+            u32::try_from(removed).map_err(|_| Error::Invariant)?,
+        ));
+    }
     Ok(Step::Done(0))
+}
+async fn remove_summary_attempts(
+    c: &mut PgConnection,
+    scope: &Scope,
+    ids: &[String],
+) -> Result<(), Error> {
+    sqlx::query("DELETE FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND id::text=ANY($3) AND target='summaries' AND NOT allowed AND drained")
+        .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(ids).execute(c).await.map_err(sql_error)?;
+    Ok(())
 }
 pub(super) async fn reclaim<C: Clock>(
     store: &Operation<'_, C>,
@@ -340,6 +355,11 @@ pub(super) async fn reclaim<C: Clock>(
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_optional(&mut *c).await.map_err(sql_error)?;
     if closed != Some(true) {
         return Ok(Step::Blocked(MaintenanceBlock::StreamOpen));
+    }
+    let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND target='summaries' AND source=$3 AND generation=$4 AND NOT drained)")
+        .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
+    if pending {
+        return Ok(Step::Blocked(MaintenanceBlock::PendingWrite));
     }
     let predicate = format!(
         "tenant={} AND namespace={} AND source={} AND generation={}",
@@ -371,6 +391,11 @@ pub(super) async fn reclaim<C: Clock>(
         if decode::<SummarySpec>(&spec)?.stream() == s {
             return Ok(Step::Blocked(MaintenanceBlock::RetainedData));
         }
+    }
+    let retained: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.attempts WHERE tenant_id=$1::text::uuid AND namespace=$2 AND target='summaries' AND source=$3 AND generation=$4)")
+        .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
+    if retained {
+        return Ok(Step::Blocked(MaintenanceBlock::RetainedData));
     }
     let live:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.batches WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND (phase<>'expired' OR replay_until>$5))")
         .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(s.source().as_str()).bind(s.generation().as_str()).bind(time).fetch_one(&mut *c).await.map_err(sql_error)?;

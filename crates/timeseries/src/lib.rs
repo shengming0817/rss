@@ -37,6 +37,9 @@ pub enum Error {
     Unauthorized,
     #[error("timeseries continuation is invalid")]
     InvalidCursor,
+    /// Restart the read from its first page; this does not imply data loss.
+    #[error("timeseries snapshot has changed; restart pagination")]
+    SnapshotInvalidated,
     #[error("timeseries history has expired")]
     HistoryExpired,
     #[error("timeseries deadline exceeded")]

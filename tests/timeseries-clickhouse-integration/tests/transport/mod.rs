@@ -214,6 +214,8 @@ async fn serve(
         .unwrap_or_default();
     let body_sql = String::from_utf8_lossy(&data);
     let reads_raw = sql.contains("FROM rss_ts_ch.raw") || body_sql.contains("FROM rss_ts_ch.raw");
+    let reads_summary = sql.contains("FROM rss_ts_ch.summaries FINAL")
+        || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
     let reads_page = sql.contains("FROM rss_ts_ch.raw FINAL")
         || body_sql.contains("FROM rss_ts_ch.raw FINAL")
         || sql.contains("FROM rss_ts_ch.summaries FINAL")
@@ -240,7 +242,8 @@ async fn serve(
     let mode = state
         .mode
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
-            ((m == 5 && reads_page) || (m != 5 && is_insert)).then_some(0)
+            ((m == 5 && reads_page) || (m == 6 && reads_summary) || (m < 5 && is_insert))
+                .then_some(0)
         })
         .unwrap_or(0);
     let captured = Captured {
@@ -254,6 +257,15 @@ async fn serve(
     if mode == 2 {
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("withheld before registration"));
+    }
+    if mode == 6 {
+        state.entered.add_permits(1);
+        state
+            .release
+            .acquire()
+            .await
+            .map_err(|_| std::io::Error::other("gate closed"))?
+            .forget();
     }
     let response = forward(&state, captured)
         .await
@@ -435,6 +447,13 @@ async fn wait_sink(f: &Fixture) -> anyhow::Result<()> {
     }).await?
 }
 
+async fn install_sink_gate(f: &Fixture, target: &str) -> anyhow::Result<()> {
+    sqlx::raw_sql("CREATE FUNCTION rss_ts_ch.test_sink_wait() RETURNS integer LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_advisory_xact_lock(2814); RETURN 1; END $$; CREATE VIEW rss_ts_ch.test_sink_gate AS SELECT rss_ts_ch.test_sink_wait() AS ready; GRANT SELECT ON rss_ts_ch.test_sink_gate TO ch_guard;").execute(&f.admin).await?;
+    f.ch.sql("CREATE TABLE default.test_sink_gate (ready Int32) ENGINE=PostgreSQL(rss_ts_ch_guard, table='test_sink_gate',schema='rss_ts_ch')").await?;
+    f.ch.sql(&format!("CREATE MATERIALIZED VIEW default.test_sink ENGINE=Null DEFINER=default SQL SECURITY DEFINER AS SELECT r.revision FROM rss_ts_ch.{target} AS r CROSS JOIN default.test_sink_gate AS g WHERE g.ready=1")).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> anyhow::Result<()> {
     for target in ["raw", "summaries"] {
@@ -446,15 +465,19 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
         f.store = replacement_writer(&f).await?;
         let b = batch("sink", vec![sample(&d, "sink", 10, 3)?])?;
         if target == "summaries" {
-            confirmed(f.write(&b).await?)?;
+            f.maintain(
+                "close-empty",
+                MaintenanceAction::CloseStream {
+                    stream: b.stream().clone(),
+                },
+            )
+            .await?;
         }
         // A dependent materialized-view sink receives a real INSERT block, after
         // the production guard join yielded rows. Its PostgreSQL source is the
         // deterministic gate, not a timing guess based on system.processes.
         // ref: ClickHouse InsertDependenciesBuilder.cpp@v25.8.12.129-lts
-        sqlx::raw_sql("CREATE FUNCTION rss_ts_ch.test_sink_wait() RETURNS integer LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_advisory_xact_lock(2814); RETURN 1; END $$; CREATE VIEW rss_ts_ch.test_sink_gate AS SELECT rss_ts_ch.test_sink_wait() AS ready; GRANT SELECT ON rss_ts_ch.test_sink_gate TO ch_guard;").execute(&f.admin).await?;
-        f.ch.sql("CREATE TABLE default.test_sink_gate (ready Int32) ENGINE=PostgreSQL(rss_ts_ch_guard, table='test_sink_gate',schema='rss_ts_ch')").await?;
-        f.ch.sql(&format!("CREATE MATERIALIZED VIEW default.test_sink ENGINE=Null DEFINER=default SQL SECURITY DEFINER AS SELECT r.revision FROM rss_ts_ch.{target} AS r CROSS JOIN default.test_sink_gate AS g WHERE g.ready=1")).await?;
+        install_sink_gate(&f, target).await?;
         let mut blocker = f.admin.acquire().await?;
         sqlx::query("SELECT pg_advisory_lock(2814)")
             .execute(&mut *blocker)
@@ -541,6 +564,41 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
                 )
                 .await?;
             }
+            if target == "summaries" {
+                let revoke = Authorized::<MaintenanceRequest>::verify(
+                    &authority(TENANT)?,
+                    MaintenanceRequest::new(
+                        id("sink-prune")?,
+                        MaintenanceAction::Prune {
+                            selection: query(&d, QueryMode::History, 10)?.selection().clone(),
+                            raw_before: Timestamp::new(0)?,
+                            summaries_before: Timestamp::new(100)?,
+                        },
+                        MaintenanceBudget {
+                            rows: NonZeroU32::new(2).ok_or(Error::Invariant)?,
+                            buckets: NonZeroU32::MIN,
+                        },
+                    )?,
+                )?;
+                assert!(matches!(
+                    confirmed(f.store.step(&revoke, None, deadline()?).await?)?,
+                    MaintenanceProgress::More { .. }
+                ));
+                // The real INSERT is already in the dependent sink. Revocation is
+                // committed, but its exact query ID has not terminated yet.
+                assert!(matches!(
+                    f.maintain(
+                        "reclaim-undrained",
+                        MaintenanceAction::Reclaim {
+                            stream: b.stream().clone()
+                        }
+                    )
+                    .await?,
+                    MaintenanceProgress::Blocked {
+                        reason: MaintenanceBlock::PendingWrite
+                    }
+                ));
+            }
             let progress = f
                 .maintain(
                     "sink-prune",
@@ -571,6 +629,18 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
                 .trim(),
             "0"
         );
+        if target == "summaries" {
+            assert!(matches!(
+                f.maintain(
+                    "reclaim-drained",
+                    MaintenanceAction::Reclaim {
+                        stream: b.stream().clone()
+                    }
+                )
+                .await?,
+                MaintenanceProgress::Complete { .. }
+            ));
+        }
         proxy.replay().await?;
         assert_eq!(
             f.ch.sql(&format!("SELECT count() FROM rss_ts_ch.{target}"))
@@ -579,5 +649,189 @@ async fn revoked_inserts_in_dependent_sink_do_not_resurrect_after_cleanup() -> a
             "0"
         );
     }
+    Ok(())
+}
+
+// Leave a real Prune checkpoint after its initial drain and PG unlink. A later
+// summary permit must still be checked before this plan resumes physical cleanup.
+async fn prune_past_initial_drain(
+    f: &Fixture,
+    d: &Definition,
+) -> anyhow::Result<MaintenanceAction> {
+    let prototype = sample(d, "initial", 1, 1)?;
+    let other = Stream::new(d.spec().scope.clone(), id("other")?, id("generation")?);
+    let spec = SummarySpec::new(
+        other,
+        prototype.input().series.clone(),
+        NonZeroU64::new(100).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    f.maintain(
+        "initial-summary",
+        MaintenanceAction::Recompute {
+            spec,
+            window: Interval::new(Timestamp::new(0)?, Timestamp::new(100)?)?,
+        },
+    )
+    .await?;
+    let action = MaintenanceAction::Prune {
+        selection: query(d, QueryMode::History, 10)?.selection().clone(),
+        raw_before: Timestamp::new(0)?,
+        summaries_before: Timestamp::new(100)?,
+    };
+    let request = Authorized::<MaintenanceRequest>::verify(
+        &authority(TENANT)?,
+        MaintenanceRequest::new(
+            id("prune")?,
+            action.clone(),
+            MaintenanceBudget {
+                rows: NonZeroU32::new(2).ok_or(Error::Invariant)?,
+                buckets: NonZeroU32::MIN,
+            },
+        )?,
+    )?;
+    let mut next = None;
+    for _ in 0..8 {
+        let MaintenanceProgress::More { next: n, .. } =
+            confirmed(f.store.step(&request, next.as_ref(), deadline()?).await?)?
+        else {
+            anyhow::bail!("Prune finished before unlink checkpoint");
+        };
+        next = Some(n);
+        let linked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT FROM rss_ts_ch.summaries WHERE source='other')",
+        )
+        .fetch_one(&f.admin)
+        .await?;
+        if !linked {
+            assert_eq!(
+                f.ch.sql("SELECT count() FROM rss_ts_ch.summaries")
+                    .await?
+                    .trim(),
+                "1"
+            );
+            return Ok(action);
+        }
+    }
+    anyhow::bail!("Prune did not reach unlink checkpoint")
+}
+
+#[tokio::test]
+async fn successful_summary_response_does_not_drain_a_delayed_duplicate() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-confirmed-duplicate").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let prototype = sample(&d, "prototype", 10, 1)?;
+    let stream = prototype.input().stream.clone();
+    f.maintain(
+        "close",
+        MaintenanceAction::CloseStream {
+            stream: stream.clone(),
+        },
+    )
+    .await?;
+    let spec = SummarySpec::new(
+        stream.clone(),
+        prototype.input().series.clone(),
+        NonZeroU64::new(100).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let action = prune_past_initial_drain(&f, &d).await?;
+    let request = Authorized::<MaintenanceRequest>::verify(
+        &authority(TENANT)?,
+        MaintenanceRequest::new(
+            id("summary")?,
+            MaintenanceAction::Recompute {
+                spec: spec.clone(),
+                window: Interval::new(Timestamp::new(0)?, Timestamp::new(100)?)?,
+            },
+            MaintenanceBudget {
+                rows: NonZeroU32::new(2).ok_or(Error::Invariant)?,
+                buckets: NonZeroU32::MIN,
+            },
+        )?,
+    )?;
+    let MaintenanceProgress::More { next, .. } =
+        confirmed(f.store.step(&request, None, deadline()?).await?)?
+    else {
+        anyhow::bail!("summary preparation");
+    };
+    let proxy = Proxy::new(&f.ch).await?;
+    let writer = proxy.store(f.pool.clone()).await?;
+    // The first real INSERT has completed, but the caller has not received its
+    // response and the publication transaction has not revoked the permit.
+    proxy.arm(4);
+    let publishing = writer.step(&request, Some(&next), deadline()?);
+    tokio::pin!(publishing);
+    tokio::select! { _=&mut publishing=>anyhow::bail!("publish missed response gate"), r=proxy.wait_held()=>r?, }
+    install_sink_gate(&f, "summaries").await?;
+    let mut blocker = f.admin.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(2814)")
+        .execute(&mut *blocker)
+        .await?;
+    // Replay the actual captured request with the SAME query ID. The original
+    // request is no longer in ProcessList, so this copy reaches the real sink.
+    let duplicate = proxy.replay();
+    tokio::pin!(duplicate);
+    tokio::select! { _=&mut duplicate=>anyhow::bail!("duplicate missed sink gate"), r=wait_sink(&f)=>r?, }
+    proxy.release();
+    assert!(matches!(
+        confirmed(publishing.await?)?,
+        MaintenanceProgress::Complete { .. }
+    ));
+    assert!(matches!(
+        f.maintain(
+            "reclaim-pending",
+            MaintenanceAction::Reclaim {
+                stream: stream.clone()
+            }
+        )
+        .await?,
+        MaintenanceProgress::Blocked {
+            reason: MaintenanceBlock::PendingWrite
+        }
+    ));
+    let release = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if f.ch
+                    .sql("SELECT count() FROM system.processes WHERE query LIKE 'KILL QUERY%'")
+                    .await?
+                    .trim()
+                    != "0"
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        sqlx::query("SELECT pg_advisory_unlock(2814)")
+            .execute(&mut *blocker)
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    // Cancellation or normal completion of the duplicate are both valid; the
+    // assertions below require terminal ProcessList state and no surviving effect.
+    let (cleaned, released, _duplicate_result) =
+        tokio::join!(f.maintain("prune", action), release, &mut duplicate);
+    released?;
+    assert!(matches!(cleaned?, MaintenanceProgress::Complete { .. }));
+    assert!(matches!(
+        f.maintain("reclaim", MaintenanceAction::Reclaim { stream })
+            .await?,
+        MaintenanceProgress::Complete { .. }
+    ));
+    proxy.replay().await?;
+    assert_eq!(
+        f.ch.sql("SELECT count() FROM rss_ts_ch.summaries")
+            .await?
+            .trim(),
+        "0"
+    );
+    assert_eq!(f.ch.sql("SELECT count() FROM system.processes WHERE query LIKE 'INSERT INTO rss_ts_ch.summaries%'").await?.trim(),"0");
     Ok(())
 }

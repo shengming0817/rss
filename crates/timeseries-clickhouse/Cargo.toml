@@ -18,6 +18,7 @@ futures = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["time", "sync"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["float_roundtrip"] }
+ring.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 base64.workspace = true
@@ -31,6 +32,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 default = []
 integration = []
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 anyhow.workspace = true
 [lints]
 workspace = true

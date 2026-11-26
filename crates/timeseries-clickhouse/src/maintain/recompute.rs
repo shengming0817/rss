@@ -9,6 +9,8 @@ pub(super) struct Fold {
     at: Timestamp,
     revision: i64,
     builder: Option<SummaryBuilder>,
+    max_input_revision: i64,
+    dependency_start: i64,
     last: Option<(i64, u64, String)>,
 }
 #[derive(Serialize, Deserialize)]
@@ -17,7 +19,30 @@ pub(super) struct Publication {
     query: String,
     digest: String,
     row: SummaryRow,
+    max_input_revision: i64,
+    dependency_start: i64,
     revision: i64,
+}
+pub(super) async fn check(c: &mut PgConnection, r: &MaintenanceRequest) -> Result<(), Error> {
+    let MaintenanceAction::Recompute { spec, window } = r.action() else {
+        return Err(Error::Invariant);
+    };
+    let window = *window;
+    if spec.bucket(window.start())?.start() != window.start()
+        || spec
+            .bucket(Timestamp::new(window.end().micros() - 1)?)?
+            .end()
+            != window.end()
+    {
+        return Err(Error::InvalidInput);
+    }
+    let stream = spec.stream();
+    let reclaimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM rss_ts_ch.streams WHERE tenant_id=$1::text::uuid AND namespace=$2 AND source=$3 AND generation=$4 AND reclaimed)")
+        .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(stream.source().as_str()).bind(stream.generation().as_str()).fetch_one(&mut *c).await.map_err(sql_error)?;
+    if reclaimed {
+        return Err(Error::HistoryExpired);
+    }
+    Ok(())
 }
 pub(super) async fn step<C: Clock>(
     store: &Operation<'_, C>,
@@ -32,14 +57,6 @@ pub(super) async fn step<C: Clock>(
         return Err(Error::Invariant);
     };
     let window = *window;
-    if spec.bucket(window.start())?.start() != window.start()
-        || spec
-            .bucket(Timestamp::new(window.end().micros() - 1)?)?
-            .end()
-            != window.end()
-    {
-        return Err(Error::InvalidInput);
-    }
     if state.publish.is_some() {
         return publish(store, c, r, state, revision, deadline).await;
     }
@@ -59,17 +76,20 @@ pub(super) async fn step<C: Clock>(
             at: window.start(),
             revision,
             builder: None,
+            max_input_revision: 0,
+            dependency_start: 0,
             last: None,
         });
     }
     let fold = state.fold.as_mut().ok_or(Error::Invariant)?;
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
-        fold.builder = Some(
-            store
-                .builder(spec, bucket, boundary, &fences, deadline)
-                .await?,
-        );
+        let (builder, max_input_revision, dependency_start) = store
+            .builder(spec, bucket, boundary, &fences, deadline)
+            .await?;
+        fold.builder = Some(builder);
+        fold.max_input_revision = max_input_revision;
+        fold.dependency_start = dependency_start;
     }
     let last = fold.last.as_ref().map_or(String::new(), |(time, seq, id)| {
         format!(
@@ -96,6 +116,7 @@ pub(super) async fn step<C: Clock>(
     let more = rows.len() > r.budget().rows.get() as usize;
     let mut processed = 0;
     for row in rows.into_iter().take(r.budget().rows.get() as usize) {
+        fold.max_input_revision = fold.max_input_revision.max(row.revision);
         let sample = row.sample;
         let input = sample.input();
         fold.last = Some((
@@ -104,13 +125,13 @@ pub(super) async fn step<C: Clock>(
             input.id.as_str().to_owned(),
         ));
         let builder = fold.builder.as_mut().ok_or(Error::Invariant)?;
-        aggregate::mask(builder, &fences, spec, sample.input().observed_at)?;
+        aggregate::mask(builder, &fences, spec, bucket, sample.input().observed_at)?;
         builder.push(sample, store.limits.max_points.get() as usize)?;
         processed += 1;
     }
     if !more {
         let mut builder = fold.builder.take().ok_or(Error::Invariant)?;
-        aggregate::mask(&mut builder, &fences, spec, bucket.end())?;
+        aggregate::mask_end(&mut builder, &fences, spec, bucket)?;
         let summary = builder.finish(store.limits.max_points.get() as usize)?;
         let payload = bytes(&summary)?;
         if payload.len() > store.limits.max_bytes.get() as usize {
@@ -118,7 +139,7 @@ pub(super) async fn step<C: Clock>(
         }
         use sha2::{Digest, Sha256};
         let digest = projection::hex(&Sha256::digest(&payload));
-        let a = projection::permit(c, r.scope(), "summaries", &digest, revision).await?;
+        let a = projection::permit(c, spec.stream(), "summaries", &digest, revision).await?;
         let row = SummaryRow {
             tenant: r.scope().tenant().to_string(),
             namespace: r.scope().namespace().as_str().to_owned(),
@@ -134,6 +155,8 @@ pub(super) async fn step<C: Clock>(
             query: a.query,
             digest,
             row,
+            max_input_revision: fold.max_input_revision,
+            dependency_start: fold.dependency_start,
             revision,
         });
     }
@@ -178,9 +201,8 @@ async fn publish<C: Clock>(
     if bytes(&summary)? != p.row.payload.as_bytes() {
         return Err(Error::Invariant);
     }
-    sqlx::query("INSERT INTO rss_ts_ch.summaries(tenant_id,namespace,spec_digest,semantics,spec,lo,hi,object_id,source,generation,series) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7,$8::text::uuid,$9,$10,$11) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET object_id=excluded.object_id,hi=excluded.hi,dirty_from=NULL")
-            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(spec.semantics()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(p.row.lo).bind(p.row.hi).bind(&p.row.object_id).bind(spec.stream().source().as_str()).bind(spec.stream().generation().as_str()).bind(projection::hex(spec.series().digest()?.as_bytes())).execute(&mut *c).await.map_err(sql_error)?;
-    control::summary_changed(c, r.scope()).await?;
+    sqlx::query("INSERT INTO rss_ts_ch.summaries(tenant_id,namespace,spec_digest,semantics,spec,lo,hi,object_id,source,generation,series,max_input_revision,dependency_start) VALUES($1::text::uuid,$2,$3,$4,$5,$6,$7,$8::text::uuid,$9,$10,$11,$12,$13) ON CONFLICT(tenant_id,namespace,spec_digest,lo) DO UPDATE SET object_id=excluded.object_id,hi=excluded.hi,dirty_from=NULL,max_input_revision=excluded.max_input_revision,dependency_start=excluded.dependency_start")
+            .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(spec.semantics()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(p.row.lo).bind(p.row.hi).bind(&p.row.object_id).bind(spec.stream().source().as_str()).bind(spec.stream().generation().as_str()).bind(projection::hex(spec.series().digest()?.as_bytes())).bind(p.max_input_revision).bind(p.dependency_start).execute(&mut *c).await.map_err(sql_error)?;
     sqlx::query("UPDATE rss_ts_ch.attempts SET allowed=false WHERE id=$1::text::uuid")
         .bind(&p.attempt)
         .execute(&mut *c)
