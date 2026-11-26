@@ -395,7 +395,12 @@ async fn independent_deadline(f: &Fixture) -> anyhow::Result<()> {
             )
             .await?;
         assert_eq!(batch.size_hint(), (1, Some(1)));
-        reserved.truncate(batch.size_hint().0);
+        reserved.truncate(
+            batch
+                .size_hint()
+                .1
+                .ok_or_else(|| anyhow::anyhow!("missing upper bound"))?,
+        );
         let item = batch
             .next()
             .await
@@ -408,6 +413,23 @@ async fn independent_deadline(f: &Fixture) -> anyhow::Result<()> {
     let other = rss_request_context::TenantId::parse("22222222-2222-2222-2222-222222222222")?;
     let other_permit = slots.clone().try_acquire_owned()?;
     assert_eq!(slots.available_permits(), 0);
+    project_other_tenant(f, other).await?;
+    drop(other_permit);
+    assert_eq!(slots.available_permits(), 1);
+    // Expire the claim budget while the independent effect is deliberately paused.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    gate.resume.notify_one();
+    assert_eq!(
+        committed_projection(task.await??.into_outcome()?)?.disposition(),
+        TerminalDisposition::Succeeded
+    );
+    assert_eq!(slots.available_permits(), 2);
+    Ok(())
+}
+async fn project_other_tenant(
+    f: &Fixture,
+    other: rss_request_context::TenantId,
+) -> anyhow::Result<()> {
     let other_projection = f
         .projection(Effect {
             gate: None,
@@ -426,16 +448,42 @@ async fn independent_deadline(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert_eq!(futures::Stream::size_hint(&empty), (0, Some(0)));
     drop(empty);
-    drop(other_permit);
-    assert_eq!(slots.available_permits(), 1);
-    // Expire the claim budget while the independent effect is deliberately paused.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    gate.resume.notify_one();
-    assert_eq!(
-        committed_projection(task.await??.into_outcome()?)?.disposition(),
-        TerminalDisposition::Succeeded
+    let template = message("short-batch-other", "orders")?;
+    let metadata = template.metadata();
+    let other_message = MessageEnvelope::new(
+        template.id().clone(),
+        MessageMetadata::new(
+            AuthoredMessageMetadata::new(
+                other,
+                metadata.occurred_at(),
+                metadata.domain().clone(),
+                metadata.route().clone(),
+                metadata.contract().clone(),
+            ),
+            MessageMetadataExtensions::new(None, None, None, Default::default()),
+        ),
+        b"second tenant".to_vec(),
     );
-    assert_eq!(slots.available_permits(), 2);
+    let mut tx = f.owner.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(other.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2)")
+        .bind(other_message.canonical_bytes())
+        .bind(serde_json::json!({"trace":null,"tenant_authority":null}))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let done = collect_batch(other_projection.project_batch(
+        crate::execution(other, 1),
+        &Validator,
+        NonZeroUsize::MIN,
+        deadline(),
+        Duration::from_secs(5),
+    ))
+    .await?;
+    committed_projection(only(done)?)?;
     Ok(())
 }
 async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {

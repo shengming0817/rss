@@ -343,13 +343,24 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
         );
     }
     append(f, "window", 0, 258, 0).await?;
-    let projection = f
-        .projection(Effect {
+    // Reserve 32 real projection slots so each empty scan gets a 128-header budget.
+    let runtime = Arc::new(
+        PgRuntime::connect_consumer(
+            f.config.clone().with_pool_limits(0, 33),
+            Timer::new(),
+            fence_fixture::storage(),
+        )
+        .await?,
+    );
+    let projection = Fixture::projection_on(
+        runtime.clone(),
+        Effect {
             gate: None,
             reject: false,
             fail: false,
-        })
-        .await?;
+        },
+    )
+    .await?;
     let validator = Validator;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=statement_timestamp()-interval '1 day' WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
     let mut held = f.owner.begin().await?;
@@ -408,6 +419,8 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
         "a frozen sweep revisits unlocked prefixes despite continuous arrivals"
     );
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE 'window-%' OR message_id LIKE 'arrival-%'").execute(&f.owner).await?;
+    drop(projection);
+    runtime.close().await;
     Ok(())
 }
 

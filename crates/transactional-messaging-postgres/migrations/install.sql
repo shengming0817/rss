@@ -776,6 +776,12 @@ BEGIN
    greatest(0,(extract(epoch FROM o.lease_until-n)*1000000)::bigint),
    greatest(0,(extract(epoch FROM o.automatic_retry_deadline-n)*1000000)::bigint);
  END LOOP;
+ -- At exact claim capacity a short window can also be exhausted. Look ahead
+ -- inside the admitted metadata only; never lock or advance past this header.
+ IF used>=p_limit AND examined<scan_limit THEN
+  FETCH NEXT FROM candidates INTO r;
+  exhausted:=NOT FOUND;
+ END IF;
  CLOSE candidates;
  IF used>=p_limit OR (owns_progress AND examined=scan_limit) THEN
   action:='continue';
