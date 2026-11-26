@@ -27,10 +27,12 @@ pub(super) async fn admit(
     ).bind(scope.tenant().to_string()).bind(scope.namespace().as_str())
      .bind(stream.source().as_str()).bind(stream.generation().as_str()).bind(&ids)
      .fetch_all(&mut *c).await.map_err(sql_error)?.into_iter().collect();
-    let wanted: BTreeSet<_> = batch
+    let new_samples = batch
         .samples()
         .iter()
-        .filter(|s| !existing.contains_key(s.input().id.as_str()))
+        .filter(|s| !existing.contains_key(s.input().id.as_str()));
+    let wanted: BTreeSet<_> = new_samples
+        .clone()
         .map(|s| {
             let d = s.input().series.definition().spec();
             (d.key.as_str(), d.version)
@@ -42,10 +44,10 @@ pub(super) async fn admit(
     } else {
         #[cfg(feature = "integration")]
         let start = crate::measurement::cpu_start();
-        let index = AdmissionFences::from_ordered(stream, fences)?;
+        let index = AdmissionFences::from_ordered(stream, fences, new_samples)?;
         #[cfg(feature = "integration")]
         crate::measurement::record(|m| m.build_cpu += crate::measurement::elapsed(start));
-        Some(index)
+        index
     };
     let mut rows = Vec::new();
     let mut new_ids = Vec::new();

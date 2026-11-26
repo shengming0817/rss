@@ -40,7 +40,7 @@ async fn frontiers(
     for (name, selection, count) in [("related", relevant, related), ("noise", other, noise)] {
         sqlx::query(
             "INSERT INTO rss_ts_ch.fences(tenant_id,namespace,id,kind,selection,lo,hi)
-            SELECT $1::text::uuid,'metrics',$2::text||n,'delete',$3::text::jsonb,2*n,2*n+1
+            SELECT $1::text::uuid,'metrics',$2::text||n,'delete',$3::text::jsonb,2*n,2*n+CASE WHEN $2::text='noise' THEN 1001 ELSE 1 END
             FROM generate_series(0,$4::int-1) n",
         )
         .bind(TENANT)
@@ -83,7 +83,7 @@ async fn fixed_admission() -> anyhow::Result<()> {
     confirmed(f.write(&seed).await?)?;
     for (related, noise) in [(0, 0), (1, 0), (1, 8), (1, 64), (8, 0), (64, 0)] {
         frontiers(&f, &d, related, noise, false).await?;
-        for case in ["new", "mixed", "replay", "receipt", "single"] {
+        for case in ["new", "gaps", "mixed", "replay", "receipt", "single"] {
             let tag = format!("{case}-{related}-{noise}");
             let new = if case == "single" { 1 } else { 48 };
             let mut items = if case == "mixed" || case == "replay" {
@@ -93,7 +93,12 @@ async fn fixed_admission() -> anyhow::Result<()> {
             };
             if case != "replay" {
                 for i in 0..new {
-                    items.push(sample(&d, &format!("{tag}-{i}"), 1000, 1)?);
+                    let at = if case == "gaps" {
+                        i64::from(2 * i + 1)
+                    } else {
+                        1000
+                    };
+                    items.push(sample(&d, &format!("{tag}-{i}"), at, 1)?);
                 }
             }
             let b = if case == "receipt" {

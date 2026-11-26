@@ -28,11 +28,37 @@ pub(super) struct AdmissionFences<'a> {
 }
 
 impl<'a> AdmissionFences<'a> {
-    pub(super) fn from_ordered(stream: &Stream, fences: &'a [Fence]) -> Result<Self, Error> {
+    pub(super) fn from_ordered<'s>(
+        stream: &Stream,
+        fences: &'a [Fence],
+        new_samples: impl Iterator<Item = &'s Sample>,
+    ) -> Result<Option<Self>, Error> {
+        let mut spans = HashMap::new();
+        for sample in new_samples {
+            let input = sample.input();
+            let at = input.observed_at;
+            let (first, last) = spans
+                .entry((input.series.subject(), input.series.resource()))
+                .or_insert((at, at));
+            *first = (*first).min(at);
+            *last = (*last).max(at);
+        }
         let mut index = Self::default();
         for fence in fences {
             let start = fence.window.start();
             let end = fence.window.end();
+            let resource = match &fence.selection {
+                Selection::Exact { series, .. } => (series.subject(), series.resource()),
+                Selection::Resource {
+                    subject, resource, ..
+                } => (subject, resource),
+            };
+            if !spans
+                .get(&resource)
+                .is_some_and(|&(first, last)| start <= last && first < end)
+            {
+                continue;
+            }
             match &fence.selection {
                 Selection::Exact {
                     stream: target,
@@ -69,7 +95,7 @@ impl<'a> AdmissionFences<'a> {
                 _ => {}
             }
         }
-        Ok(index)
+        Ok((!index.resources.is_empty() || !index.exact.is_empty()).then_some(index))
     }
 
     pub(super) fn matches(&self, sample: &Sample) -> Result<bool, Error> {
