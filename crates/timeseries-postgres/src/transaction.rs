@@ -71,7 +71,7 @@ impl Budget {
         let wall = self
             .end
             .saturating_duration_since(tokio::time::Instant::now());
-        if wall.is_zero() {
+        if logical.min(wall).is_zero() {
             return Err(Error::Deadline);
         }
         Ok(wall.min(logical))
@@ -132,7 +132,11 @@ impl<C: Clock> PgStore<C> {
             let prepared = prepare(budget).await?;
             budget.remaining(&self.clock)?;
             #[cfg(feature = "integration")]
-            let pg_wait = rss_timeseries::measurement::timer();
+            let pg_wait = {
+                let start=rss_timeseries::measurement::timer();
+                rss_timeseries::measurement::record("pool_enter",start,0,0);
+                start
+            };
             let connection = self.pool.acquire().await.map_err(sql_error)?;
             #[cfg(feature = "integration")]
             let lease_start = {
@@ -146,6 +150,8 @@ impl<C: Clock> PgStore<C> {
                 rss_timeseries::measurement::record("lease_to_begin", lease_start, 0, 0);
                 rss_timeseries::measurement::timer()
             };
+            #[cfg(feature = "integration")]
+            self.phases[2].fetch_add(1,Ordering::Relaxed);
             let mut tx = match mode {
                 Mode::Snapshot => lease.connection.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").await,
                 _ => lease.connection.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE").await,

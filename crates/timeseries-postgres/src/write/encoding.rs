@@ -49,11 +49,12 @@ impl Binding<'_> {
 
 pub(super) async fn prepare(
     batch: &Batch,
-    clock: &impl Clock,
+    store: &PgStore<impl Clock>,
     budget: Budget,
-    horizon: u64,
     permit: crate::prepare::Permit,
 ) -> Result<PreparedBatch, Error> {
+    let clock = &store.clock;
+    let horizon = store.limits.replay_micros.get();
     budget.remaining(clock)?;
     let identity = ReceiptQuery {
         stream: batch.stream().clone(),
@@ -89,6 +90,7 @@ pub(super) async fn prepare(
         }
         #[cfg(feature = "integration")]
         if index == 0 {
+            store.phases[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             buffers.set(
                 samples.capacity()
                     + series_digests.capacity() * 32
@@ -163,6 +165,8 @@ pub(super) async fn prepare(
         .bind(definitions.slices().bind_iter())
         .bind(&definitions.digests[..])
         .bind(horizon);
+    #[cfg(feature = "integration")]
+    store.phases[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(PreparedBatch {
         identity,
         count,

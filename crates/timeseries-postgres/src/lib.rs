@@ -51,6 +51,8 @@ impl Limits {
 pub struct PgStore<C> {
     pool: PgPool,
     preparation: prepare::Capacity,
+    #[cfg(feature = "integration")]
+    phases: [std::sync::atomic::AtomicUsize; 3],
     profile: StorageProfile,
     maintenance: Option<PgPool>,
     clock: C,
@@ -90,6 +92,8 @@ impl<C: Clock> PgStore<C> {
         Ok(Self {
             pool,
             preparation,
+            #[cfg(feature = "integration")]
+            phases: Default::default(),
             profile,
             maintenance,
             clock,
@@ -120,6 +124,14 @@ impl<C: Clock> PgStore<C> {
         .await
         .map_err(|_| Error::Deadline)
     }
+    /// Counts first samples encoded, completed bindings and transactions sent by this store.
+    #[cfg(feature = "integration")]
+    pub fn preparation_phases(&self) -> [usize; 3] {
+        self.phases
+            .each_ref()
+            .map(|n| n.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Remaining batch and byte permits, for provider conformance fixtures.
     #[cfg(feature = "integration")]
     pub fn available_preparation(&self) -> (usize, usize) {

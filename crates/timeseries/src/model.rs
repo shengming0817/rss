@@ -253,7 +253,7 @@ impl Batch {
             samples,
         };
         #[cfg(feature = "integration")]
-        let start = crate::measurement::timer();
+        let start = crate::measurement::encoding_timer();
         batch.encoded_len = batch.write_to(std::io::sink())?;
         #[cfg(feature = "integration")]
         crate::measurement::record("batch_check", start, batch.encoded_len, 0);

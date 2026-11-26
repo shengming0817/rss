@@ -22,11 +22,13 @@ pub(crate) struct Permit {
     _bytes: OwnedSemaphorePermit,
     #[cfg(feature = "integration")]
     weight: usize,
+    #[cfg(feature = "integration")]
+    session: rss_timeseries::measurement::Session,
 }
 #[cfg(feature = "integration")]
 impl Drop for Permit {
     fn drop(&mut self) {
-        rss_timeseries::measurement::update(|r| r.reserved_bytes -= self.weight);
+        self.session.update(|r| r.reserved_bytes -= self.weight);
     }
 }
 
@@ -62,9 +64,11 @@ impl Capacity {
             .await
             .map_err(|_| Error::Unavailable)?;
         #[cfg(feature = "integration")]
+        let session = rss_timeseries::measurement::Session::detailed();
+        #[cfg(feature = "integration")]
         {
             rss_timeseries::measurement::record("permit_wait", start, 0, 0);
-            rss_timeseries::measurement::update(|r| {
+            session.update(|r| {
                 r.reserved_bytes += weight as usize;
                 r.peak_reserved_bytes = r.peak_reserved_bytes.max(r.reserved_bytes);
             });
@@ -74,6 +78,8 @@ impl Capacity {
             _bytes: bytes,
             #[cfg(feature = "integration")]
             weight: weight as usize,
+            #[cfg(feature = "integration")]
+            session,
         })
     }
     pub(crate) fn close(&self) {

@@ -89,7 +89,7 @@ fn append_canonical<T: serde::Serialize>(
     use sha2::Digest as _;
     let begin = bytes.len();
     #[cfg(feature = "integration")]
-    let start = measurement::timer();
+    let start = measurement::encoding_timer();
     if serde_json::to_writer(&mut *bytes, value).is_err() {
         bytes.truncate(begin);
         return Err(Error::InvalidInput);
@@ -107,7 +107,7 @@ fn append_canonical<T: serde::Serialize>(
             appended.len(),
             0,
         );
-        measurement::timer()
+        measurement::encoding_timer()
     };
     let mut h = hasher(domain);
     h.update(appended);
@@ -129,7 +129,7 @@ fn digest<T: serde::Serialize>(domain: &[u8], value: &T) -> Result<Digest, Error
     use sha2::Digest as _;
     let mut h = hasher(domain);
     #[cfg(feature = "integration")]
-    if let Some(start) = measurement::timer() {
+    if let Some(start) = measurement::encoding_timer() {
         let mut count = measurement::Count {
             writer: &mut h,
             bytes: 0,

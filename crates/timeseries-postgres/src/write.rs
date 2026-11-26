@@ -57,6 +57,9 @@ struct PreparedBatch {
 
 impl PreparedBatch {
     async fn admit(self, c: &mut PgConnection) -> Result<Outcome<Receipt>, Error> {
+        // The connection now owns transport and driver buffers.
+        #[cfg(feature = "integration")]
+        self._buffers.set(0);
         let row = self.query.fetch_one(c).await.map_err(sql_error)?;
         if let Some(raw) = row
             .try_get::<Option<&[u8]>, _>("suspect_raw")
@@ -95,14 +98,8 @@ impl<C: Clock> Writer for PgStore<C> {
                     let permit = self.preparation.acquire(request.request()).await?;
                     #[cfg(feature = "integration")]
                     let start = rss_timeseries::measurement::timer();
-                    let prepared = encoding::prepare(
-                        request.request(),
-                        &self.clock,
-                        budget,
-                        self.limits.replay_micros.get(),
-                        permit,
-                    )
-                    .await?;
+                    let prepared =
+                        encoding::prepare(request.request(), self, budget, permit).await?;
                     #[cfg(feature = "integration")]
                     rss_timeseries::measurement::record("prepare", start, 0, 0);
                     Ok(prepared)

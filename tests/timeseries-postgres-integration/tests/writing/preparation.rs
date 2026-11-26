@@ -59,6 +59,7 @@ async fn pre_transaction_cancellation_and_deadline_release_all_capacity() -> any
                     pending(holder_future.as_mut()).await?;
                 }
                 let before = store.available_preparation();
+                let [encoded, bound, begun] = store.preparation_phases();
                 let mut write = Box::pin(store.write(
                     &req,
                     Deadline::from_timeout(&Timer, Duration::from_secs(2))?,
@@ -74,6 +75,12 @@ async fn pre_transaction_cancellation_and_deadline_release_all_capacity() -> any
                         assert!(during.1 < before.1);
                     }
                 }
+                let expected = match phase {
+                    Phase::Admission => [encoded, bound, begun],
+                    Phase::Encoding => [encoded + 1, bound, begun],
+                    Phase::Pool => [encoded + 1, bound + 1, begun],
+                };
+                assert_eq!(store.preparation_phases(), expected, "{phase:?}");
                 if expire {
                     tokio::time::pause();
                     tokio::time::advance(Duration::from_secs(3)).await;
@@ -143,6 +150,57 @@ async fn byte_limit_applies_with_free_slots_and_close_wakes_waiters() -> anyhow:
     drop(occupied);
     closing.await?;
     assert_eq!(f.store.available_preparation(), full);
+    assert_eq!(f.count().await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn logical_clock_landing_exactly_on_cutoff_rejects_before_begin() -> anyhow::Result<()> {
+    struct SwitchClock {
+        start: Instant,
+        cutoff: Instant,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Clock for SwitchClock {
+        fn now(&self) -> Instant {
+            if self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                < 2
+            {
+                self.start
+            } else {
+                self.cutoff
+            }
+        }
+    }
+    let f = Fixture::new("ts-exact-cutoff").await?;
+    let start = Timer.now();
+    let cutoff = start + Duration::from_secs(10);
+    let store = PgStore::new(
+        f.profile.clone(),
+        rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
+        SwitchClock {
+            start,
+            cutoff,
+            calls: Default::default(),
+        },
+        limits()?,
+        CursorKey::new([23; 32]),
+        Deadline::at(cutoff),
+    )
+    .await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let req = Authorized::<Batch>::verify(
+        &authority(TENANT)?,
+        batch("cutoff", vec![sample(&d, "cutoff", 1, 1)?])?,
+    )?;
+    assert_eq!(
+        store.write(&req, Deadline::at(cutoff)).await.err(),
+        Some(Error::Deadline)
+    );
+    assert_eq!(store.preparation_phases(), [0, 0, 0]);
     assert_eq!(f.count().await?, 0);
     Ok(())
 }
