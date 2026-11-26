@@ -1,74 +1,118 @@
-use crate::{control::Fence, transaction::bytes};
-use rss_timeseries::{Error, Id, Sample, Selection, Stream, Timestamp};
-use std::collections::HashMap;
+use crate::control::Fence;
+use rss_timeseries::{Id, Sample, Selection, Series, Stream, Timestamp};
+use std::{
+    collections::{BTreeSet, HashMap},
+    hash::{Hash, Hasher},
+};
 
 #[derive(Default)]
 struct Windows(Vec<(Timestamp, Timestamp)>);
-
 impl Windows {
-    // control::fences supplies nondecreasing starts, also within each selector.
+    // The database orders all fences by start, including each selector's subsequence.
     fn push(&mut self, start: Timestamp, end: Timestamp) {
         if let Some(last) = self.0.last_mut()
             && start <= last.1
         {
             last.1 = last.1.max(end);
-            return;
+        } else {
+            self.0.push((start, end));
         }
-        self.0.push((start, end));
     }
 }
 
-type ResourceKey<'a> = (&'a Id, &'a Id, Option<&'a Id>);
+// Hash the nominal definition identity and dimensions. Eq checks the entire borrowed
+// Series, including the definition snapshot when two keys land in the same bucket.
+#[derive(PartialEq, Eq)]
+struct ExactSeries<'a>(&'a Series);
+impl Hash for ExactSeries<'_> {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        let s = self.0;
+        (
+            s.subject(),
+            s.resource(),
+            &s.definition().spec().key,
+            s.definition().spec().version,
+            s.dimensions(),
+        )
+            .hash(h);
+    }
+}
+
+type Resource<'a> = (&'a Id, &'a Id);
+type Span = (Timestamp, Timestamp);
+
+struct Requested<'a> {
+    all: Span,
+    keys: HashMap<&'a Id, Span>,
+}
+impl<'a> Requested<'a> {
+    // Probe the smaller side; a single requested metric must not expand every
+    // multi-key fence into up to 64 new window entries.
+    fn matching_keys(&self, keys: &'a BTreeSet<Id>, mut visit: impl FnMut(&'a Id, Span)) {
+        if self.keys.len() <= keys.len() {
+            for (&key, &span) in &self.keys {
+                if keys.contains(key) {
+                    visit(key, span);
+                }
+            }
+        } else {
+            for key in keys {
+                if let Some(&span) = self.keys.get(key) {
+                    visit(key, span);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct AdmissionFences<'a> {
-    // Typed canonical bytes include the full definition snapshot and dimensions.
-    exact: HashMap<Vec<u8>, Windows>,
-    resources: HashMap<ResourceKey<'a>, Windows>,
+    exact: HashMap<ExactSeries<'a>, Windows>,
+    resource: HashMap<(Resource<'a>, Option<&'a Id>), Windows>,
 }
 
 impl<'a> AdmissionFences<'a> {
-    pub(super) fn from_ordered<'s>(
+    pub(super) fn from_ordered(
         stream: &Stream,
         fences: &'a [Fence],
-        new_samples: impl Iterator<Item = &'s Sample>,
-    ) -> Result<Option<Self>, Error> {
-        let mut spans = HashMap::new();
+        new_samples: impl Iterator<Item = &'a Sample>,
+    ) -> Option<Self> {
+        let mut requested = HashMap::new();
         for sample in new_samples {
             let input = sample.input();
             let at = input.observed_at;
-            let (first, last) = spans
-                .entry((input.series.subject(), input.series.resource()))
-                .or_insert((at, at));
-            *first = (*first).min(at);
-            *last = (*last).max(at);
+            let s = &input.series;
+            let r = requested
+                .entry((s.subject(), s.resource()))
+                .or_insert_with(|| Requested {
+                    all: (at, at),
+                    keys: HashMap::new(),
+                });
+            r.all = (r.all.0.min(at), r.all.1.max(at));
+            let span = r.keys.entry(&s.definition().spec().key).or_insert((at, at));
+            *span = (span.0.min(at), span.1.max(at));
         }
         let mut index = Self::default();
         for fence in fences {
             let start = fence.window.start();
             let end = fence.window.end();
-            let resource = match &fence.selection {
-                Selection::Exact { series, .. } => (series.subject(), series.resource()),
-                Selection::Resource {
-                    subject, resource, ..
-                } => (subject, resource),
-            };
-            if !spans
-                .get(&resource)
-                .is_some_and(|&(first, last)| start <= last && first < end)
-            {
-                continue;
-            }
+            let overlaps = |(first, last): Span| start <= last && first < end;
             match &fence.selection {
                 Selection::Exact {
                     stream: target,
                     series,
                 } if target == stream => {
-                    index
-                        .exact
-                        .entry(bytes(series)?)
-                        .or_default()
-                        .push(start, end);
+                    let relevant = requested
+                        .get(&(series.subject(), series.resource()))
+                        .and_then(|r| r.keys.get(&series.definition().spec().key))
+                        .is_some_and(|&span| overlaps(span));
+                    if relevant {
+                        index
+                            .exact
+                            .entry(ExactSeries(series))
+                            .or_default()
+                            .push(start, end);
+                    }
                 }
                 Selection::Resource {
                     scope,
@@ -76,66 +120,76 @@ impl<'a> AdmissionFences<'a> {
                     resource,
                     keys,
                 } if scope == stream.scope() => {
+                    let pair = (subject, resource);
+                    let Some(r) = requested.get(&pair) else {
+                        continue;
+                    };
+                    if !overlaps(r.all) {
+                        continue;
+                    }
                     if keys.is_empty() {
                         index
-                            .resources
-                            .entry((subject, resource, None))
+                            .resource
+                            .entry((pair, None))
                             .or_default()
                             .push(start, end);
                     } else {
-                        for key in keys {
-                            index
-                                .resources
-                                .entry((subject, resource, Some(key)))
-                                .or_default()
-                                .push(start, end);
-                        }
+                        r.matching_keys(keys, |key, span| {
+                            if overlaps(span) {
+                                index
+                                    .resource
+                                    .entry((pair, Some(key)))
+                                    .or_default()
+                                    .push(start, end);
+                            }
+                        });
                     }
                 }
                 _ => {}
             }
         }
-        Ok((!index.resources.is_empty() || !index.exact.is_empty()).then_some(index))
+        (!index.resource.is_empty() || !index.exact.is_empty()).then_some(index)
     }
 
-    pub(super) fn matches(&self, sample: &Sample) -> Result<bool, Error> {
-        let input = sample.input();
-        let series = &input.series;
-        let at = input.observed_at;
+    pub(super) fn matches(&self, sample: &Sample) -> bool {
+        #[cfg(feature = "integration")]
+        let start = crate::measurement::cpu_start();
+        let s = &sample.input().series;
+        let at = sample.input().observed_at;
         #[cfg(feature = "integration")]
         let mut comparisons = 0;
         #[allow(
             unused_mut,
-            reason = "Integration measurements count comparisons in the closure."
+            reason = "Only the integration build counts examined endpoints."
         )]
         let mut covers = |windows: Option<&Windows>| {
-            windows.is_some_and(|windows| {
-                let i = windows.0.partition_point(|&(_, end)| {
+            windows.is_some_and(|w| {
+                let i = w.0.partition_point(|&(_, end)| {
                     #[cfg(feature = "integration")]
                     {
                         comparisons += 1;
                     }
                     end <= at
                 });
-                windows.0.get(i).is_some_and(|&(start, _)| {
+                w.0.get(i).is_some_and(|&(lo, _)| {
                     #[cfg(feature = "integration")]
                     {
                         comparisons += 1;
                     }
-                    start <= at
+                    lo <= at
                 })
             })
         };
-        let resource = (series.subject(), series.resource());
-        let found = covers(self.resources.get(&(resource.0, resource.1, None)))
-            || covers(self.resources.get(&(
-                resource.0,
-                resource.1,
-                Some(&series.definition().spec().key),
-            )))
-            || (!self.exact.is_empty() && covers(self.exact.get(&bytes(series)?)));
+        let pair = (s.subject(), s.resource());
+        let found = (!self.resource.is_empty()
+            && (covers(self.resource.get(&(pair, None)))
+                || covers(self.resource.get(&(pair, Some(&s.definition().spec().key))))))
+            || (!self.exact.is_empty() && covers(self.exact.get(&ExactSeries(s))));
         #[cfg(feature = "integration")]
-        crate::measurement::record(|m| m.window_endpoint_checks += comparisons);
-        Ok(found)
+        crate::measurement::record(|m| {
+            m.window_endpoint_checks += comparisons;
+            m.match_cpu += crate::measurement::elapsed(start);
+        });
+        found
     }
 }

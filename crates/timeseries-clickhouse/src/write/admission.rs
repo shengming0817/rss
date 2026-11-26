@@ -44,7 +44,7 @@ pub(super) async fn admit(
     } else {
         #[cfg(feature = "integration")]
         let start = crate::measurement::cpu_start();
-        let index = AdmissionFences::from_ordered(stream, fences, new_samples)?;
+        let index = AdmissionFences::from_ordered(stream, fences, new_samples);
         #[cfg(feature = "integration")]
         crate::measurement::record(|m| m.build_cpu += crate::measurement::elapsed(start));
         index
@@ -62,15 +62,8 @@ pub(super) async fn admit(
             }
             continue;
         }
-        if let Some(index) = &index {
-            #[cfg(feature = "integration")]
-            let start = crate::measurement::cpu_start();
-            let expired = index.matches(sample)?;
-            #[cfg(feature = "integration")]
-            crate::measurement::record(|m| m.match_cpu += crate::measurement::elapsed(start));
-            if expired {
-                return Err(Error::HistoryExpired);
-            }
+        if index.as_ref().is_some_and(|fences| fences.matches(sample)) {
+            return Err(Error::HistoryExpired);
         }
         let def = input.series.definition();
         let stored = definitions
