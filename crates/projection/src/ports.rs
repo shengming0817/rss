@@ -9,6 +9,8 @@ use std::future::Future;
 /// Each operation owns enforcement of the supplied Control, including all waiting and decoding.
 /// The runner does not wrap providers in another cancellation race.
 pub trait Source: Send + Sync {
+    /// Page-owned input carrying the stable event identity used by the runner.
+    type Item: AsRef<Event> + Send + Sync;
     /// Exact scoped committed high-water; None means empty.
     fn high_water<T: Timer>(
         &self,
@@ -23,13 +25,15 @@ pub trait Source: Send + Sync {
         after: Option<Position>,
         limit: BatchLimit,
         control: &Control<'_, T>,
-    ) -> impl Future<Output = Result<Vec<Event>, Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send;
 }
 /// Execution session bound by a provider to write authority for a single generation.
 /// A PostgreSQL implementation settles effect, receipt and checkpoint in one transaction.
 /// Implementations enforce Control through settlement and classify interruption themselves.
 /// Preserve confirmed progress; uncertain writes require CommitUnknown or RollbackFailed.
 pub trait Execution: Send + Sync {
+    /// Input accepted by this execution session.
+    type Item: AsRef<Event> + Send + Sync;
     /// Immutable session scope.
     fn scope(&self) -> &ProjectionScope;
     /// Definition bound to this session. Providers must verify it before granting authority
@@ -44,7 +48,7 @@ pub trait Execution: Send + Sync {
     fn execute<T: Timer>(
         &self,
         expected: Option<Position>,
-        event: &Event,
+        event: &Self::Item,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<ApplyOutcome, Error>> + Send;
 }
@@ -56,7 +60,7 @@ pub trait BatchExecution: Execution {
     fn execute_batch<T: Timer>(
         &self,
         expected: Option<Position>,
-        events: Vec<Event>,
+        events: Vec<Self::Item>,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<Vec<ApplyOutcome>, Error>> + Send;
 }
@@ -110,6 +114,7 @@ impl<C, H> AtLeastOnce<C, H> {
     }
 }
 impl<C: ExternalCheckpoint, H: ExternalTarget> Execution for AtLeastOnce<C, H> {
+    type Item = Event;
     fn scope(&self) -> &ProjectionScope {
         self.checkpoint.scope()
     }

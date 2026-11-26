@@ -321,6 +321,7 @@ impl Timer for PhaseTimer {
 }
 struct EnteredEffect(Arc<AtomicUsize>);
 impl PgEffect for EnteredEffect {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         _: &mut PgTransaction<'_>,

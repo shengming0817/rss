@@ -75,6 +75,7 @@ async fn append_connection(
     decode_position(position)
 }
 impl Source for PgStore {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(
         &self,
         source: &SourceScope,

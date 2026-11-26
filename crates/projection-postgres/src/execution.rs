@@ -250,6 +250,8 @@ pub enum PgEffectOutcome {
 /// Trusted application read-model writer. Include tenant and generation in application keys.
 /// A successful result means only that SQL was staged; the adapter still owns settlement.
 pub trait PgEffect: Send + Sync {
+    /// Source item used by this mapping. Cloning must preserve its event identity.
+    type Item: AsRef<Event> + Clone + Send + Sync + 'static;
     /// Apply within the borrowed transaction. An error rolls back the settlement: one event in `run`,
     /// or the entire page (including earlier successful callbacks) in `run_batched`.
     /// Later callbacks on the same page can read earlier application writes. The provider
@@ -258,7 +260,7 @@ pub trait PgEffect: Send + Sync {
         &self,
         tx: &mut PgTransaction<'_>,
         scope: &ProjectionScope,
-        event: &Event,
+        event: &Self::Item,
     ) -> impl Future<Output = Result<PgEffectOutcome, PgOperationError>> + Send;
 }
 /// Atomic PostgreSQL projection session. No standalone checkpoint writer is exposed here.
@@ -268,6 +270,7 @@ pub struct PgProjection<H> {
     effect: Arc<H>,
 }
 impl<H: PgEffect + 'static> Execution for PgProjection<H> {
+    type Item = H::Item;
     fn scope(&self) -> &ProjectionScope {
         &self.claim.scope
     }
@@ -280,10 +283,10 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
     async fn execute<T: Timer>(
         &self,
         expected: Option<Position>,
-        event: &Event,
+        event: &Self::Item,
         control: &Control<'_, T>,
     ) -> Result<ApplyOutcome, Error> {
-        if event.source() != self.scope().source() {
+        if event.as_ref().source() != self.scope().source() {
             return Err(Error::new(ErrorKind::ScopeMismatch));
         }
         let claim = self.claim.clone();
@@ -301,13 +304,13 @@ async fn stage<H: PgEffect>(
     claim: &PgClaim,
     effect: &H,
     expected: Option<Position>,
-    event: &Event,
+    event: &H::Item,
 ) -> Result<ApplyOutcome, Error> {
     tx.check()?;
-    let duplicate = lock(tx, claim, expected, event).await?;
+    let duplicate = lock(tx, claim, expected, event.as_ref()).await?;
     let outcome = apply_event(tx, claim, effect, event, duplicate).await?;
     tx.check()?;
-    finish(tx, claim, expected, event).await?;
+    finish(tx, claim, expected, event.as_ref()).await?;
     Ok(outcome)
 }
 
@@ -315,7 +318,7 @@ async fn apply_event<H: PgEffect>(
     tx: &mut PgTransaction<'_>,
     claim: &PgClaim,
     effect: &H,
-    event: &Event,
+    event: &H::Item,
     duplicate: bool,
 ) -> Result<ApplyOutcome, Error> {
     tx.check()?;

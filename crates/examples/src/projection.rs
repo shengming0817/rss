@@ -35,6 +35,7 @@ impl Timer for Clock {
 }
 struct Counter;
 impl PgEffect for Counter {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

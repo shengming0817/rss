@@ -49,6 +49,7 @@ const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const OTHER: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d478";
 struct Counter;
 impl PgEffect for Counter {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

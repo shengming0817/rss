@@ -82,7 +82,7 @@ Every invocation has its own read-only handle; even two runs on the same session
 
 ```rust
 use rss_projection::{run, Control, Execution, ObservationStatus, RunLimit, Source, Timer};
-# async fn example<S: Source, E: Execution, T: Timer>(
+# async fn example<S: Source<Item = E::Item>, E: Execution, T: Timer>(
 # source: &S, session: &E, control: &Control<'_, T>, limit: RunLimit,
 # ) {
 let work = run(source, session, control, limit);

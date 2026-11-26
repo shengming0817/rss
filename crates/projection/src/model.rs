@@ -193,6 +193,11 @@ pub struct Event {
     id: String,
     payload: Vec<u8>,
 }
+impl AsRef<Event> for Event {
+    fn as_ref(&self) -> &Event {
+        self
+    }
+}
 impl Event {
     /// Construct a fact. Encoded payloads are bounded to 1 MiB.
     pub fn new(

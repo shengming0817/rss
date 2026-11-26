@@ -4,6 +4,7 @@ use std::{collections::HashSet, sync::atomic::AtomicUsize};
 
 struct FilterAll;
 impl PgEffect for FilterAll {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         _: &mut PgTransaction<'_>,

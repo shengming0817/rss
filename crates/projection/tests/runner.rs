@@ -42,6 +42,7 @@ fn event(scope: &ProjectionScope, n: u64) -> anyhow::Result<Event> {
 }
 struct Journal(Vec<Event>);
 impl Source for Journal {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(
         &self,
         _: &SourceScope,
@@ -87,6 +88,7 @@ impl Memory {
     }
 }
 impl Execution for Memory {
+    type Item = rss_projection::Event;
     fn definition_identity(&self) -> &rss_projection::DefinitionIdentity {
         &DEFINITION
     }
@@ -369,6 +371,7 @@ struct ConsumingTime<'a> {
     clock: &'a Clock,
 }
 impl Execution for ConsumingTime<'_> {
+    type Item = rss_projection::Event;
     fn definition_identity(&self) -> &rss_projection::DefinitionIdentity {
         &DEFINITION
     }
@@ -422,6 +425,7 @@ struct BlockedSource {
     entered: tokio::sync::Notify,
 }
 impl Source for BlockedSource {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(
         &self,
         _: &SourceScope,
@@ -493,6 +497,7 @@ async fn missing_replay_end_is_not_reported_as_complete() -> anyhow::Result<()> 
 
 struct Filtering(Memory);
 impl Execution for Filtering {
+    type Item = rss_projection::Event;
     fn definition_identity(&self) -> &rss_projection::DefinitionIdentity {
         &DEFINITION
     }
