@@ -297,9 +297,7 @@ pub(crate) fn read_error(error: clickhouse::error::Error) -> ReadFailure {
                 Some(("159" | "160", _)) => ReadFailure::Other(Error::Deadline),
                 // ClickHouse uses SYNTAX_ERROR for *all* parser errors. Only this
                 // lexical diagnostic can be remedied by shortening a generated IN list.
-                Some(("62", tail)) if tail.starts_with(" DB::Exception: Max query size exceeded")
-                    || tail.starts_with(" DB::Exception: Syntax error: failed at position")
-                        && tail.contains(". Max query size exceeded") => ReadFailure::QueryLength,
+                Some(("62", tail)) if tail.starts_with(" DB::Exception: Max query size exceeded:") => ReadFailure::QueryLength,
                 _ => ReadFailure::Other(Error::Unavailable),
             }
         }

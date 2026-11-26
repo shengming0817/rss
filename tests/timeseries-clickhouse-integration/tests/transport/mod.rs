@@ -181,6 +181,7 @@ impl Proxy {
             wire_bytes: Arc::default(),
             page_reads: Mutex::default(),
             hold_sql: Mutex::default(),
+            failure: Mutex::default(),
             bucket_width: AtomicU64::default(),
             slow_reads: AtomicUsize::default(),
             mode: AtomicU8::new(0),
@@ -216,6 +217,10 @@ impl Proxy {
             state,
             task,
         })
+    }
+    pub async fn fail_reads(&self, failure: Option<(&'static str, Option<u64>)>) {
+        *self.state.failure.lock().await = failure;
+        self.state.slow_reads.store(0, Ordering::SeqCst);
     }
     pub fn wire_bytes(&self) -> u64 {
         self.state.wire_bytes.load(Ordering::Relaxed)
@@ -350,6 +355,12 @@ async fn serve(
     let reads_page = reads_summary
         || sql.contains("FROM rss_ts_ch.raw FINAL")
         || body_sql.contains("FROM rss_ts_ch.raw FINAL");
+    if reads_page && let Some((message, width)) = *state.failure.lock().await
+        && width.is_none_or(|width| wide_read(&sql, width) || wide_read(&body_sql, width)) {
+        state.slow_reads.fetch_add(1, Ordering::SeqCst);
+        return Response::builder().status(500).body(Full::new(Bytes::from_static(message.as_bytes())))
+            .map_err(std::io::Error::other);
+    }
     if reads_raw {
         state.record_threads(&parts.uri).await;
     }

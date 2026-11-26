@@ -185,6 +185,7 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
         serde_json::to_value(split.buckets)?,
         oracle(all.request(), &samples)?
     );
+    required_failures(&proxy, &store, &fine).await?;
     // Populate separated islands, keeping a raw gap between them.
     cache(&f, &fine, 0, 160).await?;
     cache(&f, &fine, 320, 480).await?;
@@ -197,6 +198,7 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     measure
         .page("full", &all, &samples, Some(1280), (1, 0))
         .await?;
+    required_failures(&proxy, &store, &fine).await?;
     let coarse = aggregate(&spec(20)?, window(0, 1280)?, 64, AggregateOp::Sum)?;
     measure
         .page("fragmented", &coarse, &samples, Some(1280), (1, 0))
@@ -253,6 +255,19 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     Ok(())
 }
 
+async fn required_failures(proxy: &transport::Proxy, store: &OwnedStore, fine: &SummarySpec) -> anyhow::Result<()> {
+    for limit in [4, 128] {
+        let query = aggregate(fine, window(0,1280)?, limit, AggregateOp::Sum)?;
+        for message in ["service unavailable", "Code: 60. DB::Exception: UNKNOWN_TABLE",
+                        "Code: 497. DB::Exception: ACCESS_DENIED", "Code: 62. DB::Exception: Syntax error"] {
+            proxy.fail_reads(Some((message,None))).await;
+            assert_eq!(store.aggregate(&query,None,deadline()?).await.err(),Some(Error::Unavailable));
+            assert_eq!(proxy.slow_reads(),1,"{message} width {limit}");
+        }
+    }
+    proxy.fail_reads(None).await;
+    Ok(())
+}
 async fn sparse_state_reads(
     f: &Fixture,
     proxy: &transport::Proxy,
@@ -291,6 +306,11 @@ async fn sparse_state_reads(
             "twelve sparse minute buckets should batch: {requests}"
         );
         assert_eq!(serde_json::to_value(page.buckets)?, expected);
+        proxy.fail_reads(Some(("service unavailable", Some(MINUTE as u64)))).await;
+        let recovered = store.aggregate(&all, None, deadline()?).await?;
+        assert_eq!(proxy.slow_reads(),1,"{label} optional failure");
+        assert_eq!(serde_json::to_value(recovered.buckets)?, expected);
+        proxy.fail_reads(None).await;
         proxy.delay_wide_reads(MINUTE as u64);
         let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
         let recovered = store.aggregate(&all, None, cutoff).await;
