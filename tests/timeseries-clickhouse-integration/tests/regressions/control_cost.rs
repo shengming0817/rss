@@ -155,6 +155,7 @@ async fn fixed_admission() -> anyhow::Result<()> {
     assert!(c.fence_rows == 0);
     print_write("max-samples", 1, 64, c);
     dense_fences(&f, &d, &store).await?;
+    single_requested_key(&f, &d).await?;
     same_resource_cost(&f, &d).await?;
     Ok(())
 }
@@ -418,6 +419,50 @@ async fn dense_fences(f: &Fixture, d: &Definition, store: &OwnedStore) -> anyhow
     print_write("dense-miss", 0, 64, c);
     Ok(())
 }
+async fn single_requested_key(f: &Fixture, d: &Definition) -> anyhow::Result<()> {
+    // All 64 fences overlap the same sample. Returning no witness is valid only
+    // if none of their 64 keys match; admitting an empty intersection as a wildcard is wrong.
+    let point = sample(d, "key-probe", 1000, 1)?;
+    let input = point.input();
+    let mut keys = (0..64)
+        .map(|n| id(&format!("unrequested-{n}")))
+        .collect::<anyhow::Result<std::collections::BTreeSet<_>>>()?;
+    let pair = (
+        input.series.subject().clone(),
+        input.series.resource().clone(),
+    );
+    let selection = |keys| Selection::Resource {
+        scope: d.spec().scope.clone(),
+        subject: pair.0.clone(),
+        resource: pair.1.clone(),
+        keys,
+    };
+    let original = batch("key-probe", vec![point])?;
+    let replace = "UPDATE rss_ts_ch.fences SET selection=$1::text::jsonb";
+    sqlx::query(replace)
+        .bind(serde_json::to_string(&selection(keys.clone()))?)
+        .execute(&f.admin)
+        .await?;
+    explain_write(f, &original, "one-key-disjoint").await?;
+    let (accepted, c) = measure(thread_cpu, f.write(&original)).await;
+    assert_eq!(confirmed(accepted?)?.new_samples(), 1);
+    assert_eq!(c.fence_rows, 0);
+    print_write("one-key-disjoint", 0, 64, c);
+    keys.pop_last();
+    keys.insert(d.spec().key.clone());
+    sqlx::query(replace)
+        .bind(serde_json::to_string(&selection(keys))?)
+        .execute(&f.admin)
+        .await?;
+    let matched = batch("key-hit", vec![sample(d, "key-hit", 1000, 1)?])?;
+    explain_write(f, &matched, "one-key-present").await?;
+    let req = Authorized::<Batch>::verify(&authority(TENANT)?, matched)?;
+    let (rejected, c) = measure(thread_cpu, f.store.write(&req, deadline()?)).await;
+    assert_eq!(rejected.err(), Some(Error::HistoryExpired));
+    assert_eq!(c.fence_rows, 1);
+    print_write("one-key-present", 64, 0, c);
+    Ok(())
+}
 async fn explain_write(f: &Fixture, b: &Batch, label: &str) -> anyhow::Result<()> {
     use sqlx::Row;
     let mut tx = f.pool.begin().await?;
@@ -446,8 +491,8 @@ async fn explain_write(f: &Fixture, b: &Batch, label: &str) -> anyhow::Result<()
             .map_err(anyhow::Error::from_boxed)?,
     )?;
     let work = maximum_node_work(&plan[0]["Plan"]);
-    // Individual range, selector and point passes fit within these three input
-    // populations. A point × fence join would examine 262144 rows here.
+    // Individual passes fit within the input populations. Expanding point ×
+    // fence (262144) or every unrelated key for a single probe (4096) exceeds the bound.
     assert!(
         work <= (count as u64 + 64) * 3,
         "{label} node visited {work}"

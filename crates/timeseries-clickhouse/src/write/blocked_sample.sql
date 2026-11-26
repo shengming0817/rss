@@ -16,13 +16,21 @@ WITH points AS MATERIALIZED (
     WHERE sel->>'selection'='exact' AND sel->'stream'=$3::text::jsonb
       AND sel->'series' IN (SELECT s FROM series)
     GROUP BY sel->'series'
+), requested AS MATERIALIZED (
+    SELECT subject,resource,jsonb_agg(key) AS keys,jsonb_object_agg(key,true) AS key_set
+    FROM (SELECT DISTINCT subject,resource,key FROM series) unique_keys GROUP BY subject,resource
 ), resources AS MATERIALIZED (
-    SELECT sel->>'subject' AS subject, sel->>'resource' AS resource,
-        k.key, range_agg(span) AS spans
-    FROM fences LEFT JOIN LATERAL jsonb_array_elements_text(sel->'keys') k(key) ON true
-    WHERE sel->>'selection'='resource' AND sel->'scope'=($3::text::jsonb)->'scope'
-      AND (sel->>'subject',sel->>'resource') IN (SELECT subject,resource FROM series)
-    GROUP BY sel->>'subject',sel->>'resource',k.key
+    SELECT r.subject,r.resource,k.key,range_agg(f.span) AS spans
+    FROM fences f JOIN requested r ON r.subject=f.sel->>'subject' AND r.resource=f.sel->>'resource'
+    -- Expand the smaller key set. An empty fence key set yields one wildcard
+    -- via the LEFT JOIN. A nonempty disjoint set must yield no binding.
+    LEFT JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_array_length(f.sel->'keys')>jsonb_array_length(r.keys)
+             THEN r.keys ELSE f.sel->'keys' END
+    ) k(key) ON true
+    WHERE f.sel->>'selection'='resource' AND f.sel->'scope'=($3::text::jsonb)->'scope'
+      AND (f.sel->'keys'='[]'::jsonb OR (r.key_set ? k.key AND (f.sel->'keys') ? k.key))
+    GROUP BY r.subject,r.resource,k.key
 ), bindings AS MATERIALIZED (
     SELECT s.*, e.spans AS exact_spans, all_keys.spans AS all_spans, keyed.spans AS key_spans
     FROM series s LEFT JOIN exact e ON s.s=e.s
