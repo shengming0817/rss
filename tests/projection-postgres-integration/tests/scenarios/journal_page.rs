@@ -15,119 +15,150 @@ pub(crate) async fn verify(
     append(store, &other_tenant, "other-tenant", b"other tenant", c).await?;
     let scope = scope("page-bytes", TENANT)?;
     let max = Event::MAX_PAYLOAD_BYTES;
-    let sizes = [max - 1, 0, 1, max, 1];
-    for (i, size) in sizes.into_iter().enumerate() {
-        append(
-            store,
-            &scope,
-            &format!("e{i}"),
-            &vec![i as u8; size as usize],
-            c,
-        )
-        .await?;
+    let mut events = Vec::new();
+    for (i, size) in [max - 1, 0, 1, max, 1].into_iter().enumerate() {
+        let id = format!("e{i}");
+        let body = vec![i as u8; size as usize];
+        let pos = append(store, &scope, &id, &body, c).await?;
+        events.push(Event::new(scope.source().clone(), pos, id, body)?);
     }
-    for (after, rows, bytes, expected, blocked) in [
-        (None, 5, max, vec![0, 1, 2], false),
-        (None, 2, max, vec![0, 1], false),
-        (None, 5, max - 1, vec![0, 1], false),
-        (None, 5, max - 2, vec![0], true),
-        (Some(2), 5, max - 1, vec![3], true),
-        (Some(2), 5, max, vec![3], false),
-        (Some(3), 5, max, vec![4], false),
-        (Some(4), 5, max, vec![], false),
+    pages(store, runtime, scope.source(), &events, c).await?;
+    for batched in [false, true] {
+        settlement(store, owner, &scope, &events, c, batched).await?;
+    }
+    Ok(())
+}
+
+// The production statement returns these columns before adapter decoding.
+type JournalRow = (i64, i32, Option<String>, Option<Vec<u8>>);
+
+async fn raw_rows(
+    runtime: &PgPool,
+    scope: &SourceScope,
+    after: Option<Position>,
+    budget: PageBudget,
+) -> anyhow::Result<Vec<JournalRow>> {
+    let tenant = scope.tenant().to_string();
+    let mut tx = runtime.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(&tenant)
+        .execute(&mut *tx)
+        .await?;
+    let rows = sqlx::query_as(PAGE_SQL)
+        .bind(&tenant)
+        .bind(scope.source())
+        .bind(after.map_or(-1, |p| p.get() as i64))
+        .bind(i64::from(budget.rows()))
+        .bind(i64::from(budget.payload_bytes()))
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.rollback().await?;
+    Ok(rows)
+}
+
+fn expected_rows(page: &ReadPage<Event>) -> Vec<JournalRow> {
+    match page {
+        ReadPage::Events(events) => events
+            .iter()
+            .map(|e| {
+                (
+                    e.position().get() as i64,
+                    e.payload().len() as i32,
+                    Some(e.id().to_owned()),
+                    Some(e.payload().to_vec()),
+                )
+            })
+            .collect(),
+        ReadPage::Blocked {
+            position,
+            required_bytes,
+        } => vec![(position.get() as i64, *required_bytes as i32, None, None)],
+    }
+}
+
+async fn pages(
+    store: &PgStore,
+    runtime: &PgPool,
+    scope: &SourceScope,
+    events: &[Event],
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let max = Event::MAX_PAYLOAD_BYTES;
+    let prefix = |range: std::ops::Range<usize>| ReadPage::Events(events[range].to_vec());
+    let blocked = |i: usize| ReadPage::Blocked {
+        position: events[i].position(),
+        required_bytes: events[i].payload().len() as u32,
+    };
+    for (after, rows, bytes, expected) in [
+        (None, 5, max, prefix(0..3)),
+        (None, 2, max, prefix(0..2)),
+        (None, 5, max - 1, prefix(0..2)),
+        (None, 5, max - 2, blocked(0)),
+        (Some(2), 5, max - 1, blocked(3)),
+        (Some(2), 5, max, prefix(3..4)),
+        (Some(3), 5, max, prefix(4..5)),
+        (Some(4), 5, max, prefix(5..5)),
     ] {
         let budget = PageBudget::new(rows, bytes)?;
-        // Measure the production statement's returned bytea column before adapter decoding.
-        let mut tx = runtime.begin().await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(TENANT)
-            .execute(&mut *tx)
-            .await?;
-        let records: Vec<(i64, i32, Option<String>, Option<Vec<u8>>)> = sqlx::query_as(PAGE_SQL)
-            .bind(TENANT)
-            .bind(scope.source().source())
-            .bind(after.unwrap_or(-1_i64))
-            .bind(i64::from(rows))
-            .bind(i64::from(bytes))
-            .fetch_all(&mut *tx)
-            .await?;
-        tx.rollback().await?;
-        assert_eq!(records.len(), expected.len());
-        let mut returned = 0;
-        let mut events = Vec::new();
-        for ((position, size, id, body), i) in records.into_iter().zip(expected) {
-            assert_eq!((position, size), (i as i64, sizes[i] as i32));
-            if blocked {
-                assert_eq!((id, body), (None, None));
-            } else {
-                let id = id.ok_or_else(|| anyhow::anyhow!("missing event id"))?;
-                let body = body.ok_or_else(|| anyhow::anyhow!("missing payload"))?;
-                assert_eq!(id, format!("e{i}"));
-                assert_eq!(body.len(), sizes[i] as usize);
-                assert!(body.iter().all(|&b| b == i as u8));
-                returned += body.len();
-                events.push(event(&scope, position as u64, &id, &body)?);
-            }
-        }
-        assert!(returned <= bytes as usize);
-        let expected = if blocked {
-            let i = after.map_or(0, |p| p as usize + 1);
-            ReadPage::Blocked {
-                position: Position::new(i as u64)?,
-                required_bytes: sizes[i],
-            }
-        } else {
-            ReadPage::Events(events)
-        };
-        assert_eq!(
-            store
-                .read(
-                    scope.source(),
-                    after.map(|p| Position::new(p as u64)).transpose()?,
-                    budget,
-                    c
-                )
-                .await?,
-            expected
+        let cursor = after.map(Position::new).transpose()?;
+        let records = raw_rows(runtime, scope, cursor, budget).await?;
+        assert!(
+            records == expected_rows(&expected),
+            "SQL page at {cursor:?} with {budget:?}"
         );
+        assert_eq!(store.read(scope, cursor, budget, c).await?, expected);
     }
-    for batched in [false, true] {
-        let generation = ProjectionScope::new(
-            scope.source().clone(),
-            "page",
-            if batched { "batch" } else { "single" },
-        )?;
-        let exec = session(store, &generation, c).await?;
-        for bytes in [max - 1, max] {
-            let limit = RunLimit::new(PageBudget::new(5, bytes)?, 10)?;
-            let report = if batched {
-                run_batched(store, &exec, c, limit).await
-            } else {
-                run(store, &exec, c, limit).await
-            };
-            let (settled, stop) = if bytes < max {
-                (
-                    3,
-                    Stop::PayloadBudget {
-                        position: Position::new(3)?,
-                        required_bytes: max,
-                    },
-                )
-            } else {
-                (5, Stop::CaughtUp)
-            };
-            assert_eq!(report.stop, stop);
-            assert_eq!(report.position, Some(Position::new(settled - 1)?));
-            assert_eq!(exec.checkpoint(c).await?.position, report.position);
-            assert_eq!(count(owner, &generation).await?, settled as i64);
-            for i in 0..sizes.len() {
-                let query = ReceiptQuery::new(generation.clone(), DEFINITION, format!("e{i}"))?;
-                assert_eq!(
-                    store.receipt_status(&query, c).await?.is_settled(),
-                    (i as u64) < settled
-                );
-            }
-        }
+    Ok(())
+}
+
+async fn settlement(
+    store: &PgStore,
+    owner: &PgPool,
+    scope: &ProjectionScope,
+    events: &[Event],
+    c: &Control<'_, Clock>,
+    batched: bool,
+) -> anyhow::Result<()> {
+    let generation = ProjectionScope::new(
+        scope.source().clone(),
+        "page",
+        if batched { "batch" } else { "single" },
+    )?;
+    let exec = session(store, &generation, c).await?;
+    let max = Event::MAX_PAYLOAD_BYTES;
+    let blocked = Stop::PayloadBudget {
+        position: events[3].position(),
+        required_bytes: max,
+    };
+    for (bytes, settled, stop) in [(max - 1, 3, blocked), (max, events.len(), Stop::CaughtUp)] {
+        let limit = RunLimit::new(PageBudget::new(5, bytes)?, 10)?;
+        let report = if batched {
+            run_batched(store, &exec, c, limit).await
+        } else {
+            run(store, &exec, c, limit).await
+        };
+        assert_eq!(report.stop, stop);
+        assert_eq!(report.position, Some(events[settled - 1].position()));
+        assert_eq!(exec.checkpoint(c).await?.position, report.position);
+        assert_eq!(count(owner, &generation).await?, settled as i64);
+        assert_receipts(store, &generation, events, settled, c).await?;
+    }
+    Ok(())
+}
+
+async fn assert_receipts(
+    store: &PgStore,
+    generation: &ProjectionScope,
+    events: &[Event],
+    settled: usize,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    for (i, event) in events.iter().enumerate() {
+        let query = ReceiptQuery::new(generation.clone(), DEFINITION, event.id())?;
+        assert_eq!(
+            store.receipt_status(&query, c).await?.is_settled(),
+            i < settled
+        );
     }
     Ok(())
 }

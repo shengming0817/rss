@@ -234,7 +234,13 @@ pub(super) async fn ordered_append(
             control,
         )
         .await?;
-    assert!(matches!(page, ReadPage::Events(events) if events.len() == 2));
+    assert_eq!(
+        page,
+        ReadPage::Events(vec![
+            event(&s, 0, "first", b"1")?,
+            event(&s, 1, "second", b"2")?
+        ])
+    );
     assert_eq!(append(store, &s, "first", b"1", control).await?.get(), 0);
     assert_eq!(
         append(store, &s, "first", b"changed", control).await,
