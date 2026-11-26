@@ -56,6 +56,19 @@ pub(crate) enum Mode {
     RefreshPreflight,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Budget {
+    deadline: Deadline,
+    end: tokio::time::Instant,
+}
+impl Budget {
+    pub(crate) fn remaining(self, clock: &impl Clock) -> Result<std::time::Duration, Error> {
+        let logical = self.deadline.remaining(clock.now()).ok_or(Error::Deadline)?;
+        let wall = self.end.saturating_duration_since(tokio::time::Instant::now());
+        if wall.is_zero() { return Err(Error::Deadline); }
+        Ok(wall.min(logical))
+    }
+}
 impl<C: Clock> PgStore<C> {
     pub(crate) async fn transaction<T: Send>(
         &self,
@@ -69,20 +82,20 @@ impl<C: Clock> PgStore<C> {
             tenant,
             deadline,
             mode,
-            || Ok(()),
+            |_| std::future::ready(Ok(())),
             move |c, clock, ()| operation(c, clock),
         )
         .await
     }
 
-    // One tenant gate and one wall-clock watchdog cover acquire, synchronous
+    // One tenant gate and one wall-clock watchdog cover capacity, cooperative
     // preparation, BEGIN and settlement, even when injected clock readings repeat.
-    pub(crate) async fn prepared_transaction<T: Send, P: Send>(
+    pub(crate) async fn prepared_transaction<T: Send, P: Send, F: Future<Output = Result<P, Error>> + Send>(
         &self,
         tenant: TenantId,
         deadline: Deadline,
         mode: Mode,
-        prepare: impl FnOnce() -> Result<P, Error> + Send,
+        prepare: impl FnOnce(Budget) -> F + Send,
         operation: impl for<'a> FnOnce(
             &'a mut PgConnection,
             &'a C,
@@ -97,7 +110,11 @@ impl<C: Clock> PgStore<C> {
             .ok_or(Error::Deadline)?;
         let mutation = mode == Mode::Write;
         let fault = if mutation { self.take_fault() } else { 0 };
-        let result=tokio::time::timeout(remaining, async {
+        let end = tokio::time::Instant::now().checked_add(remaining).ok_or(Error::InvalidInput)?;
+        let budget = Budget { deadline, end };
+        let result=tokio::time::timeout_at(end, async {
+            let prepared = prepare(budget).await?;
+            budget.remaining(&self.clock)?;
             #[cfg(feature = "integration")]
             let pg_wait = rss_timeseries::measurement::timer();
             let connection = self.pool.acquire().await.map_err(sql_error)?;
@@ -106,12 +123,7 @@ impl<C: Clock> PgStore<C> {
                 rss_timeseries::measurement::record("pool_wait", pg_wait, 0, 0);
                 rss_timeseries::measurement::timer()
             };
-            #[cfg(feature = "integration")]
-            let prep_start = rss_timeseries::measurement::timer();
-            let prepared = prepare()?;
-            #[cfg(feature = "integration")]
-            rss_timeseries::measurement::record("prepare", prep_start, 0, 0);
-            check(&self.clock, deadline)?;
+            budget.remaining(&self.clock)?;
             let mut lease=Lease{connection,settled:false};
             #[cfg(feature = "integration")]
             let tx_start = {
@@ -122,15 +134,15 @@ impl<C: Clock> PgStore<C> {
                 Mode::Snapshot => lease.connection.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").await,
                 _ => lease.connection.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE").await,
             }.map_err(sql_error)?;
-            let ms=deadline.remaining(self.clock.now()).ok_or(Error::Deadline)?.as_millis().clamp(1,i32::MAX as u128);
+            let ms=budget.remaining(&self.clock)?.as_millis().clamp(1,i32::MAX as u128);
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")
                 .bind(tenant.to_string()).bind(format!("{ms}ms")).execute(&mut *tx).await.map_err(sql_error)?;
-            check(&self.clock, deadline)?;
+            budget.remaining(&self.clock)?;
             started.store(true,Ordering::SeqCst);
             let result=operation(&mut tx,&self.clock,prepared).await;
             // No budget remains for rollback ACK once the injected clock reaches cutoff.
             // Quarantine instead of committing a staged mutation after its deadline.
-            if check(&self.clock, deadline).is_err() {
+            if budget.remaining(&self.clock).is_err() {
                 return if mutation { Ok(Outcome::Unknown) } else { Err(Error::Deadline) };
             }
             let result=if fault==1 && result.is_ok() { Err(Error::Unavailable) } else { result };

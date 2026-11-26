@@ -100,6 +100,8 @@ pub(crate) async fn run_on(
     })?;
     let pool = input.pg.pool().await?;
     let limits = Limits {
+        max_prepare_batches: NonZeroU32::new(4).ok_or(Error::InvalidInput)?,
+        max_prepare_bytes: NonZeroU32::new(Limits::MIN_PREPARE_BYTES).ok_or(Error::InvalidInput)?,
         max_points: NonZeroU32::new(10).ok_or(Error::InvalidInput)?,
         max_series: NonZeroU32::new(10).ok_or(Error::InvalidInput)?,
         max_bytes: NonZeroU32::new(65536).ok_or(Error::InvalidInput)?,

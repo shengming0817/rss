@@ -3,7 +3,7 @@ mod measurement;
 use crate::{
     PgStore,
     definition::flatten,
-    transaction::{Mode, certain, check, sql_error},
+    transaction::{Budget, Mode, certain, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
@@ -54,13 +54,13 @@ struct PreparedBatch {
 }
 
 impl PreparedBatch {
-    fn new(
+    async fn new(
         batch: &Batch,
         clock: &impl Clock,
-        deadline: Deadline,
+        budget: Budget,
         horizon: u64,
     ) -> Result<Self, Error> {
-        check(clock, deadline)?;
+        budget.remaining(clock)?;
         let identity = ReceiptQuery {
             stream: batch.stream().clone(),
             batch_id: batch.id().clone(),
@@ -71,8 +71,9 @@ impl PreparedBatch {
         let mut series_digests = Vec::with_capacity(payloads.capacity());
         // A repeated ID binds to its last occurrence before individual samples are checked.
         let mut bindings = std::collections::BTreeMap::new();
-        for sample in batch.samples() {
-            check(clock, deadline)?;
+        for (index, sample) in batch.samples().iter().enumerate() {
+            if index > 0 && index % 32 == 0 { tokio::task::yield_now().await; }
+            budget.remaining(clock)?;
             let series = &sample.input().series;
             let def = series.definition();
             bindings.insert((&def.spec().key, def.spec().version), def);
@@ -85,15 +86,16 @@ impl PreparedBatch {
         }
         let mut definitions = Vec::with_capacity(bindings.len());
         let mut definition_digests = Vec::with_capacity(bindings.len());
-        for def in bindings.into_values() {
-            check(clock, deadline)?;
+        for (index, def) in bindings.into_values().enumerate() {
+            if index > 0 && index % 32 == 0 { tokio::task::yield_now().await; }
+            budget.remaining(clock)?;
             #[cfg(feature = "integration")]
             definitions.push(measurement::raw("definition_payload", def)?);
             #[cfg(not(feature = "integration"))]
             definitions.push(crate::lifecycle::bytes(def)?);
             definition_digests.push(def.digest()?.as_bytes().to_vec());
         }
-        check(clock, deadline)?;
+        budget.remaining(clock)?;
         let stream = &identity.stream;
         let count = payloads.len();
         let horizon = i64::try_from(horizon).map_err(|_| Error::NumericRange)?;
@@ -206,15 +208,20 @@ impl<C: Clock> Writer for PgStore<C> {
                 tenant,
                 deadline,
                 Mode::Write,
-                || {
-                    PreparedBatch::new(
-                        request.request(),
-                        &self.clock,
-                        deadline,
-                        self.limits.replay_micros.get(),
-                    )
+                |budget| async move {
+                    let permit = self.preparation.acquire(request.request()).await?;
+                    #[cfg(feature = "integration")]
+                    let start = rss_timeseries::measurement::timer();
+                    let prepared = PreparedBatch::new(request.request(), &self.clock, budget, self.limits.replay_micros.get()).await?;
+                    #[cfg(feature = "integration")]
+                    rss_timeseries::measurement::record("prepare", start, 0, 0);
+                    Ok((prepared, permit))
                 },
-                |c, _, batch| Box::pin(batch.admit(c)),
+                |c, _, (batch, permit)| Box::pin(async move {
+                    let result = batch.admit(c).await;
+                    drop(permit);
+                    result
+                }),
             )
             .await?;
         Ok(flatten(out))

@@ -204,6 +204,8 @@ pub enum IdentityMatch {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "BatchDto")]
 pub struct Batch {
+    #[serde(skip)]
+    encoded_len: usize,
     stream: Stream,
     id: Id,
     samples: Vec<Sample>,
@@ -240,16 +242,17 @@ impl Batch {
                 return Err(Error::Conflict);
             }
         }
-        let batch = Self {
+        let mut batch = Self {
+            encoded_len: 0,
             stream,
             id,
             samples,
         };
         #[cfg(feature = "integration")]
         let start = crate::measurement::timer();
-        let _bytes = batch.write_to(std::io::sink())?;
+        batch.encoded_len = batch.write_to(std::io::sink())?;
         #[cfg(feature = "integration")]
-        crate::measurement::record("batch_check", start, _bytes, 0);
+        crate::measurement::record("batch_check", start, batch.encoded_len, 0);
         Ok(batch)
     }
     pub const fn stream(&self) -> &Stream {
@@ -258,6 +261,8 @@ impl Batch {
     pub const fn id(&self) -> &Id {
         &self.id
     }
+    /// Size of the complete canonical V1 JSON, measured during validation.
+    pub const fn encoded_len(&self) -> usize { self.encoded_len }
     pub fn samples(&self) -> &[Sample] {
         &self.samples
     }
