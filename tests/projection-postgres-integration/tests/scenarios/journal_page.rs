@@ -8,6 +8,11 @@ pub(crate) async fn verify(
     owner: &PgPool,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    // Both joins must bind tenant and source even when other journals reuse position zero.
+    let neighbor = scope("page-neighbor", TENANT)?;
+    let other_tenant = scope("page-bytes", OTHER)?;
+    append(store, &neighbor, "neighbor", b"other source", c).await?;
+    append(store, &other_tenant, "other-tenant", b"other tenant", c).await?;
     let scope = scope("page-bytes", TENANT)?;
     let max = Event::MAX_PAYLOAD_BYTES;
     let sizes = [max - 1, 0, 1, max, 1];
