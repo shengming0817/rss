@@ -325,12 +325,16 @@ where
 {
     let budget = execution.policy.budget();
     let policy = execution.policy.remote_claim_wait();
-    let probe_reserve = policy.final_window(budget.total() - budget.settlement_reserve());
-    // Both cutoffs were minted from the same original operation budget.
-    let last_probe = Deadline::at(cutoff.instant() - probe_reserve);
-    // Only the selected final probe may use part of its I/O window for dispatch lag.
-    // The other half remains available for provider I/O even at the admission edge.
-    let final_start_limit = Deadline::at(last_probe.instant() + probe_reserve / 2);
+    let operation = budget.total() - budget.settlement_reserve();
+    let probe_reserve = policy.final_window(operation);
+    // The final probe may spend half its planned I/O reserve on dispatch or permit transfer.
+    let minimum_io = probe_reserve - probe_reserve / 2;
+    let final_start_limit = Deadline::at(cutoff.instant() - minimum_io);
+    // Tokio rounds sleeps up to a millisecond. Schedule early enough for that wake to
+    // precede admission even when the host selects a sub-millisecond I/O reserve.
+    const TIMER_TICK: Duration = Duration::from_millis(1);
+    let wake_reserve = probe_reserve.max(minimum_io + TIMER_TICK).min(operation);
+    let last_probe = Deadline::at(cutoff.instant() - wake_reserve);
     let mut capacity_wait = None;
     let mut backoff: Option<ClaimBackoff> = None;
     let mut known_busy = None;
@@ -378,7 +382,14 @@ where
             .next(retry_after, left);
         let wake = delay.map_or(cutoff, |delay| last_probe.capped(execution.timer, delay));
         if within(execution.timer, cutoff, |_| {
-            wait_for_probe(execution.timer, wake)
+            async {
+                if delay == Some(Duration::ZERO) {
+                    // No future tick fits. Give the owner one turn before the sole final probe.
+                    tokio::task::yield_now().await;
+                } else {
+                    wait_for_probe(execution.timer, wake).await;
+                }
+            }
         })
         .await
         .is_err()
@@ -499,7 +510,7 @@ impl ClaimBackoff {
 
     fn next(&mut self, hint: Option<Duration>, until_final: Duration) -> Option<Duration> {
         use std::hash::BuildHasher as _;
-        if self.final_scheduled || until_final.is_zero() {
+        if self.final_scheduled {
             return None;
         }
         // One earlier tier for a near expiry; a constantly renewed short lease still backs off.

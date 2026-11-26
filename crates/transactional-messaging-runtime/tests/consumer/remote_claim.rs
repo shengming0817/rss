@@ -469,7 +469,7 @@ async fn already_elapsed_remote_wait_yields_before_the_next_claim() {
             &timer,
             ConsumerExecutionPolicy::new(
                 RetryPolicy::STANDARD,
-                ExecutionBudget::new(Duration::from_micros(10), Duration::from_micros(1))
+                ExecutionBudget::new(Duration::from_millis(10), Duration::from_millis(1))
                     .expect("budget"),
                 wait,
             ),
@@ -506,5 +506,65 @@ async fn already_elapsed_remote_wait_yields_before_the_next_claim() {
                 .count(),
             1
         );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn submillisecond_final_reserve_observes_early_release_on_tokios_rounded_clock() {
+    let base = Duration::from_millis(20);
+    let cap = Duration::from_micros(100);
+    let wait = RemoteClaimWaitPolicy::new(base, base, cap).expect("submillisecond cap");
+    for operation in [base, Duration::from_micros(400)] {
+        for hint in [None, Some(operation - cap)] {
+            let budget = ExecutionBudget::new(operation + base, base).expect("budget");
+            let policy = ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, budget, wait);
+            let clock = RealtimeClock::new();
+            let start = clock.now();
+            let msg = envelope(|_| {});
+            let sub = subscription(&msg);
+            let execution = ConsumerExecution::new(
+                ConsumerGroup::parse("rounded-clock").expect("group"),
+                &TrustedIngress,
+                &sub,
+                &clock,
+                policy,
+                &NoopEmitter,
+            );
+            let inbox = FakeInbox {
+                capacity: None,
+                disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+                    retry_after: hint,
+                })),
+                lease: LeaseStatus::Held {
+                    remaining: Duration::from_secs(30),
+                },
+            };
+            let tx = FakeTx {
+                calls: Arc::default(),
+                disposition: TerminalDisposition::Succeeded,
+            };
+            let recorder = RecordingSettlement::new();
+            let processing = consume_once(
+                &inbox,
+                &tx,
+                &execution,
+                Delivery::new(msg, recorder.clone()),
+            );
+            tokio::pin!(processing);
+            assert!(futures::poll!(&mut processing).is_pending());
+            *inbox.disposition.lock().expect("early release") =
+                Some(IdempotencyDisposition::Acquired(Claim));
+            let outcome = tokio::time::timeout(operation, &mut processing)
+                .await
+                .expect("probe fits operation")
+                .expect("reclaim");
+            assert_eq!(
+                outcome,
+                ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
+            );
+            assert!(clock.now() <= start + operation - cap / 2);
+            assert_eq!(tx.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
+        }
     }
 }

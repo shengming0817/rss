@@ -81,7 +81,10 @@ probe window with that same cap. A reachable lease estimate sets the earliest fi
 An ordinary retry must start by the planned final wake. The already scheduled final probe
 can use up to half its I/O reserve for timer rounding, dispatch and permit transfer. For
 example, a 250 ms reserve still leaves at least 125 ms for I/O at the latest admitted start.
-Later wakes skip the probe, and all provider calls retain the original operation cutoff.
+The planned wake leaves room for Tokio to round up by one millisecond. If a lease
+estimate falls beyond that safe wake, the final check can still observe an early release.
+If less than one timer tick fits, the consumer yields once and uses the remaining budget
+for that single check. Later wakes skip the probe, and all provider calls retain the original operation cutoff.
 A known busy timeout requeues once.
 A durable claim error abandons the delivery. `ExecutionBudget` reserves a separate interval
 for broker settlement and cleanup.
