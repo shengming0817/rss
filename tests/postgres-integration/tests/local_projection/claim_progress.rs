@@ -153,20 +153,7 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     scale::install_explain(f).await?;
     scale::explain(f, "10,000 live leases in the current generation").await?;
     let original = snapshot(f).await?;
-    append(f, "eligible-tail", 0, 1).await?;
-    tail(&store, &[(1, 1)], 1).await?;
-    append(f, "eligible-tail", 1, 65).await?;
-    reset_tail(f).await?;
-    tail(&store, &[(1, 32), (2, 32), (3, 1)], 65).await?;
-    let empty = store
-        .claim_partition_heads(
-            crate::execution(tenant(), 1),
-            32usize.try_into()?,
-            deadline(),
-        )
-        .await?;
-    assert!(empty.is_empty());
-    assert_eq!(empty.scan_progress(), OutboxScanProgress::Complete);
+    current_generation(f, &store).await?;
     mixed_generation(f, &store).await?;
     assert_eq!(snapshot(f).await?, original);
     sqlx::query("DELETE FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'live-prefix-%' OR message_id LIKE 'eligible-tail-%' OR message_id='future-history-0'").execute(&f.owner).await?;
@@ -218,5 +205,23 @@ async fn mixed_generation(f: &Fixture, store: &PgOutboxStore<()>) -> anyhow::Res
     assert_eq!(blocked.scan_progress(), OutboxScanProgress::RetryLater);
     held.rollback().await?;
     tail(store, &[(79, 32), (80, 32), (81, 1)], 65).await?;
+    Ok(())
+}
+
+async fn current_generation(f: &Fixture, store: &PgOutboxStore<()>) -> anyhow::Result<()> {
+    append(f, "eligible-tail", 0, 1).await?;
+    tail(store, &[(1, 1)], 1).await?;
+    append(f, "eligible-tail", 1, 65).await?;
+    reset_tail(f).await?;
+    tail(store, &[(1, 32), (2, 32), (3, 1)], 65).await?;
+    let empty = store
+        .claim_partition_heads(
+            crate::execution(tenant(), 1),
+            32usize.try_into()?,
+            deadline(),
+        )
+        .await?;
+    assert!(empty.is_empty());
+    assert_eq!(empty.scan_progress(), OutboxScanProgress::Complete);
     Ok(())
 }
