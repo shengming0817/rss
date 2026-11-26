@@ -39,8 +39,8 @@ fn remote_wait_standard_and_representation_limits() {
     );
 }
 
-struct ProbeInbox<'a> {
-    clock: &'a ManualTimer,
+struct ProbeInbox<'a, C> {
+    clock: &'a C,
     inner: FakeInbox,
     probes: Mutex<Vec<(std::time::Instant, Duration)>>,
     stall_claim: bool,
@@ -48,8 +48,8 @@ struct ProbeInbox<'a> {
     retry_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
-impl<'a> ProbeInbox<'a> {
-    fn busy(clock: &'a ManualTimer, hint: Option<Duration>) -> Self {
+impl<'a, C> ProbeInbox<'a, C> {
+    fn busy(clock: &'a C, hint: Option<Duration>) -> Self {
         Self {
             clock,
             inner: FakeInbox {
@@ -74,7 +74,7 @@ impl<'a> ProbeInbox<'a> {
     }
 }
 
-impl InboxStore for ProbeInbox<'_> {
+impl<C: Clock> InboxStore for ProbeInbox<'_, C> {
     type Claim = Claim;
     type Permit = (OperationDeadline, Option<tokio::sync::OwnedSemaphorePermit>);
     fn lease_policy(&self) -> LeaseRenewalPolicy {
@@ -361,7 +361,8 @@ async fn remote_retry_leaves_the_local_permit_queue_at_its_latest_start() {
     let wait = tuned();
     let budget = ExecutionBudget::STANDARD;
     let operation = budget.total() - budget.settlement_reserve();
-    let latest = operation - wait.final_window(operation);
+    let reserve = wait.final_window(operation);
+    let latest = operation - (reserve - reserve / 2);
     for late_transfer in [false, true] {
         let clock = ManualTimer::new();
         let mut inbox = ProbeInbox::busy(&clock, None);
@@ -566,5 +567,82 @@ async fn submillisecond_final_reserve_observes_early_release_on_tokios_rounded_c
             assert_eq!(tx.calls.load(Ordering::SeqCst), 1);
             assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_retry_dispatched_in_the_final_window_spends_the_last_probe_once() {
+    let operation = Duration::from_millis(20);
+    let cap = Duration::from_micros(100);
+    let base = Duration::from_micros(9400);
+    let wait = RemoteClaimWaitPolicy::new(base, base, cap).expect("rounded ordinary tier");
+    let policy = ConsumerExecutionPolicy::new(
+        RetryPolicy::STANDARD,
+        ExecutionBudget::new(operation * 2, operation).expect("budget"),
+        wait,
+    );
+    // All initial jitter draws are ordinary (<18.8 ms). Dispatch after the safe
+    // planned wake (18.95 ms), on either side of actual admission (19.95 ms).
+    for (advance, release) in [
+        (Duration::from_millis(19), true),
+        (Duration::from_millis(19), false),
+        (Duration::from_micros(19960), true),
+        (operation, true),
+    ] {
+        let clock = RealtimeClock::new();
+        let inbox = ProbeInbox::busy(&clock, None);
+        let msg = envelope(|_| {});
+        let sub = subscription(&msg);
+        let execution = ConsumerExecution::new(
+            ConsumerGroup::parse("rounded-ordinary").expect("group"),
+            &TrustedIngress,
+            &sub,
+            &clock,
+            policy,
+            &NoopEmitter,
+        );
+        let tx = FakeTx {
+            calls: Arc::default(),
+            disposition: TerminalDisposition::Succeeded,
+        };
+        let recorder = RecordingSettlement::new();
+        let processing = consume_once(
+            &inbox,
+            &tx,
+            &execution,
+            Delivery::new(msg, recorder.clone()),
+        );
+        tokio::pin!(processing);
+        assert!(futures::poll!(&mut processing).is_pending());
+        if release {
+            inbox.release_owner();
+        }
+        tokio::time::advance(advance).await;
+        let admitted = advance <= operation - (cap - cap / 2);
+        if admitted && release {
+            assert_eq!(
+                futures::poll!(&mut processing).map(|r| r.expect("reclaim")),
+                std::task::Poll::Ready(ProcessingDisposition::Committed(
+                    TerminalDisposition::Succeeded
+                ))
+            );
+            assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
+        } else {
+            if advance < operation {
+                assert!(futures::poll!(&mut processing).is_pending());
+                // Even if the store stays busy, there is no third immediate or delayed probe.
+                tokio::task::yield_now().await;
+                assert!(futures::poll!(&mut processing).is_pending());
+                tokio::time::advance(operation - advance).await;
+            }
+            assert_eq!(
+                futures::poll!(&mut processing).map(|r| r.expect("busy")),
+                std::task::Poll::Ready(ProcessingDisposition::InProgress)
+            );
+            assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
+        }
+        let expected = 1 + usize::from(admitted);
+        assert_eq!(inbox.probes.lock().expect("probes").len(), expected);
+        assert_eq!(inbox.reservations.load(Ordering::SeqCst), expected);
     }
 }

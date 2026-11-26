@@ -344,23 +344,28 @@ where
             execution,
             binding,
             cutoff,
-            backoff.as_ref().map(|schedule| {
-                if schedule.final_scheduled {
-                    final_start_limit
-                } else {
-                    last_probe
-                }
-            }),
+            backoff.as_ref().map(|_| final_start_limit),
             &mut capacity_wait,
             &mut known_busy,
         )
         .await;
         let retry_after = match attempt {
-            Ok(IdempotencyDisposition::Acquired(claim)) => break Ok(ClaimWait::Acquired(claim)),
-            Ok(IdempotencyDisposition::Terminal(receipt)) => {
+            Ok((_, IdempotencyDisposition::Acquired(claim))) => {
+                break Ok(ClaimWait::Acquired(claim));
+            }
+            Ok((_, IdempotencyDisposition::Terminal(receipt))) => {
                 break Ok(ClaimWait::Terminal(receipt));
             }
-            Ok(IdempotencyDisposition::InProgress { retry_after }) => retry_after,
+            Ok((started, IdempotencyDisposition::InProgress { retry_after })) => {
+                // A rounded wake or a late permit transfer can move an ordinary retry
+                // into the final window. Count that actual provider call as the last one.
+                if let Some(schedule) = &mut backoff
+                    && last_probe.is_expired(started)
+                {
+                    schedule.final_scheduled = true;
+                }
+                retry_after
+            }
             Err(error) => {
                 if error.kind() == MessagingErrorKind::DeadlineElapsed
                     && let Some(busy) = known_busy
@@ -434,7 +439,7 @@ async fn claim_once<I, V, R, E>(
     latest_retry_start: Option<Deadline>,
     capacity_wait: &mut Option<Duration>,
     known_busy: &mut Option<ProcessingDisposition>,
-) -> Result<IdempotencyDisposition<I::Claim>, MessagingError>
+) -> Result<(std::time::Instant, IdempotencyDisposition<I::Claim>), MessagingError>
 where
     I: InboxStore,
     R: ExecutionTimer,
@@ -476,15 +481,16 @@ where
     let permit = permit?;
     // The timeout-first watchdog may expire after permit transfer but before this poll.
     within(timer, cutoff, |_| async {
-        let Some(permit) = permit
-            .filter(|_| latest_retry_start.is_none_or(|latest| timer.now() <= latest.instant()))
+        let started = timer.now();
+        let Some(permit) =
+            permit.filter(|_| latest_retry_start.is_none_or(|latest| started <= latest.instant()))
         else {
             // The probe window closed. Preserve the known busy outcome until the original
             // watchdog expires, with neither a queued reservation nor a held permit.
             return std::future::pending().await;
         };
         *known_busy = None;
-        inbox.claim(permit).await
+        inbox.claim(permit).await.map(|outcome| (started, outcome))
     })
     .await?
 }

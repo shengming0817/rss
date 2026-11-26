@@ -78,8 +78,9 @@ lease estimate can advance the probe by one tier, even when the lease keeps rene
 The final probe runs at most once. Its I/O reserve is one quarter of the original operation
 budget, bounded by the final window cap. Its early jitter uses one quarter of the remaining
 probe window with that same cap. A reachable lease estimate sets the earliest final wake.
-An ordinary retry must start by the planned final wake. The already scheduled final probe
-can use up to half its I/O reserve for timer rounding, dispatch and permit transfer. For
+An ordinary retry that actually starts at or after the planned final wake counts as the
+single final probe. Every retry uses the same latest admission time, allowing up to half
+the planned I/O reserve for timer rounding, dispatch and permit transfer. For
 example, a 250 ms reserve still leaves at least 125 ms for I/O at the latest admitted start.
 The planned wake leaves room for Tokio to round up by one millisecond. If a lease
 estimate falls beyond that safe wake, the final check can still observe an early release.
