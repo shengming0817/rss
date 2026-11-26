@@ -92,6 +92,110 @@ async fn bounded_candidate_scan() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn retention_window_cost() -> anyhow::Result<()> {
+    use rss_observation::{Id, LookupOutcome, ObservationStore, ReadGrant};
+    use std::time::Instant;
+
+    let f = Fixture::new().await?;
+    let store = f.store().await?;
+    let pool = maintenance_role(&f).await?;
+    let maint = PgMaintenance::new(pool.clone(), Clock, deadline()).await?;
+    let retired = scope(TENANT, "window", "r", "s", "old")?;
+    activate(&store, &retired, None).await?;
+    let mut sizes = Vec::new();
+    for seq in 0..1155 {
+        let input = batch(
+            &retired,
+            &seq.to_string(),
+            seq,
+            "all",
+            Body::Snapshot(vec![]),
+        )?;
+        f.stage(&input).await?.0.commit().await?;
+        sizes.push(input.batch().encode().len() as u64);
+    }
+    activate(&store, &scope(TENANT, "window", "r", "s", "new")?, Some(1)).await?;
+
+    for invalid in [0, 1025] {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(TENANT)
+            .execute(&mut *tx)
+            .await?;
+        let error = sqlx::query("SELECT * FROM rss_observation.reclaim($1,$2,1155,NULL,$3)")
+            .bind(retired.encode()?)
+            .bind(EXPIRY)
+            .bind(invalid)
+            .execute(&mut *tx)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("OB005")
+        );
+        tx.rollback().await?;
+    }
+
+    let grant = || MaintenanceGrant::verify(&Trusted, retired.clone(), EXPIRY, 1155);
+    let read = ReadGrant::verify(&Trusted, retired.clone())?;
+    let mut cursor = None;
+    let mut start = 0;
+    for limit in [1, 64, 65, 1024, 1024] {
+        let window = ScanWindow::new(cursor, limit)?;
+        let end = (start + usize::from(limit)).min(sizes.len());
+        let count = u32::try_from(end - start)?;
+        if count == 1024 {
+            // Compare the same foreground lookup with and without an outstanding
+            // full maintenance transaction. Roll back so the API times its own work.
+            let id = Id::new(start.to_string())?;
+            let lookup = || async {
+                let timer = Instant::now();
+                let outcome = store.lookup(&read, &id, deadline()).await?;
+                assert!(matches!(outcome, LookupOutcome::Found(_)));
+                Ok::<_, anyhow::Error>(timer.elapsed().as_micros())
+            };
+            let baseline = lookup().await?;
+            let mut tx = pool.begin().await?;
+            sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+                .bind(TENANT)
+                .execute(&mut *tx)
+                .await?;
+            let staged: i32 = sqlx::query_scalar("SELECT reclaimed FROM rss_observation.reclaim($1,$2,1155,$3::bigint::numeric,1024)")
+                .bind(retired.encode()?).bind(EXPIRY).bind(i64::try_from(start)? - 1)
+                .fetch_one(&mut *tx).await?;
+            assert_eq!(staged, 1024);
+            let concurrent = lookup().await?;
+            tx.rollback().await?;
+            println!(
+                "retention_foreground operation=lookup candidates={count} baseline_us={baseline} concurrent_us={concurrent}"
+            );
+        }
+        let timer = Instant::now();
+        let page = maint.reclaim(grant()?, window, deadline()).await?;
+        println!(
+            "retention_cost limit={limit} page={page:?} transaction_us={}",
+            timer.elapsed().as_micros()
+        );
+        assert_eq!((page.scanned, page.reclaimed), (count, count));
+        assert_eq!(page.released_bytes, sizes[start..end].iter().sum::<u64>());
+        assert_eq!(page.last_examined, Some(u64::try_from(end - 1)?));
+        assert_eq!(page.finished, count < u32::from(limit));
+        if count == 1024 {
+            let repeat = maint.reclaim(grant()?, window, deadline()).await?;
+            assert_eq!(
+                (repeat.scanned, repeat.reclaimed, repeat.released_bytes),
+                (1024, 0, 0)
+            );
+            assert_eq!(repeat.last_examined, page.last_examined);
+        }
+        cursor = page.last_examined;
+        start = end;
+    }
+    assert_eq!(start, sizes.len());
+    Ok(())
+}
+
 async fn reclaim_plans(
     f: &Fixture,
     scope: &Scope,

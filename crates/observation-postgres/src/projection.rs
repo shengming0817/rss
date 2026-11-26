@@ -18,8 +18,7 @@ use std::sync::Arc;
 const LOOKUP: &str = "SELECT raw IS NULL AS expired,scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
 // Window only over the bounded index candidates and their byte lengths. Select bodies
 // for the admitted prefix in the same snapshot as the floor.
-const READ: &str =
-    "SELECT j.expired_through, b.scope,b.batch_id,b.raw,b.fingerprint,b.received_at,
+const READ: &str = "SELECT j.expired_through, b.scope,b.batch_id,b.raw,b.fingerprint,b.received_at,
  b.policy,b.decision,b.sequence::text AS sequence,b.applicable,b.log_position
  FROM rss_observation.journals j LEFT JOIN LATERAL (
    SELECT log_position,sum(n) OVER (ORDER BY log_position ROWS UNBOUNDED PRECEDING) AS bytes
@@ -198,21 +197,15 @@ impl<C: Clock> Source for PgSource<C> {
         limit: BatchLimit,
         control: &Control<'_, T>,
     ) -> Result<Vec<Event>, rss_projection::Error> {
-        self.read_page(
-            scope,
-            after,
-            limit,
-            control,
-            |source, pos, record, fp| {
-                reference_event(
-                    source,
-                    pos,
-                    record.record().scope(),
-                    record.record().batch().id(),
-                    fp,
-                )
-            },
-        )
+        self.read_page(scope, after, limit, control, |source, pos, record, fp| {
+            reference_event(
+                source,
+                pos,
+                record.record().scope(),
+                record.record().batch().id(),
+                fp,
+            )
+        })
         .await
     }
 }
