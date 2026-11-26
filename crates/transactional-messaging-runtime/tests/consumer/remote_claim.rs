@@ -249,6 +249,7 @@ async fn remote_ownership_and_cancellation_use_the_original_short_cutoffs() {
         wait,
     );
     let latest = operation - wait.final_window(operation);
+    let dispatch_lag = wait.final_window(operation) / 2;
     for action in [
         Action::ReleaseEarly,
         Action::ExpireAtHint,
@@ -297,26 +298,37 @@ async fn remote_ownership_and_cancellation_use_the_original_short_cutoffs() {
                     clock.advance(delay - tick);
                     inbox.release_owner();
                     assert!(futures::poll!(&mut processing).is_pending());
-                    clock.advance(tick);
+                    // Round the boundary hint's fine-grained wake up by a Tokio timer tick.
+                    let lag = if hint.is_some() {
+                        Duration::from_millis(1)
+                    } else {
+                        Duration::ZERO
+                    };
+                    clock.advance(tick + lag);
                     assert_eq!(
-                        processing.await.expect("acquire"),
-                        ProcessingDisposition::Committed(TerminalDisposition::Succeeded)
+                        futures::poll!(&mut processing).map(|r| r.expect("acquire")),
+                        std::task::Poll::Ready(ProcessingDisposition::Committed(
+                            TerminalDisposition::Succeeded
+                        ))
                     );
                     assert_eq!(
                         *inbox.probes.lock().expect("probes"),
-                        [(start, operation), (start + delay, operation - delay)]
+                        [
+                            (start, operation),
+                            (start + delay + lag, operation - delay - lag)
+                        ]
                     );
                     assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
                     assert_eq!(tx.calls.load(Ordering::SeqCst), 1);
                 }
                 Action::LateWake => {
-                    clock.advance(latest + tick);
+                    clock.advance(latest + dispatch_lag + tick);
                     assert!(futures::poll!(&mut processing).is_pending());
                     assert_eq!(inbox.reservations.load(Ordering::SeqCst), 1);
-                    clock.advance(operation - latest - tick);
+                    clock.advance(operation - latest - dispatch_lag - tick);
                     assert_eq!(
-                        processing.await.expect("busy"),
-                        ProcessingDisposition::InProgress
+                        futures::poll!(&mut processing).map(|r| r.expect("busy")),
+                        std::task::Poll::Ready(ProcessingDisposition::InProgress)
                     );
                     assert_eq!(inbox.probes.lock().expect("probes").len(), 1);
                     assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
@@ -326,8 +338,9 @@ async fn remote_ownership_and_cancellation_use_the_original_short_cutoffs() {
                     assert!(futures::poll!(&mut processing).is_pending());
                     clock.advance(operation - delay);
                     assert_eq!(
-                        processing.await.expect_err("unacknowledged claim").kind(),
-                        MessagingErrorKind::DeadlineElapsed
+                        futures::poll!(&mut processing)
+                            .map(|r| r.expect_err("unacknowledged claim").kind()),
+                        std::task::Poll::Ready(MessagingErrorKind::DeadlineElapsed)
                     );
                     assert!(recorder.settlements().is_empty());
                     assert_eq!(recorder.abandon_count(), 1);
@@ -402,8 +415,8 @@ async fn remote_retry_leaves_the_local_permit_queue_at_its_latest_start() {
         assert!(recorder.settlements().is_empty());
         clock.advance(operation - elapsed);
         assert_eq!(
-            processing.await.expect("known remote owner"),
-            ProcessingDisposition::InProgress
+            futures::poll!(&mut processing).map(|r| r.expect("known remote owner")),
+            std::task::Poll::Ready(ProcessingDisposition::InProgress)
         );
         assert_eq!(inbox.probes.lock().expect("probes").len(), 1);
         assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
@@ -414,16 +427,21 @@ async fn remote_retry_leaves_the_local_permit_queue_at_its_latest_start() {
 #[tokio::test]
 async fn already_elapsed_remote_wait_yields_before_the_next_claim() {
     // Every clock observation takes longer than the configured probe interval.
-    struct Ticking(AtomicUsize);
+    struct Ticking {
+        ticks: AtomicUsize,
+        defer_first: bool,
+    }
     impl Clock for Ticking {
         fn now(&self) -> std::time::Instant {
-            support::epoch() + Duration::from_nanos(self.0.fetch_add(10, Ordering::SeqCst) as u64)
+            support::epoch()
+                + Duration::from_nanos(self.ticks.fetch_add(10, Ordering::SeqCst) as u64)
         }
     }
     impl ExecutionTimer for Ticking {
         async fn sleep_until(&self, at: Deadline) {
+            let mut defer = self.defer_first;
             std::future::poll_fn(|cx| {
-                if at.is_expired(self.now()) {
+                if at.is_expired(self.now()) && !std::mem::take(&mut defer) {
                     std::task::Poll::Ready(())
                 } else {
                     cx.waker().wake_by_ref();
@@ -433,55 +451,60 @@ async fn already_elapsed_remote_wait_yields_before_the_next_claim() {
             .await
         }
     }
-    let timer = Ticking(AtomicUsize::default());
-    let tick = Duration::from_nanos(1);
-    let wait = RemoteClaimWaitPolicy::new(tick, tick, tick).expect("minimum jitter");
-    let msg = envelope(|_| {});
-    let sub = subscription(&msg);
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let emitter = RecordingEmitter(events.clone());
-    let execution = ConsumerExecution::new(
-        ConsumerGroup::parse("probe").expect("group"),
-        &TrustedIngress,
-        &sub,
-        &timer,
-        ConsumerExecutionPolicy::new(
-            RetryPolicy::STANDARD,
-            ExecutionBudget::new(Duration::from_micros(10), Duration::from_micros(1))
-                .expect("budget"),
-            wait,
-        ),
-        &emitter,
-    );
-    let inbox = FakeInbox {
-        capacity: None,
-        disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
-            retry_after: None,
-        })),
-        lease: LeaseStatus::Lost,
-    };
-    let tx = FakeTx {
-        calls: Arc::default(),
-        disposition: TerminalDisposition::Succeeded,
-    };
-    let processing = consume_once(
-        &inbox,
-        &tx,
-        &execution,
-        Delivery::new(msg, RecordingSettlement::new()),
-    );
-    tokio::pin!(processing);
-    assert!(futures::poll!(&mut processing).is_pending());
-    assert_eq!(
-        events
-            .lock()
-            .expect("events")
-            .iter()
-            .filter(|e| matches!(
-                e,
-                TransactionalMessagingObservation::ConsumerClaimInProgress
-            ))
-            .count(),
-        1
-    );
+    for defer_first in [false, true] {
+        let timer = Ticking {
+            ticks: AtomicUsize::default(),
+            defer_first,
+        };
+        let tick = Duration::from_nanos(1);
+        let wait = RemoteClaimWaitPolicy::new(tick, tick, tick).expect("minimum jitter");
+        let msg = envelope(|_| {});
+        let sub = subscription(&msg);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let emitter = RecordingEmitter(events.clone());
+        let execution = ConsumerExecution::new(
+            ConsumerGroup::parse("probe").expect("group"),
+            &TrustedIngress,
+            &sub,
+            &timer,
+            ConsumerExecutionPolicy::new(
+                RetryPolicy::STANDARD,
+                ExecutionBudget::new(Duration::from_micros(10), Duration::from_micros(1))
+                    .expect("budget"),
+                wait,
+            ),
+            &emitter,
+        );
+        let inbox = FakeInbox {
+            capacity: None,
+            disposition: Mutex::new(Some(IdempotencyDisposition::InProgress {
+                retry_after: None,
+            })),
+            lease: LeaseStatus::Lost,
+        };
+        let tx = FakeTx {
+            calls: Arc::default(),
+            disposition: TerminalDisposition::Succeeded,
+        };
+        let processing = consume_once(
+            &inbox,
+            &tx,
+            &execution,
+            Delivery::new(msg, RecordingSettlement::new()),
+        );
+        tokio::pin!(processing);
+        assert!(futures::poll!(&mut processing).is_pending());
+        assert_eq!(
+            events
+                .lock()
+                .expect("events")
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    TransactionalMessagingObservation::ConsumerClaimInProgress
+                ))
+                .count(),
+            1
+        );
+    }
 }

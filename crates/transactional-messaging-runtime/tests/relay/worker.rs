@@ -458,7 +458,12 @@ async fn overlapping_scan_and_settlement_backoffs_keep_the_later_cutoff() {
     tokio::time::timeout(Duration::from_secs(3), async {
         let step = Duration::from_millis(2);
         for progress in [OutboxScanProgress::Continue, OutboxScanProgress::RetryLater] {
-            for error_first in [false, true] {
+            for (error_first, error_backoff) in [
+                (false, step * 2),
+                (true, step * 2),
+                (false, step * 20),
+                (true, step * 20),
+            ] {
                 let mut observed = ObservedStore::new(
                     if error_first { 2 } else { 0 },
                     0,
@@ -474,7 +479,7 @@ async fn overlapping_scan_and_settlement_backoffs_keep_the_later_cutoff() {
                     empty_pages_per_slice: NonZeroUsize::MIN,
                     continuation_delay: step * 10,
                     contention_delay: step * 15,
-                    error_backoff: step * 2,
+                    error_backoff,
                     ..RelayWaitPolicy::STANDARD
                 };
                 let scan_wait = if progress == OutboxScanProgress::Continue {
@@ -495,14 +500,14 @@ async fn overlapping_scan_and_settlement_backoffs_keep_the_later_cutoff() {
                     run.timer.advance(step);
                     store.reply.add_permits(1);
                 }
-                let scan_cutoff = if error_first {
-                    step + scan_wait
+                let (scan_at, error_at) = if error_first {
+                    (step, Duration::ZERO)
                 } else {
-                    scan_wait
+                    (Duration::ZERO, step)
                 };
-                run.timer.wait_registered(scan_cutoff).await;
-                run.timer
-                    .advance(scan_cutoff - step - Duration::from_nanos(1));
+                let resume = (scan_at + scan_wait).max(error_at + error_backoff);
+                run.timer.wait_registered(resume).await;
+                run.timer.advance(resume - step - Duration::from_nanos(1));
                 tokio::task::yield_now().await;
                 assert_eq!(store.calls.load(Ordering::SeqCst), 2);
                 run.timer.advance(Duration::from_nanos(1));

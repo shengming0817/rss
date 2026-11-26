@@ -78,7 +78,11 @@ lease estimate can advance the probe by one tier, even when the lease keeps rene
 The final probe runs at most once. Its I/O reserve is one quarter of the original operation
 budget, bounded by the final window cap. Its early jitter uses one quarter of the remaining
 probe window with that same cap. A reachable lease estimate sets the earliest final wake.
-Late wakes and permit transfers respect the original cutoff. A known busy timeout requeues once.
+An ordinary retry must start by the planned final wake. The already scheduled final probe
+can use up to half its I/O reserve for timer rounding, dispatch and permit transfer. For
+example, a 250 ms reserve still leaves at least 125 ms for I/O at the latest admitted start.
+Later wakes skip the probe, and all provider calls retain the original operation cutoff.
+A known busy timeout requeues once.
 A durable claim error abandons the delivery. `ExecutionBudget` reserves a separate interval
 for broker settlement and cleanup.
 The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.

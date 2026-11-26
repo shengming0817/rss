@@ -328,8 +328,11 @@ where
     let probe_reserve = policy.final_window(budget.total() - budget.settlement_reserve());
     // Both cutoffs were minted from the same original operation budget.
     let last_probe = Deadline::at(cutoff.instant() - probe_reserve);
+    // Only the selected final probe may use part of its I/O window for dispatch lag.
+    // The other half remains available for provider I/O even at the admission edge.
+    let final_start_limit = Deadline::at(last_probe.instant() + probe_reserve / 2);
     let mut capacity_wait = None;
-    let mut backoff = None;
+    let mut backoff: Option<ClaimBackoff> = None;
     let mut known_busy = None;
     let result = loop {
         let attempt = claim_once(
@@ -337,7 +340,13 @@ where
             execution,
             binding,
             cutoff,
-            backoff.as_ref().map(|_| last_probe),
+            backoff.as_ref().map(|schedule| {
+                if schedule.final_scheduled {
+                    final_start_limit
+                } else {
+                    last_probe
+                }
+            }),
             &mut capacity_wait,
             &mut known_busy,
         )
@@ -394,10 +403,15 @@ where
 async fn wait_for_probe(timer: &impl ExecutionTimer, wake: Deadline) {
     let sleep = timer.sleep_until(wake);
     tokio::pin!(sleep);
-    if futures::poll!(&mut sleep).is_ready() {
+    let mut parked = false;
+    std::future::poll_fn(|cx| {
+        let result = sleep.as_mut().poll(cx);
+        parked |= result.is_pending();
+        result
+    })
+    .await;
+    if !parked {
         tokio::task::yield_now().await;
-    } else {
-        sleep.await;
     }
 }
 
