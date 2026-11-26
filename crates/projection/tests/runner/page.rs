@@ -90,6 +90,30 @@ async fn both_runners_resume_the_exact_prefix() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn live_journal_with_no_events_is_caught_up_from_the_beginning() -> anyhow::Result<()> {
+    let source = Journal(Vec::new());
+    let clock = Clock(AtomicU64::new(0));
+    let cancel = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+    for batched in [false, true] {
+        let exec = Memory::new(scope()?, ReplayBound::Live);
+        let report = invoke(&source, &exec, &c, 1, batched).await?;
+        assert_eq!(
+            report,
+            Report {
+                position: None,
+                applied: 0,
+                filtered: 0,
+                duplicates: 0,
+                stop: Stop::CaughtUp
+            }
+        );
+        assert_eq!(exec.applied.load(Ordering::SeqCst), 0);
+    }
+    Ok(())
+}
+
 struct Nonconforming(ReadPage<Event>);
 impl Source for Nonconforming {
     type Item = Event;

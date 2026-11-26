@@ -201,23 +201,8 @@ impl<C: Clock> Source for PgSource<C> {
         limit: PageBudget,
         control: &Control<'_, T>,
     ) -> Result<ReadPage<Event>, rss_projection::Error> {
-        self.read_page(
-            scope,
-            after,
-            limit,
-            control,
-            None,
-            |source, pos, record, fp| {
-                reference_event(
-                    source,
-                    pos,
-                    record.record().scope(),
-                    record.record().batch().id(),
-                    fp,
-                )
-            },
-        )
-        .await
+        self.read_page(scope, after, limit, control, None, |event, _, _| event)
+            .await
     }
 }
 impl<C: Clock, M: Send + Sync> PgSource<C, M> {
@@ -228,7 +213,7 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
         limit: PageBudget,
         control: &Control<'_, T>,
         bytes: Option<i64>,
-        item: fn(&SourceScope, Position, ApplicableRecord, [u8; 32]) -> Result<I, Error>,
+        item: fn(Event, ApplicableRecord, [u8; 32]) -> I,
     ) -> Result<ReadPage<I>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
@@ -255,18 +240,20 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                     if after.map_or(0, |p| p.get() as i64) < floor {
                         return Err(expired(position(floor)?));
                     }
-                    if row
+                    let Some(raw_position) = row
                         .try_get::<Option<i64>, _>("log_position")
                         .map_err(sql_error)?
-                        .is_none()
-                    {
+                    else {
                         continue;
-                    }
-                    let (pos, record, fp) = restore_row(row)?;
-                    let event =
-                        item(&scope, pos, record, fp).map_err(|e| restore_error(Some(pos), e))?;
+                    };
+                    let pos = position(raw_position).map_err(|e| restore_error(None, e))?;
+                    let metadata =
+                        ReferenceMetadata::read(&row).map_err(|e| restore_error(Some(pos), e))?;
+                    let event = metadata
+                        .event(&scope, pos)
+                        .map_err(|e| restore_error(Some(pos), e))?;
                     budget()?;
-                    let size = event.as_ref().payload().len();
+                    let size = event.payload().len();
                     if size > remaining {
                         if events.is_empty() {
                             return Ok(ReadPage::Blocked {
@@ -277,7 +264,11 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                         break;
                     }
                     remaining -= size;
-                    events.push(event);
+                    let (record, fingerprint) = metadata
+                        .restore(row)
+                        .map_err(|e| restore_error(Some(pos), e))?;
+                    budget()?;
+                    events.push(item(event, record, fingerprint));
                     tokio::task::yield_now().await;
                 }
                 Ok(ReadPage::Events(events))
@@ -310,27 +301,40 @@ fn position(value: i64) -> Result<Position, Error> {
     }
     Position::new(value as u64).map_err(projection_error)
 }
-fn restore_row(row: PgRow) -> Result<(Position, ApplicableRecord, [u8; 32]), BridgeError> {
-    let pos = row
-        .try_get("log_position")
-        .map_err(sql_error)
-        .and_then(position)
-        .map_err(|e| restore_error(None, e))?;
-    let (record, fp) = (|| {
+// The immutable reference can be sized from receipt metadata. Admitted items must
+// still verify the canonical report and its fingerprint in the same snapshot.
+struct ReferenceMetadata {
+    scope: Scope,
+    batch_id: Id,
+    fingerprint: [u8; 32],
+}
+impl ReferenceMetadata {
+    fn read(row: &PgRow) -> Result<Self, Error> {
         let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)
             .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
-        let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)
+        let batch_id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)
             .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
-        let (record, fp) = restore(row, &scope, &id)?;
-        Ok::<_, Error>((
+        let fingerprint: &[u8] = row.try_get("fingerprint").map_err(sql_error)?;
+        Ok(Self {
+            scope,
+            batch_id,
+            fingerprint: fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?,
+        })
+    }
+
+    fn event(&self, source: &SourceScope, pos: Position) -> Result<Event, Error> {
+        reference_event(source, pos, &self.scope, &self.batch_id, self.fingerprint)
+    }
+
+    fn restore(&self, row: PgRow) -> Result<(ApplicableRecord, [u8; 32]), Error> {
+        let (record, verified) = restore(row, &self.scope, &self.batch_id)?;
+        Ok((
             record
                 .into_applicable()
                 .map_err(|e| Error::provider(ErrorKind::Invariant, e))?,
-            fp,
+            verified,
         ))
-    })()
-    .map_err(|e| restore_error(Some(pos), e))?;
-    Ok((pos, record, fp))
+    }
 }
 fn expired(pos: Position) -> BridgeError {
     BridgeError(rss_projection::Error::provider(
@@ -344,31 +348,23 @@ fn expired(pos: Position) -> BridgeError {
 fn resolve_row(row: Option<PgRow>, event: &Event) -> Result<ApplicableRecord, BridgeError> {
     let row =
         row.ok_or_else(|| restore_error(Some(event.position()), ErrorKind::Invariant.into()))?;
-    if row.try_get("expired").map_err(sql_error)? {
-        let pos = event.position();
-        let identity = (|| -> Result<Event, Error> {
-            let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)?;
-            let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)?;
-            let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(sql_error)?;
-            let fingerprint = fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?;
-            reference_event(event.source(), pos, &scope, &id, fingerprint)
-        })()
+    let pos = row
+        .try_get("log_position")
+        .map_err(sql_error)
+        .and_then(position)
+        .map_err(|e| restore_error(Some(event.position()), e))?;
+    let metadata = ReferenceMetadata::read(&row).map_err(|e| restore_error(Some(pos), e))?;
+    let reference = metadata
+        .event(event.source(), pos)
         .map_err(|e| restore_error(Some(pos), e))?;
-        validate_reference(event, &identity)?;
+    if row.try_get("expired").map_err(sql_error)? {
+        validate_reference(event, &reference)?;
         return Err(expired(pos));
     }
-    let (pos, record, fp) = restore_row(row)?;
-    validate_reference(
-        event,
-        &reference_event(
-            event.source(),
-            pos,
-            record.record().scope(),
-            record.record().batch().id(),
-            fp,
-        )
-        .map_err(|e| restore_error(Some(pos), e))?,
-    )?;
+    let (record, _) = metadata
+        .restore(row)
+        .map_err(|e| restore_error(Some(pos), e))?;
+    validate_reference(event, &reference)?;
     Ok(record)
 }
 fn validate_reference(event: &Event, original: &Event) -> Result<(), BridgeError> {

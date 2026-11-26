@@ -27,7 +27,8 @@ pub struct VerifiedObservation {
 
 impl<C: Clock> PgSource<C> {
     /// Select typed same-database handoff. Allow at least one maximum-size (4 MiB) report.
-    /// The count limit and this byte limit jointly select the transaction's ordered prefix.
+    /// `page_bytes` limits canonical report body bytes. Each read also applies the caller's
+    /// [`PageBudget`] to row count and encoded reference payload bytes in the same ordered prefix.
     pub fn into_local(self, page_bytes: u32) -> Result<PgSource<C, LocalPages>, Error> {
         if page_bytes < rss_observation::Batch::MAX_ENCODED_BYTES {
             return Err(ErrorKind::InvalidInput.into());
@@ -64,18 +65,11 @@ impl<C: Clock> Source for PgSource<C, LocalPages> {
             limit,
             control,
             Some(i64::from(self.page_mode.bytes)),
-            |source, pos, record, fingerprint| {
-                let reference = reference_event(
-                    source,
-                    pos,
-                    record.record().scope(),
-                    record.record().batch().id(),
-                    fingerprint,
-                )?;
-                Ok(reference.with_data(VerifiedObservation {
+            |event, record, fingerprint| {
+                event.with_data(VerifiedObservation {
                     fingerprint,
                     record: Arc::new(record),
-                }))
+                })
             },
         )
         .await

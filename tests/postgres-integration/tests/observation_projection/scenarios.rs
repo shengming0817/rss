@@ -862,9 +862,60 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.admin)
     .await?;
     assert_eq!(changed.rows_affected(), 1);
+    let reference = rss_observation_postgres::PgSource::new(
+        input.store.clone(),
+        rss_observation::JournalReadGrant::verify(&Trusted, input.source.scope().tenant())?,
+        input.source.scope().clone(),
+    )?;
+    assert_prefix_before_corrupt_body(
+        &reference,
+        input.source.scope(),
+        events[0].as_ref(),
+        bad.as_ref(),
+        &control,
+    )
+    .await?;
+    assert_prefix_before_corrupt_body(
+        input.source.as_ref(),
+        input.source.scope(),
+        events[0].as_ref(),
+        bad.as_ref(),
+        &control,
+    )
+    .await?;
     assert_source_failures(f, &input, &execution, bad, &control).await?;
     settlement::verify(f, &input, &execution, &projection, &events).await
 }
+async fn assert_prefix_before_corrupt_body(
+    source: &impl Source,
+    scope: &rss_projection::SourceScope,
+    first: &Event,
+    damaged: &Event,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    use rss_projection::{PageBudget, ReadPage};
+    let budget = PageBudget::new(2, first.payload().len() as u32)?;
+    let prefix = expected_events(source.read(scope, None, budget, control).await?)?;
+    assert_eq!(prefix.len(), 1);
+    assert_eq!(prefix[0].as_ref(), first);
+    let cursor = Some(first.position());
+    let bytes = damaged.payload().len() as u32;
+    assert!(
+        matches!(source.read(scope, cursor, PageBudget::new(2, bytes - 1)?, control).await?,
+        ReadPage::Blocked { position, required_bytes } if position == damaged.position() && required_bytes == bytes)
+    );
+    let error = source
+        .read(scope, cursor, PageBudget::new(2, bytes)?, control)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("admitted damaged report"))?;
+    assert_restore_error(
+        &error,
+        rss_projection::ErrorKind::StorageContract,
+        damaged.position(),
+    )
+}
+
 async fn assert_source_failures(
     f: &Fixture,
     input: &Inputs,
