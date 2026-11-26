@@ -57,40 +57,18 @@ pub(super) async fn verify(
             event(&s, 2, "first", b"first")?,
             event(&s, 3, "second", b"pause")?,
         ];
-        let inspect = async {
-            let _release_on_error = rec.resume.clone().drop_guard();
-            tokio::time::timeout(Duration::from_secs(5), rec.paused.cancelled()).await?;
-            assert_eq!(snapshot(owner, &s).await?, (Some(0), 1, vec![], 0));
-            let competing = store.takeover(&s, &DEFINITION, control);
-            let release = async {
-                tokio::time::timeout(Duration::from_secs(5),async {
-                    loop {
-                        let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='projection_runtime' AND query LIKE '%rss_projection.takeover(%' AND cardinality(pg_blocking_pids(pid))>0)").fetch_one(owner).await?;
-                        if blocked {return Ok::<_,sqlx::Error>(());}
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                }).await??;
-                rec.resume.cancel();
-                Ok::<_, anyhow::Error>(())
-            };
-            let (claim, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-                tokio::try_join!(async { Ok::<_, anyhow::Error>(competing.await?) }, release)
-            })
-            .await??;
-            Ok::<_, anyhow::Error>(claim)
-        };
         let (result, new_claim) = tokio::join!(
-            exec.execute_batch(Some(seed.position()), events, control),
-            inspect
+            Box::pin(exec.execute_batch(Some(seed.position()), events, control)),
+            Box::pin(wait_for_takeover(store, owner, control, &s, &rec))
         );
         let fresh = store.projection(new_claim?, Writer(rec.clone()))?;
         assert_eq!(rec.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
-            exec.checkpoint(control).await.unwrap_err().kind(),
-            ErrorKind::Fenced
+            exec.checkpoint(control).await.map_err(|e| e.kind()),
+            Err(ErrorKind::Fenced)
         );
         if reject {
-            assert_eq!(result.unwrap_err().kind(), ErrorKind::Rejected);
+            assert_eq!(result.map_err(|e| e.kind()), Err(ErrorKind::Rejected));
             assert_eq!(snapshot(owner, &s).await?, (Some(0), 1, vec![], 0));
         } else {
             assert_eq!(
@@ -101,30 +79,69 @@ pub(super) async fn verify(
                     ApplyOutcome::Applied
                 ]
             );
-            let next = Some(Position::new(3)?);
-            let changed = vec![
-                event(&s, 4, "unseen", b"new")?,
-                event(&s, 5, "first", b"changed")?,
-            ];
-            assert_eq!(
-                fresh
-                    .execute_batch(next, changed, control)
-                    .await
-                    .unwrap_err()
-                    .kind(),
-                ErrorKind::Conflict
-            );
-            assert_eq!(rec.calls.load(Ordering::SeqCst), 2);
-            let suffix = vec![
-                event(&s, 4, "filtered", b"filter")?,
-                event(&s, 5, "first", b"first")?,
-            ];
-            assert_eq!(
-                fresh.execute_batch(next, suffix, control).await?,
-                [ApplyOutcome::Filtered, ApplyOutcome::Duplicate]
-            );
-            assert_eq!(snapshot(owner, &s).await?, (Some(5), 4, vec![2, 3], 1));
+            verify_suffix(&fresh, &s, &rec, owner, control).await?;
         }
     }
     Ok(())
+}
+
+async fn verify_suffix(
+    fresh: &PgProjection<Writer>,
+    s: &ProjectionScope,
+    rec: &Recorder,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let next = Some(Position::new(3)?);
+    let changed = vec![
+        event(s, 4, "unseen", b"new")?,
+        event(s, 5, "first", b"changed")?,
+    ];
+    assert_eq!(
+        fresh
+            .execute_batch(next, changed, control)
+            .await
+            .map_err(|e| e.kind()),
+        Err(ErrorKind::Conflict)
+    );
+    assert_eq!(rec.calls.load(Ordering::SeqCst), 2);
+    let suffix = vec![
+        event(s, 4, "filtered", b"filter")?,
+        event(s, 5, "first", b"first")?,
+    ];
+    assert_eq!(
+        fresh.execute_batch(next, suffix, control).await?,
+        [ApplyOutcome::Filtered, ApplyOutcome::Duplicate]
+    );
+    assert_eq!(snapshot(owner, s).await?, (Some(5), 4, vec![2, 3], 1));
+    Ok(())
+}
+
+async fn wait_for_takeover(
+    store: &PgStore,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+    s: &ProjectionScope,
+    rec: &Recorder,
+) -> anyhow::Result<PgClaim> {
+    let _release_on_error = rec.resume.clone().drop_guard();
+    tokio::time::timeout(Duration::from_secs(5), rec.paused.cancelled()).await?;
+    assert_eq!(snapshot(owner, s).await?, (Some(0), 1, vec![], 0));
+    let mut taking = Box::pin(store.takeover(s, &DEFINITION, control));
+    tokio::select! {
+        claim = &mut taking => { claim?; anyhow::bail!("takeover completed while the old effect was paused"); }
+        waiting = tokio::time::timeout(Duration::from_secs(5), wait_for_lock(owner)) => { waiting??; }
+    }
+    rec.resume.cancel();
+    Ok(tokio::time::timeout(Duration::from_secs(5), taking).await??)
+}
+
+async fn wait_for_lock(owner: &PgPool) -> anyhow::Result<()> {
+    loop {
+        let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usename='projection_runtime' AND query LIKE '%rss_projection.takeover(%' AND cardinality(pg_blocking_pids(pid))>0)").fetch_one(owner).await?;
+        if blocked {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

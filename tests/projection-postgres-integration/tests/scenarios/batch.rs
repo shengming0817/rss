@@ -88,7 +88,7 @@ pub(crate) async fn verify(
         space::measure(fixture, owner, c, &shape.to_string_lossy()).await?;
     }
     standalone::verify(store, owner, c).await?;
-    visibility::verify(store, owner, c).await?;
+    Box::pin(visibility::verify(store, owner, c)).await?;
     atomic(store, owner, c).await?;
     interrupted_page(store, owner, c).await?;
     lost_ack(store, owner, fixture, c).await?;
@@ -145,9 +145,8 @@ async fn retry(
     assert_eq!(
         exec.execute_batch(None, reversed, c)
             .await
-            .unwrap_err()
-            .kind(),
-        ErrorKind::OutOfOrder
+            .map_err(|e| e.kind()),
+        Err(ErrorKind::OutOfOrder)
     );
     assert_eq!(recorder.calls.load(Ordering::SeqCst), before);
     assert_eq!(snapshot(owner, s).await?, (None, 0, vec![], 0));

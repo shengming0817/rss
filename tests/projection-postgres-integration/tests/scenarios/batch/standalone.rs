@@ -93,7 +93,7 @@ pub(super) async fn verify(
             .await?;
         let error=sqlx::query("SELECT rss_projection.finish_batch(tenant_id,source_id,projection_id,generation,$6,$7::uuid,$2,$3,$4,$5,definition_identity) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='standalone'")
             .bind(TENANT).bind(i64::from(expected)).bind(positions.iter().map(|&p|i64::from(p)).collect::<Vec<_>>())
-            .bind(ids).bind(vec![[1_u8;32],[2_u8;32]]).bind(worker_epoch).bind(worker_token).execute(&mut *tx).await.unwrap_err();
+            .bind(ids).bind(vec![[1_u8;32],[2_u8;32]]).bind(worker_epoch).bind(worker_token).execute(&mut *tx).await.err().ok_or_else(||anyhow::anyhow!("direct settlement unexpectedly succeeded for {code}"))?;
         assert_eq!(
             error.as_database_error().and_then(|e| e.code()).as_deref(),
             Some(code)
