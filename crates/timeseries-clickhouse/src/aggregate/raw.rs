@@ -4,7 +4,6 @@ pub(super) struct Run<'a> {
     spec: &'a SummarySpec,
     fences: &'a [Fence],
     published: i64,
-    deadline: Deadline,
     seeded: bool,
     prior: Option<Sample>,
     rows: VecDeque<ReadRow>,
@@ -17,14 +16,12 @@ impl<'a> Run<'a> {
         spec: &'a SummarySpec,
         fences: &'a [Fence],
         published: i64,
-        deadline: Deadline,
         start: Timestamp,
     ) -> Self {
         Self {
             spec,
             fences,
             published,
-            deadline,
             seeded: false,
             prior: None,
             rows: VecDeque::new(),
@@ -63,19 +60,24 @@ impl<'a> Run<'a> {
         store: &Operation<'_, C>,
         window: Interval,
         bounds: Lookahead,
+        budget: &mut ReadBudget,
     ) -> Result<(), Error> {
         let width = self.spec.resolution_micros().get();
-        let mut through = bounds.through;
         let (mut rows, mut end) = loop {
+            let (through, optional_cutoff) = bounds.allowed(budget, store.clock);
             let tail = through.micros().abs_diff(window.end().micros());
             let count = (1 + tail.div_ceil(width)).min(self.max_buckets);
             let span = i64::try_from((count - 1).saturating_mul(width)).unwrap_or(i64::MAX);
             let end = Timestamp::new(window.end().micros().saturating_add(span))?.min(through);
             let speculative = end > bounds.required;
-            let cutoff = batch_deadline(store, self.deadline, speculative)?;
+            let cutoff = if speculative {
+                optional_cutoff
+            } else {
+                budget.deadline
+            };
             let read = self.fetch(store, window.start(), end, cutoff);
             match store.bounded(cutoff, read).await {
-                Err(Error::Deadline) if speculative => through = bounds.required,
+                Err(Error::Deadline) if speculative => budget.prefetch_until = None,
                 Err(e) if count > 1 && !matches!(e, Error::Unauthorized | Error::Deadline) => {
                     self.max_buckets = count.div_ceil(2);
                 }
@@ -105,6 +107,7 @@ impl<'a> Run<'a> {
         store: &Operation<'_, C>,
         window: Interval,
         bounds: Lookahead,
+        budget: &mut ReadBudget,
         dependency: &mut i64,
     ) -> Result<Summary, Error> {
         if self.fences.iter().any(|f| {
@@ -122,7 +125,7 @@ impl<'a> Run<'a> {
                     window.start(),
                     self.published,
                     self.fences,
-                    self.deadline,
+                    budget.deadline,
                 )
                 .await?
                 .map(|r| r.sample);
@@ -133,7 +136,7 @@ impl<'a> Run<'a> {
             seeded_builder(self.spec, window, self.fences, self.prior.as_ref(), limit)?;
         *dependency = start;
         if self.complete_until < window.end() {
-            self.refill(store, window, bounds).await?;
+            self.refill(store, window, bounds, budget).await?;
         }
         while self
             .rows

@@ -135,19 +135,23 @@ impl<'a> Reader<'a> {
         store: &Operation<'_, C>,
         scope: &Scope,
         bounds: Lookahead,
-        deadline: Deadline,
+        budget: &mut ReadBudget,
     ) -> Result<(), Error> {
-        let mut through = bounds.through;
         loop {
+            let (through, optional_cutoff) = bounds.allowed(budget, store.clock);
             let (count, ids) = self.group(store.limits, through);
             if ids.is_empty() {
                 return Err(Error::Invariant);
             }
             let speculative = self.remaining[count - 1].hi > bounds.required.micros();
-            let cutoff = batch_deadline(store, deadline, speculative)?;
+            let cutoff = if speculative {
+                optional_cutoff
+            } else {
+                budget.deadline
+            };
             let read = store.summary_objects(scope, &ids, cutoff);
             match store.bounded(cutoff, read).await {
-                Err(Error::Deadline) if speculative => through = bounds.required,
+                Err(Error::Deadline) if speculative => budget.prefetch_until = None,
                 Err(Error::BudgetExceeded | Error::Unavailable) if ids.len() > 1 => {
                     self.max_ids = ids.len().div_ceil(2);
                 }
@@ -165,11 +169,11 @@ impl<'a> Reader<'a> {
         store: &Operation<'_, C>,
         scope: &Scope,
         bounds: Lookahead,
-        deadline: Deadline,
+        budget: &mut ReadBudget,
     ) -> Result<Summary, Error> {
         let row = *self.remaining.first().ok_or(Error::Invariant)?;
         if self.group_left == 0 {
-            self.fill(store, scope, bounds, deadline).await?;
+            self.fill(store, scope, bounds, budget).await?;
         }
         self.group_left -= 1;
         self.remaining = &self.remaining[1..];
@@ -188,13 +192,13 @@ impl<'a> Reader<'a> {
         path: &[&SummaryRef],
         bounds: Lookahead,
         attempted: &mut Vec<SummaryRef>,
-        deadline: Deadline,
+        budget: &mut ReadBudget,
     ) -> Result<Summary, Error> {
         let mut size = 0u64;
         let mut value: Option<Summary> = None;
         for &r in path {
             attempted.push(r.clone());
-            let summary = self.next(store, scope, bounds, deadline).await?;
+            let summary = self.next(store, scope, bounds, budget).await?;
             size = size
                 .checked_add(r.payload_bytes)
                 .ok_or(Error::BudgetExceeded)?;

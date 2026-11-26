@@ -4,7 +4,7 @@ mod raw;
 use crate::{
     Operation,
     control::{self, Fence},
-    page::{Dependencies, Recheck, Request, View},
+    page::{Dependencies, ReadBudget, Recheck, Request, View},
     projection::literal,
     read::{ReadRow, selection, visible},
     transaction::{bytes, decode, sql_error},
@@ -333,6 +333,15 @@ struct Lookahead {
     through: Timestamp,
 }
 impl Lookahead {
+    fn allowed(self, budget: &ReadBudget, clock: &impl Clock) -> (Timestamp, Deadline) {
+        match budget
+            .prefetch_until
+            .filter(|cutoff| !cutoff.is_expired(clock.now()))
+        {
+            Some(cutoff) => (self.through, cutoff),
+            None => (self.required, budget.deadline),
+        }
+    }
     fn capped(self, end: Timestamp) -> Self {
         Self {
             required: self.required.min(end),
@@ -371,20 +380,6 @@ fn lookahead(
         required: bound(required)?,
         through: bound(required.max(estimated))?,
     })
-}
-// Reserve time for a mandatory-only read and the PG evidence check if speculative
-// work stalls. A batch containing only required inputs uses the original deadline.
-fn batch_deadline<C: Clock>(
-    store: &Operation<'_, C>,
-    deadline: Deadline,
-    speculative: bool,
-) -> Result<Deadline, Error> {
-    if !speculative {
-        return Ok(deadline);
-    }
-    let now = store.clock.now();
-    let left = deadline.remaining(now).ok_or(Error::Deadline)?;
-    Ok(deadline.shortened_to(now + left / 2))
 }
 fn cost(bucket: &AggregateBucket) -> usize {
     1 + match &bucket.value {
@@ -528,8 +523,9 @@ impl Request for AggregateQuery {
         store: &Operation<'_, C>,
         view: View<Position>,
         refs: &mut References,
-        deadline: Deadline,
+        budget: &mut ReadBudget,
     ) -> Result<(AggregatePage, Option<Position>), Error> {
+        let deadline = budget.deadline;
         let q = self;
         let mut at = view
             .position
@@ -585,7 +581,7 @@ impl Request for AggregateQuery {
                         &path,
                         bounds,
                         &mut refs.attempted,
-                        deadline,
+                        budget,
                     )
                     .await?
             } else {
@@ -593,10 +589,11 @@ impl Request for AggregateQuery {
                 let raw_bounds = hits
                     .front()
                     .map_or(bounds, |(w, _)| bounds.capped(w.start()));
-                let run = raw.get_or_insert_with(|| {
-                    raw::Run::new(q.spec(), &fences, published, deadline, at)
-                });
-                let result = run.summary(store, window, raw_bounds, &mut start).await;
+                let run =
+                    raw.get_or_insert_with(|| raw::Run::new(q.spec(), &fences, published, at));
+                let result = run
+                    .summary(store, window, raw_bounds, budget, &mut start)
+                    .await;
                 if at == q.query().window().start() {
                     refs.dependency_start = start;
                 }

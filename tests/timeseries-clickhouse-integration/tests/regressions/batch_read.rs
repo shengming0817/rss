@@ -271,32 +271,35 @@ async fn sparse_state_reads(
     )?;
     let all = aggregate(&spec, window(0, end)?, 96, AggregateOp::Timeline)?;
     let expected = oracle(all.request(), samples)?;
-    for cached in [false, true] {
-        let needle = if cached {
-            cache(f, &spec, 0, end).await?;
-            sqlx::query_scalar::<_, String>(
-                "SELECT object_id::text FROM rss_ts_ch.summaries WHERE lo=$1",
-            )
-            .bind(end - MINUTE)
-            .fetch_one(&f.admin)
-            .await?
-        } else {
-            format!("observed_at<{end}")
-        };
+    // Keep all over-wide SELECTs slow for each entire call. The mixed page starts
+    // in raw and ends in cache; neither a later bucket nor a new path can renew
+    // a speculative allowance that timed out earlier in the page.
+    for (label, fill) in [
+        ("raw", None),
+        ("mixed", Some((6 * MINUTE, end))),
+        ("cached", Some((0, 6 * MINUTE))),
+    ] {
+        if let Some((lo, hi)) = fill {
+            cache(f, &spec, lo, hi).await?;
+        }
         let before = proxy.requests().await.len();
         let page = store.aggregate(&all, None, deadline()?).await?;
         let requests = proxy.requests().await.len() - before;
-        eprintln!("ch-page sparse minute cached={cached} requests={requests}");
+        eprintln!("ch-page sparse minute {label} requests={requests}");
         assert!(
-            requests <= 5,
+            requests <= 6,
             "twelve sparse minute buckets should batch: {requests}"
         );
         assert_eq!(serde_json::to_value(page.buckets)?, expected);
-        proxy.hold_matching(needle).await;
+        proxy.delay_wide_reads(MINUTE as u64);
         let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
         let recovered = store.aggregate(&all, None, cutoff).await;
-        proxy.release();
-        assert!(!proxy.matching_gate_unused(), "speculative read was held");
+        proxy.arm(0);
+        assert_eq!(
+            proxy.slow_reads(),
+            1,
+            "{label}: only one timed-out optional read per page"
+        );
         let recovered = recovered?;
         assert!(recovered.next.is_none());
         assert_eq!(serde_json::to_value(recovered.buckets)?, expected);

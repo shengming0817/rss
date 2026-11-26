@@ -25,6 +25,8 @@ struct State {
     wire_bytes: Arc<AtomicU64>,
     page_reads: Mutex<Vec<(String, bool)>>,
     hold_sql: Mutex<Option<String>>,
+    bucket_width: AtomicU64,
+    slow_reads: AtomicUsize,
     mode: AtomicU8,
     dropped: AtomicUsize,
     saved: Mutex<Option<Captured>>,
@@ -36,6 +38,21 @@ struct State {
     requests: Mutex<Vec<(usize, String)>>,
     raw_threads: Mutex<Vec<(u32, u32)>>,
 }
+fn wide_read(sql: &str, width: u64) -> bool {
+    if sql.contains("FROM rss_ts_ch.summaries FINAL") {
+        return sql.contains("','");
+    }
+    let bound = |key| -> Option<u64> {
+        let tail = sql.split_once(key)?.1;
+        tail.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    bound("observed_at>=")
+        .zip(bound("observed_at<"))
+        .is_some_and(|(lo, hi)| hi.saturating_sub(lo) > width)
+}
 impl State {
     async fn hold(&self) -> std::io::Result<()> {
         self.entered.add_permits(1);
@@ -44,6 +61,14 @@ impl State {
             .await
             .map_err(|_| std::io::Error::other("gate closed"))?
             .forget();
+        Ok(())
+    }
+    async fn delay_before_forward(&self, mode: u8) -> std::io::Result<()> {
+        match mode {
+            6 | 7 => self.hold().await?,
+            8 => tokio::time::sleep(Duration::from_secs(3)).await,
+            _ => {} // reason: other modes act on writes or after the real response.
+        }
         Ok(())
     }
     async fn gated_response(
@@ -68,6 +93,13 @@ impl State {
         sql: &str,
         body_sql: &str,
     ) -> u8 {
+        if self.mode.load(Ordering::SeqCst) == 8 {
+            let width = self.bucket_width.load(Ordering::SeqCst);
+            if wide_read(sql, width) || wide_read(body_sql, width) {
+                self.slow_reads.fetch_add(1, Ordering::SeqCst);
+                return 8;
+            }
+        }
         let hold = self
             .hold_sql
             .lock()
@@ -148,6 +180,8 @@ impl Proxy {
             wire_bytes: Arc::default(),
             page_reads: Mutex::default(),
             hold_sql: Mutex::default(),
+            bucket_width: AtomicU64::default(),
+            slow_reads: AtomicUsize::default(),
             mode: AtomicU8::new(0),
             dropped: AtomicUsize::new(0),
             saved: Mutex::new(None),
@@ -187,6 +221,14 @@ impl Proxy {
     }
     pub async fn take_page_reads(&self) -> Vec<(String, bool)> {
         std::mem::take(&mut *self.state.page_reads.lock().await)
+    }
+    pub fn delay_wide_reads(&self, width: u64) {
+        self.state.slow_reads.store(0, Ordering::SeqCst);
+        self.state.bucket_width.store(width, Ordering::SeqCst);
+        self.arm(8);
+    }
+    pub fn slow_reads(&self) -> usize {
+        self.state.slow_reads.load(Ordering::SeqCst)
     }
     pub async fn hold_matching(&self, sql: String) {
         *self.state.hold_sql.lock().await = Some(sql);
@@ -329,9 +371,7 @@ async fn serve(
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("withheld before registration"));
     }
-    if mode >= 6 {
-        state.hold().await?;
-    }
+    state.delay_before_forward(mode).await?;
     let response = forward(&state, captured)
         .await
         .map_err(|_| std::io::Error::other("upstream transport"))?;
