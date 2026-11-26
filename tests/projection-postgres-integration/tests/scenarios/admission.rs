@@ -264,6 +264,22 @@ async fn required_function_permissions(
             "ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) SECURITY INVOKER",
             "ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) SECURITY DEFINER",
         ),
+        (
+            "ALTER FUNCTION rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) STRICT",
+            "ALTER FUNCTION rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) CALLED ON NULL INPUT",
+        ),
+        (
+            "ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) STRICT",
+            "ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) CALLED ON NULL INPUT",
+        ),
+        (
+            "ALTER FUNCTION rss_projection.process_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea,boolean) STRICT",
+            "ALTER FUNCTION rss_projection.process_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea,boolean) CALLED ON NULL INPUT",
+        ),
+        (
+            "CREATE ROLE batch_wrapper_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; GRANT USAGE ON SCHEMA rss_projection TO batch_wrapper_owner; GRANT EXECUTE ON FUNCTION rss_projection.process_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea,boolean) TO batch_wrapper_owner; ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) OWNER TO batch_wrapper_owner",
+            "ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) OWNER TO projection_owner; REVOKE EXECUTE ON FUNCTION rss_projection.process_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea,boolean) FROM batch_wrapper_owner; REVOKE USAGE ON SCHEMA rss_projection FROM batch_wrapper_owner; DROP ROLE batch_wrapper_owner",
+        ),
     ] {
         sqlx::raw_sql(revoke).execute(owner).await?;
         let adoption = PgStore::new(pool.clone(), control).await;

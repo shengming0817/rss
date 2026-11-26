@@ -81,7 +81,7 @@ pub(super) async fn measure(
                 .ssl_mode(PgSslMode::Disable),
         )
         .await?;
-    let store = PgStore::new(pool, control).await?;
+    let store = PgStore::new(pool.clone(), control).await?;
     let s = scope("space-sample", TENANT)?;
     store
         .initialize(
@@ -103,13 +103,13 @@ pub(super) async fn measure(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let temp = || {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT temp_bytes FROM pg_stat_database WHERE datname=current_database()",
-        )
-        .fetch_one(owner)
-    };
-    let temp_before = temp().await?;
+    let before_spill = flushed_temp_bytes(&pool, owner).await?;
+    sqlx::raw_sql("BEGIN; SET LOCAL work_mem='64kB'; SELECT sum(i) FROM (SELECT i FROM generate_series(1,32768) i ORDER BY i DESC) ordered; COMMIT").execute(&pool).await?;
+    let temp_before = flushed_temp_bytes(&pool, owner).await?;
+    anyhow::ensure!(
+        temp_before > before_spill,
+        "observer must see the calibration spill"
+    );
     let initial = resident_kib()?;
     let stop = CancellationToken::new();
     let done = stop.clone().drop_guard();
@@ -129,13 +129,27 @@ pub(super) async fn measure(
         .join()
         .map_err(|_| anyhow::anyhow!("RSS sampler failed"))??;
     assert_eq!(result?, vec![ApplyOutcome::Filtered; n as usize]);
+    let temp_after = flushed_temp_bytes(&pool, owner).await?;
     assert_eq!(store.close(control).await, CloseOutcome::Drained);
     let bind = bytes.load(Ordering::Relaxed);
     anyhow::ensure!(bind > 0);
     println!(
         "projection_space events={n} payload_bytes={size} initial_kib={initial} peak_delta_kib={} management_bind_bytes={bind} pg_temp_bytes={}",
         peak - initial,
-        temp().await? - temp_before
+        temp_after - temp_before
     );
     Ok(())
+}
+
+async fn flushed_temp_bytes(runtime: &PgPool, observer: &PgPool) -> anyhow::Result<i64> {
+    // The measured pool has exactly one connection. Publish its transaction's
+    // pending database counters before opening the observer's statement snapshot.
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(runtime)
+        .await?;
+    Ok(sqlx::query_scalar(
+        "SELECT temp_bytes FROM pg_stat_database WHERE datname=current_database()",
+    )
+    .fetch_one(observer)
+    .await?)
 }

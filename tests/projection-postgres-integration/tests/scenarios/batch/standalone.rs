@@ -7,6 +7,7 @@ pub(super) async fn verify(
     owner: &PgPool,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
+    skips_settlement(store, owner, control).await?;
     let s = scope("standalone", TENANT)?;
     let exec = worker(
         store,
@@ -101,5 +102,28 @@ pub(super) async fn verify(
         tx.rollback().await?;
         assert_eq!(snapshot(owner, &s).await?, (Some(1), 1, vec![1], 1));
     }
+    Ok(())
+}
+
+// Even on a store admitted before DDL drift, an omitted settlement result
+// must roll back the first page's already-staged business writes.
+async fn skips_settlement(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let s = scope("strict-page", TENANT)?;
+    let rec = Arc::new(Recorder::default());
+    let session = worker(store, &s, ReplayBound::Live, rec.clone(), c).await?;
+    let page = vec![event(&s, 1, "first", b"work")?];
+    sqlx::raw_sql("ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) STRICT").execute(owner).await?;
+    let result = session.execute_batch(None, page, c).await;
+    sqlx::raw_sql("ALTER FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) CALLED ON NULL INPUT").execute(owner).await?;
+    assert_eq!(
+        result.map_err(|e| e.kind()),
+        Err(ErrorKind::StorageContract)
+    );
+    assert_eq!(rec.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(snapshot(owner, &s).await?, (None, 0, vec![], 0));
     Ok(())
 }

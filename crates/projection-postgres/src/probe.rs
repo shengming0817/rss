@@ -101,8 +101,12 @@ SELECT
           AND NOT EXISTS (SELECT FROM expected WHERE expected.oid=p.oid)
     )
     AND (SELECT count(*)=2 AND bool_and(p.prosecdef AND NOT helper.prosecdef
+                AND NOT p.proisstrict AND NOT helper.proisstrict
+                AND p.proowner=ns.nspowner AND helper.proowner=ns.nspowner
+                AND p.prorettype=CASE p.proname WHEN 'finish_batch' THEN 'boolean'::regtype ELSE 'boolean[]'::regtype END
                 AND has_function_privilege(p.proowner,helper.oid,'EXECUTE'))
-        FROM pg_proc p JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid
+        FROM pg_proc p JOIN pg_namespace ns ON ns.oid=p.pronamespace
+        JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid
             AND d.refclassid='pg_proc'::regclass
         JOIN pg_proc helper ON helper.oid=d.refobjid
         WHERE p.pronamespace=to_regnamespace('rss_projection') AND p.proname IN ('lock_batch','finish_batch')

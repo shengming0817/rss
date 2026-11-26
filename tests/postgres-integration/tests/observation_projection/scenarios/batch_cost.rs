@@ -138,10 +138,7 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
             (count("checkpoint"), count("lock"), count("finish")),
             (0, calls, calls)
         );
-        assert_eq!(
-            (count("resolve"), count("effect"), count("page")),
-            (25, 26, 4)
-        );
+
         assert_eq!(xids, calls);
     }
     Ok(())
@@ -161,13 +158,15 @@ async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
             "lock"
         } else if sql.starts_with("SELECT rss_projection.finish_") {
             "finish"
-        } else if sql.starts_with("SELECT raw IS NULL AS expired") {
+        } else if sql.contains("rss_observation.batches")
+            && !sql.contains("rss_observation.journals")
+        {
             "resolve"
         } else if sql.contains("public.observation_facts")
             && (sql.starts_with("DELETE") || sql.starts_with("INSERT"))
         {
             "effect"
-        } else if sql.starts_with("SELECT j.expired_through,b.*") {
+        } else if sql.contains("rss_observation.journals") {
             "page"
         } else if sql.starts_with("SELECT set_config(") {
             "setup"

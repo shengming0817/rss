@@ -85,8 +85,11 @@ impl<H: PgEffect + 'static> BatchExecution for PgProjection<H> {
                         outcomes.push(apply_event(tx, &claim, effect.as_ref(), &event, duplicate).await?);
                     }
                     tx.check()?;
-                    facts.query("SELECT rss_projection.finish_batch($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10,$11)", &claim, expected)
-                        .execute(&mut *tx.connection).await.map_err(map_sql)?;
+                    let settled: Option<bool> = facts.query("SELECT rss_projection.finish_batch($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10,$11)", &claim, expected)
+                        .fetch_one(&mut *tx.connection).await.map_err(map_sql)?.try_get(0).map_err(map_sql)?;
+                    if settled != Some(true) {
+                        return Err(Error::new(ErrorKind::StorageContract));
+                    }
                     Ok(outcomes)
                 })
             })
