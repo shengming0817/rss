@@ -80,9 +80,9 @@ Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .
 
 ## 资源协调
 
-v2 使用 targets、target_resources（声明和可空等待票号）、resources（原 claim 的 owner）、scans 四张租户表。队列票号使用组件 sequence；运行角色不得直接使用/更新 sequence，也不得写组件表。只扩展已有 claim 事务，不增加每资源连接、线程或第二租约。
+v3 使用 targets、target_resources（声明和可空等待票号）、resources（原 claim 的 owner）、scans 四张租户表。队列票号使用组件 sequence；运行角色不得直接使用/更新 sequence，也不得写组件表。只扩展已有 claim 事务，不增加每资源连接、线程或第二租约。
 
-每个 claim 调用按显式 scan_budget 检查候选（正 u32，PostgreSQL 要求不超过 i32::MAX），以 Scope 游标和固定高水位保证本轮有界；future/live 候选也计入预算。资源队头由部分索引点查，整个集合一次取得。所有资源占用绑定 target/token/epoch，TTL 直接引用 target；释放精确匹配 owner，旧 claim 不能清除接管者。
+每个 claim 调用按显式 scan_budget 检查候选（正 u32，PostgreSQL 要求不超过 i32::MAX），每页按数据库时间筛出已到期且租约已结束的目标，在 Scope 的固定高水位内按票号尝试加锁。被锁或资源阻塞的候选消耗预算；额外前瞻一个到期目标决定是否续页。已越过游标的唤醒和新票可在下一轮发现。资源队头由部分索引点查，整个集合一次取得。所有资源占用绑定 target/token/epoch，TTL 直接引用 target；释放精确匹配 owner，旧 claim 不能清除接管者。
 
 `protect` / `protect_in` callback 返回 `ProtectedStep::Ready(value)`、`Deferred(after)` 或 `Rebind(resources, after)`。Ready 才标记 Applied；Rebind 在原事务改声明，确认提交后返回 `ReconcileStep::Deferred`，runner 仍唯一负责 finish。`wake_with` / `wake_in` 显式带资源；`bind_with` / `bind_in` 提供保留调度事实的原事务绑定。消息 protect 发现绑定已变化时跳过 callback，返回 1ms 的 Deferred；这是 staged 结果，必须先等待原事务 owner 的已确认提交。实际资源排队仍由 claim 阶段持有。
 

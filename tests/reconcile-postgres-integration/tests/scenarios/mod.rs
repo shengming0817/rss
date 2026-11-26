@@ -295,7 +295,7 @@ async fn admission(pool: &PgPool, owner: &PgPool, c: &Control<'_, Clock>) -> any
     assert!(
         matches!(PgStore::new(pool.clone(),c).await,Err(e) if e.kind()==ErrorKind::StorageContract)
     );
-    sqlx::raw_sql("COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:2'; GRANT UPDATE ON rss_reconcile.targets TO reconcile_runtime;").execute(owner).await?;
+    sqlx::raw_sql("COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:3'; GRANT UPDATE ON rss_reconcile.targets TO reconcile_runtime;").execute(owner).await?;
     assert!(PgStore::new(pool.clone(), c).await.is_err());
     sqlx::raw_sql("REVOKE UPDATE ON rss_reconcile.targets FROM reconcile_runtime")
         .execute(owner)
