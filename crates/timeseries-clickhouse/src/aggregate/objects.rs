@@ -102,8 +102,11 @@ impl<'a> Reader<'a> {
         let mut ids = Vec::new();
         let mut size = 0u64;
         // Each ID may return a second row as evidence of a duplicate.
-        let capacity =
-            u64::from(limits.max_points.get()).min((limits.max_scan_rows.get() / 2).max(1));
+        // Bound the SQL text independently of response budgets (39 bytes per quoted UUID).
+        const MAX_IDS: u64 = 512;
+        let capacity = MAX_IDS
+            .min(u64::from(limits.max_points.get()))
+            .min((limits.max_scan_rows.get() / 2).max(1));
         for (index, r) in self.remaining.iter().enumerate() {
             if !seen.insert(r.object_id.as_str()) {
                 continue;
@@ -134,9 +137,9 @@ impl<'a> Reader<'a> {
             let (count, ids) = self.group(store.limits);
             self.group_left = count;
             self.objects = match store.summary_objects(scope, &ids, deadline).await {
-                // Physical scan/memory accounting can exceed the projected payload budget.
-                // Retry only the individual objects that this page actually consumes.
-                Err(Error::BudgetExceeded) if ids.len() > 1 => None,
+                // Per-query resource/parser limits and RowBinary errors in later rows
+                // cannot decide this object. Narrow once under the same read deadline.
+                Err(Error::BudgetExceeded | Error::Unavailable) if ids.len() > 1 => None,
                 result => Some(result?),
             };
         }

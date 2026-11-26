@@ -203,6 +203,14 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
         serde_json::to_value(decoded)?,
         oracle(all.request(), &samples)?
     );
+    // A stricter installation-level SQL parser cap may still require narrower groups.
+    f.ch.sql("ALTER USER ch_reader SETTINGS max_query_size=3072")
+        .await?;
+    let narrow = store.aggregate(&all, None, deadline()?).await?;
+    assert_eq!(
+        serde_json::to_value(narrow.buckets)?,
+        oracle(all.request(), &samples)?
+    );
     Ok(())
 }
 
@@ -269,6 +277,30 @@ async fn predecessor_survives_empty_buckets_and_unused_corruption_waits_for_its_
         store.aggregate(&all, None, deadline()?).await,
         Err(Error::Invariant)
     ));
+    f.ch.sql("ALTER TABLE rss_ts_ch.summaries UPDATE payload=unhex('FF') WHERE lo=80 SETTINGS mutations_sync=2").await?;
+    for cached in [true, false] {
+        if !cached {
+            sqlx::query("DELETE FROM rss_ts_ch.summaries")
+                .execute(&f.admin)
+                .await?;
+            f.ch.sql("INSERT INTO rss_ts_ch.raw SELECT * REPLACE (unhex('FF') AS payload) FROM rss_ts_ch.raw FINAL WHERE observed_at=81").await?;
+        }
+        let mut page = store.aggregate(&short, None, deadline()?).await?;
+        assert_eq!(page.buckets.len(), 1);
+        loop {
+            let next = page.next.ok_or(Error::Invariant)?;
+            match store.aggregate(&short, Some(&next), deadline()?).await {
+                Ok(p) => {
+                    assert!(p.buckets.iter().all(|b| b.window.end().micros() <= 80));
+                    page = p;
+                }
+                Err(e) => {
+                    assert_eq!(e, Error::Unavailable);
+                    break;
+                }
+            }
+        }
+    }
     Ok(())
 }
 

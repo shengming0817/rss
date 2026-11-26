@@ -83,13 +83,7 @@ impl<'a> Run<'a> {
         let result = self.fetch(store, window.start(), end).await;
         let mut rows = match result {
             // Local validation or a provider cap in a later bucket must not decide this bucket.
-            Err(e)
-                if end > window.end()
-                    && !matches!(
-                        e,
-                        Error::Deadline | Error::Unavailable | Error::Unauthorized
-                    ) =>
-            {
+            Err(e) if end > window.end() && !matches!(e, Error::Deadline | Error::Unauthorized) => {
                 self.single_bucket = true;
                 end = window.end();
                 self.fetch(store, window.start(), end).await?
