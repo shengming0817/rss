@@ -113,37 +113,38 @@ async fn commit_before_write(
     Ok(())
 }
 
+async fn assert_rejected(
+    f: &Fixture,
+    store: &ChStore<Timer>,
+    name: &str,
+    action: &MaintenanceAction,
+    expected: Error,
+) -> anyhow::Result<()> {
+    let before = facts(f).await?;
+    let req = request(name, action)?;
+    assert_eq!(
+        store.step(&req, None, deadline()?).await.err(),
+        Some(expected)
+    );
+    assert_eq!(facts(f).await?, before);
+    Ok(())
+}
+
 async fn rejected_steps(
     f: &Fixture,
     small: &ChStore<Timer>,
     action: &MaintenanceAction,
 ) -> anyhow::Result<()> {
     let original = facts(f).await?;
-    let req = request("over", action)?;
-    assert!(matches!(
-        small.step(&req, None, deadline()?).await,
-        Err(Error::BudgetExceeded)
-    ));
-    assert_eq!(facts(f).await?, original);
-    let req = request("fail-save", action)?;
-    assert!(matches!(
-        f.store.step(&req, None, deadline()?).await,
-        Err(Error::Invariant)
-    ));
-    assert_eq!(facts(f).await?, original);
+    assert_rejected(f, small, "over", action, Error::BudgetExceeded).await?;
+    assert_rejected(f, &f.store, "fail-save", action, Error::Invariant).await?;
     cancellation(f, &request("pause-save", action)?).await?;
     // Keep valid JSON and a matching selector so the typed SummarySpec decoder sees the corruption.
     let spec: Vec<u8> = sqlx::query_scalar("SELECT spec FROM rss_ts_ch.summaries WHERE lo=20")
         .fetch_one(&f.admin)
         .await?;
     sqlx::query("UPDATE rss_ts_ch.summaries SET spec=convert_to(jsonb_set(convert_from(spec,'UTF8')::jsonb,'{resolution}','0')::text,'UTF8') WHERE lo=20").execute(&f.admin).await?;
-    let corrupt = facts(f).await?;
-    let req = request("bad-spec", action)?;
-    assert!(matches!(
-        f.store.step(&req, None, deadline()?).await,
-        Err(Error::Invariant)
-    ));
-    assert_eq!(facts(f).await?, corrupt);
+    assert_rejected(f, &f.store, "bad-spec", action, Error::Invariant).await?;
     sqlx::query("UPDATE rss_ts_ch.summaries SET spec=$1 WHERE lo=20")
         .bind(spec)
         .execute(&f.admin)

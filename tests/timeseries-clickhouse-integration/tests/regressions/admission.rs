@@ -19,11 +19,11 @@ async fn watermarks(f: &Fixture) -> anyhow::Result<(i64, i64)> {
 
 async fn write_error(store: &ChStore<Timer>, b: Batch) -> anyhow::Result<Error> {
     let req = Authorized::<Batch>::verify(&authority(TENANT)?, b)?;
-    Ok(store
+    store
         .write(&req, deadline()?)
         .await
         .err()
-        .ok_or_else(|| anyhow::anyhow!("write succeeded"))?)
+        .ok_or_else(|| anyhow::anyhow!("write succeeded"))
 }
 
 #[tokio::test]
