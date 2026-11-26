@@ -98,7 +98,11 @@ async fn tail(
         .collect::<HashSet<_>>();
     let mut ids = HashSet::new();
     let mut hits = Vec::new();
-    for call in 1..=expected.last().expect("nonempty hits").0 {
+    for call in 1..=expected
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("missing expected hit"))?
+        .0
+    {
         let batch = store
             .claim_partition_heads(
                 crate::execution(tenant(), 1),
@@ -144,25 +148,7 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
             Duration::from_secs(1),
         )?,
     )?);
-    lease_prefix(f, 0, 128).await?;
-    for _ in 0..12 {
-        let batch = store
-            .claim_partition_heads(
-                crate::execution(tenant(), 1),
-                32usize.try_into()?,
-                deadline(),
-            )
-            .await?;
-        assert!(batch.is_empty());
-        assert_eq!(batch.scan_progress(), OutboxScanProgress::Complete);
-    }
-    let cursors: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM rss_transactional_messaging.outbox_scan WHERE domain='orders'",
-    )
-    .fetch_one(&f.owner)
-    .await?;
-    assert_eq!(cursors, 0);
-    idle_worker(store.clone()).await?;
+    all_leased(f, store.clone()).await?;
     lease_prefix(f, 128, 10_000).await?;
     scale::install_explain(f).await?;
     scale::explain(f, "10,000 live leases in the current generation").await?;
@@ -181,6 +167,35 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert!(empty.is_empty());
     assert_eq!(empty.scan_progress(), OutboxScanProgress::Complete);
+    mixed_generation(f, &store).await?;
+    assert_eq!(snapshot(f).await?, original);
+    sqlx::query("DELETE FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'live-prefix-%' OR message_id LIKE 'eligible-tail-%' OR message_id='future-history-0'").execute(&f.owner).await?;
+    Ok(())
+}
+
+async fn all_leased(f: &Fixture, store: Arc<PgOutboxStore<()>>) -> anyhow::Result<()> {
+    lease_prefix(f, 0, 128).await?;
+    for _ in 0..12 {
+        let batch = store
+            .claim_partition_heads(
+                crate::execution(tenant(), 1),
+                32usize.try_into()?,
+                deadline(),
+            )
+            .await?;
+        assert!(batch.is_empty());
+        assert_eq!(batch.scan_progress(), OutboxScanProgress::Complete);
+    }
+    let cursors: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rss_transactional_messaging.outbox_scan WHERE domain='orders'",
+    )
+    .fetch_one(&f.owner)
+    .await?;
+    assert_eq!(cursors, 0);
+    idle_worker(store).await
+}
+
+async fn mixed_generation(f: &Fixture, store: &PgOutboxStore<()>) -> anyhow::Result<()> {
     append(f, "future-history", 0, 1).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 hour',retry_after=clock_timestamp()+interval '1 day' WHERE message_id='future-history-0'").execute(&f.owner).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET claim_lineage=decode(repeat('03',16),'hex') WHERE message_id='future-history-0'").execute(&f.owner).await?;
@@ -202,8 +217,6 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     assert!(blocked.is_empty());
     assert_eq!(blocked.scan_progress(), OutboxScanProgress::RetryLater);
     held.rollback().await?;
-    tail(&store, &[(79, 32), (80, 32), (81, 1)], 65).await?;
-    assert_eq!(snapshot(f).await?, original);
-    sqlx::query("DELETE FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'live-prefix-%' OR message_id LIKE 'eligible-tail-%' OR message_id='future-history-0'").execute(&f.owner).await?;
+    tail(store, &[(79, 32), (80, 32), (81, 1)], 65).await?;
     Ok(())
 }

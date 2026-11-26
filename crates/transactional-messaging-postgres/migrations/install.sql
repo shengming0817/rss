@@ -669,11 +669,14 @@ LANGUAGE sql STABLE AS $f$
   WHERE p.tenant_id=p_tenant AND src.domain=p_domain AND d.status<>'completed'
    AND p.epoch=nullif(current_setting('rss.execution_epoch',true),'')::bigint
    AND p.lineage=decode(current_setting('rss.storage_lineage',true),'hex')
+ -- Sequence is a positive integer. When a later lane shares the cursor's time and
+ -- sequence, include it with a single two-column index bound. Two overlapping row
+ -- predicates misestimate equal timestamps and can select a full heap scan.
  ), heads AS MATERIALIZED (
   (SELECT seq,NULL::uuid AS op,retry_after AS at,0 AS lane,true AS runnable,partition_key,partition_seq
    FROM rss_transactional_messaging.outbox
    WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='pending'
-    AND (retry_after,seq)>=(p_at,p_seq) AND (retry_after,seq,0)>(p_at,p_seq,p_lane)
+    AND (retry_after,seq)>(p_at,p_seq)
     AND retry_after<=p_through ORDER BY retry_after,seq LIMIT p_take)
   UNION ALL
   (SELECT seq,NULL::uuid,greatest(retry_after,lease_until),1,true,partition_key,partition_seq
@@ -681,8 +684,7 @@ LANGUAGE sql STABLE AS $f$
    WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='publishing'
     AND claim_epoch=nullif(current_setting('rss.execution_epoch',true),'')::bigint
     AND claim_lineage=decode(current_setting('rss.storage_lineage',true),'hex')
-    AND (greatest(retry_after,lease_until),seq)>=(p_at,p_seq)
-    AND (greatest(retry_after,lease_until),seq,1)>(p_at,p_seq,p_lane)
+    AND (greatest(retry_after,lease_until),seq)>(p_at,CASE WHEN p_lane<1 AND p_seq>0 THEN p_seq-1 ELSE p_seq END)
     AND greatest(retry_after,lease_until)<=p_through ORDER BY greatest(retry_after,lease_until),seq LIMIT p_take)
   UNION ALL
   (SELECT seq,NULL::uuid,retry_after,2,
@@ -699,7 +701,7 @@ LANGUAGE sql STABLE AS $f$
       WHERE g.tenant_id=p_tenant AND g.domain=p_domain AND (g.partition_head OR g.partition_key IS NULL)
        AND g.status='publishing' AND (g.claim_epoch,g.claim_lineage) >
         (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex'))))
-    AND (retry_after,seq)>=(p_at,p_seq) AND (retry_after,seq,2)>(p_at,p_seq,p_lane)
+    AND (retry_after,seq)>(p_at,CASE WHEN p_lane<2 AND p_seq>0 THEN p_seq-1 ELSE p_seq END)
     AND retry_after<=p_through ORDER BY retry_after,seq LIMIT p_take)
   UNION ALL
   (SELECT d.outbox_seq,d.operation_id,greatest(d.retry_after,CASE WHEN d.status='publishing' THEN d.lease_until END),3,true,d.partition_key,d.partition_seq

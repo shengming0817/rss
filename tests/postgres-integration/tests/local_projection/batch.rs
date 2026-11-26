@@ -432,7 +432,7 @@ async fn independent_deadline(f: &Fixture) -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(1100)).await;
     gate.resume.notify_one();
     assert_eq!(
-        committed_projection(task.await??)?.disposition(),
+        committed_projection(task.await??.into_outcome()?)?.disposition(),
         TerminalDisposition::Succeeded
     );
     assert_eq!(slots.available_permits(), 2);

@@ -122,10 +122,7 @@ async fn measure(
     Ok(())
 }
 
-pub(super) async fn byte_budget(
-    owner: &sqlx::PgPool,
-    maintenance: &PgPublishedBodyMaintenance,
-) -> anyhow::Result<()> {
+async fn seed_budget_page(owner: &sqlx::PgPool) -> anyhow::Result<(i64, Vec<i64>)> {
     let after: i64 =
         sqlx::query_scalar("SELECT coalesce(max(seq),0) FROM rss_transactional_messaging.outbox")
             .fetch_one(owner)
@@ -162,20 +159,34 @@ pub(super) async fn byte_budget(
         stored > 32 * 1024,
         "oversized body requires external TOAST storage"
     );
-    let page = async |cursor, limit, budget| -> anyhow::Result<PublishedBodyPage> {
-        committed(
-            maintenance
-                .reclaim(
-                    crate::execution(tenant(), 1),
-                    PublishedBodyRetention::new(i64::MAX, cursor, limit, budget)?,
-                    deadline(),
-                )
-                .await,
-        )
-    };
+    Ok((after, coords))
+}
+
+async fn reclaim(
+    maintenance: &PgPublishedBodyMaintenance,
+    cursor: i64,
+    limit: u16,
+    budget: u64,
+) -> anyhow::Result<PublishedBodyPage> {
+    committed(
+        maintenance
+            .reclaim(
+                crate::execution(tenant(), 1),
+                PublishedBodyRetention::new(i64::MAX, cursor, limit, budget)?,
+                deadline(),
+            )
+            .await,
+    )
+}
+
+pub(super) async fn byte_budget(
+    owner: &sqlx::PgPool,
+    maintenance: &PgPublishedBodyMaintenance,
+) -> anyhow::Result<()> {
+    let (after, coords) = seed_budget_page(owner).await?;
     assert!(PublishedBodyRetention::new(i64::MAX, after, 1, 0).is_err());
     assert!(PublishedBodyRetention::new(i64::MAX, after, 1, u64::MAX).is_err());
-    let first = page(after, 4, 8).await?;
+    let first = reclaim(maintenance, after, 4, 8).await?;
     assert_eq!(
         (
             first.scanned,
@@ -190,7 +201,7 @@ pub(super) async fn byte_budget(
         required_bytes: 65536,
     };
     assert_eq!(first.stop, oversized);
-    let again = page(first.next_seq, 4, 64000).await?;
+    let again = reclaim(maintenance, first.next_seq, 4, 64000).await?;
     assert_eq!(
         (
             again.scanned,
@@ -201,7 +212,7 @@ pub(super) async fn byte_budget(
         ),
         (1, 0, 0, coords[0], oversized)
     );
-    let full = page(again.next_seq, 1, 65536).await?;
+    let full = reclaim(maintenance, again.next_seq, 1, 65536).await?;
     assert_eq!(
         (
             full.stop,
@@ -218,8 +229,18 @@ pub(super) async fn byte_budget(
             coords[1]
         )
     );
+    rollback_and_replay(owner, maintenance, after, full.next_seq, &coords).await
+}
+
+async fn rollback_and_replay(
+    owner: &sqlx::PgPool,
+    maintenance: &PgPublishedBodyMaintenance,
+    after: i64,
+    cursor: i64,
+    coords: &[i64],
+) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET payload=payload||decode('01','hex') WHERE seq=$1").bind(coords[3]).execute(owner).await?;
-    assert!(page(full.next_seq, 4, 100).await.is_err());
+    assert!(reclaim(maintenance, cursor, 4, 100).await.is_err());
     let retained:i64=sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox WHERE seq=ANY($1) AND payload IS NOT NULL").bind(&coords[2..]).fetch_one(owner).await?;
     assert_eq!(retained, 2, "corruption rolls back the preceding release");
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET payload=substring(payload FROM 1 FOR 16) WHERE seq=$1").bind(coords[3]).execute(owner).await?;
@@ -227,7 +248,7 @@ pub(super) async fn byte_budget(
     let unknown = maintenance
         .reclaim(
             crate::execution(tenant(), 1),
-            PublishedBodyRetention::new(i64::MAX, full.next_seq, 4, 40)?,
+            PublishedBodyRetention::new(i64::MAX, cursor, 4, 40)?,
             deadline(),
         )
         .await;
@@ -239,7 +260,7 @@ pub(super) async fn byte_budget(
         |_| true,
         |_| false
     ));
-    let retried = page(full.next_seq, 4, 16).await?;
+    let retried = reclaim(maintenance, cursor, 4, 16).await?;
     assert_eq!(
         (
             retried.stop,
@@ -250,6 +271,6 @@ pub(super) async fn byte_budget(
         ),
         (PublishedBodyStop::Complete, 1, 1, 16, coords[3])
     );
-    assert_eq!(page(after, 4, 1).await?.scanned, 0);
+    assert_eq!(reclaim(maintenance, after, 4, 1).await?.scanned, 0);
     Ok(())
 }
