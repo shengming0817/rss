@@ -113,3 +113,51 @@ async fn arrivals() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "release-mode probes behind a byte-blocked writer"]
+async fn byte_blocked_probes() -> anyhow::Result<()> {
+    let fixture = Fixture::new("ts-byte-probes").await?;
+    let d = definition(TENANT)?;
+    fixture.register(&d).await?;
+    let auth = authority(TENANT)?;
+    let mut small_latency = Vec::new();
+    let mut before_head = 0;
+    for i in 0..32 {
+        let request = |lane, size| {
+            let input = prepare_measure::items(&d, lane, size, false)?;
+            Ok::<_, anyhow::Error>(Authorized::<Batch>::verify(
+                &auth,
+                batch(&format!("load-{lane}"), input)?,
+            )?)
+        };
+        let left = request(3 * i, Batch::MAX_SAMPLES)?;
+        let head = request(3 * i + 1, Batch::MAX_SAMPLES)?;
+        let small = request(3 * i + 2, 1)?;
+        let cutoff = deadline()?;
+        let mut first = Box::pin(fixture.store.write(&left, cutoff));
+        let mut blocked = Box::pin(fixture.store.write(&head, cutoff));
+        // Establish the same arrival order on either algorithm. The first
+        // writer has its bytes, the second is queued, and the pool can run probes.
+        for future in [&mut first, &mut blocked] {
+            tokio::select! { biased; result=future.as_mut()=>anyhow::bail!("large batch completed on first poll: {result:?}"), ()=std::future::ready(())=>{} }
+        }
+        let arrival = Timer.now();
+        let (a, b, s) = tokio::join!(first, async { (blocked.await, Timer.now()) }, async {
+            (fixture.store.write(&small, cutoff).await, Timer.now())
+        });
+        confirmed(a?)?;
+        confirmed(b.0?)?;
+        confirmed(s.0?)?;
+        before_head += usize::from(s.1 < b.1);
+        small_latency.push((s.1 - arrival).as_micros());
+    }
+    small_latency.sort_unstable();
+    println!(
+        "BYTE_PROBE n={} before_queued_large={before_head} p95_us={} p99_us={}",
+        small_latency.len(),
+        small_latency[30],
+        small_latency[31]
+    );
+    Ok(())
+}
