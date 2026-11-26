@@ -223,7 +223,7 @@ pub async fn run(
         status(&store5, &expired).await?,
         vec![MemberStatus::Blocked(BlockReason::DeadlineExpired)]
     );
-    fixture_sql(owner,5,"SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024)").await?;
+    fixture_sql(owner,5,"SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024,1048576)").await?;
     let retained:bool=sqlx::query_scalar("SELECT payload IS NOT NULL FROM rss_transactional_messaging.outbox WHERE message_id='published'").fetch_one(owner).await?;
     assert!(
         retained,
@@ -272,7 +272,7 @@ pub async fn run(
         .execute(&mut *retired)
         .await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()-interval '1 day' WHERE message_id='published'").execute(&mut *retired).await?;
-    sqlx::query("SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024)").execute(&mut *retired).await?;
+    sqlx::query("SELECT * FROM rss_transactional_messaging.reclaim_published_bodies((extract(epoch FROM clock_timestamp())*1000000)::bigint,0,1024,1048576)").execute(&mut *retired).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE message_id='published'").execute(&mut *retired).await?;
     let rejected=sqlx::query("SELECT rss_transactional_messaging.apply_dr(gen_random_uuid(),sha256('clock-reversal'::bytea),'database','{}',jsonb_build_array(jsonb_build_object('message',message_id,'fingerprint',encode(fingerprint,'hex'),'version',recovery_version)),6) FROM rss_transactional_messaging.outbox WHERE message_id='published'").execute(&mut *retired).await;
     assert!(

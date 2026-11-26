@@ -689,6 +689,16 @@ LANGUAGE sql STABLE AS $f$
     (claim_epoch,claim_lineage) IS DISTINCT FROM (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex')),partition_key,partition_seq
    FROM rss_transactional_messaging.outbox
    WHERE tenant_id=p_tenant AND domain=p_domain AND (partition_head OR partition_key IS NULL) AND status='publishing'
+    -- A publishing head has non-null generation keys. Two index range seeks can
+    -- rule out the whole historical lane without walking current leases in retry order.
+    AND (EXISTS (SELECT FROM rss_transactional_messaging.outbox g
+      WHERE g.tenant_id=p_tenant AND g.domain=p_domain AND (g.partition_head OR g.partition_key IS NULL)
+       AND g.status='publishing' AND (g.claim_epoch,g.claim_lineage) <
+        (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex')))
+     OR EXISTS (SELECT FROM rss_transactional_messaging.outbox g
+      WHERE g.tenant_id=p_tenant AND g.domain=p_domain AND (g.partition_head OR g.partition_key IS NULL)
+       AND g.status='publishing' AND (g.claim_epoch,g.claim_lineage) >
+        (nullif(current_setting('rss.execution_epoch',true),'')::bigint,decode(current_setting('rss.storage_lineage',true),'hex'))))
     AND (retry_after,seq)>=(p_at,p_seq) AND (retry_after,seq,2)>(p_at,p_seq,p_lane)
     AND retry_after<=p_through ORDER BY retry_after,seq LIMIT p_take)
   UNION ALL
@@ -713,40 +723,33 @@ CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain 
 RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,payload bytea,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
- observed timestamptz; progress outbox_scan; examined integer:=0; owns_progress boolean; wrapped boolean:=false;
+ progress outbox_scan; frontier outbox_scan; examined integer:=0;
+ owns_progress boolean; resumed boolean; exhausted boolean:=false; action text:='complete';
  scan_limit integer:=greatest(64,least(p_limit::bigint*4,1024))::integer;
  candidates NO SCROLL CURSOR FOR
-  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit-examined) ORDER BY source_seq,lane;
+  SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit) ORDER BY source_seq,lane;
 BEGIN
  PERFORM check_execution();
  IF p_domain IS NULL OR octet_length(p_domain) NOT BETWEEN 1 AND 255 OR (p_domain COLLATE "C") ~ '[^A-Za-z0-9_.:-]' OR p_tenant IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid OR p_limit IS NULL OR p_limit < 1 OR p_ttl_ms NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim' USING ERRCODE='22023'; END IF;
  -- Transaction-local result metadata, read by the private adapter before commit.
- PERFORM set_config('rss.outbox_scan_more','false',true);
+ PERFORM set_config('rss.outbox_scan_progress','complete',true);
  IF consumer_scope_domain() IS NOT NULL AND consumer_scope_domain()<>p_domain THEN RETURN; END IF;
  -- FETCH NEXT avoids PL/pgSQL FOR's prefetch locks and never reopens an exhausted scan.
  -- ref: PostgreSQL REL_17_6 src/pl/plpgsql/src/pl_exec.c exec_stmt_fetch/exec_for_query.
- observed:=clock_timestamp();
  -- Contention may repeat metadata work, but never serializes relay transactions.
  owns_progress:=pg_try_advisory_xact_lock(hashtextextended('rss-tmsg-claim:'||p_tenant::text||':'||p_domain,0));
  SELECT * INTO progress FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
- IF NOT FOUND THEN progress.through_at:=observed; progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
- IF progress.eligible_at='-infinity'::timestamptz THEN progress.through_at:=observed; END IF;
+ resumed:=FOUND;
+ IF NOT resumed THEN progress.through_at:=clock_timestamp(); progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
+ frontier:=progress;
  OPEN candidates;
  LOOP
   EXIT WHEN used>=p_limit OR examined>=scan_limit;
   FETCH NEXT FROM candidates INTO r;
-  IF NOT FOUND THEN
-   IF examined<scan_limit AND NOT wrapped AND progress.eligible_at<>'-infinity'::timestamptz THEN
-    CLOSE candidates;
-    progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; progress.through_at:=observed; wrapped:=true;
-    OPEN candidates;
-    CONTINUE;
-   END IF;
-   EXIT;
-  END IF;
+  IF NOT FOUND THEN exhausted:=true; EXIT; END IF;
   examined:=examined+1;
-  IF (r.eligible_at,r.source_seq,r.lane)>(progress.eligible_at,progress.source_seq,progress.lane) THEN
-   progress.eligible_at:=r.eligible_at; progress.source_seq:=r.source_seq; progress.lane:=r.lane;
+  IF (r.eligible_at,r.source_seq,r.lane)>(frontier.eligible_at,frontier.source_seq,frontier.lane) THEN
+   frontier.eligible_at:=r.eligible_at; frontier.source_seq:=r.source_seq; frontier.lane:=r.lane;
   END IF;
   IF NOT r.runnable THEN CONTINUE; END IF;
   SELECT * INTO o FROM outbox src WHERE src.seq=r.source_seq AND src.tenant_id=p_tenant
@@ -772,14 +775,19 @@ BEGIN
    greatest(0,(extract(epoch FROM o.automatic_retry_deadline-n)*1000000)::bigint);
  END LOOP;
  CLOSE candidates;
- PERFORM set_config('rss.outbox_scan_more',(examined>=scan_limit OR used>=p_limit)::text,true);
- IF used>0 OR examined<scan_limit THEN
-  progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0;
+ IF used>=p_limit OR (owns_progress AND examined=scan_limit) THEN
+  action:='continue';
+ ELSIF NOT owns_progress OR (used=0 AND (examined>0 OR resumed)) THEN
+  action:='retry_later';
  END IF;
+ PERFORM set_config('rss.outbox_scan_progress',action,true);
  IF owns_progress THEN
-  IF progress.eligible_at='-infinity'::timestamptz THEN
-   DELETE FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
+  IF exhausted THEN
+   IF resumed THEN DELETE FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain; END IF;
   ELSE
+   -- Locks are taken in source order. A capacity stop can leave earlier eligibility
+   -- keys unvisited. Keep the window entrance and its frozen horizon in that case.
+   IF examined=scan_limit THEN progress:=frontier; END IF;
    INSERT INTO outbox_scan AS s(tenant_id,domain,through_at,eligible_at,source_seq,lane)
     VALUES(p_tenant,p_domain,progress.through_at,progress.eligible_at,progress.source_seq,progress.lane)
     ON CONFLICT ON CONSTRAINT outbox_scan_pkey DO UPDATE SET through_at=excluded.through_at,eligible_at=excluded.eligible_at,source_seq=excluded.source_seq,lane=excluded.lane
@@ -791,47 +799,53 @@ END $f$;
 ALTER FUNCTION rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint) OWNER TO rss_tmsg_relay;
 
 -- Host retention is an additional restriction; it never opens the original delivery window.
-CREATE FUNCTION rss_transactional_messaging.reclaim_published_bodies(p_before_us bigint,p_after bigint,p_limit integer)
-RETURNS TABLE(scanned integer,reclaimed integer,released_bytes bigint,next_seq bigint)
+CREATE FUNCTION rss_transactional_messaging.reclaim_published_bodies(p_before_us bigint,p_after bigint,p_limit integer,p_verify_bytes bigint)
+RETURNS TABLE(scanned integer,reclaimed integer,verified_bytes bigint,released_bytes bigint,next_seq bigint,stop_reason text,required_bytes bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid;
- r record; o outbox; cutoff_us bigint; current_operation uuid; member_source bigint; member_status text;
+ r record; body_length bigint; body_id text; seals_valid boolean; cutoff_us bigint; current_operation uuid; member_source bigint; member_status text;
 BEGIN
  PERFORM check_execution();
- IF p_before_us IS NULL OR p_before_us<0 OR p_after IS NULL OR p_after<0 OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1024 THEN
+ IF p_before_us IS NULL OR p_before_us<0 OR p_after IS NULL OR p_after<0 OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1024 OR p_verify_bytes IS NULL OR p_verify_bytes<1 THEN
   RAISE EXCEPTION 'invalid body retention' USING ERRCODE='22023';
  END IF;
  cutoff_us:=least(p_before_us,(extract(epoch FROM clock_timestamp())*1000000)::bigint);
  SELECT operation_id INTO current_operation FROM dr_plans WHERE tenant_id=t
   AND epoch=current_setting('rss.execution_epoch')::bigint
   AND lineage=decode(current_setting('rss.storage_lineage'),'hex');
- scanned:=0; reclaimed:=0; released_bytes:=0; next_seq:=p_after;
+ scanned:=0; reclaimed:=0; verified_bytes:=0; released_bytes:=0; next_seq:=p_after; stop_reason:='complete';
  -- Bound candidate work before retention and DR filtering. A skipped row can be
  -- revisited in the host's next sweep; advancing does not claim it was reclaimed.
  FOR r IN SELECT src.seq FROM outbox src WHERE src.tenant_id=t AND src.status='published'
   AND src.payload IS NOT NULL AND src.seq>p_after ORDER BY src.seq LIMIT p_limit LOOP
-  scanned:=scanned+1; next_seq:=r.seq;
-  SELECT * INTO o FROM outbox src WHERE src.seq=r.seq AND src.tenant_id=t
+  scanned:=scanned+1;
+  -- byteaoctetlen reads TOAST's raw size without fetching the body.
+  -- ref: PostgreSQL REL_17_6 src/backend/utils/adt/varlena.c byteaoctetlen.
+  SELECT src.message_id,octet_length(src.payload) INTO body_id,body_length FROM outbox src WHERE src.seq=r.seq AND src.tenant_id=t
    AND src.status='published' AND src.payload IS NOT NULL AND extract(epoch FROM src.automatic_retry_deadline)*1000000<=cutoff_us
    FOR UPDATE SKIP LOCKED;
-  IF NOT FOUND THEN CONTINUE; END IF;
+  IF NOT FOUND THEN next_seq:=r.seq; CONTINUE; END IF;
   IF current_operation IS NOT NULL THEN
-   -- Admit exactly one member by its unique identity before evaluating source/state.
-   -- Keeping outbox_seq out of this query prevents a history-sized source-index scan.
    SELECT d.outbox_seq,d.status INTO member_source,member_status FROM dr_members d
-    WHERE d.tenant_id=t AND d.operation_id=current_operation AND d.message_id=o.message_id AND d.consumer_group='';
-   IF FOUND AND member_source=o.seq AND member_status<>'completed' THEN CONTINUE; END IF;
+    WHERE d.tenant_id=t AND d.operation_id=current_operation AND d.message_id=body_id AND d.consumer_group='';
+   IF FOUND AND member_source=r.seq AND member_status<>'completed' THEN next_seq:=r.seq; CONTINUE; END IF;
   END IF;
-  IF o.body_digest IS DISTINCT FROM sha256(o.payload) OR o.authored_evidence IS DISTINCT FROM
-   sha256(convert_to('rss-outbox-evidence-v1','UTF8')||convert_to((o.envelope-ARRAY['trace','tenant_authority'])::text,'UTF8')||o.fingerprint||o.body_digest) THEN
-   RAISE EXCEPTION 'published evidence mismatch' USING ERRCODE='PZ002';
+  IF body_length>p_verify_bytes-verified_bytes THEN
+   stop_reason:='byte_limit'; required_bytes:=body_length;
+   RETURN NEXT; RETURN;
   END IF;
-  released_bytes:=released_bytes+octet_length(o.payload); reclaimed:=reclaimed+1;
-  UPDATE outbox SET payload=NULL,body_retired=true WHERE outbox.seq=o.seq;
+  SELECT src.body_digest=sha256(src.payload) AND src.authored_evidence=
+   sha256(convert_to('rss-outbox-evidence-v1','UTF8')||convert_to((src.envelope-ARRAY['trace','tenant_authority'])::text,'UTF8')||src.fingerprint||src.body_digest)
+   INTO STRICT seals_valid FROM outbox src WHERE src.seq=r.seq AND src.tenant_id=t;
+  IF seals_valid IS NOT TRUE THEN RAISE EXCEPTION 'published evidence mismatch' USING ERRCODE='PZ002'; END IF;
+  verified_bytes:=verified_bytes+body_length;
+  UPDATE outbox SET payload=NULL,body_retired=true WHERE outbox.seq=r.seq AND outbox.tenant_id=t;
+  released_bytes:=released_bytes+body_length; reclaimed:=reclaimed+1; next_seq:=r.seq;
  END LOOP;
+ IF scanned=p_limit THEN stop_reason:='candidate_limit'; END IF;
  RETURN NEXT;
 END $f$;
-ALTER FUNCTION rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer) OWNER TO rss_tmsg_relay;
+ALTER FUNCTION rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint) OWNER TO rss_tmsg_relay;
 
 CREATE FUNCTION rss_transactional_messaging.next_outbox_wakeup(p_tenant uuid,p_domain text)
 RETURNS TABLE(due_now boolean,next_us bigint)

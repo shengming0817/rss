@@ -342,7 +342,7 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
             "idle scans must not create durable cursor versions"
         );
     }
-    append(f, "window", 0, 130, 0).await?;
+    append(f, "window", 0, 258, 0).await?;
     let projection = f
         .projection(Effect {
             gate: None,
@@ -353,21 +353,21 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
     let validator = Validator;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=statement_timestamp()-interval '1 day' WHERE message_id LIKE 'window-%'").execute(&f.owner).await?;
     let mut held = f.owner.begin().await?;
-    let locked:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'window-%' ORDER BY seq LIMIT 128 FOR UPDATE")
+    let locked:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'window-%' ORDER BY seq LIMIT 256 FOR UPDATE")
         .fetch_all(&mut *held).await?;
     for _ in 0..2 {
         let batch = projection
             .project_batch(
                 crate::execution(tenant(), 1),
                 &validator,
-                NonZeroUsize::MIN,
+                NonZeroUsize::try_from(32usize)?,
                 deadline(),
                 Duration::from_secs(5),
             )
             .await?;
         assert_eq!(
             batch.scan_progress(),
-            rss_transactional_messaging::outbox::OutboxScanProgress::More
+            rss_transactional_messaging::outbox::OutboxScanProgress::Continue
         );
         let rows = futures::StreamExt::collect::<Vec<_>>(batch).await;
         assert!(
@@ -411,7 +411,7 @@ pub(super) async fn bounded_windows(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct Published(tokio::sync::mpsc::UnboundedSender<String>);
+pub(super) struct Published(pub(super) tokio::sync::mpsc::UnboundedSender<String>);
 impl rss_transactional_messaging::transport::Publisher<Vec<u8>> for Published {
     type Receipt = ();
     async fn publish(

@@ -1,4 +1,5 @@
 use super::*;
+use rss_transactional_messaging::outbox::OutboxScanProgress;
 use rss_transactional_messaging::{fence::ExecutionBinding, outbox::OutboxWriter};
 use rss_transactional_messaging_testkit::memory::MemoryOutboxStore;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -40,7 +41,8 @@ struct ObservedStore {
     reply: Semaphore,
     fail_settle: Option<&'static str>,
     settle_calls: AtomicUsize,
-    scan_more: bool,
+    empty_until: usize,
+    empty_action: OutboxScanProgress,
 }
 
 impl ObservedStore {
@@ -58,7 +60,8 @@ impl ObservedStore {
             reply: Semaphore::new(0),
             fail_settle: None,
             settle_calls: 0.into(),
-            scan_more: false,
+            empty_until: 0,
+            empty_action: OutboxScanProgress::Complete,
         }
     }
 
@@ -91,6 +94,10 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
                 std::io::Error::other("scripted claim failure"),
             ));
         }
+        if call <= self.empty_until {
+            return OutboxClaimBatch::try_from_provider(Vec::new(), limit, self.empty_action)
+                .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e));
+        }
         let batch = self
             .memory
             .claim_partition_heads(binding, limit, deadline)
@@ -100,16 +107,7 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
         if call == self.block_call {
             self.reply.acquire().await.expect("claim gate").forget();
         }
-        if self.scan_more {
-            OutboxClaimBatch::try_from_provider(
-                batch.into_iter().collect(),
-                limit,
-                rss_transactional_messaging::outbox::OutboxScanProgress::More,
-            )
-            .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))
-        } else {
-            Ok(batch)
-        }
+        Ok(batch)
     }
 
     async fn extend(
@@ -146,12 +144,43 @@ impl OutboxRelayStore<Vec<u8>> for ObservedStore {
 }
 
 #[tokio::test]
-async fn empty_continuation_is_paced_separately_from_idle() {
-    use rss_transactional_messaging::outbox::OutboxScanProgress;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        for more in [false, true] {
+async fn empty_continuation_has_a_bounded_request_slice() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut observed = ObservedStore::new(0, 0, MessagingErrorKind::Transient);
+        observed.empty_until = 78;
+        observed.empty_action = OutboxScanProgress::Continue;
+        let store = Arc::new(observed);
+        store.append("tail", "ordered").await;
+        let mut run = Run::with_limits(store.clone(), 32, 1);
+        for slice in 1..=9 {
+            run.timer
+                .wait_registered(Duration::from_millis(slice * 100))
+                .await;
+            assert_eq!(store.calls.load(Ordering::SeqCst), slice as usize * 8);
+            run.timer.advance(Duration::from_millis(100));
+        }
+        let (id, finish) = run.next().await;
+        assert_eq!(id, "tail");
+        assert_eq!(store.calls.load(Ordering::SeqCst), 79);
+        run.stop.cancel();
+        finish.send(()).expect("settle tail");
+        support::join_worker(run.worker).await.expect("drain");
+    })
+    .await
+    .expect("bounded continuation");
+}
+
+#[tokio::test]
+async fn caller_driven_action_and_worker_retry_cadence() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for action in [
+            OutboxScanProgress::Complete,
+            OutboxScanProgress::RetryLater,
+            OutboxScanProgress::Continue,
+        ] {
             let mut observed = ObservedStore::new(0, 0, MessagingErrorKind::Transient);
-            observed.scan_more = more;
+            observed.empty_action = action;
+            observed.empty_until = usize::MAX;
             let store = Arc::new(observed);
             let timer = Arc::new(AdvancingTimer::new());
             let publisher = Arc::new(ScriptedPublisher::new([]));
@@ -165,14 +194,10 @@ async fn empty_continuation_is_paced_separately_from_idle() {
             )
             .await
             .expect("report");
-            assert_eq!(
-                report.scan_progress(),
-                if more {
-                    OutboxScanProgress::More
-                } else {
-                    OutboxScanProgress::Complete
-                }
-            );
+            assert_eq!(report.scan_progress(), action);
+            if action == OutboxScanProgress::Continue {
+                continue;
+            }
             store.calls.store(0, Ordering::SeqCst);
             let config = RelayConfig::new(
                 NonZeroUsize::MIN,
@@ -190,37 +215,17 @@ async fn empty_continuation_is_paced_separately_from_idle() {
             );
             let stop = CancellationToken::new();
             let task = tokio::spawn(worker.run(execution(fixture_tenant(), 1), stop.clone()));
-            let delay = if more {
-                Duration::from_millis(100)
-            } else {
+            let delay = if action == OutboxScanProgress::Complete {
                 Duration::from_secs(30)
+            } else {
+                Duration::from_millis(100)
             };
             timer.wait_registered(delay).await;
-            assert_eq!(store.calls.load(Ordering::SeqCst), 1);
-            timer.advance(Duration::from_millis(99));
+            timer.advance(delay - Duration::from_millis(1));
             tokio::task::yield_now().await;
-            assert_eq!(
-                store.calls.load(Ordering::SeqCst),
-                1,
-                "no busy loop before continuation delay"
-            );
+            assert_eq!(store.calls.load(Ordering::SeqCst), 1);
             timer.advance(Duration::from_millis(1));
-            if more {
-                support::wait_for_count(&store.calls, 2).await;
-                timer.wait_registered(Duration::from_millis(200)).await;
-                assert_eq!(
-                    store.calls.load(Ordering::SeqCst),
-                    2,
-                    "persistent empty continuation remains paced"
-                );
-            } else {
-                tokio::task::yield_now().await;
-                assert_eq!(
-                    store.calls.load(Ordering::SeqCst),
-                    1,
-                    "idle retains host interval"
-                );
-            }
+            support::wait_for_count(&store.calls, 2).await;
             stop.cancel();
             support::join_worker(task).await.expect("stop");
         }

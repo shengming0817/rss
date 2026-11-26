@@ -32,7 +32,7 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
 
  AND NOT EXISTS(SELECT FROM (VALUES
   ('rss_transactional_messaging.outbox_candidates(uuid,text,timestamptz,timestamptz,integer)',$5::text,false,'s','sql',NULL::text[]),
-  ('rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer)',$8::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']),
+  ('rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint)',$8::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']),
  ('rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer)',$7::text,false,'s','sql',NULL::text[]),
  ('rss_transactional_messaging.claim_outbox(uuid,text,integer,bigint)',$6::text,true,'v','plpgsql',ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp'])
  ) f(signature,body,definer,volatility,language,config)

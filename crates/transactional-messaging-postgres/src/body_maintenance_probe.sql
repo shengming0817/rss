@@ -1,4 +1,4 @@
-SELECT EXISTS(SELECT FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer)')
+SELECT EXISTS(SELECT FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint)')
  AND p.prosrc=$1 AND p.prosecdef AND p.provolatile='v' AND p.proowner='rss_tmsg_relay'::regrole
  AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
  AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
@@ -14,7 +14,7 @@ SELECT EXISTS(SELECT FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transaction
    AND (pg_has_role(current_user,r.oid,'USAGE') OR pg_has_role(current_user,r.oid,'SET'))
    AND has_function_privilege(r.oid,p.oid,'EXECUTE')
    AND p.oid NOT IN ('rss_transactional_messaging.check_execution()'::regprocedure,
-    'rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer)'::regprocedure,
+    'rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint)'::regprocedure,
     'rss_transactional_messaging.consumer_scope_domain()'::regprocedure,
     'rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text)'::regprocedure,
     'rss_transactional_messaging.projection_scope_matches(text,text)'::regprocedure))

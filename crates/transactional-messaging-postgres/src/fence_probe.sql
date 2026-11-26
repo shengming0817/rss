@@ -86,4 +86,4 @@ SELECT to_regclass('rss_transactional_messaging.storage_lineage') IS NOT NULL
  WHERE a.attnum IS NULL OR format_type(a.atttypid,a.atttypmod)<>e.type_name OR a.attnotnull)
 
  AND ($2 OR NOT EXISTS(SELECT FROM pg_roles r WHERE (pg_has_role(current_user,r.oid,'SET') OR pg_has_role(current_user,r.oid,'USAGE'))
-  AND has_function_privilege(r.oid,'rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer)','EXECUTE')))
+  AND has_function_privilege(r.oid,'rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint)','EXECUTE')))

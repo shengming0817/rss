@@ -414,10 +414,18 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
         let domain = self.writer.domain.as_str().to_owned();
         #[cfg(feature = "recovery")]
         let started = self.writer.runtime.timer.now();
-        let (batch, more) = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
+        let (batch, progress) = self.writer.runtime.relay(binding, cutoff, move |connection| Box::pin(async move {
                 let rows = sqlx::query("SELECT seq, tenant_id::text, message_id, domain, partition_key, lease_token::text AS token, (extract(epoch FROM lease_until)*1000000)::bigint AS lease_us, envelope::text, payload, fingerprint, dr_operation::text, remaining_us, delivery_us FROM rss_transactional_messaging.claim_outbox($1::uuid,$2,$3,$4)")
                     .bind(tenant.to_string()).bind(&domain).bind(count).bind(ttl).fetch_all(&mut *connection).await?;
-                let more:bool=sqlx::query_scalar("SELECT current_setting('rss.outbox_scan_more')::boolean").fetch_one(&mut *connection).await?;
+                use rss_transactional_messaging::outbox::OutboxScanProgress;
+                let action: String = sqlx::query_scalar("SELECT current_setting('rss.outbox_scan_progress')")
+                    .fetch_one(&mut *connection).await?;
+                let progress = match action.as_str() {
+                    "continue" => OutboxScanProgress::Continue,
+                    "retry_later" => OutboxScanProgress::RetryLater,
+                    "complete" => OutboxScanProgress::Complete,
+                    _ => return Err(PgError::invariant()),
+                };
                 let claims = rows.into_iter().map(|row| {
                     let message = PendingMessage::new(Envelope::decode(&row)?);
                     if message.fingerprint() != fingerprint(row.try_get("fingerprint")?)? { return Err(PgError::invariant()); }
@@ -439,18 +447,10 @@ impl<R: Send> OutboxRelayStore<Vec<u8>> for PgOutboxStore<R> {
                         },
                         message, binding, dr_operation:row.try_get("dr_operation")?, seq: row.try_get("seq")?, token: row.try_get("token")?, lease_us: Mutex::new(row.try_get("lease_us")?) })
                 }).collect::<Result<Vec<_>, PgError>>()?;
-                Ok((claims, more))
+                Ok((claims, progress))
         })).await.map_err(PgError::port)?;
-        OutboxClaimBatch::try_from_provider(
-            batch,
-            limit,
-            if more {
-                rss_transactional_messaging::outbox::OutboxScanProgress::More
-            } else {
-                rss_transactional_messaging::outbox::OutboxScanProgress::Complete
-            },
-        )
-        .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))
+        OutboxClaimBatch::try_from_provider(batch, limit, progress)
+            .map_err(|e| MessagingError::new(MessagingErrorKind::Invariant, e))
     }
     async fn extend(
         &self,

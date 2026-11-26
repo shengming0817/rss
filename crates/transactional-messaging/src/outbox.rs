@@ -219,14 +219,16 @@ pub struct OutboxClaimBatch<C> {
     progress: OutboxScanProgress,
 }
 
-/// Scheduling hint from one bounded scan; neither state proves future queue emptiness.
+/// Scheduling hint from one bounded scan; no state proves future queue emptiness.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OutboxScanProgress {
     /// This scan completed. An empty batch permits the host's normal idle wait.
     #[default]
     Complete,
-    /// The scan stopped at its work bound. Continue with bounded pacing, even if empty.
-    More,
+    /// Capacity was filled or the provider advanced its shared scan position.
+    Continue,
+    /// Contention or a fruitless sweep warrants a short delay before retrying.
+    RetryLater,
 }
 
 /// A provider returned more durable claims than the caller admitted.
@@ -288,7 +290,7 @@ impl<C> OutboxClaimBatch<C> {
         self.claims.is_empty()
     }
 
-    /// Retain this hint before consuming the claims; empty `More` batches require continuation.
+    /// Retain this hint before consuming the claims; empty batches carry their own pacing decision.
     #[must_use]
     pub const fn scan_progress(&self) -> OutboxScanProgress {
         self.progress
@@ -345,8 +347,7 @@ pub trait OutboxRelayStore<P>: Send + Sync {
 
     /// Claim only the unresolved head of each `(tenant, domain, partition key)` sequence. An
     /// unresolved dead-letter head is not eligible and must continue blocking its successor.
-    /// Atomically lease at most `limit` records. An empty `More` batch exhausted a scan budget;
-    /// callers must continue with bounded pacing instead of inferring that the queue is idle.
+    /// Atomically lease at most `limit` records. Consult the returned scan action even when empty.
     fn claim_partition_heads(
         &self,
         binding: crate::fence::ExecutionBinding,
