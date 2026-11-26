@@ -125,15 +125,23 @@ async fn blocked_sample(
     let mut times = Vec::new();
     let mut positions = Vec::new();
     let mut previous = None;
+    let mut last_time = None;
     for (pos, sample) in batch.samples().iter().enumerate() {
         let input = sample.input();
         if existing.contains_key(input.id.as_str()) {
             continue;
         }
-        if previous != Some(&input.series) {
+        if previous == Some(&input.series) {
+            // Equal selector and time imply the same witness. The earliest new
+            // input already represents this position, even across identity replays.
+            if last_time == Some(input.observed_at) {
+                continue;
+            }
+        } else {
             series.push(serde_json::to_string(&input.series).map_err(|_| Error::Invariant)?);
             previous = Some(&input.series);
         }
+        last_time = Some(input.observed_at);
         serials.push(i32::try_from(series.len()).map_err(|_| Error::Invariant)?);
         positions.push(i32::try_from(pos).map_err(|_| Error::Invariant)?);
         times.push(input.observed_at.micros());

@@ -377,6 +377,29 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn only_query_local_memory_and_parser_length_can_shrink() {
+        let classified =
+            |message: &str| read_error(clickhouse::error::Error::BadResponse(message.into()));
+        assert_eq!(
+            classified("Code: 241. DB::Exception: Query memory limit exceeded: would use 100 MiB"),
+            ReadFailure::Capacity
+        );
+        assert_eq!(
+            classified("Code: 241. DB::Exception: User memory limit exceeded: would use 100 MiB"),
+            ReadFailure::Other(Error::BudgetExceeded)
+        );
+        assert_eq!(
+            classified(
+                "Code: 62. DB::Exception: Max query size exceeded (can be increased with the `max_query_size` setting): Syntax error"
+            ),
+            ReadFailure::QueryLength
+        );
+        assert_eq!(
+            classified("Code: 62. DB::Exception: Syntax error"),
+            ReadFailure::Other(Error::Unavailable)
+        );
+    }
+    #[test]
     fn reads_classify_budgets_and_time_without_exposing_provider_text() {
         for (code, expected) in [
             (158, Error::BudgetExceeded),

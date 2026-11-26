@@ -131,7 +131,7 @@ async fn fixed_admission() -> anyhow::Result<()> {
     }
     frontiers(&f, &d, 1, 64, false).await?;
     let samples = (0..Batch::MAX_SAMPLES)
-        .map(|n| sample(&d, &format!("capacity-{n}"), 1000, 1))
+        .map(|n| sample(&d, &format!("capacity-{n}"), 1000 + n as i64, 1))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let b = batch("capacity", samples)?;
     let mut caps = limits()?;
@@ -170,7 +170,7 @@ async fn fixed_admission() -> anyhow::Result<()> {
         .bind(serde_json::to_string(b.stream())?)
         .bind(vec![serde_json::to_string(&b.samples()[0].input().series)?])
         .bind(vec![1i32; count])
-        .bind(vec![1000i64; count])
+        .bind((1000..1000 + i64::try_from(count)?).collect::<Vec<_>>())
         .bind((0..i32::try_from(count)?).collect::<Vec<_>>())
         .fetch_all(&mut *tx)
         .await?;
@@ -339,26 +339,7 @@ async fn invalidation_load(noise: usize) -> anyhow::Result<()> {
         .await?;
     }
     f.maintain("plan-clean", cache.clone()).await?;
-    let mut tx = f.pool.begin().await?;
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-        .bind(TENANT)
-        .execute(&mut *tx)
-        .await?;
-    let plan = concat!(
-        "EXPLAIN (ANALYZE, BUFFERS) ",
-        include_str!("../../../../crates/timeseries-clickhouse/src/invalidation_targets.sql")
-    );
-    let lines: Vec<String> = sqlx::query_scalar(plan)
-        .bind(TENANT)
-        .bind("metrics")
-        .bind(0i64)
-        .bind(101i64)
-        .bind(serde_json::to_string(&spec.selection())?)
-        .bind(10i64)
-        .fetch_all(&mut *tx)
-        .await?;
-    println!("maint-plan noise={noise} {}", lines.join("\n"));
-    tx.rollback().await?;
+    explain_maintenance(&f, &spec, noise).await?;
     for hits in [0, 1, 8] {
         let tag = format!("{noise}-{hits}");
         f.maintain(&format!("clean-{tag}"), cache.clone()).await?;
@@ -394,5 +375,29 @@ async fn invalidation_load(noise: usize) -> anyhow::Result<()> {
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn explain_maintenance(f: &Fixture, spec: &SummarySpec, noise: usize) -> anyhow::Result<()> {
+    let mut tx = f.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(TENANT)
+        .execute(&mut *tx)
+        .await?;
+    let plan = concat!(
+        "EXPLAIN (ANALYZE, BUFFERS) ",
+        include_str!("../../../../crates/timeseries-clickhouse/src/invalidation_targets.sql")
+    );
+    let lines: Vec<String> = sqlx::query_scalar(plan)
+        .bind(TENANT)
+        .bind("metrics")
+        .bind(0i64)
+        .bind(101i64)
+        .bind(serde_json::to_string(&spec.selection())?)
+        .bind(10i64)
+        .fetch_all(&mut *tx)
+        .await?;
+    println!("maint-plan noise={noise} {}", lines.join("\n"));
+    tx.rollback().await?;
     Ok(())
 }

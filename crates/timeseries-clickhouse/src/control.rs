@@ -87,17 +87,11 @@ pub(crate) struct Fence {
     pub until: Option<i64>,
     pub restored: bool,
 }
-pub(crate) async fn fence_count(
-    c: &mut PgConnection,
-    scope: &Scope,
-    max: u32,
-) -> Result<i64, Error> {
-    let count:i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT 1 FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 LIMIT $3) bounded")
-        .bind(scope.tenant().to_string()).bind(scope.namespace().as_str()).bind(i64::from(max)+1).fetch_one(&mut *c).await.map_err(sql_error)?;
+pub(crate) fn has_fences(count: i64, max: u32) -> Result<bool, Error> {
     if count > i64::from(max) {
         return Err(Error::BudgetExceeded);
     }
-    Ok(count)
+    Ok(count > 0)
 }
 pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<Vec<Fence>, Error> {
     let rows=sqlx::query("SELECT id,kind,selection::text,lo,hi,restore_until,restored FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 ORDER BY lo,id LIMIT $3")
@@ -199,7 +193,14 @@ pub(crate) async fn put_fence(
     sqlx::query("INSERT INTO rss_ts_ch.fences(tenant_id,namespace,id,kind,selection,lo,hi,restore_until) VALUES($1::text::uuid,$2,$3,$4,$5::text::jsonb,$6,$7,$8)")
         .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(r.id().as_str()).bind(kind).bind(String::from_utf8(bytes(selection)?).map_err(|_|Error::Invariant)?).bind(window.start().micros()).bind(window.end().micros()).bind(until).execute(&mut *c).await.map_err(sql_error)?;
     // Reject new distinct frontiers atomically, before poisoning future reads.
-    fence_count(c, r.scope(), max).await?;
+    let count = sqlx::query_scalar(include_str!("fence_count.sql"))
+        .bind(r.scope().tenant().to_string())
+        .bind(r.scope().namespace().as_str())
+        .bind(i64::from(max) + 1)
+        .fetch_one(&mut *c)
+        .await
+        .map_err(sql_error)?;
+    has_fences(count, max)?;
     if kind == "pruned" {
         fence_changed(c, r.scope()).await?;
     }

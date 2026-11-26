@@ -60,6 +60,8 @@ impl<C: Clock> Operation<'_, C> {
         );
         let mut cursor = self
             .ch_query(self.reader.query_raw(&sql), deadline)?
+            // Keep the provider status available when a result limit trips after the first block.
+            .with_setting("wait_end_of_query", "1")
             .fetch::<Stored>()
             .map_err(crate::projection::read_error)?;
         let mut objects = HashMap::new();

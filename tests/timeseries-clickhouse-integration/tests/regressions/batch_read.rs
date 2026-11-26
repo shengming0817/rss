@@ -290,6 +290,24 @@ async fn required_failures(
     proxy.fail_reads(None).await;
     Ok(())
 }
+async fn optional_failure(
+    proxy: &transport::Proxy,
+    store: &OwnedStore,
+    query: &Authorized<AggregateQuery>,
+    expected: &serde_json::Value,
+    width: u64,
+) -> anyhow::Result<()> {
+    proxy
+        .fail_reads(Some(("service unavailable", Some(width))))
+        .await;
+    let result = store.aggregate(query, None, deadline()?).await;
+    let failures = proxy.slow_reads();
+    proxy.fail_reads(None).await;
+    assert_eq!(failures, 1);
+    assert_eq!(&serde_json::to_value(result?.buckets)?, expected);
+    Ok(())
+}
+
 async fn sparse_state_reads(
     f: &Fixture,
     proxy: &transport::Proxy,
@@ -328,13 +346,7 @@ async fn sparse_state_reads(
             "twelve sparse minute buckets should batch: {requests}"
         );
         assert_eq!(serde_json::to_value(page.buckets)?, expected);
-        proxy
-            .fail_reads(Some(("service unavailable", Some(MINUTE as u64))))
-            .await;
-        let recovered = store.aggregate(&all, None, deadline()?).await?;
-        assert_eq!(proxy.slow_reads(), 1, "{label} optional failure");
-        assert_eq!(serde_json::to_value(recovered.buckets)?, expected);
-        proxy.fail_reads(None).await;
+        optional_failure(proxy, store, &all, &expected, MINUTE as u64).await?;
         proxy.delay_wide_reads(MINUTE as u64);
         let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
         let recovered = store.aggregate(&all, None, cutoff).await;
