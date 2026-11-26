@@ -1,6 +1,6 @@
 mod objects;
+mod raw;
 
-use std::collections::VecDeque;
 use crate::{
     Operation,
     control::{self, Fence},
@@ -13,6 +13,7 @@ use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
+use std::collections::VecDeque;
 #[derive(Clone)]
 struct SummaryRef {
     spec_digest: Vec<u8>,
@@ -124,6 +125,35 @@ pub(crate) fn mask_end(
         Timestamp::new(window.end().micros() - 1)?,
     )
 }
+fn seeded_builder(
+    spec: &SummarySpec,
+    window: Interval,
+    fences: &[Fence],
+    prior: Option<&Sample>,
+    limit: usize,
+) -> Result<(SummaryBuilder, i64), Error> {
+    let earliest = dependency_start(spec, window.start());
+    let prior = prior.filter(|p| p.input().observed_at.micros() >= earliest);
+    let dependency_start = prior.map_or(earliest, |p| p.input().observed_at.micros());
+    if needs_prior(spec)
+        && fences.iter().any(|f| {
+            f.kind == "pruned"
+                && control::overlaps(&f.selection, &spec.selection())
+                && f.window.start() < window.start()
+                && f.window.end().micros() > dependency_start
+                && prior
+                    .as_ref()
+                    .is_none_or(|p| p.input().observed_at < f.window.end())
+        })
+    {
+        return Err(Error::HistoryExpired);
+    }
+    let mut builder = SummaryBuilder::new(spec.clone(), window)?;
+    if let Some(prior) = prior {
+        builder.push(prior.clone(), limit)?;
+    }
+    Ok((builder, dependency_start))
+}
 impl<C: Clock> Operation<'_, C> {
     pub(crate) async fn predecessor(
         &self,
@@ -164,83 +194,15 @@ impl<C: Clock> Operation<'_, C> {
         let prior = self
             .predecessor(spec, window.start(), boundary, fences, deadline)
             .await?;
-        let dependency_start = prior
-            .as_ref()
-            .map_or(dependency_start(spec, window.start()), |p| {
-                p.sample.input().observed_at.micros()
-            });
-        if needs_prior(spec)
-            && fences.iter().any(|f| {
-                f.kind == "pruned"
-                    && control::overlaps(&f.selection, &spec.selection())
-                    && f.window.start() < window.start()
-                    && f.window.end().micros() > dependency_start
-                    && prior
-                        .as_ref()
-                        .is_none_or(|p| p.sample.input().observed_at < f.window.end())
-            })
-        {
-            return Err(Error::HistoryExpired);
-        }
-        let mut builder = SummaryBuilder::new(spec.clone(), window)?;
-        let max_input_revision = prior.as_ref().map_or(0, |row| row.revision);
-        if let Some(prior) = prior {
-            builder.push(prior.sample, self.limits.max_points.get() as usize)?;
-        }
-        Ok((builder, max_input_revision, dependency_start))
-    }
-    async fn raw_summary(
-        &self,
-        spec: &SummarySpec,
-        window: Interval,
-        boundary: i64,
-        fences: &[Fence],
-        deadline: Deadline,
-        dependency: &mut i64,
-    ) -> Result<Summary, Error> {
-        if fences.iter().any(|f| {
-            f.kind == "pruned"
-                && control::overlaps(&f.selection, &spec.selection())
-                && f.window.start() < window.end()
-                && f.window.end() > window.start()
-        }) {
-            return Err(Error::HistoryExpired);
-        }
-        let (mut builder, _, start) = self
-            .builder(spec, window, boundary, fences, deadline)
-            .await?;
-        *dependency = start;
-        let condition = format!(
-            "{} AND revision<={boundary} AND observed_at>={} AND observed_at<{}{}",
-            selection(&spec.selection())?,
-            window.start().micros(),
-            window.end().micros(),
-            visible(fences)?
-        );
-        let rows = self
-            .raw_rows(
-                &condition,
-                "observed_at,sequence,sample_id",
-                self.limits.max_points.get(),
-                deadline,
-            )
-            .await?;
-        if rows.len() > self.limits.max_points.get() as usize {
-            return Err(Error::BudgetExceeded);
-        }
-        for row in rows {
-            let sample = row.sample;
-            mask(
-                &mut builder,
-                fences,
-                spec,
-                window,
-                sample.input().observed_at,
-            )?;
-            builder.push(sample, self.limits.max_points.get() as usize)?;
-        }
-        mask_end(&mut builder, fences, spec, window)?;
-        builder.finish(self.limits.max_points.get() as usize)
+        let revision = prior.as_ref().map_or(0, |r| r.revision);
+        let (builder, start) = seeded_builder(
+            spec,
+            window,
+            fences,
+            prior.as_ref().map(|r| &r.sample),
+            self.limits.max_points.get() as usize,
+        )?;
+        Ok((builder, revision, start))
     }
     async fn references(
         &self,
@@ -345,13 +307,19 @@ fn coverage(refs: &[SummaryRef], window: Interval) -> Result<Option<Vec<&Summary
     Ok(Some(chain))
 }
 // Plan only buckets with candidate metadata; long empty runs cost no extra storage.
-fn covered<'a>(q: &AggregateQuery, start: Timestamp, mut rows: &'a [SummaryRef])
-    -> Result<VecDeque<(Interval, Vec<&'a SummaryRef>)>, Error> {
+fn covered<'a>(
+    q: &AggregateQuery,
+    start: Timestamp,
+    mut rows: &'a [SummaryRef],
+) -> Result<VecDeque<(Interval, Vec<&'a SummaryRef>)>, Error> {
     let mut hits = VecDeque::new();
     while let Some(first) = rows.first() {
         let bucket = q.spec().bucket(Timestamp::new(first.lo)?)?;
         let count = rows.partition_point(|r| r.lo >= bucket.start().micros());
-        let window = Interval::new(bucket.start().max(start), bucket.end().min(q.query().window().end()))?;
+        let window = Interval::new(
+            bucket.start().max(start),
+            bucket.end().min(q.query().window().end()),
+        )?;
         if let Some(path) = coverage(&rows[..count], window)? {
             hits.push_front((window, path));
         }
@@ -516,33 +484,58 @@ impl Request for AggregateQuery {
         let mut continuous = true;
         let published = view.published;
         let mut hits = covered(q, at, &refs.rows)?;
-        let planned: Vec<_> = hits.iter().flat_map(|(_, path)| path.iter().copied()).collect();
+        let planned: Vec<_> = hits
+            .iter()
+            .flat_map(|(_, path)| path.iter().copied())
+            .collect();
         let mut objects = objects::Reader::new(&planned);
+        let mut raw = None;
         while view.exists
             && at.micros() < refs.end
             && used < (q.query().budget().max_points.get() as usize)
         {
+            deadline
+                .remaining(store.clock.now())
+                .ok_or(Error::Deadline)?;
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
             let is_cached = hits.front().is_some_and(|(w, _)| *w == window);
             let value = if is_cached {
+                raw = None;
                 let (_, path) = hits.pop_front().ok_or(Error::Invariant)?;
                 if at == q.query().window().start() {
-                    refs.dependency_start = path.iter().map(|r| r.dependency_start).min().ok_or(Error::Invariant)?;
+                    refs.dependency_start = path
+                        .iter()
+                        .map(|r| r.dependency_start)
+                        .min()
+                        .ok_or(Error::Invariant)?;
                 }
-                objects.merge(store, q.spec().stream().scope(), &path, &mut refs.attempted, deadline).await?
+                objects
+                    .merge(
+                        store,
+                        q.spec().stream().scope(),
+                        &path,
+                        &mut refs.attempted,
+                        deadline,
+                    )
+                    .await?
             } else {
-                    let mut start = refs.dependency_start;
-                    let result = store
-                        .raw_summary(q.spec(), window, published, &fences, deadline, &mut start)
-                        .await;
-                    if at == q.query().window().start() {
-                        refs.dependency_start = start;
-                    }
-                    if matches!(result, Err(Error::BudgetExceeded)) {
-                        refs.raw_budget = Some(window);
-                    }
-                    result?
+                let mut start = refs.dependency_start;
+                let run_end = hits
+                    .front()
+                    .map_or(Timestamp::new(refs.end)?, |(w, _)| w.start());
+                let run = raw.get_or_insert_with(|| {
+                    raw::Run::new(q.spec(), &fences, published, deadline, at, run_end)
+                });
+                let remaining = q.query().budget().max_points.get() as usize - used;
+                let result = run.summary(store, window, remaining, &mut start).await;
+                if at == q.query().window().start() {
+                    refs.dependency_start = start;
+                }
+                if matches!(result, Err(Error::BudgetExceeded)) {
+                    refs.raw_budget = Some(window);
+                }
+                result?
             };
             let bucket = value.project(q.operation())?;
             if used + cost(&bucket) > q.query().budget().max_points.get() as usize {

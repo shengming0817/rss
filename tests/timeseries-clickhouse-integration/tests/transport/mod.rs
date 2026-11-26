@@ -1,5 +1,6 @@
 //! Capture/replay real production INSERT requests; discard real server responses.
 //! Both proxy legs verify TLS. No synthetic database success/error is injected.
+mod metered;
 use super::*;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -7,7 +8,7 @@ use hyper::{Request, Response, body::Incoming};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 use tokio::{net::TcpListener, sync::Mutex};
 type Http = hyper_util::client::legacy::Client<
@@ -21,6 +22,8 @@ struct Captured {
     body: Bytes,
 }
 struct State {
+    wire_bytes: Arc<AtomicU64>,
+    page_reads: Mutex<Vec<(String, bool)>>,
     mode: AtomicU8,
     dropped: AtomicUsize,
     saved: Mutex<Option<Captured>>,
@@ -73,6 +76,8 @@ impl Proxy {
             hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
                 .build(connector);
         let state = Arc::new(State {
+            wire_bytes: Arc::default(),
+            page_reads: Mutex::default(),
             mode: AtomicU8::new(0),
             dropped: AtomicUsize::new(0),
             saved: Mutex::new(None),
@@ -93,7 +98,7 @@ impl Proxy {
                 tokio::select! {
                     accepted=listener.accept()=>{let Ok((tcp,_))=accepted else {break;};let acceptor=acceptor.clone();let state=shared.clone();connections.spawn(async move {
                         let tls=acceptor.accept(tcp).await?;let connection=state.connections.fetch_add(1,Ordering::SeqCst);
-                        hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls),hyper::service::service_fn(move |request|serve(state.clone(),connection,request))).await?;
+                        hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(metered::Metered(tls, state.wire_bytes.clone())),hyper::service::service_fn(move |request|serve(state.clone(),connection,request))).await?;
                         Ok::<_,anyhow::Error>(())
                     });}
                     Some(_)=connections.join_next(),if !connections.is_empty()=>{}
@@ -106,6 +111,12 @@ impl Proxy {
             state,
             task,
         })
+    }
+    pub fn wire_bytes(&self) -> u64 {
+        self.state.wire_bytes.load(Ordering::Relaxed)
+    }
+    pub async fn take_page_reads(&self) -> Vec<(String, bool)> {
+        std::mem::take(&mut *self.state.page_reads.lock().await)
     }
     pub fn arm(&self, mode: u8) {
         self.state.mode.store(mode, Ordering::SeqCst);
@@ -270,6 +281,18 @@ async fn serve(
     let response = forward(&state, captured)
         .await
         .map_err(|_| std::io::Error::other("upstream transport"))?;
+    if reads_page
+        && let Some(id) = response
+            .headers()
+            .get("x-clickhouse-query-id")
+            .and_then(|v| v.to_str().ok())
+    {
+        state
+            .page_reads
+            .lock()
+            .await
+            .push((id.to_owned(), reads_summary));
+    }
     if mode == 1 && response.status().is_success() {
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("discarded real response"));

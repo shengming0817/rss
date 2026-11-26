@@ -1,3 +1,4 @@
+mod batch_read;
 mod pages;
 mod revision;
 mod snapshots;

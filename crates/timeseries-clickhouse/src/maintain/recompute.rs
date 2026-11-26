@@ -197,7 +197,8 @@ async fn publish<C: Clock>(
         .await?;
     let summary = store
         .summary_objects(r.scope(), &[&p.row.object_id], deadline)
-        .await?.value(&p.row.object_id, p.row.lo, p.row.hi, p.row.payload.len())?;
+        .await?
+        .value(&p.row.object_id, p.row.lo, p.row.hi, p.row.payload.len())?;
     if bytes(&summary)? != p.row.payload.as_bytes() {
         return Err(Error::Invariant);
     }
