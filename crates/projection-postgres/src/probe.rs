@@ -87,7 +87,9 @@ SELECT
             ('rss_projection.initialize(uuid,text,text,text,bigint,boolean,bigint,text[],bytea[],bytea)'),
             ('rss_projection.takeover(uuid,text,text,text,uuid,bytea)'),
             ('rss_projection.lock_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea)'),
-            ('rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea)')
+            ('rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea)'),
+            ('rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea)'),
+            ('rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea)')
         ), expected AS (
             SELECT to_regprocedure(signature) AS oid FROM required
         )
@@ -95,10 +97,10 @@ SELECT
         UNION ALL
         SELECT FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid
         WHERE n.nspname='rss_projection'
-          AND p.proname IN ('initialize','takeover','lock_event','finish_event')
+          AND p.proname IN ('initialize','takeover','lock_event','finish_event','lock_batch','finish_batch')
           AND NOT EXISTS (SELECT FROM expected WHERE expected.oid=p.oid)
     )
-    AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:4'
+    AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:5'
          FROM pg_namespace WHERE nspname='rss_projection')
 "#).fetch_one(connection).await.map_err(|e| sql_error(e, rss_projection::Phase::Admission))?;
     if safe == Some(true) {

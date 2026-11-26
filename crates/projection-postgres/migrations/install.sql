@@ -175,7 +175,84 @@ BEGIN
     INSERT INTO rss_projection.receipts(tenant_id,source_id,projection_id,generation,event_id,fingerprint) VALUES(t,s,p,g,e,digest) ON CONFLICT DO NOTHING;
     UPDATE rss_projection.checkpoints SET position=at_position WHERE tenant_id=t AND source_id=s AND projection_id=p AND generation=g;
 END $$;
+-- The two runtime entry points share one validation path. This invoker helper
+-- has no authority of its own to update or lock component rows.
+CREATE FUNCTION rss_projection.process_batch(t uuid, s text, p text, g text, worker_epoch bigint,
+    token uuid, expected bigint, positions bigint[], ids text[], digests bytea[], definition bytea,
+    settle boolean) RETURNS boolean[]
+LANGUAGE plpgsql SET search_path = pg_catalog, rss_projection AS $$
+DECLARE n integer := cardinality(positions); c rss_projection.checkpoints;
+        duplicates boolean[]; invalid_fact boolean;
+BEGIN
+    PERFORM rss_projection.assert_tenant(t);
+    IF n IS NULL OR n NOT BETWEEN 1 AND 1024
+       OR cardinality(ids) IS DISTINCT FROM n OR cardinality(digests) IS DISTINCT FROM n
+       OR array_ndims(positions) <> 1 OR array_ndims(ids) <> 1 OR array_ndims(digests) <> 1
+       OR array_lower(positions,1) <> 1 OR array_lower(ids,1) <> 1 OR array_lower(digests,1) <> 1 THEN
+        RAISE EXCEPTION 'invalid projection batch' USING ERRCODE='23514';
+    END IF;
+    IF EXISTS (SELECT FROM unnest(positions) WITH ORDINALITY AS e(pos,i)
+               WHERE pos IS NULL OR pos < 0 OR pos <= expected OR pos <= positions[i::int-1]) THEN
+        RAISE EXCEPTION 'projection out of order' USING ERRCODE='P1004';
+    END IF;
+    IF settle THEN
+        -- Standalone settlement acquires authority by CAS. Later validation
+        -- errors roll back this update along with any staged effects.
+        UPDATE rss_projection.checkpoints SET position=positions[n]
+          WHERE tenant_id=t AND source_id=s AND projection_id=p AND generation=g
+            AND epoch=worker_epoch AND worker_token=token AND position IS NOT DISTINCT FROM expected
+          RETURNING * INTO c;
+    ELSE
+        SELECT * INTO c FROM rss_projection.checkpoints
+          WHERE tenant_id=t AND source_id=s AND projection_id=p AND generation=g
+            AND epoch=worker_epoch AND worker_token=token AND position IS NOT DISTINCT FROM expected
+          FOR UPDATE;
+    END IF;
+    IF NOT FOUND THEN RAISE EXCEPTION 'projection worker fenced' USING ERRCODE='P1002'; END IF;
+    IF c.definition_identity IS DISTINCT FROM definition THEN
+        RAISE EXCEPTION 'projection definition conflict' USING ERRCODE='P1003';
+    END IF;
+    IF c.replay AND (c.end_position IS NULL OR positions[n] > c.end_position) THEN
+        RAISE EXCEPTION 'projection out of order' USING ERRCODE='P1004';
+    END IF;
+
+    -- Start this statement after acquiring the checkpoint, so a waiter can
+    -- see receipts published by the transaction it waited for.
+    WITH input AS MATERIALIZED (
+        SELECT * FROM unnest(ids,digests) WITH ORDINALITY AS e(id,digest,i)
+    ), firsts AS (
+        SELECT DISTINCT ON (id) * FROM input ORDER BY id,i
+    ), known AS MATERIALIZED (
+        SELECT f.*, r.fingerprint FROM firsts f LEFT JOIN LATERAL (
+            SELECT fingerprint FROM rss_projection.receipts
+              WHERE tenant_id=t AND source_id=s AND projection_id=p AND generation=g AND event_id=f.id
+              LIMIT 1
+        ) r ON true
+    )
+    SELECT bool_or(e.id IS NULL OR (e.id COLLATE "C") !~ '^[A-Za-z0-9_.:-]{1,128}$'
+                   OR octet_length(e.digest) IS DISTINCT FROM 32
+                   OR k.digest IS DISTINCT FROM e.digest
+                   OR (k.fingerprint IS NOT NULL AND k.fingerprint IS DISTINCT FROM e.digest)),
+           array_agg(k.fingerprint IS NOT NULL OR k.i <> e.i ORDER BY e.i)
+      INTO invalid_fact, duplicates FROM input e LEFT JOIN known k ON k.id=e.id;
+    IF invalid_fact THEN RAISE EXCEPTION 'projection fact conflict' USING ERRCODE='P1003'; END IF;
+    IF settle THEN
+        INSERT INTO rss_projection.receipts(tenant_id,source_id,projection_id,generation,event_id,fingerprint)
+            SELECT t,s,p,g,id,digest FROM unnest(ids,digests,duplicates) AS e(id,digest,seen)
+            WHERE NOT seen;
+    END IF;
+    RETURN duplicates;
+END $$;
+
+CREATE FUNCTION rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea)
+RETURNS boolean[] LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, rss_projection AS $$
+    SELECT rss_projection.process_batch($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false)
+$$;
+CREATE FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea)
+RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, rss_projection AS $$
+    SELECT rss_projection.process_batch($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
+$$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_projection FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_projection FROM PUBLIC;
-COMMENT ON SCHEMA rss_projection IS 'rss-projection-postgres:4';
+COMMENT ON SCHEMA rss_projection IS 'rss-projection-postgres:5';
 COMMIT;

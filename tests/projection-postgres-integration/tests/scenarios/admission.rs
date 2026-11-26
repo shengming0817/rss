@@ -252,6 +252,14 @@ async fn required_function_permissions(
             "REVOKE EXECUTE ON FUNCTION rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea) FROM projection_runtime",
             "GRANT EXECUTE ON FUNCTION rss_projection.finish_event(uuid,text,text,text,bigint,uuid,bigint,bigint,text,bytea,bytea) TO projection_runtime",
         ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) FROM projection_runtime",
+            "GRANT EXECUTE ON FUNCTION rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) TO projection_runtime",
+        ),
+        (
+            "REVOKE EXECUTE ON FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) FROM projection_runtime",
+            "GRANT EXECUTE ON FUNCTION rss_projection.finish_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea) TO projection_runtime",
+        ),
     ] {
         sqlx::raw_sql(revoke).execute(owner).await?;
         let adoption = PgStore::new(pool.clone(), control).await;
