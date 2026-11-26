@@ -1,4 +1,5 @@
 SELECT EXISTS(SELECT FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint)')
+ AND pg_get_function_result(p.oid)='TABLE(scanned integer, reclaimed integer, verified_bytes bigint, released_bytes bigint, next_seq bigint, stop_reason text, required_bytes bigint)'
  AND p.prosrc=$1 AND p.prosecdef AND p.provolatile='v' AND p.proowner='rss_tmsg_relay'::regrole
  AND p.proconfig=ARRAY['search_path=pg_catalog, rss_transactional_messaging, pg_temp']
  AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')

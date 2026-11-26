@@ -130,11 +130,19 @@ pub(super) async fn byte_budget(
         sqlx::query_scalar("SELECT coalesce(max(seq),0) FROM rss_transactional_messaging.outbox")
             .fetch_one(owner)
             .await?;
-    for (n, len) in [8, 65536, 32, 16].into_iter().enumerate() {
+    for (n, len) in [8usize, 65536, 32, 16].into_iter().enumerate() {
+        let payload: Vec<u8> = (0..len.div_ceil(32))
+            .flat_map(|block| {
+                ring::digest::digest(&ring::digest::SHA256, &block.to_be_bytes())
+                    .as_ref()
+                    .to_vec()
+            })
+            .take(len)
+            .collect();
         let body = MessageEnvelope::new(
             MessageId::parse(&format!("byte-page-{n}"))?,
             metadata(),
-            vec![n as u8; len],
+            payload,
         );
         sqlx::query("SELECT rss_transactional_messaging.append_outbox($1,$2)")
             .bind(body.canonical_bytes())
@@ -144,6 +152,16 @@ pub(super) async fn byte_budget(
     }
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',automatic_retry_deadline=timestamptz 'epoch' WHERE message_id LIKE 'byte-page-%'").execute(owner).await?;
     let coords:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'byte-page-%' ORDER BY seq").fetch_all(owner).await?;
+    let stored: i32 = sqlx::query_scalar(
+        "SELECT pg_column_size(payload) FROM rss_transactional_messaging.outbox WHERE seq=$1",
+    )
+    .bind(coords[1])
+    .fetch_one(owner)
+    .await?;
+    assert!(
+        stored > 32 * 1024,
+        "oversized body requires external TOAST storage"
+    );
     let page = async |cursor, limit, budget| -> anyhow::Result<PublishedBodyPage> {
         committed(
             maintenance

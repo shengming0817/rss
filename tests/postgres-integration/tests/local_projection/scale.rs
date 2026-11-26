@@ -114,7 +114,7 @@ async fn profile_populations(f: &Fixture) -> anyhow::Result<()> {
 
 // A fixed read-only query runs with the exact login scope and effective relay role of claim.
 // No generic SQL execution or broader table grants are exposed to the consumer fixture.
-async fn install_explain(f: &Fixture) -> anyhow::Result<()> {
+pub(super) async fn install_explain(f: &Fixture) -> anyhow::Result<()> {
     let body: String = sqlx::query_scalar("SELECT prosrc FROM pg_proc WHERE oid='rss_transactional_messaging.outbox_claim_window(uuid,text,timestamptz,bigint,integer,timestamptz,integer)'::regprocedure").fetch_one(&f.owner).await?;
     let query = format!(
         "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
@@ -147,7 +147,7 @@ fn examined(plan: &serde_json::Value) -> f64 {
         .as_array()
         .map_or(0.0, |children| children.iter().map(examined).sum::<f64>())
 }
-async fn explain(f: &Fixture, label: &str) -> anyhow::Result<f64> {
+pub(super) async fn explain(f: &Fixture, label: &str) -> anyhow::Result<f64> {
     sqlx::query("ANALYZE rss_transactional_messaging.outbox")
         .execute(&f.owner)
         .await?;

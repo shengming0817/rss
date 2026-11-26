@@ -98,7 +98,7 @@ pub struct RelayReport {
 }
 
 impl RelayReport {
-    /// Continue scanning with bounded pacing when the provider exhausted its scan budget.
+    /// Whether to continue a bounded slice, retry after a short delay, or enter the idle wait.
     #[must_use]
     pub const fn scan_progress(self) -> OutboxScanProgress {
         self.scan_progress

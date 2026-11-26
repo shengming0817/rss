@@ -586,7 +586,8 @@ and DR barriers remain authoritative.
 An empty `Continue` batch indicates committed forward progress. The default worker runs up to
 eight of these scans before a 100ms pause. An empty `RetryLater` requests a short pause after
 contention or a fruitless sweep. `Complete` permits the normal idle interval. Caller-driven relay
-and local Projection expose this action before the batch is consumed. `next_wakeup` is a time hint.
+and local Projection expose this action before the batch is consumed. A Projection batch
+reports an exact remaining stream size so the host can immediately release surplus reservations. `next_wakeup` is a time hint.
 
 `PgPublishedBodyMaintenance` owns a separate private pool. The host explicitly authorizes
 the tenant and retention policy, chooses the original-deadline cutoff and schedules sweeps.

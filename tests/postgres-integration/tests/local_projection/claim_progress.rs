@@ -164,6 +164,8 @@ pub(super) async fn run(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(cursors, 0);
     idle_worker(store.clone()).await?;
     lease_prefix(f, 128, 10_000).await?;
+    scale::install_explain(f).await?;
+    scale::explain(f, "10,000 live leases in the current generation").await?;
     let original = snapshot(f).await?;
     append(f, "eligible-tail", 0, 1).await?;
     tail(&store, &[(1, 1)], 1).await?;

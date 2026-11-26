@@ -151,6 +151,7 @@ async fn concurrent_heads(f: &Fixture) -> anyhow::Result<()> {
                     Duration::from_secs(5),
                 )
                 .await?;
+            assert_eq!(futures::Stream::size_hint(&stream), (2, Some(2)));
             futures::pin_mut!(stream);
             while let Some(item) = stream.next().await {
                 completed
@@ -377,24 +378,64 @@ async fn independent_deadline(f: &Fixture) -> anyhow::Result<()> {
             fail: false,
         })
         .await?;
+    let slots = Arc::new(Semaphore::new(2));
+    let mut reserved = vec![
+        slots.clone().try_acquire_owned()?,
+        slots.clone().try_acquire_owned()?,
+    ];
     let task = tokio::spawn(async move {
-        collect_batch(projection.project_batch(
-            crate::execution(crate::fixture_tenant(), 1),
-            &Validator,
-            NonZeroUsize::MIN,
-            OperationDeadline::from_remaining(Duration::from_secs(1)),
-            Duration::from_secs(5),
-        ))
-        .await
+        use futures::{Stream, StreamExt};
+        let mut batch = projection
+            .project_batch(
+                crate::execution(tenant(), 1),
+                &Validator,
+                NonZeroUsize::try_from(reserved.len())?,
+                OperationDeadline::from_remaining(Duration::from_secs(1)),
+                Duration::from_secs(5),
+            )
+            .await?;
+        assert_eq!(batch.size_hint(), (1, Some(1)));
+        reserved.truncate(batch.size_hint().0);
+        let item = batch
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("missing projected item"))?;
+        assert_eq!(batch.size_hint(), (0, Some(0)));
+        Ok::<_, anyhow::Error>(item)
     });
     tokio::time::timeout(Duration::from_secs(2), gate.entered.notified()).await?;
+    // Another tenant uses the surplus reservation before the first effect can finish.
+    let other = rss_request_context::TenantId::parse("22222222-2222-2222-2222-222222222222")?;
+    let other_permit = slots.clone().try_acquire_owned()?;
+    assert_eq!(slots.available_permits(), 0);
+    let other_projection = f
+        .projection(Effect {
+            gate: None,
+            reject: false,
+            fail: false,
+        })
+        .await?;
+    let empty = other_projection
+        .project_batch(
+            crate::execution(other, 1),
+            &Validator,
+            NonZeroUsize::MIN,
+            deadline(),
+            Duration::from_secs(5),
+        )
+        .await?;
+    assert_eq!(futures::Stream::size_hint(&empty), (0, Some(0)));
+    drop(empty);
+    drop(other_permit);
+    assert_eq!(slots.available_permits(), 1);
     // Expire the claim budget while the independent effect is deliberately paused.
     tokio::time::sleep(Duration::from_millis(1100)).await;
     gate.resume.notify_one();
     assert_eq!(
-        committed_projection(only(task.await??)?)?.disposition(),
+        committed_projection(task.await??)?.disposition(),
         TerminalDisposition::Succeeded
     );
+    assert_eq!(slots.available_permits(), 2);
     Ok(())
 }
 async fn mixed_unknown(f: &Fixture) -> anyhow::Result<()> {
