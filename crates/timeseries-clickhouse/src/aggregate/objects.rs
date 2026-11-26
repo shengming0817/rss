@@ -134,20 +134,21 @@ impl<'a> Reader<'a> {
         &mut self,
         store: &Operation<'_, C>,
         scope: &Scope,
-        through: Timestamp,
+        bounds: Lookahead,
         deadline: Deadline,
     ) -> Result<(), Error> {
+        let mut through = bounds.through;
         loop {
             let (count, ids) = self.group(store.limits, through);
             if ids.is_empty() {
                 return Err(Error::Invariant);
             }
-            let cutoff = batch_deadline(store, deadline, ids.len() > 1)?;
+            let speculative = self.remaining[count - 1].hi > bounds.required.micros();
+            let cutoff = batch_deadline(store, deadline, speculative)?;
             let read = store.summary_objects(scope, &ids, cutoff);
             match store.bounded(cutoff, read).await {
-                Err(Error::BudgetExceeded | Error::Unavailable | Error::Deadline)
-                    if ids.len() > 1 =>
-                {
+                Err(Error::Deadline) if speculative => through = bounds.required,
+                Err(Error::BudgetExceeded | Error::Unavailable) if ids.len() > 1 => {
                     self.max_ids = ids.len().div_ceil(2);
                 }
                 result => {
@@ -163,12 +164,12 @@ impl<'a> Reader<'a> {
         &mut self,
         store: &Operation<'_, C>,
         scope: &Scope,
-        through: Timestamp,
+        bounds: Lookahead,
         deadline: Deadline,
     ) -> Result<Summary, Error> {
         let row = *self.remaining.first().ok_or(Error::Invariant)?;
         if self.group_left == 0 {
-            self.fill(store, scope, through, deadline).await?;
+            self.fill(store, scope, bounds, deadline).await?;
         }
         self.group_left -= 1;
         self.remaining = &self.remaining[1..];
@@ -185,7 +186,7 @@ impl<'a> Reader<'a> {
         store: &Operation<'_, C>,
         scope: &Scope,
         path: &[&SummaryRef],
-        through: Timestamp,
+        bounds: Lookahead,
         attempted: &mut Vec<SummaryRef>,
         deadline: Deadline,
     ) -> Result<Summary, Error> {
@@ -193,7 +194,7 @@ impl<'a> Reader<'a> {
         let mut value: Option<Summary> = None;
         for &r in path {
             attempted.push(r.clone());
-            let summary = self.next(store, scope, through, deadline).await?;
+            let summary = self.next(store, scope, bounds, deadline).await?;
             size = size
                 .checked_add(r.payload_bytes)
                 .ok_or(Error::BudgetExceeded)?;

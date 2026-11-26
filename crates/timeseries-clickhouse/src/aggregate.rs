@@ -327,15 +327,28 @@ fn covered<'a>(
     }
     Ok(hits)
 }
-// State observations at equal microseconds are collapsed. A projected state entry
-// starts at a distinct in-window tick (including a carried segment at the left edge).
-// Include a later bucket only if the page must at least attempt it.
-fn read_through(
+#[derive(Clone, Copy)]
+struct Lookahead {
+    required: Timestamp,
+    through: Timestamp,
+}
+impl Lookahead {
+    fn capped(self, end: Timestamp) -> Self {
+        Self {
+            required: self.required.min(end),
+            through: self.through.min(end),
+        }
+    }
+}
+// Equal-time state observations collapse. Each projected entry starts at a distinct
+// in-window tick. Only work beyond this guaranteed prefix is speculative.
+fn lookahead(
     q: &AggregateQuery,
     window: Interval,
     remaining: usize,
+    observed_cost: usize,
     end: Timestamp,
-) -> Result<Timestamp, Error> {
+) -> Result<Lookahead, Error> {
     let width = q.resolution_micros().get();
     let (first, full) = match q.operation() {
         AggregateOp::Timeline | AggregateOp::Transitions | AggregateOp::Coverage => {
@@ -343,20 +356,30 @@ fn read_through(
         }
         _ => (1, 1),
     };
-    let remaining = remaining as u64;
-    let extra = remaining.saturating_sub(first).div_ceil(full);
-    let span = i64::try_from(extra.saturating_mul(width)).unwrap_or(i64::MAX);
-    Timestamp::new(window.end().micros().saturating_add(span).min(end.micros()))
+    let required = (remaining as u64).saturating_sub(first).div_ceil(full);
+    // Learn from this page before looking past the guaranteed prefix. Limit optional
+    // work independently of the configured number of points in a very large page.
+    let estimated = (remaining - 1)
+        .checked_div(observed_cost)
+        .unwrap_or(0)
+        .min(128) as u64;
+    let bound = |extra: u64| {
+        let span = i64::try_from(extra.saturating_mul(width)).unwrap_or(i64::MAX);
+        Timestamp::new(window.end().micros().saturating_add(span).min(end.micros()))
+    };
+    Ok(Lookahead {
+        required: bound(required)?,
+        through: bound(required.max(estimated))?,
+    })
 }
-
-// Wide reads are optional optimizations. Leave half of the remaining call budget for
-// a narrower request and the PG evidence check, including when the HTTP body stalls.
+// Reserve time for a mandatory-only read and the PG evidence check if speculative
+// work stalls. A batch containing only required inputs uses the original deadline.
 fn batch_deadline<C: Clock>(
     store: &Operation<'_, C>,
     deadline: Deadline,
-    wide: bool,
+    speculative: bool,
 ) -> Result<Deadline, Error> {
-    if !wide {
+    if !speculative {
         return Ok(deadline);
     }
     let now = store.clock.now();
@@ -526,6 +549,7 @@ impl Request for AggregateQuery {
             .collect();
         let mut objects = objects::Reader::new(&planned);
         let mut raw = None;
+        let mut observed_cost = 0;
         while view.exists
             && at.micros() < refs.end
             && used < (q.query().budget().max_points.get() as usize)
@@ -536,7 +560,13 @@ impl Request for AggregateQuery {
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
             let remaining = q.query().budget().max_points.get() as usize - used;
-            let through = read_through(q, window, remaining, Timestamp::new(refs.end)?)?;
+            let bounds = lookahead(
+                q,
+                window,
+                remaining,
+                observed_cost,
+                Timestamp::new(refs.end)?,
+            )?;
             let is_cached = hits.front().is_some_and(|(w, _)| *w == window);
             let value = if is_cached {
                 raw = None;
@@ -553,20 +583,20 @@ impl Request for AggregateQuery {
                         store,
                         q.spec().stream().scope(),
                         &path,
-                        through,
+                        bounds,
                         &mut refs.attempted,
                         deadline,
                     )
                     .await?
             } else {
                 let mut start = refs.dependency_start;
-                let run_end = hits
+                let raw_bounds = hits
                     .front()
-                    .map_or(through, |(w, _)| w.start().min(through));
+                    .map_or(bounds, |(w, _)| bounds.capped(w.start()));
                 let run = raw.get_or_insert_with(|| {
                     raw::Run::new(q.spec(), &fences, published, deadline, at)
                 });
-                let result = run.summary(store, window, run_end, &mut start).await;
+                let result = run.summary(store, window, raw_bounds, &mut start).await;
                 if at == q.query().window().start() {
                     refs.dependency_start = start;
                 }
@@ -576,13 +606,15 @@ impl Request for AggregateQuery {
                 result?
             };
             let bucket = value.project(q.operation())?;
-            if used + cost(&bucket) > q.query().budget().max_points.get() as usize {
+            let points = cost(&bucket);
+            if used + points > q.query().budget().max_points.get() as usize {
                 if buckets.is_empty() {
                     return Err(Error::BudgetExceeded);
                 }
                 break;
             }
-            used += cost(&bucket);
+            used += points;
+            observed_cost = observed_cost.max(points);
             size = size
                 .checked_add(bytes(&bucket)?.len())
                 .ok_or(Error::BudgetExceeded)?;

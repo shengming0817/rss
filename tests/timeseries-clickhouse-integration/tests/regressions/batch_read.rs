@@ -219,15 +219,21 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
         serde_json::to_value(decoded)?,
         oracle(all.request(), &samples)?
     );
-    // Stall the first multi-object request. A smaller group must still finish
-    // this same page before the absolute deadline, without releasing the stalled response.
-    proxy.arm(6);
+    // Both fine objects are required to return this single coarse bucket. Hold
+    // their response past half of the caller's deadline and verify no retry.
+    let one = aggregate(&spec(20)?, window(0, 20)?, 1, AggregateOp::Sum)?;
+    let before = proxy.requests().await.len();
     let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
-    let delayed = store.aggregate(&all, None, cutoff).await;
-    proxy.release();
+    let delayed =
+        pages::during_select_mode(&proxy, 6, store.aggregate(&one, None, cutoff), async {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            Ok(())
+        })
+        .await??;
+    assert_eq!(proxy.requests().await.len() - before, 1);
     assert_eq!(
-        serde_json::to_value(delayed?.buckets)?,
-        oracle(all.request(), &samples)?
+        serde_json::to_value(delayed.buckets)?,
+        oracle(one.request(), &samples)?
     );
     // A stricter installation-level SQL parser cap may still require narrower groups.
     f.ch.sql("ALTER USER ch_reader SETTINGS max_query_size=3072")
@@ -247,6 +253,57 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     Ok(())
 }
 
+async fn sparse_state_reads(
+    f: &Fixture,
+    proxy: &transport::Proxy,
+    store: &OwnedStore,
+    samples: &[Sample],
+) -> anyhow::Result<()> {
+    const MINUTE: i64 = 60_000_000;
+    let end = 12 * MINUTE;
+    let first = samples.first().ok_or(Error::Invariant)?.input();
+    let spec = SummarySpec::new(
+        first.stream.clone(),
+        first.series.clone(),
+        NonZeroU64::new(MINUTE as u64).ok_or(Error::Invariant)?,
+        CoveragePolicy::HoldLast(NonZeroU64::new(30).ok_or(Error::Invariant)?),
+        None,
+    )?;
+    let all = aggregate(&spec, window(0, end)?, 96, AggregateOp::Timeline)?;
+    let expected = oracle(all.request(), samples)?;
+    for cached in [false, true] {
+        let needle = if cached {
+            cache(f, &spec, 0, end).await?;
+            sqlx::query_scalar::<_, String>(
+                "SELECT object_id::text FROM rss_ts_ch.summaries WHERE lo=$1",
+            )
+            .bind(end - MINUTE)
+            .fetch_one(&f.admin)
+            .await?
+        } else {
+            format!("observed_at<{end}")
+        };
+        let before = proxy.requests().await.len();
+        let page = store.aggregate(&all, None, deadline()?).await?;
+        let requests = proxy.requests().await.len() - before;
+        eprintln!("ch-page sparse minute cached={cached} requests={requests}");
+        assert!(
+            requests <= 5,
+            "twelve sparse minute buckets should batch: {requests}"
+        );
+        assert_eq!(serde_json::to_value(page.buckets)?, expected);
+        proxy.hold_matching(needle).await;
+        let cutoff = Deadline::from_timeout(&Timer, Duration::from_secs(2))?;
+        let recovered = store.aggregate(&all, None, cutoff).await;
+        proxy.release();
+        assert!(!proxy.matching_gate_unused(), "speculative read was held");
+        let recovered = recovered?;
+        assert!(recovered.next.is_none());
+        assert_eq!(serde_json::to_value(recovered.buckets)?, expected);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn predecessor_survives_empty_buckets_and_unused_corruption_waits_for_its_page()
 -> anyhow::Result<()> {
@@ -257,20 +314,27 @@ async fn predecessor_survives_empty_buckets_and_unused_corruption_waits_for_its_
     f.register(&d).await?;
     let stream = Stream::new(d.spec().scope.clone(), id("sensor")?, id("generation")?);
     let series = Series::new(d, id("device")?, id("resource")?, Default::default())?;
-    let samples = [(15, false), (22, true), (63, false), (81, true)]
-        .iter()
-        .map(|&(at, value)| {
-            Ok(Sample::new(SampleInput {
-                stream: stream.clone(),
-                series: series.clone(),
-                id: id(&format!("s{at}"))?,
-                sequence: at as u64,
-                observed_at: Timestamp::new(at)?,
-                interval: None,
-                reading: Reading::Valid(Value::Bool(value)),
-            })?)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let samples = [
+        (15, false),
+        (22, true),
+        (63, false),
+        (81, true),
+        (300_000_001, false),
+        (540_000_001, true),
+    ]
+    .iter()
+    .map(|&(at, value)| {
+        Ok(Sample::new(SampleInput {
+            stream: stream.clone(),
+            series: series.clone(),
+            id: id(&format!("s{at}"))?,
+            sequence: at as u64,
+            observed_at: Timestamp::new(at)?,
+            interval: None,
+            reading: Reading::Valid(Value::Bool(value)),
+        })?)
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
     confirmed(f.write(&batch("bool", samples.clone())?).await?)?;
     let spec = SummarySpec::new(
         stream,
@@ -300,6 +364,7 @@ async fn predecessor_survives_empty_buckets_and_unused_corruption_waits_for_its_
             .await,
         Err(Error::BudgetExceeded)
     ));
+    sparse_state_reads(&f, &proxy, &store, &samples).await?;
     // The first Timeline bucket consumes all three points. A read containing
     // data from the next bucket would stall; the continuation must start at 40.
     let exact = aggregate(&spec, range, 3, AggregateOp::Timeline)?;

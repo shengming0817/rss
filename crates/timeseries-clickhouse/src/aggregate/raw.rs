@@ -62,20 +62,22 @@ impl<'a> Run<'a> {
         &mut self,
         store: &Operation<'_, C>,
         window: Interval,
-        through: Timestamp,
+        bounds: Lookahead,
     ) -> Result<(), Error> {
         let width = self.spec.resolution_micros().get();
-        let tail = through.micros().abs_diff(window.end().micros());
-        let mut count = (1 + tail.div_ceil(width)).min(self.max_buckets);
+        let mut through = bounds.through;
         let (mut rows, mut end) = loop {
+            let tail = through.micros().abs_diff(window.end().micros());
+            let count = (1 + tail.div_ceil(width)).min(self.max_buckets);
             let span = i64::try_from((count - 1).saturating_mul(width)).unwrap_or(i64::MAX);
             let end = Timestamp::new(window.end().micros().saturating_add(span))?.min(through);
-            let cutoff = batch_deadline(store, self.deadline, count > 1)?;
+            let speculative = end > bounds.required;
+            let cutoff = batch_deadline(store, self.deadline, speculative)?;
             let read = self.fetch(store, window.start(), end, cutoff);
             match store.bounded(cutoff, read).await {
-                Err(e) if count > 1 && e != Error::Unauthorized => {
-                    count = count.div_ceil(2);
-                    self.max_buckets = count;
+                Err(Error::Deadline) if speculative => through = bounds.required,
+                Err(e) if count > 1 && !matches!(e, Error::Unauthorized | Error::Deadline) => {
+                    self.max_buckets = count.div_ceil(2);
                 }
                 result => break (result?, end),
             }
@@ -102,7 +104,7 @@ impl<'a> Run<'a> {
         &mut self,
         store: &Operation<'_, C>,
         window: Interval,
-        through: Timestamp,
+        bounds: Lookahead,
         dependency: &mut i64,
     ) -> Result<Summary, Error> {
         if self.fences.iter().any(|f| {
@@ -131,7 +133,7 @@ impl<'a> Run<'a> {
             seeded_builder(self.spec, window, self.fences, self.prior.as_ref(), limit)?;
         *dependency = start;
         if self.complete_until < window.end() {
-            self.refill(store, window, through).await?;
+            self.refill(store, window, bounds).await?;
         }
         while self
             .rows
