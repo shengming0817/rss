@@ -7,10 +7,11 @@ pub struct Counters {
     pub fence_bytes: usize,
     pub build_cpu: Duration,
     pub match_cpu: Duration,
-    pub comparisons: usize,
+    pub window_endpoint_checks: usize,
     pub candidates: usize,
     pub updated: u64,
     pub locked: Duration,
+    pub transaction: Duration,
 }
 
 struct Run {

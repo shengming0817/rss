@@ -38,6 +38,20 @@ async fn facts(f: &Fixture) -> anyhow::Result<String> {
     .await?)
 }
 
+async fn wait_for_gate(f: &Fixture, writer: bool) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(8),async {
+        loop {
+            let waiting:bool=sqlx::query_scalar("SELECT EXISTS (
+                SELECT FROM pg_locks gate WHERE gate.locktype='advisory' AND gate.objid=3296 AND NOT gate.granted
+                  AND (NOT $1 OR EXISTS (SELECT FROM pg_stat_activity w
+                     WHERE w.usename='ch_runtime' AND gate.pid=ANY(pg_blocking_pids(w.pid)))))")
+                .bind(writer).fetch_one(&f.admin).await?;
+            if waiting { return Ok::<_,anyhow::Error>(()); }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await?
+}
+
 async fn cancellation(f: &Fixture, req: &Authorized<MaintenanceRequest>) -> anyhow::Result<()> {
     let mut gate = f.admin.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(3296)")
@@ -46,23 +60,56 @@ async fn cancellation(f: &Fixture, req: &Authorized<MaintenanceRequest>) -> anyh
     let before = facts(f).await?;
     {
         let op = f.store.step(req, None, deadline()?);
-        let wait = tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_locks WHERE locktype='advisory' AND objid=3296 AND NOT granted)").fetch_one(&f.admin).await?;
-                if waiting {
-                    return Ok::<_, anyhow::Error>(());
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        });
-        tokio::select! { result=op=>anyhow::bail!("operation passed the save gate: {result:?}"), ready=wait=>ready?? }
-        // Drop the mutation future with the PostgreSQL transaction still open.
+        tokio::select! {
+            result=op=>anyhow::bail!("operation passed the save gate: {result:?}"),
+            ready=wait_for_gate(f,false)=>ready?,
+        }
     }
     gate.rollback().await?;
-    sqlx::query("SELECT revision FROM rss_ts_ch.namespaces FOR UPDATE")
-        .execute(&f.admin)
-        .await?;
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        sqlx::query("SELECT revision FROM rss_ts_ch.namespaces FOR UPDATE").execute(&f.admin),
+    )
+    .await??;
     assert_eq!(facts(f).await?, before);
+    Ok(())
+}
+
+// Start the writer only after maintenance owns the namespace; release it only after PG
+// observes this backend actually blocking the writer.
+async fn commit_before_write(
+    f: &Fixture,
+    name: &str,
+    action: MaintenanceAction,
+    b: &Batch,
+) -> anyhow::Result<()> {
+    let mut gate = f.admin.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(3296)")
+        .execute(&mut *gate)
+        .await?;
+    let writer = async {
+        wait_for_gate(f, false).await?;
+        let release = async {
+            wait_for_gate(f, true).await?;
+            gate.rollback().await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let (result, released) = tokio::join!(f.write(b), release);
+        released?;
+        anyhow::ensure!(matches!(
+            result.err().and_then(|e| e.downcast::<Error>().ok()),
+            Some(Error::HistoryExpired)
+        ));
+        anyhow::Ok(())
+    };
+    let (progress, written) = tokio::join!(f.maintain(name, action), writer);
+    assert!(matches!(progress?, MaintenanceProgress::Complete { .. }));
+    written?;
+    let lookup = Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(b)?)?;
+    assert!(matches!(
+        f.store.receipt(&lookup, deadline()?).await?,
+        Lookup::NotVisible
+    ));
     Ok(())
 }
 
@@ -145,7 +192,7 @@ async fn delete_and_restore_validate_every_key_and_roll_back_together() -> anyho
     .await?;
     sqlx::raw_sql("CREATE FUNCTION rss_ts_ch.gate_plan() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         IF NEW.id='fail-save' THEN RAISE EXCEPTION 'fixture save failure' USING ERRCODE='23514'; END IF;
-        IF NEW.id='pause-save' THEN PERFORM pg_advisory_xact_lock(3296); END IF; RETURN NEW; END $$;
+        IF NEW.id IN ('delete','restore','pause-save') THEN PERFORM pg_advisory_xact_lock(3296); END IF; RETURN NEW; END $$;
         CREATE TRIGGER gate_plan BEFORE INSERT ON rss_ts_ch.plans FOR EACH ROW EXECUTE FUNCTION rss_ts_ch.gate_plan();").execute(&f.admin).await?;
     let delete = MaintenanceAction::Delete {
         selection: select.clone(),
@@ -170,7 +217,8 @@ async fn delete_and_restore_validate_every_key_and_roll_back_together() -> anyho
             }
         }
         let (rev, epoch, alloc, pub_watermark) = namespace(&f).await?;
-        f.maintain(name, action.clone()).await?;
+        let blocked = batch(&format!("write-{name}"), vec![sample(&d, "fresh", 15, 1)?])?;
+        commit_before_write(&f, name, action.clone(), &blocked).await?;
         assert_eq!(dirty_keys(&f).await?, expected);
         assert_eq!(
             namespace(&f).await?,

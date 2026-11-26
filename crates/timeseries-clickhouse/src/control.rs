@@ -15,8 +15,6 @@ pub(crate) async fn invalidate(
     max: u32,
 ) -> Result<(), Error> {
     let rows = invalidation_targets(c, s, selection, window, max).await?;
-    #[cfg(feature = "integration")]
-    crate::measurement::record(|m| m.candidates += rows.len());
     let mut digests = Vec::<Vec<u8>>::new();
     let mut starts = Vec::<i64>::new();
     for row in rows {

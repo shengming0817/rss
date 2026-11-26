@@ -109,7 +109,7 @@ impl<'a> AdmissionFences<'a> {
             )))
             || (!self.exact.is_empty() && covers(self.exact.get(&bytes(series)?)));
         #[cfg(feature = "integration")]
-        crate::measurement::record(|m| m.comparisons += comparisons);
+        crate::measurement::record(|m| m.window_endpoint_checks += comparisons);
         Ok(found)
     }
 }

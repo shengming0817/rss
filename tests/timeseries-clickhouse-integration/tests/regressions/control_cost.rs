@@ -18,13 +18,25 @@ async fn frontiers(
     sqlx::query("DELETE FROM rss_ts_ch.fences")
         .execute(&f.admin)
         .await?;
-    let relevant = query(d, QueryMode::History, 1)?.selection().clone();
-    let other = Selection::Resource {
+    let mut relevant = query(d, QueryMode::History, 1)?.selection().clone();
+    let mut other = Selection::Resource {
         scope: d.spec().scope.clone(),
         subject: id("other")?,
         resource: id("resource")?,
         keys: Default::default(),
     };
+    if std::env::var_os("RSS_CH_EXACT_COST").is_some() {
+        let sample = sample(d, "selector", 1000, 1)?;
+        let stream = sample.input().stream.clone();
+        relevant = Selection::Exact {
+            stream: stream.clone(),
+            series: sample.input().series.clone(),
+        };
+        other = Selection::Exact {
+            stream,
+            series: Series::new(d.clone(), id("other")?, id("resource")?, Default::default())?,
+        };
+    }
     for (name, selection, count) in [("related", relevant, related), ("noise", other, noise)] {
         sqlx::query(
             "INSERT INTO rss_ts_ch.fences(tenant_id,namespace,id,kind,selection,lo,hi)
@@ -48,10 +60,10 @@ async fn frontiers(
 
 fn print_write(name: &str, related: i32, noise: i32, c: Counters) {
     println!(
-        "control-write case={name} related={related} noise={noise} rows={} field_bytes={} comparisons={} build_cpu_ns={} match_cpu_ns={} locked_us={}",
+        "control-write case={name} related={related} noise={noise} rows={} field_bytes={} window_endpoint_checks={} build_cpu_ns={} match_cpu_ns={} locked_us={}",
         c.fence_rows,
         c.fence_bytes,
-        c.comparisons,
+        c.window_endpoint_checks,
         c.build_cpu.as_nanos(),
         c.match_cpu.as_nanos(),
         c.locked.as_micros()
@@ -145,11 +157,12 @@ async fn measured_step(
     let after = calls(&f.pool).await?;
     assert_eq!((c.candidates, c.updated), (hits, hits as u64));
     println!(
-        "control-maint case={name} hits={hits} noise={noise} candidates={} changed={} sql={} summary_updates={} locked_us={}",
+        "control-maint case={name} hits={hits} noise={noise} candidates={} changed={} sql={} summary_updates={} transaction_us={} locked_us={}",
         c.candidates,
         c.updated,
         after.0 - before.0,
         after.1 - before.1,
+        c.transaction.as_micros(),
         c.locked.as_micros()
     );
     Ok(())
