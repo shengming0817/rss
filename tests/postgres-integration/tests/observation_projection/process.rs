@@ -117,6 +117,8 @@ struct CrashEffect {
 }
 impl PgEffect for CrashEffect {
     type Item = rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>;
+    const ISOLATION: rss_projection_postgres::EffectIsolation =
+        <model::Facts<Clock> as PgEffect>::ISOLATION;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

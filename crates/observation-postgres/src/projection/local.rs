@@ -95,6 +95,15 @@ impl<C: Clock> PgSource<C, LocalPages> {
         if tx.tenant() != self.grant.tenant() {
             return Err(source_error(ErrorKind::Unauthorized.into()));
         }
+        if !tx.has_statement_snapshots() {
+            return Err(rss_projection::Error::provider(
+                rss_projection::ErrorKind::InvalidInput,
+                Phase::Admission,
+                None,
+                None,
+                ErrorKind::InvalidInput,
+            ));
+        }
         let tenant = self.grant.tenant().to_string();
         let item = item.clone();
         tx.with_connection(move |connection| {

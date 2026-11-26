@@ -142,7 +142,9 @@ the returned page is the atomic unit in `run_batched`. For eight maximum-size re
 transaction allow 32 MiB. Decoded facts, references, driver buffers and application data consume
 additional memory. The page owns the verified inputs through settlement.
 
-Call `resolve_in_transaction(tx, item)` at each callback before consuming facts. It checks the
+Set `PgEffect::ISOLATION` to `EffectIsolation::ReadCommitted` for this mapping.
+Call `resolve_in_transaction(tx, item)` at each callback before consuming facts.
+A borrowed transaction with a fixed snapshot returns InvalidInput at admission. It checks the
 tenant, current row, exact report digest and receipt fields on the borrowed transaction, then
 returns an `Arc<ApplicableRecord>`. Changed evidence is restored from the same statement snapshot.
 A concurrent release before a later callback can therefore roll back the entire batch. Provision

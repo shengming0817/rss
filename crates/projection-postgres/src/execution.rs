@@ -1,7 +1,7 @@
 mod batch;
 
 use crate::{
-    PgOperationError, PgStore, PgTransaction,
+    EffectIsolation, PgOperationError, PgStore, PgTransaction,
     journal::{decode_position, encode_position},
     transaction::map_sql,
 };
@@ -88,7 +88,7 @@ impl PgStore {
         let definition = *definition;
         let scope = scope.clone();
         let source = scope.source().clone();
-        self.controlled_tx(&source, control, move |tx| {
+        self.controlled_tx(&source, control, EffectIsolation::Inherit, move |tx| {
             Box::pin(async move {
                 let (replay, end) = match bound {
                     ReplayBound::Live => (false, None),
@@ -139,7 +139,7 @@ impl PgStore {
         let source = scope.source().clone();
         let token = Uuid::new_v4();
         let store = self.identity.clone();
-        self.controlled_tx(&source, control, move |tx| {
+        self.controlled_tx(&source, control, EffectIsolation::Inherit, move |tx| {
             Box::pin(async move {
                 let epoch = sqlx::query_scalar(
                     "SELECT rss_projection.takeover($1::uuid,$2,$3,$4,$5::uuid,$6)",
@@ -252,6 +252,8 @@ pub enum PgEffectOutcome {
 pub trait PgEffect: Send + Sync {
     /// Source item used by this mapping. Cloning must preserve its event identity.
     type Item: rss_projection::EventInput + Clone + 'static;
+    /// Isolation selected only for this mapping's single-event and page transactions.
+    const ISOLATION: EffectIsolation = EffectIsolation::Inherit;
     /// Apply within the borrowed transaction. An error rolls back the settlement: one event in `run`,
     /// or the entire page (including earlier successful callbacks) in `run_batched`.
     /// Later callbacks on the same page can read earlier application writes. The provider
@@ -293,7 +295,7 @@ impl<H: PgEffect + 'static> Execution for PgProjection<H> {
         let effect = self.effect.clone();
         let event = event.clone();
         self.store
-            .controlled_tx(self.scope().source(), control, move |tx| {
+            .controlled_tx(self.scope().source(), control, H::ISOLATION, move |tx| {
                 Box::pin(async move { stage(tx, &claim, effect.as_ref(), expected, &event).await })
             })
             .await
@@ -362,9 +364,12 @@ impl ExternalCheckpoint for PgCheckpoint {
         let claim = self.claim.clone();
         let event = event.clone();
         self.store
-            .controlled_tx(self.scope().source(), control, move |tx| {
-                Box::pin(async move { finish(tx, &claim, expected, &event).await })
-            })
+            .controlled_tx(
+                self.scope().source(),
+                control,
+                EffectIsolation::Inherit,
+                move |tx| Box::pin(async move { finish(tx, &claim, expected, &event).await }),
+            )
             .await
     }
 }

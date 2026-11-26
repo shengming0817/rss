@@ -4,7 +4,9 @@ PostgreSQL 16+ committed-order journals and atomic projection execution. With `r
 adapter locks the checkpoint, validates the worker epoch and definition identity, applies trusted read-model SQL, records
 fact identity and advances the checkpoint. An old worker is fenced **before** the effect.
 
-The adapter opens write transactions at READ COMMITTED. Each callback can see earlier business writes and changes committed before its own next statement.
+Transactions inherit the host isolation by default. A mapping that needs per-statement visibility
+can set `PgEffect::ISOLATION` to `EffectIsolation::ReadCommitted` for its own single-event and
+batch execution. Callbacks in one batch can read earlier business writes.
 Projection receipts and the checkpoint retain their pre-page values throughout those callbacks.
 The adapter checks historical and intra-page fingerprints before the first callback, skips matching
 duplicates, and records filtered facts along with applied facts at page settlement.

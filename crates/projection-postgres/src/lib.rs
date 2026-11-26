@@ -9,6 +9,6 @@ pub use execution::{PgCheckpoint, PgClaim, PgEffect, PgEffectOutcome, PgProjecti
 pub use journal::append_in_transaction;
 #[cfg(feature = "integration")]
 pub use transaction::PgFault;
-pub use transaction::{CloseOutcome, PgOperationError, PgStore, PgTransaction};
+pub use transaction::{CloseOutcome, EffectIsolation, PgOperationError, PgStore, PgTransaction};
 /// Fresh component schema for a dedicated external migrator. Executes nothing.
 pub const MIGRATION_SQL: &str = include_str!("../migrations/install.sql");

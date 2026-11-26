@@ -16,6 +16,8 @@ struct PausedFacts {
 }
 impl PgEffect for PausedFacts {
     type Item = rss_projection::EventWith<VerifiedObservation>;
+    const ISOLATION: rss_projection_postgres::EffectIsolation =
+        <model::Facts<Clock> as PgEffect>::ISOLATION;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -157,6 +159,17 @@ async fn changed_receipt_uses_current_row_and_retries_atomically() -> anyhow::Re
         .source
         .read(input.source.scope(), None, BatchLimit::new(2)?, &control)
         .await?;
+    let current:i64=sqlx::query_scalar("UPDATE rss_observation.batches SET received_at=received_at+1 WHERE log_position=2 RETURNING received_at")
+        .fetch_one(&f.admin).await?;
+    let resolved = resolve_on(
+        &pg,
+        &control,
+        input.source.scope(),
+        &input.source,
+        &events[1],
+    )
+    .await??;
+    assert_eq!(resolved.record().received_at(), u64::try_from(current)?);
     let saved: String =
         sqlx::query_scalar("SELECT decision FROM rss_observation.batches WHERE log_position=2")
             .fetch_one(&f.admin)
@@ -316,6 +329,91 @@ async fn bounded_prefix_releases_records_and_resumes_at_exact_position() -> anyh
             .read(source.scope(), after, BatchLimit::new(8)?, &control)
             .await?
             .is_empty()
+    );
+    Ok(())
+}
+
+struct InheritedEffect;
+impl PgEffect for InheritedEffect {
+    type Item = Event;
+    async fn apply(
+        &self,
+        tx: &mut PgTransaction<'_>,
+        _: &ProjectionScope,
+        _: &Event,
+    ) -> Result<PgEffectOutcome, PgOperationError> {
+        let level: String = tx
+            .with_connection(|conn| {
+                Box::pin(async move {
+                    sqlx::query_scalar("SHOW transaction_isolation")
+                        .fetch_one(conn)
+                        .await
+                })
+            })
+            .await?;
+        assert_eq!(level, "serializable");
+        Ok(PgEffectOutcome::Filtered)
+    }
+}
+#[tokio::test]
+async fn ordinary_sessions_inherit_fixed_snapshots_and_borrowed_resolve_rejects_them()
+-> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let input = seed(&f).await?;
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let source = &input.source;
+    let items = source
+        .read(source.scope(), None, BatchLimit::new(2)?, &control)
+        .await?;
+    sqlx::raw_sql("ALTER ROLE handoff_runtime SET default_transaction_isolation='serializable'")
+        .execute(&f.admin)
+        .await?;
+    let pg = f.projection(&control).await?;
+    let s = ProjectionScope::new(source.scope().clone(), "facts", "inherits")?;
+    pg.initialize(
+        &s,
+        &model::DEFINITION,
+        GenerationStart::beginning(),
+        ReplayBound::Live,
+        &control,
+    )
+    .await?;
+    let exec = pg.projection(
+        pg.takeover(&s, &model::DEFINITION, &control).await?,
+        InheritedEffect,
+    )?;
+    exec.execute(None, items[0].as_ref(), &control).await?;
+    exec.execute_batch(
+        Some(items[0].as_ref().position()),
+        vec![items[1].as_ref().clone()],
+        &control,
+    )
+    .await?;
+    let level: String = pg
+        .local_tx(source.scope(), &control, |tx| {
+            Box::pin(async move {
+                tx.with_connection(|conn| {
+                    Box::pin(async move {
+                        sqlx::query_scalar("SHOW transaction_isolation")
+                            .fetch_one(conn)
+                            .await
+                    })
+                })
+                .await
+            })
+        })
+        .await?;
+    assert_eq!(level, "serializable");
+    let e = resolve_on(&pg, &control, source.scope(), source, &items[0])
+        .await?
+        .err()
+        .context("fixed snapshot accepted")?;
+    assert_eq!(e.kind(), rss_projection::ErrorKind::InvalidInput);
+    assert_eq!(
+        e.diagnostic().map(|d| d.phase()),
+        Some(rss_projection::Phase::Admission)
     );
     Ok(())
 }

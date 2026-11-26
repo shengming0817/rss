@@ -72,7 +72,7 @@ impl<H: PgEffect + 'static> BatchExecution for PgProjection<H> {
         let claim = self.claim.clone();
         let effect = self.effect.clone();
         self.store
-            .controlled_tx(self.scope().source(), control, move |tx| {
+            .controlled_tx(self.scope().source(), control, H::ISOLATION, move |tx| {
                 Box::pin(async move {
                     let duplicates: Vec<bool> = facts
                         .query("SELECT rss_projection.lock_batch($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10,$11)", &claim, expected)

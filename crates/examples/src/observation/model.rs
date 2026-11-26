@@ -21,6 +21,8 @@ impl<C> Facts<C> {
 }
 impl<C: Clock + 'static> PgEffect for Facts<C> {
     type Item = rss_projection::EventWith<VerifiedObservation>;
+    const ISOLATION: rss_projection_postgres::EffectIsolation =
+        rss_projection_postgres::EffectIsolation::ReadCommitted;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

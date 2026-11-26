@@ -3,8 +3,17 @@
 use futures::future::BoxFuture;
 use rss_projection::{Control, Error, ErrorKind, Phase, SourceScope, Timer};
 use rss_request_context::TenantId;
-use sqlx::{Connection, PgConnection, PgPool, Postgres, pool::PoolConnection};
+use sqlx::{Connection, PgConnection, PgPool, Postgres, Row, pool::PoolConnection};
 use std::{sync::Arc, time::Duration};
+
+/// Isolation requirement for the transaction that executes a projection effect.
+#[derive(Clone, Copy)]
+pub enum EffectIsolation {
+    /// Inherit the host connection's transaction isolation.
+    Inherit,
+    /// Give every ordered callback a fresh PostgreSQL statement snapshot.
+    ReadCommitted,
+}
 
 /// Component storage handle. The caller configures transport/TLS on the supplied pool.
 /// Closing this handle closes that pool and all of its clones.
@@ -73,7 +82,7 @@ impl PgStore {
         self.transact(
             scope.tenant(),
             control,
-            TransactionMode::ReadWrite,
+            TransactionMode::ReadWrite(EffectIsolation::Inherit),
             operation,
         )
         .await
@@ -83,6 +92,7 @@ impl PgStore {
         &self,
         scope: &SourceScope,
         control: &Control<'_, T>,
+        isolation: EffectIsolation,
         operation: F,
     ) -> Result<R, Error>
     where
@@ -91,7 +101,7 @@ impl PgStore {
         self.transact(
             scope.tenant(),
             control,
-            TransactionMode::ReadWrite,
+            TransactionMode::ReadWrite(isolation),
             operation,
         )
         .await
@@ -170,7 +180,8 @@ impl PgStore {
         control.check()?;
         let mut tx = match mode {
             TransactionMode::ReadOnly => lease.connection.begin_with("BEGIN READ ONLY").await,
-            TransactionMode::ReadWrite => {
+            TransactionMode::ReadWrite(EffectIsolation::Inherit) => lease.connection.begin().await,
+            TransactionMode::ReadWrite(EffectIsolation::ReadCommitted) => {
                 lease
                     .connection
                     .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
@@ -183,13 +194,14 @@ impl PgStore {
         let check = || control.check();
         let result = async {
             control.check()?;
-            setup(&mut tx, tenant, control.remaining()).await?;
+            let statement_snapshots = setup(&mut tx, tenant, control.remaining()).await?;
             control.check()?;
             progress.store(1, std::sync::atomic::Ordering::SeqCst);
             let result = operation(&mut PgTransaction {
                 connection: &mut tx,
                 tenant,
                 check: &check,
+                statement_snapshots,
             })
             .await
             .map_err(Into::into);
@@ -265,7 +277,7 @@ pub enum PgFault {
 #[derive(Clone, Copy)]
 enum TransactionMode {
     ReadOnly,
-    ReadWrite,
+    ReadWrite(EffectIsolation),
 }
 impl TransactionMode {
     fn is_read_only(self) -> bool {
@@ -274,7 +286,7 @@ impl TransactionMode {
     fn settlement_error(self, mutating: ErrorKind) -> ErrorKind {
         match self {
             Self::ReadOnly => ErrorKind::Unavailable,
-            Self::ReadWrite => mutating,
+            Self::ReadWrite(_) => mutating,
         }
     }
 }
@@ -294,6 +306,7 @@ impl Drop for Lease {
 pub struct PgTransaction<'a> {
     pub(crate) connection: &'a mut PgConnection,
     tenant: TenantId,
+    statement_snapshots: bool,
     check: &'a (dyn Fn() -> Result<(), Error> + Sync),
 }
 impl PgTransaction<'_> {
@@ -303,6 +316,11 @@ impl PgTransaction<'_> {
     /// Tenant bound by the enclosing transaction.
     pub const fn tenant(&self) -> TenantId {
         self.tenant
+    }
+    /// Whether this transaction takes a fresh snapshot for each statement.
+    /// PostgreSQL implements READ UNCOMMITTED with READ COMMITTED visibility.
+    pub const fn has_statement_snapshots(&self) -> bool {
+        self.statement_snapshots
     }
     /// Execute trusted SQL on this same transaction. Do not issue transaction/session control
     /// or change tenant settings. Application tables must enforce their own RLS policy.
@@ -320,11 +338,10 @@ async fn setup(
     connection: &mut PgConnection,
     tenant: TenantId,
     timeout: Duration,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let millis = watchdog(timeout)?.to_string();
-    sqlx::query("SELECT set_config('rss.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true)")
-        .bind(tenant.to_string()).bind(millis).execute(connection).await.map_err(|e| sql_error(e, Phase::Setup))?;
-    Ok(())
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true), set_config('statement_timeout',$2,true), set_config('lock_timeout',$2,true), current_setting('transaction_isolation') IN ('read committed','read uncommitted') AS statement_snapshots")
+        .bind(tenant.to_string()).bind(millis).fetch_one(connection).await.and_then(|row|row.try_get("statement_snapshots")).map_err(|e|sql_error(e,Phase::Setup))
 }
 /// PostgreSQL stores these GUCs as signed integer milliseconds; never silently shorten a budget.
 pub(crate) fn watchdog(remaining: Duration) -> Result<i32, Error> {
