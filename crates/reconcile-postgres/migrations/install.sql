@@ -187,7 +187,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS 
 DECLARE scan rss_reconcile.scans; page refcursor; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
  cutoff timestamptz; page_limit bigint; examined integer:=0;
  probe_limit integer; sampled_entities text[]; sampled_tickets bigint[];
- next_sample integer:=1; hinted_entities text[];
+ next_sample integer:=1; stream_sample integer:=1;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -240,10 +240,13 @@ BEGIN
    candidate.entity:=sampled_entities[next_sample];
    candidate.queue_ticket:=sampled_tickets[next_sample];
    next_sample:=next_sample+1;
-   hinted_entities:=array_append(hinted_entities,candidate.entity);
-  ELSIF candidate.entity=ANY(hinted_entities) THEN
-   -- The stream can catch up even to a previously locked or busy hint.
-   CONTINUE;
+  ELSE
+   -- Both streams advance in ticket order. Samples passed by next_sample
+   -- were tried as hints or were already behind the cursor when skipped.
+   WHILE stream_sample<next_sample AND sampled_tickets[stream_sample]<scan.cursor_ticket LOOP
+    stream_sample:=stream_sample+1;
+   END LOOP;
+   IF stream_sample<next_sample AND sampled_tickets[stream_sample]=scan.cursor_ticket THEN CONTINUE; END IF;
   END IF;
   BEGIN
    SELECT * INTO row FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND entity=candidate.entity FOR UPDATE NOWAIT;

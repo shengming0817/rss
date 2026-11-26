@@ -113,7 +113,7 @@ impl Policy {
     pub const fn claim_batch_size(&self) -> usize {
         self.claim_batch_size
     }
-    /// Maximum candidates visited in one provider scan.
+    /// Maximum scan positions processed in one provider call.
     pub const fn scan_budget(&self) -> u32 {
         self.scan_budget
     }
