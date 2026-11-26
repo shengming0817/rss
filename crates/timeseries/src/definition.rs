@@ -186,6 +186,10 @@ impl Definition {
     pub const fn spec(&self) -> &DefinitionSpec {
         &self.0
     }
+    /// Append the canonical V1 payload and return its definition-domain digest.
+    pub fn append_canonical(&self, bytes: &mut Vec<u8>) -> Result<Digest, Error> {
+        crate::append_canonical(b"definition", self, bytes)
+    }
     pub fn digest(&self) -> Result<Digest, Error> {
         digest(b"definition", self)
     }

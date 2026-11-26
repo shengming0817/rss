@@ -33,6 +33,8 @@ fn id(s: &str) -> anyhow::Result<Id> {
 }
 fn limits() -> anyhow::Result<Limits> {
     Ok(Limits {
+        max_prepare_batches: NonZeroU32::new(4).ok_or(Error::InvalidInput)?,
+        max_prepare_bytes: NonZeroU32::new(Limits::MIN_PREPARE_BYTES).ok_or(Error::InvalidInput)?,
         max_points: NonZeroU32::new(100).ok_or_else(|| anyhow::anyhow!("positive"))?,
         max_series: NonZeroU32::new(20).ok_or_else(|| anyhow::anyhow!("positive"))?,
         max_bytes: NonZeroU32::new(1024 * 1024).ok_or_else(|| anyhow::anyhow!("positive"))?,

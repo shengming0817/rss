@@ -622,11 +622,52 @@ fn canonical_v1_golden_and_duplicate_dimensions() -> TestResult {
             87, 13, 1, 48, 238, 137, 69, 245, 218, 221, 211, 75
         ]
     );
+    assert_eq!(b.encoded_len(), encoded.len());
+    assert_eq!(Batch::decode(&encoded)?.encoded_len(), encoded.len());
+    assert_eq!(
+        b.samples()[0].input().series.digest()?.as_bytes(),
+        &[
+            106, 103, 22, 137, 255, 92, 48, 180, 80, 188, 167, 133, 24, 152, 147, 181, 124, 58,
+            217, 183, 125, 137, 189, 79, 14, 178, 245, 143, 172, 27, 83, 117
+        ]
+    );
+    assert_eq!(
+        b.samples()[0]
+            .input()
+            .series
+            .definition()
+            .digest()?
+            .as_bytes(),
+        &[
+            219, 77, 88, 221, 241, 143, 238, 42, 116, 98, 99, 193, 81, 124, 201, 23, 163, 120, 141,
+            238, 77, 225, 227, 140, 186, 69, 235, 251, 215, 1, 49, 143
+        ]
+    );
+    check_appended_payloads(&b.samples()[0], SAMPLE.as_bytes())?;
     let raw = String::from_utf8(b.encode()?)?.replace(
         "\"dimensions\":{}",
         "\"dimensions\":{\"core\":\"1\",\"core\":\"2\"}",
     );
     assert!(Batch::decode(raw.as_bytes()).is_err());
+    Ok(())
+}
+
+fn check_appended_payloads(sample: &Sample, expected: &[u8]) -> TestResult {
+    const DEFINITION: &str = r#"{"scope":{"tenant":"11111111-1111-4111-8111-111111111111","namespace":"telemetry"},"key":"custom.measurement","version":1,"unit":"1","metric":{"kind":"gauge","number":"u64"},"dimensions":{"allowed":["core"],"required":[],"maxCount":1,"maxValueBytes":16,"maxTotalBytes":64}}"#;
+    let definition = sample.input().series.definition();
+    let prefix = b"previous payload";
+    let mut appended = prefix.to_vec();
+    assert_eq!(sample.append_canonical(&mut appended)?, sample.digest()?);
+    assert_eq!(&appended[..prefix.len()], prefix);
+    assert_eq!(&appended[prefix.len()..], expected);
+    let offset = appended.len();
+    assert_eq!(
+        definition.append_canonical(&mut appended)?,
+        definition.digest()?
+    );
+    assert_eq!(&appended[..prefix.len()], prefix);
+    assert_eq!(&appended[prefix.len()..offset], expected);
+    assert_eq!(&appended[offset..], DEFINITION.as_bytes());
     Ok(())
 }
 
@@ -829,6 +870,7 @@ fn exact_batch_protocol_limits() -> TestResult {
     assert_eq!(remaining, 0);
     let b = batch(samples.clone())?;
     assert_eq!(b.encode()?.len(), Batch::MAX_BYTES);
+    assert_eq!(b.encoded_len(), Batch::MAX_BYTES);
     assert_eq!(
         Batch::new(stream()?, id("batch-11")?, samples),
         Err(Error::BudgetExceeded)

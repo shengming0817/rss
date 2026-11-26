@@ -5,6 +5,7 @@ mod cursor;
 mod definition;
 mod lifecycle;
 mod maintain;
+mod prepare;
 mod probe;
 mod profile;
 pub use profile::{StorageProfile, StoreConnections};
@@ -29,15 +30,29 @@ pub(crate) const PARTITIONS_SQL: &str = include_str!("../migrations/partitions.s
 /// not exact process memory. A finite replay minimum is persisted on every new batch.
 #[derive(Clone, Debug)]
 pub struct Limits {
+    /// Concurrent batches from admission through consumption of their SQL arguments.
+    pub max_prepare_batches: NonZeroU32,
+    /// Total charged preparation bytes. Must cover at least MIN_PREPARE_BYTES.
+    pub max_prepare_bytes: NonZeroU32,
     pub max_points: NonZeroU32,
     pub max_series: NonZeroU32,
     pub max_bytes: NonZeroU32,
     pub replay_micros: NonZeroU64,
     pub cursor_micros: NonZeroU64,
 }
+impl Limits {
+    /// Smallest byte budget admitting every legal batch.
+    pub const MIN_PREPARE_BYTES: u32 = prepare::charge(
+        rss_timeseries::Batch::MAX_BYTES,
+        rss_timeseries::Batch::MAX_SAMPLES,
+    );
+}
 /// Dedicated pool adopted by this adapter; closing it affects all pool clones.
 pub struct PgStore<C> {
     pool: PgPool,
+    preparation: prepare::Capacity,
+    #[cfg(feature = "integration")]
+    phases: [std::sync::atomic::AtomicUsize; 3],
     profile: StorageProfile,
     maintenance: Option<PgPool>,
     clock: C,
@@ -63,6 +78,7 @@ impl<C: Clock> PgStore<C> {
         {
             return Err(Error::InvalidInput);
         }
+        let preparation = prepare::Capacity::new(&limits)?;
         let (pool, maintenance) = connections.into_pools();
         let remaining = deadline.remaining(clock.now()).ok_or(Error::Deadline)?;
         let instance =
@@ -75,6 +91,9 @@ impl<C: Clock> PgStore<C> {
         };
         Ok(Self {
             pool,
+            preparation,
+            #[cfg(feature = "integration")]
+            phases: Default::default(),
             profile,
             maintenance,
             clock,
@@ -89,6 +108,7 @@ impl<C: Clock> PgStore<C> {
     /// Stop pool admission, then wait for borrowers within the original absolute deadline.
     pub async fn close(&self, deadline: Deadline) -> Result<(), Error> {
         let close = async {
+            self.preparation.close();
             if let Some(maintenance) = &self.maintenance {
                 futures::future::join(self.pool.close(), maintenance.close()).await;
             } else {
@@ -104,6 +124,20 @@ impl<C: Clock> PgStore<C> {
         .await
         .map_err(|_| Error::Deadline)
     }
+    /// Counts first samples encoded, completed bindings and transactions sent by this store.
+    #[cfg(feature = "integration")]
+    pub fn preparation_phases(&self) -> [usize; 3] {
+        self.phases
+            .each_ref()
+            .map(|n| n.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Remaining batch and byte permits, for provider conformance fixtures.
+    #[cfg(feature = "integration")]
+    pub fn available_preparation(&self) -> (usize, usize) {
+        self.preparation.available()
+    }
+
     #[cfg(feature = "integration")]
     pub fn inject_next_fault(&self, fault: Fault) {
         self.fault

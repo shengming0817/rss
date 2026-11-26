@@ -168,6 +168,10 @@ impl Sample {
     pub const fn input(&self) -> &SampleInput {
         &self.0
     }
+    /// Append the canonical V1 payload and return its sample-domain digest.
+    pub fn append_canonical(&self, bytes: &mut Vec<u8>) -> Result<Digest, Error> {
+        crate::append_canonical(b"sample", self, bytes)
+    }
     pub fn digest(&self) -> Result<Digest, Error> {
         digest(b"sample", self)
     }
@@ -204,6 +208,8 @@ pub enum IdentityMatch {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "BatchDto")]
 pub struct Batch {
+    #[serde(skip)]
+    encoded_len: usize,
     stream: Stream,
     id: Id,
     samples: Vec<Sample>,
@@ -240,12 +246,17 @@ impl Batch {
                 return Err(Error::Conflict);
             }
         }
-        let batch = Self {
+        let mut batch = Self {
+            encoded_len: 0,
             stream,
             id,
             samples,
         };
-        batch.write_to(std::io::sink())?;
+        #[cfg(feature = "integration")]
+        let start = crate::measurement::encoding_timer();
+        batch.encoded_len = batch.write_to(std::io::sink())?;
+        #[cfg(feature = "integration")]
+        crate::measurement::record("batch_check", start, batch.encoded_len, 0);
         Ok(batch)
     }
     pub const fn stream(&self) -> &Stream {
@@ -253,6 +264,10 @@ impl Batch {
     }
     pub const fn id(&self) -> &Id {
         &self.id
+    }
+    /// Size of the complete canonical V1 JSON, measured during validation.
+    pub const fn encoded_len(&self) -> usize {
+        self.encoded_len
     }
     pub fn samples(&self) -> &[Sample] {
         &self.samples
@@ -275,12 +290,13 @@ impl Batch {
         self.write_to(&mut bytes)?;
         Ok(bytes)
     }
-    fn write_to(&self, output: impl std::io::Write) -> Result<(), Error> {
-        let writer = BoundedWriter {
+    fn write_to(&self, output: impl std::io::Write) -> Result<usize, Error> {
+        let mut writer = BoundedWriter {
             output,
             remaining: Self::MAX_BYTES,
         };
-        serde_json::to_writer(writer, self).map_err(|_| Error::BudgetExceeded)
+        serde_json::to_writer(&mut writer, self).map_err(|_| Error::BudgetExceeded)?;
+        Ok(Self::MAX_BYTES - writer.remaining)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() > Self::MAX_BYTES {

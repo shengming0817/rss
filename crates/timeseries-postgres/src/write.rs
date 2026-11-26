@@ -1,7 +1,10 @@
+mod encoding;
+#[cfg(feature = "integration")]
+mod measurement;
 use crate::{
     PgStore,
     definition::flatten,
-    transaction::{Mode, certain, check, sql_error},
+    transaction::{Budget, Mode, certain, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
@@ -44,72 +47,23 @@ fn receipt(row: &PgRow, q: &ReceiptQuery) -> Result<Receipt, Error> {
     })
 }
 struct PreparedBatch {
+    #[cfg(feature = "integration")]
+    _buffers: measurement::Buffers,
     identity: ReceiptQuery,
     count: usize,
     query: SqlQuery<'static, Postgres, PgArguments>,
+    _permit: crate::prepare::Permit,
 }
 
 impl PreparedBatch {
-    fn new(
-        batch: &Batch,
-        clock: &impl Clock,
-        deadline: Deadline,
-        horizon: u64,
-    ) -> Result<Self, Error> {
-        check(clock, deadline)?;
-        let identity = ReceiptQuery {
-            stream: batch.stream().clone(),
-            batch_id: batch.id().clone(),
-            digest: batch.digest()?,
-        };
-        let mut payloads = Vec::with_capacity(batch.samples().len());
-        let mut sample_digests = Vec::with_capacity(payloads.capacity());
-        let mut series_digests = Vec::with_capacity(payloads.capacity());
-        // A repeated ID binds to its last occurrence before individual samples are checked.
-        let mut bindings = std::collections::BTreeMap::new();
-        for sample in batch.samples() {
-            check(clock, deadline)?;
-            let series = &sample.input().series;
-            let def = series.definition();
-            bindings.insert((&def.spec().key, def.spec().version), def);
-            payloads.push(crate::lifecycle::bytes(sample)?);
-            sample_digests.push(sample.digest()?.as_bytes().to_vec());
-            series_digests.push(series.digest()?.as_bytes().to_vec());
-        }
-        let mut definitions = Vec::with_capacity(bindings.len());
-        let mut definition_digests = Vec::with_capacity(bindings.len());
-        for def in bindings.into_values() {
-            check(clock, deadline)?;
-            definitions.push(crate::lifecycle::bytes(def)?);
-            definition_digests.push(def.digest()?.as_bytes().to_vec());
-        }
-        check(clock, deadline)?;
-        let stream = &identity.stream;
-        let count = payloads.len();
-        let query = sqlx::query(
-            "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-        )
-        .bind(stream.scope().tenant().to_string())
-        .bind(stream.scope().namespace().as_str())
-        .bind(stream.source().as_str())
-        .bind(stream.generation().as_str())
-        .bind(identity.batch_id.as_str())
-        .bind(identity.digest.as_bytes().as_slice())
-        .bind(payloads)
-        .bind(sample_digests)
-        .bind(series_digests)
-        .bind(definitions)
-        .bind(definition_digests)
-        .bind(i64::try_from(horizon).map_err(|_| Error::NumericRange)?);
-        Ok(Self {
-            identity,
-            count,
-            query,
-        })
-    }
-
     async fn admit(self, c: &mut PgConnection) -> Result<Outcome<Receipt>, Error> {
-        let row = self.query.fetch_one(c).await.map_err(sql_error)?;
+        // The connection now owns transport and driver buffers.
+        #[cfg(feature = "integration")]
+        self._buffers.submit();
+        let row = self.query.fetch_one(c).await;
+        #[cfg(feature = "integration")]
+        self._buffers.set(0);
+        let row = row.map_err(sql_error)?;
         if let Some(raw) = row
             .try_get::<Option<&[u8]>, _>("suspect_raw")
             .map_err(sql_error)?
@@ -143,13 +97,15 @@ impl<C: Clock> Writer for PgStore<C> {
                 tenant,
                 deadline,
                 Mode::Write,
-                || {
-                    PreparedBatch::new(
-                        request.request(),
-                        &self.clock,
-                        deadline,
-                        self.limits.replay_micros.get(),
-                    )
+                |budget| async move {
+                    let permit = self.preparation.acquire(request.request()).await?;
+                    #[cfg(feature = "integration")]
+                    let start = rss_timeseries::measurement::timer();
+                    let prepared =
+                        encoding::prepare(request.request(), self, budget, permit).await?;
+                    #[cfg(feature = "integration")]
+                    rss_timeseries::measurement::record("prepare", start, 0, 0);
+                    Ok(prepared)
                 },
                 |c, _, batch| Box::pin(batch.admit(c)),
             )
