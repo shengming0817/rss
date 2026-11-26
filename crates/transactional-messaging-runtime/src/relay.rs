@@ -565,39 +565,46 @@ impl Admission {
         };
         match claims {
             Ok(batch) => {
-                if matches!(self, Self::Stopped(_)) {
-                    return Some(batch);
-                }
-                match (batch.is_empty(), batch.scan_progress()) {
-                    (true, OutboxScanProgress::Continue) if full_slice => {
-                        self.backoff(clock, emitter, config.wait.continuation_delay);
-                    }
-                    (true, OutboxScanProgress::RetryLater) => {
-                        self.backoff(clock, emitter, config.wait.contention_delay);
-                    }
-                    (true, OutboxScanProgress::Continue) => {
-                        if let Self::Ready(n) = self {
-                            *n += 1;
-                        }
-                    }
-                    (true, OutboxScanProgress::Complete)
-                        if active.len() == before && matches!(self, Self::Ready(_)) =>
-                    {
-                        *self =
-                            Self::delay(clock, emitter, config.wait.idle_scan_interval, Self::Idle);
-                    }
-                    _ => {
-                        if let Self::Ready(n) = self {
-                            *n = 0;
-                        }
-                    }
-                }
+                self.scanned(
+                    batch.is_empty().then(|| batch.scan_progress()),
+                    full_slice,
+                    active.len() != before,
+                    config.wait,
+                    clock,
+                    emitter,
+                );
                 Some(batch)
             }
             Err(error) => {
                 self.failed(error, config, clock, emitter);
                 None
             }
+        }
+    }
+
+    fn scanned(
+        &mut self,
+        empty: Option<OutboxScanProgress>,
+        full_slice: bool,
+        completed: bool,
+        policy: RelayWaitPolicy,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+    ) {
+        match (empty, &mut *self) {
+            (_, Self::Stopped(_)) => {}
+            (Some(OutboxScanProgress::Continue), _) if full_slice => {
+                self.backoff(clock, emitter, policy.continuation_delay)
+            }
+            (Some(OutboxScanProgress::RetryLater), _) => {
+                self.backoff(clock, emitter, policy.contention_delay)
+            }
+            (Some(OutboxScanProgress::Continue), Self::Ready(n)) => *n += 1,
+            (Some(OutboxScanProgress::Complete), Self::Ready(_)) if !completed => {
+                *self = Self::delay(clock, emitter, policy.idle_scan_interval, Self::Idle);
+            }
+            (_, Self::Ready(n)) => *n = 0,
+            _ => {}
         }
     }
 
