@@ -194,11 +194,11 @@ CREATE TABLE rss_transactional_messaging.consumer_scope (
 -- These optional transaction settings are consumed only by the fresh installer.
 INSERT INTO rss_transactional_messaging.policy
  (revision,automatic_window_seconds,safety_seconds,receipt_retention_seconds,retry_initial_seconds,retry_max_seconds)
- VALUES (1,coalesce(current_setting('rss.install_window_seconds',true)::integer,86400),
-           coalesce(current_setting('rss.install_safety_seconds',true)::integer,86400),
-           coalesce(current_setting('rss.install_receipt_seconds',true)::integer,604800),
-           coalesce(current_setting('rss.install_retry_initial_seconds',true)::integer,1),
-           coalesce(current_setting('rss.install_retry_max_seconds',true)::integer,3600));
+ VALUES (1,coalesce(nullif(current_setting('rss.install_window_seconds',true),'')::integer,86400),
+           coalesce(nullif(current_setting('rss.install_safety_seconds',true),'')::integer,86400),
+           coalesce(nullif(current_setting('rss.install_receipt_seconds',true),'')::integer,604800),
+           coalesce(nullif(current_setting('rss.install_retry_initial_seconds',true),'')::integer,1),
+           coalesce(nullif(current_setting('rss.install_retry_max_seconds',true),'')::integer,3600));
 
 -- UPDATE already holds the row lock, including after waiting for concurrent readers.
 CREATE FUNCTION rss_transactional_messaging.protect_policy_change() RETURNS trigger

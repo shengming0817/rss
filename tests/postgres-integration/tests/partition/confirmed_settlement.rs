@@ -169,9 +169,11 @@ async fn assert_result(
         mode,
         Mode::OtherLock | Mode::UnknownCommit | Mode::RollbackFailed
     ) {
-        let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM public.settle_seen")
-            .fetch_one(owner)
-            .await?;
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM public.settle_seen",
+        )
+        .fetch_one(owner)
+        .await?;
         assert_eq!(attempts, 1);
     }
     // Isolate the next scenario from this deliberately expired retained claim.

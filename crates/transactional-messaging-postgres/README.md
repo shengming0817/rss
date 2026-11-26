@@ -316,7 +316,7 @@ Source: `baseline/pre-community-core-20260902`.
 | `consumer_tx.rs` | Retain private commit proof and atomic effect/receipt; remove Audit/Settings handlers in favor of trusted static effect. |
 | Product migration execution, CDC, reconcile, fault-matrix product combinations | Exclude: products own deployment and production workflows; the current installation SQL remains library-owned. |
 
-Receipt retention must strictly exceed the 24-hour automatic window plus safety margin. No
+Receipt retention must strictly exceed the configured automatic window plus safety margin. No
 automatic cleanup or CDC is supplied. Explicit recovery supplies application DLQ, redrive and resolve. A dead-letter partition
 head continues blocking its successors.
 
@@ -594,7 +594,7 @@ its default remains 64 and it does not alter request authorization or digest ide
 ### Bounded claim work and Published body retention
 
 Use `PgOutboxStore::with_scan_budget` or `PgLocalProjection::with_scan_budget` with
-`PgOutboxScanBudget::new(1..=1024)` (pass a single header count). The window may be smaller
+`PgOutboxScanBudget::new(headers)` (1–1024 headers). The window may be smaller
 than claim capacity. The default from #3281/#3288 is `clamp(4 * capacity, 64, 1024)`.
 SQL callers supply both limits to `claim_outbox(tenant, domain, capacity, scan_budget, ttl_ms)`.
 Each indexed lane reads at most the remaining budget before the merged window is capped;

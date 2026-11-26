@@ -1,6 +1,6 @@
 -- Common startup checks, including profiles whose SQL authority is function-only.
 WITH policy_table AS (
- SELECT oid,relowner FROM pg_class WHERE oid=to_regclass('rss_transactional_messaging.policy') AND relkind='r'
+ SELECT oid,relowner FROM pg_class WHERE oid=to_regclass('rss_transactional_messaging.policy') AND relkind='r' AND NOT relrowsecurity AND NOT relforcerowsecurity
 ), functions(signature,body,definer,volatility,owner,public_read) AS (VALUES
  ('protect_policy_change()',$1::text,false,'v',(SELECT relowner FROM policy_table),false),
  ('lock_outbox_policy()',$2::text,true,'v',(SELECT relowner FROM policy_table),false),

@@ -389,9 +389,13 @@ impl PgRuntime {
         if valid {
             Ok(())
         } else {
-            Err(PgError::IncompatibleStorageContract(
-                PgStorageContractFailure::Policy,
-            ))
+            let reason = PgStorageContractFailure::Policy;
+            tracing::warn!(
+                phase = "probe",
+                reason = reason.as_label(),
+                "PostgreSQL storage contract rejected"
+            );
+            Err(PgError::IncompatibleStorageContract(reason))
         }
     }
 
