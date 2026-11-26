@@ -67,7 +67,7 @@ async fn resolver_record(
     f: &Fixture,
 ) -> anyhow::Result<(
     std::sync::Arc<rss_observation_postgres::PgSource<Clock, rss_observation_postgres::LocalPages>>,
-    rss_observation_postgres::VerifiedObservation,
+    rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>,
 )> {
     let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let budget_cancel = tokio_util::sync::CancellationToken::new();
@@ -94,9 +94,11 @@ async fn resolver_record(
 async fn reject_permanent(
     f: &Fixture,
     source: &rss_observation_postgres::PgSource<Clock, rss_observation_postgres::LocalPages>,
-    execution: &impl rss_projection::Execution<Item = rss_observation_postgres::VerifiedObservation>,
+    execution: &impl rss_projection::Execution<
+        Item = rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>,
+    >,
     control: &rss_projection::Control<'_, ProjectionClock>,
-    event: &rss_observation_postgres::VerifiedObservation,
+    event: &rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>,
 ) -> anyhow::Result<()> {
     let invalid = rss_projection::Event::new(
         event.as_ref().source().clone(),

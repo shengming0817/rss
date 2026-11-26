@@ -20,7 +20,7 @@ impl<C> Facts<C> {
     }
 }
 impl<C: Clock + 'static> PgEffect for Facts<C> {
-    type Item = VerifiedObservation;
+    type Item = rss_projection::EventWith<VerifiedObservation>;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

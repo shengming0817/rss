@@ -10,7 +10,7 @@ use std::future::Future;
 /// The runner does not wrap providers in another cancellation race.
 pub trait Source: Send + Sync {
     /// Page-owned input carrying the stable event identity used by the runner.
-    type Item: AsRef<Event> + Send + Sync;
+    type Item: crate::EventInput;
     /// Exact scoped committed high-water; None means empty.
     fn high_water<T: Timer>(
         &self,
@@ -33,7 +33,7 @@ pub trait Source: Send + Sync {
 /// Preserve confirmed progress; uncertain writes require CommitUnknown or RollbackFailed.
 pub trait Execution: Send + Sync {
     /// Input accepted by this execution session.
-    type Item: AsRef<Event> + Send + Sync;
+    type Item: crate::EventInput;
     /// Immutable session scope.
     fn scope(&self) -> &ProjectionScope;
     /// Definition bound to this session. Providers must verify it before granting authority

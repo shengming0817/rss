@@ -14,7 +14,7 @@ struct PausedFacts {
     released: Arc<Notify>,
 }
 impl PgEffect for PausedFacts {
-    type Item = VerifiedObservation;
+    type Item = rss_projection::EventWith<VerifiedObservation>;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -189,7 +189,7 @@ async fn resolve_on(
     control: &Control<'_, ProjectionClock>,
     tx_scope: &rss_projection::SourceScope,
     source: &Arc<ObsSource>,
-    item: &VerifiedObservation,
+    item: &rss_projection::EventWith<VerifiedObservation>,
 ) -> anyhow::Result<Result<Arc<rss_observation::ApplicableRecord>, rss_projection::Error>> {
     let source = source.clone();
     let item = item.clone();

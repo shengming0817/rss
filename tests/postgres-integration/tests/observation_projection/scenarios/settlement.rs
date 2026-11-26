@@ -15,7 +15,7 @@ pub(super) async fn verify(
     input: &Inputs,
     execution: &Session,
     projection: &rss_projection_postgres::PgStore,
-    events: &[rss_observation_postgres::VerifiedObservation],
+    events: &[rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>],
 ) -> anyhow::Result<()> {
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = CancellationToken::new();
@@ -144,7 +144,7 @@ async fn assert_durable(
     f: &Fixture,
     execution: &Session,
     projection: &rss_projection_postgres::PgStore,
-    events: &[rss_observation_postgres::VerifiedObservation],
+    events: &[rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>],
 ) -> anyhow::Result<()> {
     // Inspect settled state on a fresh budget after each independently controlled interruption.
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));

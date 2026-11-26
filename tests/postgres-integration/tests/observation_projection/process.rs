@@ -116,7 +116,7 @@ struct CrashEffect {
     marker: PathBuf,
 }
 impl PgEffect for CrashEffect {
-    type Item = rss_observation_postgres::VerifiedObservation;
+    type Item = rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

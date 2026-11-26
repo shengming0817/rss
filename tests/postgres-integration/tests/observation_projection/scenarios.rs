@@ -447,7 +447,7 @@ async fn project_to(
     Ok(())
 }
 fn assert_positions(
-    events: &[rss_observation_postgres::VerifiedObservation],
+    events: &[rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>],
     before: Option<Position>,
 ) {
     let start = before.map_or(0, |p| p.get());
@@ -818,7 +818,7 @@ async fn assert_source_failures(
     f: &Fixture,
     input: &Inputs,
     execution: &Session,
-    bad: &rss_observation_postgres::VerifiedObservation,
+    bad: &rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>,
     control: &Control<'_, ProjectionClock>,
 ) -> anyhow::Result<()> {
     use rss_projection::ErrorKind as Kind;

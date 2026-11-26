@@ -136,7 +136,7 @@ reconstruction from the validated durable record. Debug/error formatting does no
 
 `resolve(event, &control)` returns `ApplicableRecord` under the source's tenant grant.
 For a same-database effect, select `source.into_local(page_bytes)?` and implement
-`PgEffect<Item = VerifiedObservation>`. Give the source an explicit canonical-byte allowance
+`PgEffect<Item = EventWith<VerifiedObservation>>`. Give the source an explicit canonical-byte allowance
 of at least 4 MiB. Together with the runner's count limit it selects an ordered prefix;
 the returned page is the atomic unit in `run_batched`. For eight maximum-size reports in one
 transaction allow 32 MiB. Decoded facts, references, driver buffers and application data consume

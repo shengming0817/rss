@@ -251,7 +251,7 @@ pub enum PgEffectOutcome {
 /// A successful result means only that SQL was staged; the adapter still owns settlement.
 pub trait PgEffect: Send + Sync {
     /// Source item used by this mapping. Cloning must preserve its event identity.
-    type Item: AsRef<Event> + Clone + Send + Sync + 'static;
+    type Item: rss_projection::EventInput + Clone + 'static;
     /// Apply within the borrowed transaction. An error rolls back the settlement: one event in `run`,
     /// or the entire page (including earlier successful callbacks) in `run_batched`.
     /// Later callbacks on the same page can read earlier application writes. The provider
@@ -307,10 +307,11 @@ async fn stage<H: PgEffect>(
     event: &H::Item,
 ) -> Result<ApplyOutcome, Error> {
     tx.check()?;
-    let duplicate = lock(tx, claim, expected, event.as_ref()).await?;
+    let identity = event.as_ref();
+    let duplicate = lock(tx, claim, expected, identity).await?;
     let outcome = apply_event(tx, claim, effect, event, duplicate).await?;
     tx.check()?;
-    finish(tx, claim, expected, event.as_ref()).await?;
+    finish(tx, claim, expected, identity).await?;
     Ok(outcome)
 }
 

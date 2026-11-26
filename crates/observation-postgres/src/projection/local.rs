@@ -1,4 +1,5 @@
 use super::*;
+use rss_projection::EventWith;
 use rss_projection_postgres::PgTransaction;
 use sqlx::ValueRef;
 
@@ -17,22 +18,11 @@ pub struct LocalPages {
     bytes: u32,
 }
 
-/// Page-owned validated input. Only its immutable reference is visible before transaction recheck.
-#[derive(Clone)]
+/// Observation evidence held by a page item. The adapter alone constructs this value;
+/// use the borrowed transaction resolver to access the underlying record.
 pub struct VerifiedObservation {
-    reference: Event,
     fingerprint: [u8; 32],
     record: Arc<ApplicableRecord>,
-}
-impl std::fmt::Debug for VerifiedObservation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.reference.fmt(f)
-    }
-}
-impl AsRef<Event> for VerifiedObservation {
-    fn as_ref(&self) -> &Event {
-        &self.reference
-    }
 }
 
 impl<C: Clock> PgSource<C> {
@@ -52,7 +42,7 @@ impl<C: Clock> PgSource<C> {
 }
 
 impl<C: Clock> Source for PgSource<C, LocalPages> {
-    type Item = VerifiedObservation;
+    type Item = EventWith<VerifiedObservation>;
     async fn high_water<T: Timer>(
         &self,
         scope: &SourceScope,
@@ -82,11 +72,10 @@ impl<C: Clock> Source for PgSource<C, LocalPages> {
                     record.record().batch().id(),
                     fingerprint,
                 )?;
-                Ok(VerifiedObservation {
-                    reference,
+                Ok(reference.with_data(VerifiedObservation {
                     fingerprint,
                     record: Arc::new(record),
-                })
+                }))
             },
         )
         .await
@@ -100,9 +89,9 @@ impl<C: Clock> PgSource<C, LocalPages> {
     pub async fn resolve_in_transaction(
         &self,
         tx: &mut PgTransaction<'_>,
-        item: &VerifiedObservation,
+        item: &EventWith<VerifiedObservation>,
     ) -> Result<Arc<ApplicableRecord>, rss_projection::Error> {
-        self.check(item.reference.source()).map_err(source_error)?;
+        self.check(item.as_ref().source()).map_err(source_error)?;
         if tx.tenant() != self.grant.tenant() {
             return Err(source_error(ErrorKind::Unauthorized.into()));
         }
@@ -120,16 +109,16 @@ impl<C: Clock> PgSource<C, LocalPages> {
 async fn recheck(
     connection: &mut sqlx::PgConnection,
     tenant: &str,
-    item: VerifiedObservation,
+    item: EventWith<VerifiedObservation>,
 ) -> Result<Arc<ApplicableRecord>, BridgeError> {
-    let record = item.record.record();
+    let record = item.data().record.record();
     let batch = record.batch();
-    let pos = item.reference.position();
+    let pos = item.as_ref().position();
     let row = sqlx::query(RECHECK)
         .bind(tenant)
         .bind(pos.get() as i64)
         .bind(batch.fingerprint_prefix(record.scope())?)
-        .bind(item.fingerprint.as_slice())
+        .bind(item.data().fingerprint.as_slice())
         .bind(record.scope().encode()?)
         .bind(batch.id().as_str())
         .bind(batch.sequence().to_string())
@@ -152,8 +141,8 @@ async fn recheck(
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         });
         if row.try_get_raw("raw").map_err(sql_error)?.is_null() {
-            return Ok(item.record);
+            return Ok(item.data().record.clone());
         }
     }
-    resolve_row(row, &item.reference).map(Arc::new)
+    resolve_row(row, item.as_ref()).map(Arc::new)
 }

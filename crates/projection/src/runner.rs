@@ -266,14 +266,14 @@ impl<E: Execution> Settlement<E> for Individual {
         control: &Control<'_, T>,
     ) -> Result<(Position, Self::Outcomes), Error> {
         let event = events.next().ok_or(Error::new(ErrorKind::SourceContract))?;
-        if matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if event.as_ref().position() > end)
-        {
+        let position = event.as_ref().position();
+        if matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if position > end) {
             return Err(Error::new(ErrorKind::SourceContract));
         }
         let outcome = execution
             .execute(checkpoint.position, &event, control)
             .await?;
-        Ok((event.as_ref().position(), [outcome]))
+        Ok((position, [outcome]))
     }
 }
 

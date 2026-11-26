@@ -193,12 +193,67 @@ pub struct Event {
     id: String,
     payload: Vec<u8>,
 }
+mod sealed {
+    pub trait EventInput {}
+}
+
+/// An input whose framework identity is fixed throughout execution and across clones.
+/// Sources can attach their own data with [`Event::with_data`]. The source cannot
+/// redefine which event is used for ordering, fencing, receipts or progress.
+///
+/// ```compile_fail
+/// use rss_projection::{Event, EventInput};
+/// use std::sync::atomic::{AtomicBool,Ordering};
+/// struct Switching { facts: [Event; 2], next: AtomicBool }
+/// impl AsRef<Event> for Switching {
+///     fn as_ref(&self) -> &Event { &self.facts[self.next.load(Ordering::Relaxed) as usize] }
+/// }
+/// impl EventInput for Switching {}
+/// ```
+pub trait EventInput: sealed::EventInput + AsRef<Event> + Send + Sync {}
+impl sealed::EventInput for Event {}
+impl EventInput for Event {}
+
+/// One immutable event and its page-owned application data. Clones share both.
+pub struct EventWith<T>(std::sync::Arc<EventData<T>>);
+struct EventData<T> {
+    event: Event,
+    data: T,
+}
+impl<T> EventWith<T> {
+    /// Borrow the associated data without separating ownership from its event.
+    pub fn data(&self) -> &T {
+        &self.0.data
+    }
+}
+impl<T> Clone for EventWith<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<T> AsRef<Event> for EventWith<T> {
+    fn as_ref(&self) -> &Event {
+        &self.0.event
+    }
+}
+impl<T> std::fmt::Debug for EventWith<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.event.fmt(f)
+    }
+}
+impl<T> sealed::EventInput for EventWith<T> {}
+impl<T: Send + Sync> EventInput for EventWith<T> {}
 impl AsRef<Event> for Event {
     fn as_ref(&self) -> &Event {
         self
     }
 }
 impl Event {
+    /// Attach typed data to this exact event for one local handoff.
+    pub fn with_data<T>(self, data: T) -> EventWith<T> {
+        EventWith(std::sync::Arc::new(EventData { event: self, data }))
+    }
+
     /// Construct a fact. Encoded payloads are bounded to 1 MiB.
     pub fn new(
         source: SourceScope,
