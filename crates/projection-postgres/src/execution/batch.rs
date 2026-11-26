@@ -9,7 +9,7 @@ struct BatchFacts {
 
 impl BatchFacts {
     async fn collect<T: Timer>(
-        events: &[Event],
+        events: &[impl AsRef<Event>],
         scope: &ProjectionScope,
         mut previous: Option<Position>,
         control: &Control<'_, T>,
@@ -21,7 +21,8 @@ impl BatchFacts {
             ids: Vec::with_capacity(n),
             digests: Vec::with_capacity(n),
         };
-        for event in events {
+        for item in events {
+            let event = item.as_ref();
             control.check()?;
             if event.source() != scope.source() {
                 return Err(Error::new(ErrorKind::ScopeMismatch));
@@ -64,14 +65,14 @@ impl<H: PgEffect + 'static> BatchExecution for PgProjection<H> {
     async fn execute_batch<T: Timer>(
         &self,
         expected: Option<Position>,
-        events: Vec<Event>,
+        events: Vec<H::Item>,
         control: &Control<'_, T>,
     ) -> Result<Vec<ApplyOutcome>, Error> {
         let facts = BatchFacts::collect(&events, self.scope(), expected, control).await?;
         let claim = self.claim.clone();
         let effect = self.effect.clone();
         self.store
-            .controlled_tx(self.scope().source(), control, move |tx| {
+            .controlled_tx(self.scope().source(), control, H::ISOLATION, move |tx| {
                 Box::pin(async move {
                     let duplicates: Vec<bool> = facts
                         .query("SELECT rss_projection.lock_batch($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8,$9,$10,$11)", &claim, expected)

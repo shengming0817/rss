@@ -204,12 +204,15 @@ impl Fixture {
         &self,
         store: Arc<PgStore<Clock>>,
         tenant: &str,
-    ) -> anyhow::Result<Arc<PgSource<Clock>>> {
-        Ok(Arc::new(PgSource::new(
-            store,
-            JournalReadGrant::verify(&Trusted, TenantId::parse(tenant)?)?,
-            rss_projection::SourceScope::new(TenantId::parse(tenant)?, "rss.observation.v1")?,
-        )?))
+    ) -> anyhow::Result<Arc<PgSource<Clock, rss_observation_postgres::LocalPages>>> {
+        Ok(Arc::new(
+            PgSource::new(
+                store,
+                JournalReadGrant::verify(&Trusted, TenantId::parse(tenant)?)?,
+                rss_projection::SourceScope::new(TenantId::parse(tenant)?, "rss.observation.v1")?,
+            )?
+            .into_local(32 * 1024 * 1024)?,
+        ))
     }
     pub async fn projection(
         &self,

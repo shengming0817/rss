@@ -33,10 +33,12 @@ impl Timer for Clock {
 struct Consumer { scope: ProjectionScope, event: Event, position: std::sync::Mutex<Option<Position>> }
 const DEFINITION: DefinitionIdentity = DefinitionIdentity::new([7;32]);
 impl Source for Consumer {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(&self, _: &SourceScope, control: &Control<'_,T>) -> Result<Option<Position>,Error> {control.check()?; Ok(Some(self.event.position()))}
     async fn read<T: Timer>(&self, _: &SourceScope, after: Option<Position>, _: BatchLimit, control: &Control<'_,T>) -> Result<Vec<Event>,Error> {control.check()?; Ok(if after.is_none() {vec![self.event.clone()]} else {vec![]})}
 }
 impl Execution for Consumer {
+    type Item = rss_projection::Event;
     fn scope(&self) -> &ProjectionScope { &self.scope }
     fn definition_identity(&self) -> &DefinitionIdentity { &DEFINITION }
     async fn checkpoint<T: Timer>(&self, control: &Control<'_,T>) -> Result<Checkpoint,Error> {

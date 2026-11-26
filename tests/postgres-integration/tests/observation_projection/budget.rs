@@ -41,7 +41,7 @@ impl Timer for ManualTimer {
         }
     }
 }
-type ObsSource = rss_observation_postgres::PgSource<Clock>;
+type ObsSource = rss_observation_postgres::PgSource<Clock, rss_observation_postgres::LocalPages>;
 pub(super) async fn verify(f: &Fixture) -> anyhow::Result<()> {
     let timer = ManualTimer::new();
     let acquired = timer.clone();
@@ -81,7 +81,8 @@ pub(super) async fn verify(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     let event = events
         .last()
-        .ok_or_else(|| anyhow::anyhow!("missing fixture event"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing fixture event"))?
+        .as_ref();
     for stage in 0..3 {
         for kind in [ErrorKind::Cancelled, ErrorKind::Deadline] {
             acquire_wait(&pool, &source, event, &timer, stage, kind).await?;

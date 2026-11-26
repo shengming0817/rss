@@ -19,6 +19,7 @@ struct Probe {
     boundary: Boundary,
 }
 impl Execution for Probe {
+    type Item = rss_projection::Event;
     fn scope(&self) -> &ProjectionScope {
         self.memory.scope()
     }
@@ -92,6 +93,7 @@ impl Fixture {
     }
 }
 impl Source for Fixture {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(
         &self,
         _: &SourceScope,

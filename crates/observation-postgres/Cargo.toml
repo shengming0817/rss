@@ -21,7 +21,7 @@ serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
 [features]
 default = []
-integration = []
+integration = ["rss-observation/integration"]
 projection = ["dep:rss-projection", "dep:serde", "dep:serde_json"]
 projection-postgres = ["projection", "dep:rss-projection-postgres"]
 [dev-dependencies]

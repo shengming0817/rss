@@ -15,7 +15,7 @@ pub(super) async fn verify(
     input: &Inputs,
     execution: &Session,
     projection: &rss_projection_postgres::PgStore,
-    events: &[Event],
+    events: &[rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>],
 ) -> anyhow::Result<()> {
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = CancellationToken::new();
@@ -37,7 +37,7 @@ pub(super) async fn verify(
     let entered = input.store.inject_pending_rollback();
     let direct = input
         .source
-        .resolve(&events[1], &control)
+        .resolve(events[1].as_ref(), &control)
         .map(|result| result.map(|_| ()));
     let result = expire_after(
         &timer,
@@ -144,7 +144,7 @@ async fn assert_durable(
     f: &Fixture,
     execution: &Session,
     projection: &rss_projection_postgres::PgStore,
-    events: &[Event],
+    events: &[rss_projection::EventWith<rss_observation_postgres::VerifiedObservation>],
 ) -> anyhow::Result<()> {
     // Inspect settled state on a fresh budget after each independently controlled interruption.
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
@@ -156,7 +156,7 @@ async fn assert_durable(
         let query = ReceiptQuery::new(
             execution.scope().clone(),
             *execution.definition_identity(),
-            event.id(),
+            event.as_ref().id(),
         )?;
         assert_eq!(
             projection.receipt_status(&query, &control).await?,

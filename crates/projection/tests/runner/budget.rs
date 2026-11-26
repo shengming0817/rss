@@ -42,6 +42,7 @@ impl Waiting {
     }
 }
 impl Source for Waiting {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(
         &self,
         _: &SourceScope,
@@ -60,6 +61,7 @@ impl Source for Waiting {
     }
 }
 impl Execution for Waiting {
+    type Item = rss_projection::Event;
     fn scope(&self) -> &ProjectionScope {
         self.0.scope()
     }
@@ -150,6 +152,7 @@ async fn direct_read_ports_use_full_original_budget() -> anyhow::Result<()> {
 }
 struct EmptyAtDeadline<'a>(&'a Clock);
 impl Source for EmptyAtDeadline<'_> {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(
         &self,
         _: &SourceScope,

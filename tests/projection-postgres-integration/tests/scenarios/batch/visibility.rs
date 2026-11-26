@@ -2,6 +2,7 @@ use super::*;
 
 struct ObservePrefix(Writer);
 impl PgEffect for ObservePrefix {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

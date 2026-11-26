@@ -16,6 +16,7 @@ struct Recorder {
 }
 struct Writer(Arc<Recorder>);
 impl PgEffect for Writer {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

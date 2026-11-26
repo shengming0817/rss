@@ -68,11 +68,14 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
         )
         .await?;
     receive_batches(store.as_ref(), &scope, deadline).await?;
-    let source = Arc::new(PgSource::new(
-        store.clone(),
-        JournalReadGrant::verify(&DemoAuthority, tenant)?,
-        rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
-    )?);
+    let source = Arc::new(
+        PgSource::new(
+            store.clone(),
+            JournalReadGrant::verify(&DemoAuthority, tenant)?,
+            rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
+        )?
+        .into_local(32 * 1024 * 1024)?,
+    );
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(
         &clock,

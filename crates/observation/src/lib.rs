@@ -4,6 +4,8 @@
 mod admission;
 mod error;
 mod identity;
+#[cfg(feature = "integration")]
+pub mod measurement;
 mod report;
 mod retention;
 pub use retention::{MaintenanceGrant, ObservationMaintenance, RetentionPage, ScanWindow};

@@ -66,6 +66,7 @@ pub(super) async fn crash(
 }
 struct CrashEffect(PathBuf);
 impl PgEffect for CrashEffect {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,

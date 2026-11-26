@@ -9,7 +9,9 @@ use futures::TryStreamExt;
 use rss_observation::{ApplicableRecord, Clock, Error, ErrorKind, Id, JournalReadGrant, Scope};
 use rss_projection::{BatchLimit, Control, Event, Phase, Position, Source, SourceScope, Timer};
 #[cfg(feature = "projection-postgres")]
-use rss_projection_postgres::PgTransaction;
+mod local;
+#[cfg(feature = "projection-postgres")]
+pub use local::{LocalPages, VerifiedObservation};
 use serde::Serialize;
 use sqlx::{Row, postgres::PgRow};
 use std::sync::Arc;
@@ -22,6 +24,19 @@ const READ: &str = "SELECT j.expired_through,b.* FROM rss_observation.journals j
      AND $2>=j.expired_through ORDER BY log_position LIMIT $3
  ) b ON true WHERE j.tenant_id=$1::uuid ORDER BY b.log_position";
 
+// Window only over the bounded index candidates and their byte lengths. Select bodies
+// for the admitted prefix in the same snapshot as the floor.
+const READ_LOCAL: &str =
+    "SELECT j.expired_through, b.scope,b.batch_id,b.raw,b.fingerprint,b.received_at,
+ b.policy,b.decision,b.sequence::text AS sequence,b.applicable,b.log_position
+ FROM rss_observation.journals j LEFT JOIN LATERAL (
+   SELECT log_position,sum(n) OVER (ORDER BY log_position ROWS UNBOUNDED PRECEDING) AS bytes
+   FROM (SELECT log_position,coalesce(octet_length(raw),0) AS n FROM rss_observation.batches
+     WHERE tenant_id=j.tenant_id AND applicable AND log_position>$2 AND $2>=j.expired_through
+     ORDER BY log_position LIMIT $3) candidates
+ ) p ON p.bytes<=$4::bigint LEFT JOIN rss_observation.batches b
+ ON b.tenant_id=j.tenant_id AND b.applicable AND b.log_position=p.log_position
+ WHERE j.tenant_id=$1::uuid ORDER BY b.log_position";
 /// Tenant journal coordinates from one committed snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalBounds {
@@ -32,7 +47,12 @@ pub struct JournalBounds {
 }
 /// Tenant-authorized immutable source. The adopted Observation store owns the pool lifecycle.
 /// Reauthorize a new grant for each host operation; cancel/join workers before revocation.
-pub struct PgSource<C> {
+pub struct PgSource<C, M = ()> {
+    #[cfg_attr(
+        not(feature = "projection-postgres"),
+        allow(dead_code, reason = "reference-only builds use a zero-sized page mode")
+    )]
+    page_mode: M,
     store: Arc<PgStore<C>>,
     scope: SourceScope,
     grant: JournalReadGrant,
@@ -50,11 +70,14 @@ impl<C: Clock> PgSource<C> {
             return Err(ErrorKind::Unauthorized.into());
         }
         Ok(Self {
+            page_mode: (),
             store,
             scope,
             grant,
         })
     }
+}
+impl<C: Clock, M: Send + Sync> PgSource<C, M> {
     /// Exact tenant/source binding for runner and projection generation initialization.
     pub const fn scope(&self) -> &SourceScope {
         &self.scope
@@ -158,43 +181,9 @@ impl<C: Clock> PgSource<C> {
         })
         .await
     }
-    /// Resolve on the same borrowed transaction as the read-model effect/checkpoint. Does not
-    /// change tenant, watchdogs or settlement authority; the enclosing Projection Control applies.
-    #[cfg(feature = "projection-postgres")]
-    pub async fn resolve_in_transaction(
-        &self,
-        tx: &mut PgTransaction<'_>,
-        event: &Event,
-    ) -> Result<ApplicableRecord, rss_projection::Error> {
-        self.check(event.source()).map_err(source_error)?;
-        if tx.tenant() != self.grant.tenant() {
-            return Err(source_error(ErrorKind::Unauthorized.into()));
-        }
-        let tenant = self.grant.tenant().to_string();
-        let position = event.position().get() as i64;
-        let event = event.clone();
-        tx.with_connection(move |connection| {
-            Box::pin(async move {
-                // Keep the SQL result inside the callback value so the Observation
-                // owner classifies its own static query before the application SQL wrapper.
-                Ok(async {
-                    let row = sqlx::query(LOOKUP)
-                        .bind(tenant)
-                        .bind(position)
-                        .fetch_optional(connection)
-                        .await
-                        .map_err(sql_error)?;
-                    resolve_row(row, &event)
-                }
-                .await)
-            })
-        })
-        .await
-        .map_err(rss_projection::Error::from)?
-        .map_err(|error: BridgeError| error.0)
-    }
 }
 impl<C: Clock> Source for PgSource<C> {
+    type Item = rss_projection::Event;
     async fn high_water<T: Timer>(
         &self,
         scope: &SourceScope,
@@ -210,19 +199,55 @@ impl<C: Clock> Source for PgSource<C> {
         limit: BatchLimit,
         control: &Control<'_, T>,
     ) -> Result<Vec<Event>, rss_projection::Error> {
+        self.read_page(
+            scope,
+            after,
+            limit,
+            control,
+            None,
+            |source, pos, record, fp| {
+                reference_event(
+                    source,
+                    pos,
+                    record.record().scope(),
+                    record.record().batch().id(),
+                    fp,
+                )
+            },
+        )
+        .await
+    }
+}
+impl<C: Clock, M: Send + Sync> PgSource<C, M> {
+    async fn read_page<T: Timer, I: Send + 'static>(
+        &self,
+        scope: &SourceScope,
+        after: Option<Position>,
+        limit: BatchLimit,
+        control: &Control<'_, T>,
+        bytes: Option<i64>,
+        item: fn(&SourceScope, Position, ApplicableRecord, [u8; 32]) -> Result<I, Error>,
+    ) -> Result<Vec<I>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
-        self.transact(control, move |connection, budget| {
+        let operation = self.transact(control, move |connection, budget| {
             Box::pin(async move {
-                let mut rows = sqlx::query(READ)
+                let query = sqlx::query(if bytes.is_some() { READ_LOCAL } else { READ })
                     .bind(tenant.to_string())
                     .bind(after.map_or(0, |p| p.get() as i64))
-                    .bind(i64::from(limit.get()))
-                    .fetch(connection);
+                    .bind(i64::from(limit.get()));
+                let query = if let Some(bytes) = bytes {
+                    query.bind(bytes)
+                } else {
+                    query
+                };
+                let mut rows = query.fetch(connection);
                 let mut events = Vec::new();
                 while let Some(row) = rows.try_next().await.map_err(sql_error)? {
                     budget()?;
+                    #[cfg(feature = "integration")]
+                    crate::read_profile::row(&row);
                     let floor: i64 = row.try_get("expired_through").map_err(sql_error)?;
                     if after.map_or(0, |p| p.get() as i64) < floor {
                         return Err(expired(position(floor)?));
@@ -234,17 +259,19 @@ impl<C: Clock> Source for PgSource<C> {
                     {
                         continue;
                     }
-                    let (pos, record) = restore_row(row)?;
+                    let (pos, record, fp) = restore_row(row)?;
                     events.push(
-                        event_for(&scope, pos, &record).map_err(|e| restore_error(Some(pos), e))?,
+                        item(&scope, pos, record, fp).map_err(|e| restore_error(Some(pos), e))?,
                     );
                     budget()?;
                     tokio::task::yield_now().await;
                 }
                 Ok(events)
             })
-        })
-        .await
+        });
+        #[cfg(feature = "integration")]
+        let operation = crate::read_profile::page(operation);
+        operation.await
     }
 }
 // Only this adapter needs to carry projection diagnostics through Observation settlement.
@@ -269,23 +296,27 @@ fn position(value: i64) -> Result<Position, Error> {
     }
     Position::new(value as u64).map_err(projection_error)
 }
-fn restore_row(row: PgRow) -> Result<(Position, ApplicableRecord), BridgeError> {
+fn restore_row(row: PgRow) -> Result<(Position, ApplicableRecord, [u8; 32]), BridgeError> {
     let pos = row
         .try_get("log_position")
         .map_err(sql_error)
         .and_then(position)
         .map_err(|e| restore_error(None, e))?;
-    let record = (|| -> Result<ApplicableRecord, Error> {
+    let (record, fp) = (|| {
         let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)
             .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
         let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)
             .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
-        restore(row, &scope, &id)?
-            .into_applicable()
-            .map_err(|e| Error::provider(ErrorKind::Invariant, e))
+        let (record, fp) = restore(row, &scope, &id)?;
+        Ok::<_, Error>((
+            record
+                .into_applicable()
+                .map_err(|e| Error::provider(ErrorKind::Invariant, e))?,
+            fp,
+        ))
     })()
     .map_err(|e| restore_error(Some(pos), e))?;
-    Ok((pos, record))
+    Ok((pos, record, fp))
 }
 fn expired(pos: Position) -> BridgeError {
     BridgeError(rss_projection::Error::provider(
@@ -312,10 +343,17 @@ fn resolve_row(row: Option<PgRow>, event: &Event) -> Result<ApplicableRecord, Br
         validate_reference(event, &identity)?;
         return Err(expired(pos));
     }
-    let (pos, record) = restore_row(row)?;
+    let (pos, record, fp) = restore_row(row)?;
     validate_reference(
         event,
-        &event_for(event.source(), pos, &record).map_err(|e| restore_error(Some(pos), e))?,
+        &reference_event(
+            event.source(),
+            pos,
+            record.record().scope(),
+            record.record().batch().id(),
+            fp,
+        )
+        .map_err(|e| restore_error(Some(pos), e))?,
     )?;
     Ok(record)
 }
@@ -340,20 +378,6 @@ struct Reference<'a> {
     scope: &'a Scope,
     batch_id: &'a Id,
     fingerprint: [u8; 32],
-}
-fn event_for(
-    scope: &SourceScope,
-    position: Position,
-    record: &ApplicableRecord,
-) -> Result<Event, Error> {
-    let record = record.record();
-    reference_event(
-        scope,
-        position,
-        record.scope(),
-        record.batch().id(),
-        record.batch().fingerprint(record.scope())?,
-    )
 }
 fn reference_event(
     source: &SourceScope,
@@ -404,6 +428,20 @@ mod tests {
         Batch, Body, Change, Coverage, Epoch, Policy, Record, Registration, State,
     };
     use rss_request_context::TenantId;
+    fn event_for(
+        scope: &SourceScope,
+        position: Position,
+        record: &ApplicableRecord,
+    ) -> Result<Event, Error> {
+        let record = record.record();
+        reference_event(
+            scope,
+            position,
+            record.scope(),
+            record.batch().id(),
+            record.batch().fingerprint(record.scope())?,
+        )
+    }
     #[test]
     fn reference_is_bounded_and_immutable_for_large_unicode_reports() -> anyhow::Result<()> {
         let tenant = TenantId::parse("00000000-0000-0000-0000-000000000001")?;

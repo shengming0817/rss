@@ -69,7 +69,7 @@ pub(crate) fn validate_next(checkpoint: Checkpoint, event: &Event) -> Result<(),
     }
 }
 fn validate_batch(
-    events: &[Event],
+    events: &[impl AsRef<Event>],
     execution: &impl Execution,
     after: Option<Position>,
     limit: BatchLimit,
@@ -78,7 +78,8 @@ fn validate_batch(
         return Err(Error::new(ErrorKind::SourceContract));
     }
     let mut previous = after;
-    for event in events {
+    for item in events {
+        let event = item.as_ref();
         if event.source() != execution.scope().source() {
             return Err(Error::new(ErrorKind::ScopeMismatch));
         }
@@ -113,7 +114,7 @@ impl<F: Future<Output = Report>> IntoFuture for Run<F> {
 /// Prepare a run until caught up, interrupted, failed or bounded. Execution begins when awaited;
 /// only local observation state is allocated here. No implicit retry or epoch takeover occurs.
 /// Dropping the run or its future before a final report latches an unavailable observation.
-pub fn run<'a, S: Source, E: Execution, T: Timer>(
+pub fn run<'a, S: Source<Item = E::Item>, E: Execution, T: Timer>(
     source: &'a S,
     execution: &'a E,
     control: &'a Control<'_, T>,
@@ -124,7 +125,7 @@ pub fn run<'a, S: Source, E: Execution, T: Timer>(
 
 /// Run ordered, atomic pages. A rejected or uncertain page publishes no progress.
 /// Read size and remaining event budget bound each transaction.
-pub fn run_batched<'a, S: Source, E: BatchExecution, T: Timer>(
+pub fn run_batched<'a, S: Source<Item = E::Item>, E: BatchExecution, T: Timer>(
     source: &'a S,
     execution: &'a E,
     control: &'a Control<'_, T>,
@@ -133,7 +134,7 @@ pub fn run_batched<'a, S: Source, E: BatchExecution, T: Timer>(
     prepare::<_, _, _, AtomicPage>(source, execution, control, limit)
 }
 
-fn prepare<'a, S: Source, E: Execution, T: Timer, M: Settlement<E>>(
+fn prepare<'a, S: Source<Item = E::Item>, E: Execution, T: Timer, M: Settlement<E>>(
     source: &'a S,
     execution: &'a E,
     control: &'a Control<'_, T>,
@@ -170,7 +171,7 @@ fn prepare<'a, S: Source, E: Execution, T: Timer, M: Settlement<E>>(
         observation,
     }
 }
-async fn drive<S: Source, E: Execution, T: Timer, M: Settlement<E>>(
+async fn drive<S: Source<Item = E::Item>, E: Execution, T: Timer, M: Settlement<E>>(
     source: &S,
     execution: &E,
     control: &Control<'_, T>,
@@ -250,7 +251,7 @@ trait Settlement<E: Execution> {
     fn next<T: Timer>(
         execution: &E,
         checkpoint: Checkpoint,
-        events: &mut std::vec::IntoIter<Event>,
+        events: &mut std::vec::IntoIter<E::Item>,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<(Position, Self::Outcomes), Error>> + Send;
 }
@@ -261,17 +262,18 @@ impl<E: Execution> Settlement<E> for Individual {
     async fn next<T: Timer>(
         execution: &E,
         checkpoint: Checkpoint,
-        events: &mut std::vec::IntoIter<Event>,
+        events: &mut std::vec::IntoIter<E::Item>,
         control: &Control<'_, T>,
     ) -> Result<(Position, Self::Outcomes), Error> {
         let event = events.next().ok_or(Error::new(ErrorKind::SourceContract))?;
-        if matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if event.position() > end) {
+        let position = event.as_ref().position();
+        if matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if position > end) {
             return Err(Error::new(ErrorKind::SourceContract));
         }
         let outcome = execution
             .execute(checkpoint.position, &event, control)
             .await?;
-        Ok((event.position(), [outcome]))
+        Ok((position, [outcome]))
     }
 }
 
@@ -281,12 +283,12 @@ impl<E: BatchExecution> Settlement<E> for AtomicPage {
     async fn next<T: Timer>(
         execution: &E,
         checkpoint: Checkpoint,
-        events: &mut std::vec::IntoIter<Event>,
+        events: &mut std::vec::IntoIter<E::Item>,
         control: &Control<'_, T>,
     ) -> Result<(Position, Self::Outcomes), Error> {
         let mut page: Vec<_> = std::mem::take(events).collect();
         if let ReplayBound::Through(Some(end)) = checkpoint.bound {
-            match page.binary_search_by_key(&end, Event::position) {
+            match page.binary_search_by_key(&end, |e| e.as_ref().position()) {
                 Ok(index) => page.truncate(index + 1),
                 Err(index) if index < page.len() => {
                     return Err(Error::new(ErrorKind::SourceContract));
@@ -297,6 +299,7 @@ impl<E: BatchExecution> Settlement<E> for AtomicPage {
         let position = page
             .last()
             .ok_or(Error::new(ErrorKind::SourceContract))?
+            .as_ref()
             .position();
         let len = page.len();
         let outcomes = execution

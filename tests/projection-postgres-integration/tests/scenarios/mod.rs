@@ -106,6 +106,7 @@ async fn rollback_cases(
 }
 struct Reject;
 impl PgEffect for Reject {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -389,6 +390,7 @@ struct HeldEffect {
     release: Arc<tokio::sync::Notify>,
 }
 impl PgEffect for HeldEffect {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,
@@ -527,6 +529,7 @@ struct Filter {
     calls: Arc<std::sync::atomic::AtomicU64>,
 }
 impl PgEffect for Filter {
+    type Item = rss_projection::Event;
     async fn apply(
         &self,
         _: &mut PgTransaction<'_>,

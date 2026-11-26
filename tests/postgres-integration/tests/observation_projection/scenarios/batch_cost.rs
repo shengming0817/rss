@@ -81,7 +81,12 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
         .await?;
     let mut expected: Vec<_> = all
         .iter()
-        .map(|e| (e.id().to_owned(), e.fingerprint().to_vec()))
+        .map(|e| {
+            (
+                e.as_ref().id().to_owned(),
+                e.as_ref().fingerprint().to_vec(),
+            )
+        })
         .collect();
     expected.sort();
     let history: i32 = std::env::var("RSS_PROJECTION_HISTORY")
@@ -123,7 +128,7 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
         );
         assert_eq!(
             (report.position, report.applied),
-            (all.last().map(Event::position), EVENTS)
+            (all.last().map(|e| e.as_ref().position()), EVENTS)
         );
         assert_eq!(
             values(&f, mode, "cost").await?,
@@ -144,7 +149,7 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
+pub(super) async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT statement,custom_plans+generic_plans FROM pg_prepared_statements",
     )
