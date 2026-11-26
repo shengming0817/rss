@@ -98,10 +98,26 @@ impl<C: Clock> PgStore<C> {
         let mutation = mode == Mode::Write;
         let fault = if mutation { self.take_fault() } else { 0 };
         let result=tokio::time::timeout(remaining, async {
+            #[cfg(feature = "integration")]
+            let pg_wait = rss_timeseries::measurement::timer();
             let connection = self.pool.acquire().await.map_err(sql_error)?;
+            #[cfg(feature = "integration")]
+            let lease_start = {
+                rss_timeseries::measurement::record("pool_wait", pg_wait, 0, 0);
+                rss_timeseries::measurement::timer()
+            };
+            #[cfg(feature = "integration")]
+            let prep_start = rss_timeseries::measurement::timer();
             let prepared = prepare()?;
+            #[cfg(feature = "integration")]
+            rss_timeseries::measurement::record("prepare", prep_start, 0, 0);
             check(&self.clock, deadline)?;
             let mut lease=Lease{connection,settled:false};
+            #[cfg(feature = "integration")]
+            let tx_start = {
+                rss_timeseries::measurement::record("lease_to_begin", lease_start, 0, 0);
+                rss_timeseries::measurement::timer()
+            };
             let mut tx = match mode {
                 Mode::Snapshot => lease.connection.begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY").await,
                 _ => lease.connection.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE").await,
@@ -122,12 +138,16 @@ impl<C: Clock> PgStore<C> {
                 Ok(value) if mutation=> {
                     if fault==4 { std::future::pending::<()>().await; }
                     if tx.commit().await.is_err() { return Ok(Outcome::Unknown); }
+                    #[cfg(feature = "integration")]
+                    rss_timeseries::measurement::record("transaction", tx_start, 0, 0);
                     lease.settled=true;
                     if fault==2 { return Ok(Outcome::Unknown); }
                     Ok(Outcome::Accepted(value))
                 }
                 result=> {
                     if tx.rollback().await.is_err() || fault==3 { return Ok(Outcome::Unknown); }
+                    #[cfg(feature = "integration")]
+                    rss_timeseries::measurement::record("transaction", tx_start, 0, 0);
                     lease.settled=true;
                     result.map(Outcome::Accepted)
                 }

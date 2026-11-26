@@ -1,3 +1,5 @@
+#[cfg(feature = "integration")]
+mod measurement;
 use crate::{
     PgStore,
     definition::flatten,
@@ -44,6 +46,8 @@ fn receipt(row: &PgRow, q: &ReceiptQuery) -> Result<Receipt, Error> {
     })
 }
 struct PreparedBatch {
+    #[cfg(feature = "integration")]
+    _buffers: measurement::Buffers,
     identity: ReceiptQuery,
     count: usize,
     query: SqlQuery<'static, Postgres, PgArguments>,
@@ -72,6 +76,9 @@ impl PreparedBatch {
             let series = &sample.input().series;
             let def = series.definition();
             bindings.insert((&def.spec().key, def.spec().version), def);
+            #[cfg(feature = "integration")]
+            payloads.push(measurement::raw("sample_payload", sample)?);
+            #[cfg(not(feature = "integration"))]
             payloads.push(crate::lifecycle::bytes(sample)?);
             sample_digests.push(sample.digest()?.as_bytes().to_vec());
             series_digests.push(series.digest()?.as_bytes().to_vec());
@@ -80,12 +87,66 @@ impl PreparedBatch {
         let mut definition_digests = Vec::with_capacity(bindings.len());
         for def in bindings.into_values() {
             check(clock, deadline)?;
+            #[cfg(feature = "integration")]
+            definitions.push(measurement::raw("definition_payload", def)?);
+            #[cfg(not(feature = "integration"))]
             definitions.push(crate::lifecycle::bytes(def)?);
             definition_digests.push(def.digest()?.as_bytes().to_vec());
         }
         check(clock, deadline)?;
         let stream = &identity.stream;
         let count = payloads.len();
+        let horizon = i64::try_from(horizon).map_err(|_| Error::NumericRange)?;
+        #[cfg(feature = "integration")]
+        let buffers = measurement::Buffers::default();
+        #[cfg(feature = "integration")]
+        let (payloads, sample_digests, series_digests, definitions, definition_digests, horizon) = {
+            use measurement::{Observed, nested};
+            let e = nested(&definition_digests);
+            let d = e + nested(&definitions);
+            let c = d + nested(&series_digests);
+            let b = c + nested(&sample_digests);
+            let a = b + nested(&payloads);
+            buffers.set(a);
+            (
+                Observed {
+                    value: payloads,
+                    buffers: &buffers,
+                    scratch: a,
+                    final_arg: false,
+                },
+                Observed {
+                    value: sample_digests,
+                    buffers: &buffers,
+                    scratch: b,
+                    final_arg: false,
+                },
+                Observed {
+                    value: series_digests,
+                    buffers: &buffers,
+                    scratch: c,
+                    final_arg: false,
+                },
+                Observed {
+                    value: definitions,
+                    buffers: &buffers,
+                    scratch: d,
+                    final_arg: false,
+                },
+                Observed {
+                    value: definition_digests,
+                    buffers: &buffers,
+                    scratch: e,
+                    final_arg: false,
+                },
+                Observed {
+                    value: horizon,
+                    buffers: &buffers,
+                    scratch: 0,
+                    final_arg: true,
+                },
+            )
+        };
         let query = sqlx::query(
             "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
         )
@@ -100,8 +161,10 @@ impl PreparedBatch {
         .bind(series_digests)
         .bind(definitions)
         .bind(definition_digests)
-        .bind(i64::try_from(horizon).map_err(|_| Error::NumericRange)?);
+        .bind(horizon);
         Ok(Self {
+            #[cfg(feature = "integration")]
+            _buffers: buffers,
             identity,
             count,
             query,

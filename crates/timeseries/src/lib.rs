@@ -5,6 +5,8 @@ mod definition;
 mod lifecycle;
 pub use aggregate::*;
 pub use lifecycle::*;
+#[cfg(feature = "integration")]
+pub mod measurement;
 mod model;
 mod ports;
 mod query;
@@ -75,6 +77,28 @@ fn digest<T: serde::Serialize>(domain: &[u8], value: &T) -> Result<Digest, Error
     h.update(b"rss.timeseries.v1\0");
     h.update(domain);
     h.update([0]);
+    #[cfg(feature = "integration")]
+    if let Some(start) = measurement::timer() {
+        let mut count = measurement::Count {
+            writer: &mut h,
+            bytes: 0,
+        };
+        serde_json::to_writer(&mut count, value).map_err(|_| Error::InvalidInput)?;
+        let bytes = count.bytes;
+        measurement::record(
+            match domain {
+                b"batch" => "batch_sha",
+                b"sample" => "sample_sha",
+                b"series" => "series_sha",
+                b"definition" => "definition_sha",
+                _ => "other_sha",
+            },
+            Some(start),
+            bytes,
+            bytes + b"rss.timeseries.v1\0".len() + domain.len() + 1,
+        );
+        return Ok(Digest(h.finalize().into()));
+    }
     serde_json::to_writer(&mut h, value).map_err(|_| Error::InvalidInput)?;
     Ok(Digest(h.finalize().into()))
 }

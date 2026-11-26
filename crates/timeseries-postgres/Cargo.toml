@@ -24,7 +24,7 @@ base64.workspace = true
 zeroize.workspace = true
 [features]
 default = []
-integration = []
+integration = ["rss-timeseries/integration"]
 timescaledb = []
 [dev-dependencies]
 anyhow.workspace = true

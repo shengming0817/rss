@@ -245,7 +245,11 @@ impl Batch {
             id,
             samples,
         };
-        batch.write_to(std::io::sink())?;
+        #[cfg(feature = "integration")]
+        let start = crate::measurement::timer();
+        let _bytes = batch.write_to(std::io::sink())?;
+        #[cfg(feature = "integration")]
+        crate::measurement::record("batch_check", start, _bytes, 0);
         Ok(batch)
     }
     pub const fn stream(&self) -> &Stream {
@@ -275,12 +279,13 @@ impl Batch {
         self.write_to(&mut bytes)?;
         Ok(bytes)
     }
-    fn write_to(&self, output: impl std::io::Write) -> Result<(), Error> {
-        let writer = BoundedWriter {
+    fn write_to(&self, output: impl std::io::Write) -> Result<usize, Error> {
+        let mut writer = BoundedWriter {
             output,
             remaining: Self::MAX_BYTES,
         };
-        serde_json::to_writer(writer, self).map_err(|_| Error::BudgetExceeded)
+        serde_json::to_writer(&mut writer, self).map_err(|_| Error::BudgetExceeded)?;
+        Ok(Self::MAX_BYTES - writer.remaining)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() > Self::MAX_BYTES {

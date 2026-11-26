@@ -1,4 +1,5 @@
 mod measure;
+mod prepare_measure;
 use super::*;
 #[tokio::test]
 async fn atomic_replay_conflict_retirement_and_recovery() -> anyhow::Result<()> {

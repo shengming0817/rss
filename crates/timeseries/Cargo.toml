@@ -17,6 +17,7 @@ sha2 = { workspace = true, features = ["std"] }
 thiserror.workspace = true
 [features]
 default = []
+integration = []
 [dev-dependencies]
 anyhow.workspace = true
 [lints]
