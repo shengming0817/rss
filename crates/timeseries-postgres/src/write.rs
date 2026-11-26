@@ -59,8 +59,11 @@ impl PreparedBatch {
     async fn admit(self, c: &mut PgConnection) -> Result<Outcome<Receipt>, Error> {
         // The connection now owns transport and driver buffers.
         #[cfg(feature = "integration")]
+        self._buffers.submit();
+        let row = self.query.fetch_one(c).await;
+        #[cfg(feature = "integration")]
         self._buffers.set(0);
-        let row = self.query.fetch_one(c).await.map_err(sql_error)?;
+        let row = row.map_err(sql_error)?;
         if let Some(raw) = row
             .try_get::<Option<&[u8]>, _>("suspect_raw")
             .map_err(sql_error)?

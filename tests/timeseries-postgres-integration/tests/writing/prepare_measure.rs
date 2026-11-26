@@ -146,7 +146,7 @@ async fn fixed_load() -> anyhow::Result<()> {
         }
         let read = f.clone();
         let read_entered = entered.clone();
-        probes.spawn(async move {
+        probes.spawn(measurement::probe("receipt", async move {
             let start = Timer.now();
             let mut op = Box::pin(read.store.receipt(&lookup, deadline()?));
             first_poll(op.as_mut(), &read_entered).await?;
@@ -154,17 +154,17 @@ async fn fixed_load() -> anyhow::Result<()> {
             anyhow::ensure!(matches!(result?, Lookup::Found(_)));
             let ack = Timer.now();
             anyhow::Ok(("receipt", ack - start, ack))
-        });
+        }));
         let write = f.clone();
         let write_entered = entered.clone();
-        probes.spawn(async move {
+        probes.spawn(measurement::probe("write", async move {
             let start = Timer.now();
             let mut op = Box::pin(write.write(&probe));
             first_poll(op.as_mut(), &write_entered).await?;
             anyhow::ensure!(confirmed(op.await?)?.new_samples() == 1);
             let ack = Timer.now();
             anyhow::Ok(("write", ack - start, ack))
-        });
+        }));
         wait_for_polls(&entered, 2).await?;
         drop(occupied.pop());
         for _ in 0..8 {
@@ -190,6 +190,35 @@ async fn fixed_load() -> anyhow::Result<()> {
     }
     let report = rss_timeseries::measurement::finish();
     anyhow::ensure!(report.live_bytes == 0 && report.reserved_bytes == 0);
+    anyhow::ensure!(report.pre_submit_bytes == 0);
+    anyhow::ensure!(report.stages.get("prepare").map(|s| s.calls) == Some(jobs as u64));
+    if pressure {
+        anyhow::ensure!(
+            report
+                .probe_stages
+                .get(&("write", "prepare"))
+                .map(|s| s.calls)
+                == Some(1)
+        );
+        for probe in ["receipt", "write"] {
+            anyhow::ensure!(
+                report
+                    .probe_stages
+                    .get(&(probe, "pool_wait"))
+                    .map(|s| s.calls)
+                    == Some(1)
+            );
+        }
+    }
+    for ((probe, name), s) in report.probe_stages {
+        println!(
+            "PROBE_STAGE {probe} {name} calls={} json={} sha={} ns={}",
+            s.calls,
+            s.json_bytes,
+            s.sha_bytes,
+            s.elapsed.as_nanos()
+        );
+    }
     for (name, s) in report.stages {
         println!(
             "STAGE {name} calls={} json={} sha={} ns={}",
@@ -200,8 +229,9 @@ async fn fixed_load() -> anyhow::Result<()> {
         );
     }
     println!(
-        "LOAD {load} jobs={jobs} samples={samples} bind={} peak_buffers={} peak_reserved={} rss_start_kib={rss_start} rss_peak_kib={} rss_end_kib={}",
+        "LOAD {load} jobs={jobs} samples={samples} bind={} peak_buffers={} peak_through_fetch={} peak_reserved={} rss_start_kib={rss_start} rss_peak_kib={} rss_end_kib={}",
         report.bind_bytes,
+        report.peak_pre_submit_bytes,
         report.peak_live_bytes,
         report.peak_reserved_bytes,
         peak_rss.max(rss_kib()?),

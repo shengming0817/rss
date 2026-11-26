@@ -160,7 +160,7 @@ pub(super) async fn prepare(
     .map_err(|_| Error::Invariant)?;
     drop((samples, definitions, series_digests));
     #[cfg(feature = "integration")]
-    buffers.set(wire);
+    buffers.keep_arguments();
     const ADMIT: &str = "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)";
     let query = sqlx::query_with(ADMIT, args);
     #[cfg(feature = "integration")]

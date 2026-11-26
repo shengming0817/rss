@@ -19,6 +19,9 @@ pub struct Total {
 
 #[derive(Debug, Default)]
 pub struct Report {
+    pub probe_stages: BTreeMap<(&'static str, &'static str), Total>,
+    pub pre_submit_bytes: usize,
+    pub peak_pre_submit_bytes: usize,
     pub stages: BTreeMap<&'static str, Total>,
     pub bind_bytes: usize,
     pub live_bytes: usize,
@@ -73,6 +76,28 @@ impl Session {
     }
 }
 
+// Probe futures may migrate between worker threads. Set their label only for each poll.
+thread_local! {
+    static PROBE: std::cell::Cell<Option<&'static str>> = const {std::cell::Cell::new(None)};
+}
+struct RestoreProbe(Option<&'static str>);
+impl Drop for RestoreProbe {
+    fn drop(&mut self) {
+        PROBE.set(self.0);
+    }
+}
+pub async fn probe<F: Future>(name: &'static str, future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        let _restore = RestoreProbe(PROBE.replace(Some(name)));
+        future.as_mut().poll(cx)
+    })
+    .await
+}
+pub fn main_workload() -> bool {
+    PROBE.get().is_none()
+}
+
 #[derive(Clone, Copy)]
 pub struct Started(Session, Instant);
 #[allow(clippy::disallowed_methods)] // reason: real elapsed time for isolated measurements.
@@ -95,7 +120,10 @@ pub fn record(name: &'static str, time: Option<Started>, json: usize, sha: usize
     if let Some(Started(session, start)) = time {
         let elapsed = observed_now() - start;
         session.update(|report| {
-            let total = report.stages.entry(name).or_default();
+            let total = match PROBE.get() {
+                Some(probe) => report.probe_stages.entry((probe, name)).or_default(),
+                None => report.stages.entry(name).or_default(),
+            };
             total.calls += 1;
             total.elapsed += elapsed;
             total.json_bytes += json as u64;

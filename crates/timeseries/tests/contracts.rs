@@ -643,6 +643,22 @@ fn canonical_v1_golden_and_duplicate_dimensions() -> TestResult {
             238, 77, 225, 227, 140, 186, 69, 235, 251, 215, 1, 49, 143
         ]
     );
+    const DEFINITION: &str = r#"{"scope":{"tenant":"11111111-1111-4111-8111-111111111111","namespace":"telemetry"},"key":"custom.measurement","version":1,"unit":"1","metric":{"kind":"gauge","number":"u64"},"dimensions":{"allowed":["core"],"required":[],"maxCount":1,"maxValueBytes":16,"maxTotalBytes":64}}"#;
+    let sample = &b.samples()[0];
+    let definition = sample.input().series.definition();
+    let prefix = b"previous payload";
+    let mut appended = prefix.to_vec();
+    assert_eq!(sample.append_canonical(&mut appended)?, sample.digest()?);
+    assert_eq!(&appended[..prefix.len()], prefix);
+    assert_eq!(&appended[prefix.len()..], SAMPLE.as_bytes());
+    let offset = appended.len();
+    assert_eq!(
+        definition.append_canonical(&mut appended)?,
+        definition.digest()?
+    );
+    assert_eq!(&appended[..prefix.len()], prefix);
+    assert_eq!(&appended[prefix.len()..offset], SAMPLE.as_bytes());
+    assert_eq!(&appended[offset..], DEFINITION.as_bytes());
     let raw = String::from_utf8(b.encode()?)?.replace(
         "\"dimensions\":{}",
         "\"dimensions\":{\"core\":\"1\",\"core\":\"2\"}",
