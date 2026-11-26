@@ -91,11 +91,7 @@ pub(super) async fn prepare(
         #[cfg(feature = "integration")]
         if index == 0 {
             store.phases[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            buffers.set(
-                samples.capacity()
-                    + series_digests.capacity() * 32
-                    + bindings.capacity() * size_of::<Binding>(),
-            );
+            buffers.set(samples.capacity() + series_digests.capacity() * 32);
         }
     }
     bindings.sort_unstable_by(|a, b| a.key().cmp(&b.key()).then_with(|| b.index.cmp(&a.index)));
@@ -105,12 +101,7 @@ pub(super) async fn prepare(
     let max_definition_bytes = bindings.iter().map(|b| b.sample_bytes).sum();
     let mut definitions = Payloads::new(bindings.len(), max_definition_bytes);
     #[cfg(feature = "integration")]
-    buffers.set(
-        samples.capacity()
-            + series_digests.capacity() * 32
-            + bindings.capacity() * size_of::<Binding>()
-            + definitions.capacity(),
-    );
+    buffers.set(samples.capacity() + series_digests.capacity() * 32 + definitions.capacity());
     for (index, binding) in bindings.into_iter().enumerate() {
         checkpoint(index, clock, budget).await?;
         let digest = binding.definition.append_canonical(&mut definitions.raw)?;
@@ -148,25 +139,30 @@ pub(super) async fn prepare(
         measurement::Observed {
             value: horizon,
             buffers: &buffers,
-            scratch: 0,
+            scratch: samples.capacity() + definitions.capacity() + series_digests.capacity() * 32,
         }
     };
-    const ADMIT: &str = "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)";
-    let query = sqlx::query_with(ADMIT, args)
-        .bind(tenant)
-        .bind(namespace)
-        .bind(source)
-        .bind(generation)
-        .bind(id)
-        .bind(identity.digest.as_bytes().as_slice())
-        .bind(samples.slices().bind_iter())
-        .bind(&samples.digests[..])
-        .bind(&series_digests[..])
-        .bind(definitions.slices().bind_iter())
-        .bind(&definitions.digests[..])
-        .bind(horizon);
+    // Encode every argument now. A local binding failure must finish before BEGIN.
+    (|| -> Result<(), sqlx::error::BoxDynError> {
+        args.add(tenant)?;
+        args.add(namespace)?;
+        args.add(source)?;
+        args.add(generation)?;
+        args.add(id)?;
+        args.add(identity.digest.as_bytes().as_slice())?;
+        args.add(samples.slices().bind_iter())?;
+        args.add(&samples.digests[..])?;
+        args.add(&series_digests[..])?;
+        args.add(definitions.slices().bind_iter())?;
+        args.add(&definitions.digests[..])?;
+        args.add(horizon)
+    })()
+    .map_err(|_| Error::Invariant)?;
+    drop((samples, definitions, series_digests));
     #[cfg(feature = "integration")]
-    store.phases[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    buffers.set(wire);
+    const ADMIT: &str = "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)";
+    let query = sqlx::query_with(ADMIT, args);
     Ok(PreparedBatch {
         identity,
         count,
