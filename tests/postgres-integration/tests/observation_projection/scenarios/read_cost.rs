@@ -77,19 +77,35 @@ async fn measure(shape: &str) -> anyhow::Result<()> {
     let scope = ProjectionScope::new(source.scope().clone(), "read-cost", shape)?;
     let exec = session(&pg, &scope, &source, &control).await?;
     let before = batch_cost::counters(&pool).await?;
-    let profile = Arc::new(ReadProfile::default());
+    // Sampling is reserved for runs with one test per process. The ordinary T2
+    // asserts deterministic SQL, byte and operation counts on every platform.
+    let detailed = std::env::var_os("RSS_OBSERVATION_RSS").is_some();
+    let (sender, boundary) = std::sync::mpsc::channel();
+    let profile = Arc::new(if detailed {
+        ReadProfile::with_page_end(move || {
+            let _ = sender.send(rss_kib());
+        })
+    } else {
+        ReadProfile::default()
+    });
     let sampler = profile.clone();
     let done = CancellationToken::new();
     let signal = done.clone().drop_guard();
-    let initial = rss_kib()?;
-    let thread = std::thread::spawn(move || -> anyhow::Result<[u64; 2]> {
-        let mut peak = [initial; 2];
-        while !done.is_cancelled() {
-            let phase = usize::from(!sampler.reading_page());
-            peak[phase] = peak[phase].max(rss_kib()?);
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        Ok(peak)
+    let initial = detailed.then(rss_kib).transpose()?;
+    let thread = initial.map(|initial| {
+        std::thread::spawn(move || -> anyhow::Result<[u64; 2]> {
+            let mut peak = [initial; 2];
+            while !done.is_cancelled() {
+                let phase = sampler.transition();
+                let bytes = rss_kib()?;
+                if sampler.transition() == phase {
+                    let index = usize::from(phase % 2 == 0);
+                    peak[index] = peak[index].max(bytes);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(peak)
+        })
     });
     let limit = RunLimit::new(BatchLimit::new(8)?, 8)?;
     let report = profile
@@ -98,9 +114,17 @@ async fn measure(shape: &str) -> anyhow::Result<()> {
         ))
         .await;
     drop(signal);
-    let peaks = thread
-        .join()
-        .map_err(|_| anyhow::anyhow!("RSS sampler failed"))??;
+    if let Some(thread) = thread {
+        let mut peak = thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("RSS sampler failed"))??;
+        // At this point the complete source page was still owned by the measured future.
+        for bytes in boundary.try_iter() {
+            peak[0] = peak[0].max(bytes?);
+        }
+        peak[1] = peak[1].max(rss_kib()?);
+        println!("observation_rss shape={shape} initial_kib={initial:?} phase_peak_kib={peak:?}");
+    }
     assert_eq!(report.into_result()?.applied, 8);
     let mut sql = batch_cost::counters(&pool).await?;
     for (k, v) in before {
@@ -122,7 +146,8 @@ async fn measure(shape: &str) -> anyhow::Result<()> {
     assert_eq!(sql["resolve"], 8);
     assert_eq!((sql["lock"], sql["finish"], sql["effect"]), (1, 1, 129));
     println!(
-        "observation_cost shape={shape} raw={bytes} sql={sql:?} profile={profile:?} initial_kib={initial} phase_peak_kib={peaks:?}"
+        "observation_cost shape={shape} raw={bytes} sql={sql:?} source={:?} resolver={:?}",
+        profile.source, profile.resolver
     );
     assert_eq!(profile.source.raw_bytes.load(Relaxed), bytes);
     assert_eq!(profile.source.decodes.load(Relaxed), 8);

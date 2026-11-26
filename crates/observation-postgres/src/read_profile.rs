@@ -2,7 +2,7 @@
 use std::{
     future::Future,
     sync::Arc,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
 /// Successful workload counters, separated by page and transaction resolver.
@@ -27,30 +27,47 @@ pub struct ReadWork {
 }
 
 /// Instrument only the caller's future, including any SQL and synchronous reconstruction.
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct ReadProfile {
     /// Page work.
     pub source: ReadWork,
     /// Borrowed transaction work.
     pub resolver: ReadWork,
-    reading: AtomicBool,
+    transition: AtomicU64,
+    page_end: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 tokio::task_local! {static PROFILE: Arc<ReadProfile>;}
 
 impl ReadProfile {
+    /// Observe the page boundary before its owned results leave the reader.
+    pub fn with_page_end(callback: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            page_end: Some(Box::new(callback)),
+            ..Self::default()
+        }
+    }
+    /// Monotone phase marker; odd values identify page reads.
+    pub fn transition(&self) -> u64 {
+        self.transition.load(Relaxed)
+    }
     /// Run the measured operation under this profile.
     pub async fn run<F: Future>(self: &Arc<Self>, operation: F) -> F::Output {
         PROFILE.scope(self.clone(), operation).await
     }
     /// Whether the measured task is currently reading its source page.
     pub fn reading_page(&self) -> bool {
-        self.reading.load(Relaxed)
+        self.transition() % 2 == 1
     }
 }
 
 pub(crate) fn reading(value: bool) {
-    let _ = PROFILE.try_with(|profile| profile.reading.store(value, Relaxed));
+    let _ = PROFILE.try_with(|profile| {
+        if !value && let Some(observe) = &profile.page_end {
+            observe();
+        }
+        profile.transition.fetch_add(1, Relaxed);
+    });
 }
 pub(crate) fn count(update: impl FnOnce(&ReadWork)) {
     let _ = PROFILE.try_with(|p| {

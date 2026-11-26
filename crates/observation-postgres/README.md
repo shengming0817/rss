@@ -102,7 +102,7 @@ async fn adopt<C: Clock>(pool: sqlx::PgPool, clock: C, deadline: Deadline)
 }
 ```
 
-`integration` exposes only one-shot settlement faults; default features are empty. Real TLS
+`integration` enables settlement fault injection and, with `projection`, task-scoped read cost measurements. Default features are empty. Real TLS
 PostgreSQL tests live in `postgres-integration --test observation`, including concurrency, RLS,
 ACK loss, cursor atomicity and real worker-process kill/recovery. `hack/observation-package-proof.py`
 consumes actual extracted package artifacts in separate core, base adapter, Source-only and PostgreSQL-bridge workspaces.
