@@ -66,8 +66,8 @@ async fn permanent_resolver_failures_reject_the_effect() -> anyhow::Result<()> {
 async fn resolver_record(
     f: &Fixture,
 ) -> anyhow::Result<(
-    std::sync::Arc<rss_observation_postgres::PgSource<Clock>>,
-    rss_projection::Event,
+    std::sync::Arc<rss_observation_postgres::PgSource<Clock, rss_observation_postgres::LocalPages>>,
+    rss_observation_postgres::VerifiedObservation,
 )> {
     let budget_clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let budget_cancel = tokio_util::sync::CancellationToken::new();
@@ -93,29 +93,29 @@ async fn resolver_record(
 }
 async fn reject_permanent(
     f: &Fixture,
-    source: &rss_observation_postgres::PgSource<Clock>,
-    execution: &impl rss_projection::Execution,
+    source: &rss_observation_postgres::PgSource<Clock, rss_observation_postgres::LocalPages>,
+    execution: &impl rss_projection::Execution<Item = rss_observation_postgres::VerifiedObservation>,
     control: &rss_projection::Control<'_, ProjectionClock>,
-    event: &rss_projection::Event,
+    event: &rss_observation_postgres::VerifiedObservation,
 ) -> anyhow::Result<()> {
     let invalid = rss_projection::Event::new(
-        event.source().clone(),
-        event.position(),
-        event.id(),
+        event.as_ref().source().clone(),
+        event.as_ref().position(),
+        event.as_ref().id(),
         br#"{"version":2}"#.to_vec(),
     )?;
     assert_eq!(
-        execution
-            .execute(None, &invalid, control)
+        source
+            .resolve(&invalid, control)
             .await
             .err()
             .map(|e| e.kind()),
-        Some(rss_projection::ErrorKind::Rejected)
+        Some(rss_projection::ErrorKind::InvalidInput)
     );
     sqlx::raw_sql("REVOKE SELECT ON rss_observation.batches FROM handoff_runtime")
         .execute(&f.owner)
         .await?;
-    let independent = source.resolve(event, control).await;
+    let independent = source.resolve(event.as_ref(), control).await;
     let atomic = execution.execute(None, event, control).await;
     sqlx::raw_sql("GRANT SELECT ON rss_observation.batches TO handoff_runtime")
         .execute(&f.owner)

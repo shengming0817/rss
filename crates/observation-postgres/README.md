@@ -135,15 +135,20 @@ Reference encoding is private; unknown, changed or misplaced references are reje
 reconstruction from the validated durable record. Debug/error formatting does not expose facts.
 
 `resolve(event, &control)` returns `ApplicableRecord` under the source's tenant grant.
-`resolve_in_transaction(&mut PgTransaction, event)` (requires `projection-postgres`) resolves on the **same borrowed transaction**
-as the consumer's `PgEffect`. Provision that projection runtime role with Observation schema USAGE
-and SELECT on rss_observation.batches as well. The resolver does not change session identity, deadlines or settlement. Both resolver methods return `rss_projection::Error`; their static SQL is classified by the Observation owner before projection.
-`read` and both resolvers expose corrupt rows as `Phase::Restore` with `diagnostic().position()` once
-a legal journal position is known. Restoration stays inside the original transaction/deadline;
-rollback failure takes precedence over a row failure. Diagnostics contain no raw record or identity.
-The Rust resolver error type replaces the prior Observation error without a compatibility wrapper; the example maps invalid references,
-authorization failures and storage-contract violations to a rejected effect, rather than transient
-unavailability. Neither category advances the checkpoint.
+For a same-database effect, select `source.into_local(page_bytes)?` and implement
+`PgEffect<Item = VerifiedObservation>`. Give the source an explicit canonical-byte allowance
+of at least 4 MiB. Together with the runner's count limit it selects an ordered prefix;
+the returned page is the atomic unit in `run_batched`. For eight maximum-size reports in one
+transaction allow 32 MiB. Decoded facts, references, driver buffers and application data consume
+additional memory. The page owns the verified inputs through settlement.
+
+Call `resolve_in_transaction(tx, item)` at each callback before consuming facts. It checks the
+tenant, current row, exact report digest and receipt fields on the borrowed transaction, then
+returns an `Arc<ApplicableRecord>`. Changed evidence is restored from the same statement snapshot.
+A concurrent release before a later callback can therefore roll back the entire batch. Provision
+the projection runtime with Observation schema USAGE and SELECT on rss_observation.batches.
+Known corrupt positions carry `Phase::Restore` and the source position. The example preserves
+those diagnostics when it classifies permanent failures as rejected effects.
 The consumer mapping supplies its own `DefinitionIdentity` to Projection `initialize` and
 `takeover`; the source does not invent a definition for a business read model. The handoff mapping
 owns its declaration next to its effect. A changed definition requires a new generation, and

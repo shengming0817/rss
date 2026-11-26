@@ -2,7 +2,7 @@ use crate::{Error, ErrorKind, Id, Scope};
 use rss_contract::Timepoint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-const MAX_BATCH: usize = 4 * 1024 * 1024;
+const MAX_BATCH: usize = Batch::MAX_ENCODED_BYTES as usize;
 /// Trusted coverage identity and opaque product-owned definition/content references.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -147,6 +147,8 @@ impl std::fmt::Debug for Batch {
     }
 }
 impl Batch {
+    /// Maximum canonical report size accepted by the V1 format.
+    pub const MAX_ENCODED_BYTES: u32 = 4 * 1024 * 1024;
     /// Construct V1, sort facts by key and enforce the complete-batch bounds.
     /// Reject duplicate keys, snapshot deletes, more than 4,096 entries or canonical JSON
     /// over 4 MiB. Sequence is producer-local; observed time never orders facts.
@@ -172,6 +174,8 @@ impl Batch {
         }
         wire.body.normalize()?;
         let mut writer = BoundedEncoding(Vec::new());
+        #[cfg(feature = "integration")]
+        crate::measurement::update(|w| w.encodes += 1);
         serde_json::to_writer(&mut writer, &wire)?;
         let canonical = writer.0;
         if canonical.len() > MAX_BATCH {
@@ -185,7 +189,25 @@ impl Batch {
         if raw.len() > MAX_BATCH {
             return Err(ErrorKind::InvalidInput.into());
         }
-        Self::validated(serde_json::from_slice(raw)?)
+        #[cfg(feature = "integration")]
+        crate::measurement::update(|w| w.decodes += 1);
+        let batch = Self::validated(serde_json::from_slice(raw)?)?;
+        #[cfg(feature = "integration")]
+        crate::measurement::update(|w| {
+            let changes = match batch.body() {
+                Body::Snapshot(v) | Body::Delta { changes: v, .. } | Body::Partial(v) => Some(v),
+                Body::Failed { .. } => None,
+            };
+            w.buffers += batch.canonical.capacity()
+                + changes.map_or(0, |v| {
+                    v.capacity() * size_of::<Change>()
+                        + v.iter()
+                            .filter_map(|c| c.value.as_ref())
+                            .map(Vec::capacity)
+                            .sum::<usize>()
+                });
+        });
+        Ok(batch)
     }
     /// Immutable producer batch ID, scoped by the full stream identity.
     pub const fn id(&self) -> &Id {
@@ -214,13 +236,22 @@ impl Batch {
     /// Compute domain-separated SHA-256 over canonical scope and the complete normalized report.
     /// The digest detects changed semantic input; it does not authenticate the producer or prove collection truth.
     pub fn fingerprint(&self, scope: &Scope) -> Result<[u8; 32], Error> {
+        #[cfg(feature = "integration")]
+        crate::measurement::update(|w| w.fingerprints += 1);
         let mut digest = Sha256::new();
-        digest.update(b"rss-observation-v1");
-        for bytes in [scope.encode()?.as_bytes(), self.encode()] {
-            digest.update((bytes.len() as u64).to_be_bytes());
-            digest.update(bytes);
-        }
+        digest.update(self.fingerprint_prefix(scope)?);
+        digest.update(self.encode());
         Ok(digest.finalize().into())
+    }
+    /// Exact V1 SHA-256 input preceding the canonical report. A storage adapter can
+    /// bind this prefix and hash the current durable bytes within its own snapshot.
+    pub fn fingerprint_prefix(&self, scope: &Scope) -> Result<Vec<u8>, Error> {
+        let scope = scope.encode()?;
+        let mut prefix = b"rss-observation-v1".to_vec();
+        prefix.extend_from_slice(&(scope.len() as u64).to_be_bytes());
+        prefix.extend_from_slice(scope.as_bytes());
+        prefix.extend_from_slice(&(self.encode().len() as u64).to_be_bytes());
+        Ok(prefix)
     }
 }
 

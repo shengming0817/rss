@@ -2,8 +2,7 @@ use super::{fixture::*, scenarios::model};
 use rss_observation::{Body, Change, Id, JournalReadGrant, ObservationStore};
 use rss_observation_postgres::{PgSource, PgStore};
 use rss_projection::{
-    BatchLimit, Control, Event, Execution, GenerationStart, ProjectionScope, ReplayBound, RunLimit,
-    Source,
+    BatchLimit, Control, Execution, GenerationStart, ProjectionScope, ReplayBound, RunLimit, Source,
 };
 use rss_projection_postgres::{PgEffect, PgEffectOutcome, PgOperationError, PgTransaction};
 use rss_request_context::TenantId;
@@ -59,7 +58,9 @@ pub async fn crash(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(count, 1);
     Ok(())
 }
-async fn seed_source(f: &Fixture) -> anyhow::Result<Arc<PgSource<Clock>>> {
+async fn seed_source(
+    f: &Fixture,
+) -> anyhow::Result<Arc<PgSource<Clock, rss_observation_postgres::LocalPages>>> {
     let store = f.store().await?;
     let source = f.source(store.clone(), CRASH_TENANT)?;
     let stream = scope(CRASH_TENANT, "crash", "r", "agent", "e")?;
@@ -115,11 +116,12 @@ struct CrashEffect {
     marker: PathBuf,
 }
 impl PgEffect for CrashEffect {
+    type Item = rss_observation_postgres::VerifiedObservation;
     async fn apply(
         &self,
         tx: &mut PgTransaction<'_>,
         scope: &ProjectionScope,
-        event: &Event,
+        event: &Self::Item,
     ) -> Result<PgEffectOutcome, PgOperationError> {
         self.inner.apply(tx, scope, event).await?;
         std::fs::write(&self.marker, b"staged").map_err(|error| {
@@ -152,11 +154,14 @@ async fn worker_child() -> anyhow::Result<()> {
         )
         .await?,
     );
-    let source = Arc::new(PgSource::new(
-        store,
-        JournalReadGrant::verify(&Trusted, TenantId::parse(CRASH_TENANT)?)?,
-        rss_projection::SourceScope::new(TenantId::parse(CRASH_TENANT)?, "rss.observation.v1")?,
-    )?);
+    let source = Arc::new(
+        PgSource::new(
+            store,
+            JournalReadGrant::verify(&Trusted, TenantId::parse(CRASH_TENANT)?)?,
+            rss_projection::SourceScope::new(TenantId::parse(CRASH_TENANT)?, "rss.observation.v1")?,
+        )?
+        .into_local(32 * 1024 * 1024)?,
+    );
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(60), &cancel);

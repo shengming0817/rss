@@ -7,6 +7,8 @@ mod projection;
 pub use projection::{JournalBounds, PgSource};
 #[cfg(all(feature = "projection", feature = "integration"))]
 pub mod read_profile;
+#[cfg(feature = "projection-postgres")]
+pub use projection::{LocalPages, VerifiedObservation};
 mod maintenance;
 pub use maintenance::PgMaintenance;
 mod probe;

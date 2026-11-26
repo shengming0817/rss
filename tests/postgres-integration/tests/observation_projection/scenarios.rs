@@ -1,6 +1,7 @@
 use super::fixture::*;
 mod batch_cost;
 mod read_cost;
+mod recheck;
 mod settlement;
 use rss_observation::{
     Body, Change, Id, LookupOutcome, ObservationStore, ReadGrant, ReceiveOutcome,
@@ -25,7 +26,7 @@ async fn values(
         .bind(TENANT).bind(generation).bind(coverage).fetch_all(&f.admin).await?)
 }
 type ObsStore = rss_observation_postgres::PgStore<Clock>;
-type ObsSource = rss_observation_postgres::PgSource<Clock>;
+type ObsSource = rss_observation_postgres::PgSource<Clock, rss_observation_postgres::LocalPages>;
 type Session = rss_projection_postgres::PgProjection<model::Facts<Clock>>;
 use std::sync::Arc;
 struct Inputs {
@@ -421,7 +422,7 @@ async fn concurrent_pair(
     project_to(
         source,
         execution,
-        events.last().map(Event::position),
+        events.last().map(|e| e.as_ref().position()),
         control,
     )
     .await
@@ -445,10 +446,13 @@ async fn project_to(
     assert_eq!(execution.checkpoint(control).await?.position, expected);
     Ok(())
 }
-fn assert_positions(events: &[Event], before: Option<Position>) {
+fn assert_positions(
+    events: &[rss_observation_postgres::VerifiedObservation],
+    before: Option<Position>,
+) {
     let start = before.map_or(0, |p| p.get());
     for (offset, event) in events.iter().enumerate() {
-        assert_eq!(event.position().get(), start + 1 + offset as u64);
+        assert_eq!(event.as_ref().position().get(), start + 1 + offset as u64);
     }
 }
 struct Large {
@@ -490,7 +494,7 @@ async fn seed_large(f: &Fixture) -> anyhow::Result<Large> {
         .read(source.scope(), None, BatchLimit::new(1000)?, &control)
         .await?;
     assert_eq!(events.len(), 1);
-    let event = events[0].clone();
+    let event = events[0].as_ref().clone();
     Ok(Large {
         store,
         source,
@@ -521,8 +525,9 @@ async fn validate_large(large: &Large) -> anyhow::Result<()> {
     assert_eq!(
         source
             .read(source.scope(), None, BatchLimit::new(1)?, &control)
-            .await?[0],
-        *event
+            .await?[0]
+            .as_ref(),
+        event
     );
     Ok(())
 }
@@ -622,7 +627,7 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
         .await?;
     let ids = all
         .iter()
-        .map(|e| e.id())
+        .map(|e| e.as_ref().id())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids.len(), 4);
     assert_same_record(
@@ -723,9 +728,9 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
     let wrong =
         rss_projection::SourceScope::new(rss_request_context::TenantId::parse(OTHER)?, "rebuilt")?;
     assert!(
-        matches!(ObsSource::new(input.store.clone(), grant, wrong), Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
+        matches!(rss_observation_postgres::PgSource::new(input.store.clone(), grant, wrong), Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
     );
-    let rebuilt = ObsSource::new(
+    let rebuilt = rss_observation_postgres::PgSource::new(
         input.store.clone(),
         rss_observation::JournalReadGrant::verify(&Trusted, tenant)?,
         rss_projection::SourceScope::new(tenant, "rebuilt")?,
@@ -739,12 +744,12 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
         .await?;
     assert_eq!(original.len(), 1);
     assert_eq!(new.len(), 1);
-    assert_eq!(original[0].payload(), new[0].payload());
-    assert_ne!(original[0].source(), new[0].source());
+    assert_eq!(original[0].as_ref().payload(), new[0].as_ref().payload());
+    assert_ne!(original[0].as_ref().source(), new[0].as_ref().source());
     assert!(
-        matches!(rebuilt.resolve(&original[0], &control).await, Err(e) if e.kind() == rss_projection::ErrorKind::ScopeMismatch)
+        matches!(rebuilt.resolve(original[0].as_ref(), &control).await, Err(e) if e.kind() == rss_projection::ErrorKind::ScopeMismatch)
     );
-    Ok(rebuilt)
+    Ok(rebuilt.into_local(32 * 1024 * 1024)?)
 }
 
 async fn rebuilt_checkpoint(
@@ -802,7 +807,7 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     )
     .bind(b"secret-payload".as_slice())
     .bind(TENANT)
-    .bind(bad.position().get() as i64)
+    .bind(bad.as_ref().position().get() as i64)
     .execute(&f.admin)
     .await?;
     assert_eq!(changed.rows_affected(), 1);
@@ -813,7 +818,7 @@ async fn assert_source_failures(
     f: &Fixture,
     input: &Inputs,
     execution: &Session,
-    bad: &Event,
+    bad: &rss_observation_postgres::VerifiedObservation,
     control: &Control<'_, ProjectionClock>,
 ) -> anyhow::Result<()> {
     use rss_projection::ErrorKind as Kind;
@@ -827,22 +832,22 @@ async fn assert_source_failures(
     .into_result()
     .err()
     .ok_or_else(|| anyhow::anyhow!("bad source row accepted"))?;
-    assert_restore_error(&error, Kind::StorageContract, bad.position())?;
+    assert_restore_error(&error, Kind::StorageContract, bad.as_ref().position())?;
     assert_eq!(execution.checkpoint(control).await?.position, None);
     assert!(values(f, "bad-row", "inside").await?.is_empty());
     let error = input
         .source
-        .resolve(bad, control)
+        .resolve(bad.as_ref(), control)
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("bad row resolved"))?;
-    assert_restore_error(&error, Kind::StorageContract, bad.position())?;
+    assert_restore_error(&error, Kind::StorageContract, bad.as_ref().position())?;
     let error = execution
         .execute(None, bad, control)
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("bad row applied"))?;
-    assert_restore_error(&error, Kind::Rejected, bad.position())?;
+    assert_restore_error(&error, Kind::Rejected, bad.as_ref().position())?;
     assert_eq!(execution.checkpoint(control).await?.position, None);
     assert!(values(f, "bad-row", "inside").await?.is_empty());
 

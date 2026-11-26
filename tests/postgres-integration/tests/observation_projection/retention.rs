@@ -260,7 +260,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
             &generation,
             &model::DEFINITION,
             GenerationStart::beginning(),
-            ReplayBound::Through(Some(third.position())),
+            ReplayBound::Through(Some(third.as_ref().position())),
             &control,
         )
         .await?;
@@ -336,7 +336,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
         ErrorKind::Storage
     );
     assert_same_record(
-        source.resolve(second, &control).await?.record(),
+        source.resolve(second.as_ref(), &control).await?.record(),
         store.receive(&old, deadline()).await?.record(),
     );
     // Hold a real cleanup after both writes, before settlement. Other connections must
@@ -356,11 +356,19 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     let read_limit = BatchLimit::new(4)?;
     let (replay, resolved, page) = tokio::join!(
         store.receive(&old, deadline()),
-        source.resolve(second, &control),
-        source.read(source.scope(), Some(first.position()), read_limit, &control)
+        source.resolve(second.as_ref(), &control),
+        source.read(
+            source.scope(),
+            Some(first.as_ref().position()),
+            read_limit,
+            &control
+        )
     );
     assert_same_record(replay?.record(), resolved?.record());
-    assert_eq!(page?, vec![second.clone(), third.clone()]);
+    assert_eq!(
+        page?.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+        [second.as_ref(), third.as_ref()]
+    );
     staged.rollback().await?;
     maint.inject_next_fault(Fault::CommitAckLost);
     assert_eq!(
@@ -389,13 +397,13 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     );
     assert_eq!(
         source.bounds(&control).await?.expired_through,
-        Some(second.position())
+        Some(second.as_ref().position())
     );
     assert_eq!(
         source.high_water(source.scope(), &control).await?,
-        Some(third.position())
+        Some(third.as_ref().position())
     );
-    for after in [None, Some(first.position())] {
+    for after in [None, Some(first.as_ref().position())] {
         assert_eq!(
             source
                 .read(source.scope(), after, BatchLimit::new(4)?, &control)
@@ -410,20 +418,23 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
         source
             .read(
                 source.scope(),
-                Some(second.position()),
+                Some(second.as_ref().position()),
                 BatchLimit::new(4)?,
                 &control
             )
-            .await?,
-        vec![third.clone()]
+            .await?
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>(),
+        [third.as_ref()]
     );
     assert_same_record(
-        source.resolve(first, &control).await?.record(),
+        source.resolve(first.as_ref(), &control).await?.record(),
         store.receive(&active, deadline()).await?.record(),
     );
     assert_eq!(
         source
-            .resolve(second, &control)
+            .resolve(second.as_ref(), &control)
             .await
             .err()
             .context("expected operation to fail")?
@@ -432,9 +443,9 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     );
     let forged = rss_projection::Event::new(
         source.scope().clone(),
-        second.position(),
-        first.id(),
-        first.payload().to_vec(),
+        second.as_ref().position(),
+        first.as_ref().id(),
+        first.as_ref().payload().to_vec(),
     )?;
     assert_eq!(
         source
@@ -447,7 +458,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     );
     assert_eq!(
         execution
-            .execute(Some(first.position()), second, &control)
+            .execute(Some(first.as_ref().position()), second, &control)
             .await
             .err()
             .context("expected operation to fail")?
@@ -456,7 +467,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     );
     assert_eq!(
         execution.checkpoint(&control).await?.position,
-        Some(first.position())
+        Some(first.as_ref().position())
     );
     let run = rss_projection::run_batched(
         &*source,
@@ -530,10 +541,10 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     // The host supplied the complete empty read model and both processed receipts.
     let restored = ProjectionScope::new(source.scope().clone(), "facts", "baseline")?;
     let start = GenerationStart::after(
-        second.position(),
+        second.as_ref().position(),
         vec![
-            rss_projection::BaselineReceipt::from_event(first),
-            rss_projection::BaselineReceipt::from_event(second),
+            rss_projection::BaselineReceipt::from_event(first.as_ref()),
+            rss_projection::BaselineReceipt::from_event(second.as_ref()),
         ],
     )?;
     projection
@@ -541,7 +552,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
             &restored,
             &model::DEFINITION,
             start,
-            ReplayBound::Through(Some(third.position())),
+            ReplayBound::Through(Some(third.as_ref().position())),
             &control,
         )
         .await?;
@@ -555,7 +566,10 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     let done = rss_projection::run(&*source, &rebuilt, &control, limits)
         .await
         .into_result()?;
-    assert_eq!((done.position, done.applied), (Some(third.position()), 1));
+    assert_eq!(
+        (done.position, done.applied),
+        (Some(third.as_ref().position()), 1)
+    );
     assert_eq!(
         rss_projection::run(&*source, &rebuilt, &control, limits)
             .await

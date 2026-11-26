@@ -448,27 +448,21 @@ async fn read(connection: &mut PgConnection, scope: &Scope, id: &Id) -> Result<S
                 fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?,
             ))
         }
-        Some(row) => restore(row, scope, id)
-            .map(Box::new)
-            .map(StoredBatch::Found),
+        Some(row) => {
+            restore(row, scope, id).map(|(record, _)| StoredBatch::Found(Box::new(record)))
+        }
     }
 }
-pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Error> {
-    let restore = || -> Result<Record, Error> {
-        let raw: Vec<u8> = row.try_get("raw").map_err(sql_error)?;
-        #[cfg(all(feature = "projection", feature = "integration"))]
-        crate::read_profile::count(|cost| {
-            use std::sync::atomic::Ordering::Relaxed;
-            cost.raw_bytes.fetch_add(raw.len() as u64, Relaxed);
-            cost.decodes.fetch_add(1, Relaxed);
-            cost.fingerprints.fetch_add(1, Relaxed);
-        });
-        let batch = Batch::decode(&raw)?;
+pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<(Record, [u8; 32]), Error> {
+    let restore = || {
+        let raw: &[u8] = row.try_get("raw").map_err(sql_error)?;
+        let batch = Batch::decode(raw)?;
         let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(sql_error)?;
         let sequence: String = row.try_get("sequence").map_err(sql_error)?;
+        let verified = batch.fingerprint(scope)?;
         if batch.id() != id
             || batch.encode() != raw
-            || batch.fingerprint(scope)?.as_slice() != fingerprint
+            || verified.as_slice() != fingerprint
             || batch.sequence().to_string() != sequence
         {
             return Err(ErrorKind::Invariant.into());
@@ -493,9 +487,16 @@ pub(crate) fn restore(row: PgRow, scope: &Scope, id: &Id) -> Result<Record, Erro
         {
             return Err(ErrorKind::Invariant.into());
         }
-        Record::from_durable(scope.clone(), batch, received_at, policy, decision)
+        Ok::<_, Error>((
+            Record::from_durable(scope.clone(), batch, received_at, policy, decision)?,
+            verified,
+        ))
     };
-    restore().map_err(|e| Error::provider(ErrorKind::Invariant, e))
+    #[cfg(all(feature = "projection", feature = "integration"))]
+    let result = crate::read_profile::measure(restore);
+    #[cfg(not(all(feature = "projection", feature = "integration")))]
+    let result = restore();
+    result.map_err(|e| Error::provider(ErrorKind::Invariant, e))
 }
 
 fn durable<T>(value: Result<T, Error>) -> Result<T, Error> {
