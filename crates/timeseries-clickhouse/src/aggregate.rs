@@ -1,8 +1,11 @@
+mod objects;
+mod raw;
+
 use crate::{
     Operation,
     control::{self, Fence},
-    page::{Dependencies, Recheck, Request, View},
-    projection::{SummaryRow, literal},
+    page::{Dependencies, ReadBudget, Recheck, Request, View},
+    projection::literal,
     read::{ReadRow, selection, visible},
     transaction::{bytes, decode, sql_error},
 };
@@ -10,18 +13,21 @@ use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
+use std::collections::VecDeque;
 #[derive(Clone)]
 struct SummaryRef {
     spec_digest: Vec<u8>,
     lo: i64,
     hi: i64,
     object_id: String,
+    payload_bytes: u64,
     dependency_start: i64,
 }
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for SummaryRef {
     fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
             spec_digest: row.try_get("spec_digest")?,
+            payload_bytes: row.try_get::<i64, _>("payload_bytes")?.cast_unsigned(),
             lo: row.try_get("lo")?,
             hi: row.try_get("hi")?,
             object_id: row.try_get("object_id")?,
@@ -119,6 +125,35 @@ pub(crate) fn mask_end(
         Timestamp::new(window.end().micros() - 1)?,
     )
 }
+fn seeded_builder(
+    spec: &SummarySpec,
+    window: Interval,
+    fences: &[Fence],
+    prior: Option<&Sample>,
+    limit: usize,
+) -> Result<(SummaryBuilder, i64), Error> {
+    let earliest = dependency_start(spec, window.start());
+    let prior = prior.filter(|p| p.input().observed_at.micros() >= earliest);
+    let dependency_start = prior.map_or(earliest, |p| p.input().observed_at.micros());
+    if needs_prior(spec)
+        && fences.iter().any(|f| {
+            f.kind == "pruned"
+                && control::overlaps(&f.selection, &spec.selection())
+                && f.window.start() < window.start()
+                && f.window.end().micros() > dependency_start
+                && prior
+                    .as_ref()
+                    .is_none_or(|p| p.input().observed_at < f.window.end())
+        })
+    {
+        return Err(Error::HistoryExpired);
+    }
+    let mut builder = SummaryBuilder::new(spec.clone(), window)?;
+    if let Some(prior) = prior {
+        builder.push(prior.clone(), limit)?;
+    }
+    Ok((builder, dependency_start))
+}
 impl<C: Clock> Operation<'_, C> {
     pub(crate) async fn predecessor(
         &self,
@@ -159,114 +194,15 @@ impl<C: Clock> Operation<'_, C> {
         let prior = self
             .predecessor(spec, window.start(), boundary, fences, deadline)
             .await?;
-        let dependency_start = prior
-            .as_ref()
-            .map_or(dependency_start(spec, window.start()), |p| {
-                p.sample.input().observed_at.micros()
-            });
-        if needs_prior(spec)
-            && fences.iter().any(|f| {
-                f.kind == "pruned"
-                    && control::overlaps(&f.selection, &spec.selection())
-                    && f.window.start() < window.start()
-                    && f.window.end().micros() > dependency_start
-                    && prior
-                        .as_ref()
-                        .is_none_or(|p| p.sample.input().observed_at < f.window.end())
-            })
-        {
-            return Err(Error::HistoryExpired);
-        }
-        let mut builder = SummaryBuilder::new(spec.clone(), window)?;
-        let max_input_revision = prior.as_ref().map_or(0, |row| row.revision);
-        if let Some(prior) = prior {
-            builder.push(prior.sample, self.limits.max_points.get() as usize)?;
-        }
-        Ok((builder, max_input_revision, dependency_start))
-    }
-    async fn raw_summary(
-        &self,
-        spec: &SummarySpec,
-        window: Interval,
-        boundary: i64,
-        fences: &[Fence],
-        deadline: Deadline,
-        dependency: &mut i64,
-    ) -> Result<Summary, Error> {
-        if fences.iter().any(|f| {
-            f.kind == "pruned"
-                && control::overlaps(&f.selection, &spec.selection())
-                && f.window.start() < window.end()
-                && f.window.end() > window.start()
-        }) {
-            return Err(Error::HistoryExpired);
-        }
-        let (mut builder, _, start) = self
-            .builder(spec, window, boundary, fences, deadline)
-            .await?;
-        *dependency = start;
-        let condition = format!(
-            "{} AND revision<={boundary} AND observed_at>={} AND observed_at<{}{}",
-            selection(&spec.selection())?,
-            window.start().micros(),
-            window.end().micros(),
-            visible(fences)?
-        );
-        let rows = self
-            .raw_rows(
-                &condition,
-                "observed_at,sequence,sample_id",
-                self.limits.max_points.get(),
-                deadline,
-            )
-            .await?;
-        if rows.len() > self.limits.max_points.get() as usize {
-            return Err(Error::BudgetExceeded);
-        }
-        for row in rows {
-            let sample = row.sample;
-            mask(
-                &mut builder,
-                fences,
-                spec,
-                window,
-                sample.input().observed_at,
-            )?;
-            builder.push(sample, self.limits.max_points.get() as usize)?;
-        }
-        mask_end(&mut builder, fences, spec, window)?;
-        builder.finish(self.limits.max_points.get() as usize)
-    }
-    pub(crate) async fn summary_value(
-        &self,
-        id: &str,
-        scope: &Scope,
-        deadline: Deadline,
-    ) -> Result<Summary, Error> {
-        let sql = format!(
-            "SELECT tenant,namespace,object_id,lo,hi,revision,digest,payload FROM rss_ts_ch.summaries FINAL WHERE tenant={} AND namespace={} AND object_id={} LIMIT 2",
-            literal(&scope.tenant().to_string()),
-            literal(scope.namespace().as_str()),
-            literal(id)
-        );
-        let rows = self
-            .ch_query(self.reader.query_raw(&sql), deadline)?
-            .fetch_all::<SummaryRow>()
-            .await
-            .map_err(crate::projection::read_error)?;
-        if rows.len() != 1 {
-            return Err(Error::Invariant);
-        }
-        let row = rows.first().ok_or(Error::Invariant)?;
-        let value: Summary = decode(row.payload.as_bytes())?;
-        use sha2::{Digest, Sha256};
-        if crate::projection::hex(&Sha256::digest(row.payload.as_bytes())) != row.digest
-            || value.window.start().micros() != row.lo
-            || value.window.end().micros() != row.hi
-        {
-            return Err(Error::Invariant);
-        }
-        Ok(value)
+        let revision = prior.as_ref().map_or(0, |r| r.revision);
+        let (builder, start) = seeded_builder(
+            spec,
+            window,
+            fences,
+            prior.as_ref().map(|r| &r.sample),
+            self.limits.max_points.get() as usize,
+        )?;
+        Ok((builder, revision, start))
     }
     async fn references(
         &self,
@@ -307,7 +243,7 @@ impl<C: Clock> Operation<'_, C> {
         // Fetch whole buckets in chronological order. If the reference budget runs out
         // partway through a later bucket, resume at that bucket with a fresh page budget.
         let mut rows: Vec<SummaryRef> = sqlx::query_as(
-            "SELECT spec_digest,lo,hi,object_id::text,dependency_start FROM rss_ts_ch.summaries
+            "SELECT spec_digest,lo,hi,object_id::text,dependency_start,payload_bytes FROM rss_ts_ch.summaries
             WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5
               AND max_input_revision<=$7 AND (dirty_from IS NULL OR dirty_from>$7) AND lo/$8::bigint=(hi-1)/$8::bigint
             ORDER BY lo,hi,object_id LIMIT $6",
@@ -341,39 +277,6 @@ impl<C: Clock> Operation<'_, C> {
             fences: view.fences.clone(),
         })
     }
-    async fn cached(
-        &self,
-        refs: &[SummaryRef],
-        attempted: &mut Vec<SummaryRef>,
-        scope: &Scope,
-        window: Interval,
-        deadline: Deadline,
-    ) -> Result<Option<Summary>, Error> {
-        let Some(path) = coverage(refs, window)? else {
-            return Ok(None);
-        };
-        let mut value: Option<Summary> = None;
-        let mut size = 0usize;
-        for row in path {
-            attempted.push(row.clone());
-            let summary = self.summary_value(&row.object_id, scope, deadline).await?;
-            if summary.window.start().micros() != row.lo || summary.window.end().micros() != row.hi
-            {
-                return Err(Error::Invariant);
-            }
-            size = size
-                .checked_add(bytes(&summary)?.len())
-                .ok_or(Error::BudgetExceeded)?;
-            if size > self.limits.max_bytes.get() as usize {
-                return Err(Error::BudgetExceeded);
-            }
-            value = Some(match value {
-                None => summary,
-                Some(old) => old.merge(summary, self.limits.max_points.get() as usize)?,
-            });
-        }
-        Ok(value)
-    }
 }
 // The bounded DAG is solved backwards before reading any object.
 fn coverage(refs: &[SummaryRef], window: Interval) -> Result<Option<Vec<&SummaryRef>>, Error> {
@@ -402,6 +305,81 @@ fn coverage(refs: &[SummaryRef], window: Interval) -> Result<Option<Vec<&Summary
         at = row.hi;
     }
     Ok(Some(chain))
+}
+// Plan only buckets with candidate metadata; long empty runs cost no extra storage.
+fn covered<'a>(
+    q: &AggregateQuery,
+    start: Timestamp,
+    mut rows: &'a [SummaryRef],
+) -> Result<VecDeque<(Interval, Vec<&'a SummaryRef>)>, Error> {
+    let mut hits = VecDeque::new();
+    while let Some(first) = rows.first() {
+        let bucket = q.spec().bucket(Timestamp::new(first.lo)?)?;
+        let count = rows.partition_point(|r| r.lo >= bucket.start().micros());
+        let window = Interval::new(
+            bucket.start().max(start),
+            bucket.end().min(q.query().window().end()),
+        )?;
+        if let Some(path) = coverage(&rows[..count], window)? {
+            hits.push_front((window, path));
+        }
+        rows = &rows[count..];
+    }
+    Ok(hits)
+}
+#[derive(Clone, Copy)]
+struct Lookahead {
+    required: Timestamp,
+    through: Timestamp,
+}
+impl Lookahead {
+    fn allowed(self, budget: &ReadBudget, clock: &impl Clock) -> (Timestamp, Deadline) {
+        match budget
+            .prefetch_until
+            .filter(|cutoff| !cutoff.is_expired(clock.now()))
+        {
+            Some(cutoff) => (self.through, cutoff),
+            None => (self.required, budget.deadline),
+        }
+    }
+    fn capped(self, end: Timestamp) -> Self {
+        Self {
+            required: self.required.min(end),
+            through: self.through.min(end),
+        }
+    }
+}
+// Equal-time state observations collapse. Each projected entry starts at a distinct
+// in-window tick. Only work beyond this guaranteed prefix is speculative.
+fn lookahead(
+    q: &AggregateQuery,
+    window: Interval,
+    remaining: usize,
+    observed_cost: usize,
+    end: Timestamp,
+) -> Result<Lookahead, Error> {
+    let width = q.resolution_micros().get();
+    let (first, full) = match q.operation() {
+        AggregateOp::Timeline | AggregateOp::Transitions | AggregateOp::Coverage => {
+            (1 + window.width_micros(), 1 + width)
+        }
+        _ => (1, 1),
+    };
+    let required = (remaining as u64).saturating_sub(first).div_ceil(full);
+    // Learn from this page before looking past the guaranteed prefix. Limit optional
+    // work independently of the configured number of points in a very large page.
+    let estimated = (remaining - 1)
+        .checked_div(observed_cost)
+        .unwrap_or(0)
+        .min(128) as u64;
+    let bound = |extra: u64| {
+        let span = i64::try_from(extra.saturating_mul(width)).unwrap_or(i64::MAX);
+        Timestamp::new(window.end().micros().saturating_add(span).min(end.micros()))
+    };
+    Ok(Lookahead {
+        required: bound(required)?,
+        through: bound(required.max(estimated))?,
+    })
 }
 fn cost(bucket: &AggregateBucket) -> usize {
     1 + match &bucket.value {
@@ -545,8 +523,9 @@ impl Request for AggregateQuery {
         store: &Operation<'_, C>,
         view: View<Position>,
         refs: &mut References,
-        deadline: Deadline,
+        budget: &mut ReadBudget,
     ) -> Result<(AggregatePage, Option<Position>), Error> {
+        let deadline = budget.deadline;
         let q = self;
         let mut at = view
             .position
@@ -559,55 +538,80 @@ impl Request for AggregateQuery {
         let mut refreshed = None;
         let mut continuous = true;
         let published = view.published;
+        let mut hits = covered(q, at, &refs.rows)?;
+        let planned: Vec<_> = hits
+            .iter()
+            .flat_map(|(_, path)| path.iter().copied())
+            .collect();
+        let mut objects = objects::Reader::new(&planned);
+        let mut raw = None;
+        let mut observed_cost = 0;
         while view.exists
             && at.micros() < refs.end
             && used < (q.query().budget().max_points.get() as usize)
         {
+            deadline
+                .remaining(store.clock.now())
+                .ok_or(Error::Deadline)?;
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
-            if at == q.query().window().start()
-                && let Some(path) = coverage(&refs.rows, window)?
-            {
-                refs.dependency_start = path
-                    .iter()
-                    .map(|r| r.dependency_start)
-                    .min()
-                    .unwrap_or(refs.dependency_start);
-            }
-            let cached = store
-                .cached(
-                    &refs.rows,
-                    &mut refs.attempted,
-                    q.spec().stream().scope(),
-                    window,
-                    deadline,
-                )
-                .await?;
-            let is_cached = cached.is_some();
-            let value = match cached {
-                Some(v) => v,
-                None => {
-                    let mut start = refs.dependency_start;
-                    let result = store
-                        .raw_summary(q.spec(), window, published, &fences, deadline, &mut start)
-                        .await;
-                    if at == q.query().window().start() {
-                        refs.dependency_start = start;
-                    }
-                    if matches!(result, Err(Error::BudgetExceeded)) {
-                        refs.raw_budget = Some(window);
-                    }
-                    result?
+            let remaining = q.query().budget().max_points.get() as usize - used;
+            let bounds = lookahead(
+                q,
+                window,
+                remaining,
+                observed_cost,
+                Timestamp::new(refs.end)?,
+            )?;
+            let is_cached = hits.front().is_some_and(|(w, _)| *w == window);
+            let value = if is_cached {
+                raw = None;
+                let (_, path) = hits.pop_front().ok_or(Error::Invariant)?;
+                if at == q.query().window().start() {
+                    refs.dependency_start = path
+                        .iter()
+                        .map(|r| r.dependency_start)
+                        .min()
+                        .ok_or(Error::Invariant)?;
                 }
+                objects
+                    .merge(
+                        store,
+                        q.spec().stream().scope(),
+                        &path,
+                        bounds,
+                        &mut refs.attempted,
+                        budget,
+                    )
+                    .await?
+            } else {
+                let mut start = refs.dependency_start;
+                let raw_bounds = hits
+                    .front()
+                    .map_or(bounds, |(w, _)| bounds.capped(w.start()));
+                let run =
+                    raw.get_or_insert_with(|| raw::Run::new(q.spec(), &fences, published, at));
+                let result = run
+                    .summary(store, window, raw_bounds, budget, &mut start)
+                    .await;
+                if at == q.query().window().start() {
+                    refs.dependency_start = start;
+                }
+                if matches!(result, Err(Error::BudgetExceeded)) {
+                    refs.raw_budget = Some(window);
+                }
+                result?
             };
             let bucket = value.project(q.operation())?;
-            if used + cost(&bucket) > q.query().budget().max_points.get() as usize {
+            let points = cost(&bucket);
+            if used + points > q.query().budget().max_points.get() as usize {
                 if buckets.is_empty() {
                     return Err(Error::BudgetExceeded);
                 }
                 break;
             }
-            used += cost(&bucket);
+            used += points;
+            observed_cost = observed_cost.max(points);
             size = size
                 .checked_add(bytes(&bucket)?.len())
                 .ok_or(Error::BudgetExceeded)?;

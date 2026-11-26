@@ -1,5 +1,6 @@
 //! Capture/replay real production INSERT requests; discard real server responses.
 //! Both proxy legs verify TLS. No synthetic database success/error is injected.
+mod metered;
 use super::*;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -7,7 +8,7 @@ use hyper::{Request, Response, body::Incoming};
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer, pem::PemObject};
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 use tokio::{net::TcpListener, sync::Mutex};
 type Http = hyper_util::client::legacy::Client<
@@ -21,6 +22,11 @@ struct Captured {
     body: Bytes,
 }
 struct State {
+    wire_bytes: Arc<AtomicU64>,
+    page_reads: Mutex<Vec<(String, bool)>>,
+    hold_sql: Mutex<Option<String>>,
+    bucket_width: AtomicU64,
+    slow_reads: AtomicUsize,
     mode: AtomicU8,
     dropped: AtomicUsize,
     saved: Mutex<Option<Captured>>,
@@ -31,6 +37,104 @@ struct State {
     connections: AtomicUsize,
     requests: Mutex<Vec<(usize, String)>>,
     raw_threads: Mutex<Vec<(u32, u32)>>,
+}
+fn wide_read(sql: &str, width: u64) -> bool {
+    if sql.contains("FROM rss_ts_ch.summaries FINAL") {
+        return sql.contains("','");
+    }
+    let bound = |key| -> Option<u64> {
+        let tail = sql.split_once(key)?.1;
+        tail.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    bound("observed_at>=")
+        .zip(bound("observed_at<"))
+        .is_some_and(|(lo, hi)| hi.saturating_sub(lo) > width)
+}
+impl State {
+    async fn hold(&self) -> std::io::Result<()> {
+        self.entered.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .map_err(|_| std::io::Error::other("gate closed"))?
+            .forget();
+        Ok(())
+    }
+    async fn delay_before_forward(&self, mode: u8) -> std::io::Result<()> {
+        match mode {
+            6 | 7 => self.hold().await?,
+            8 => tokio::time::sleep(Duration::from_secs(3)).await,
+            _ => {} // reason: other modes act on writes or after the real response.
+        }
+        Ok(())
+    }
+    async fn gated_response(
+        &self,
+        response: Response<Full<Bytes>>,
+        mode: u8,
+    ) -> std::io::Result<Response<Full<Bytes>>> {
+        if mode == 1 && response.status().is_success() {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            return Err(std::io::Error::other("discarded real response"));
+        }
+        if matches!(mode, 4 | 5) && response.status().is_success() {
+            self.hold().await?;
+        }
+        Ok(response)
+    }
+    async fn take_mode(
+        &self,
+        is_insert: bool,
+        reads_page: bool,
+        reads_summary: bool,
+        sql: &str,
+        body_sql: &str,
+    ) -> u8 {
+        if self.mode.load(Ordering::SeqCst) == 8 {
+            let width = self.bucket_width.load(Ordering::SeqCst);
+            if wide_read(sql, width) || wide_read(body_sql, width) {
+                self.slow_reads.fetch_add(1, Ordering::SeqCst);
+                return 8;
+            }
+        }
+        let hold = self
+            .hold_sql
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|needle| sql.contains(needle) || body_sql.contains(needle));
+        self.mode
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
+                ((m == 7 && hold)
+                    || (m == 5 && reads_page)
+                    || (m == 6 && reads_summary)
+                    || (m < 5 && is_insert))
+                    .then_some(0)
+            })
+            .unwrap_or(0)
+    }
+    async fn record_read(&self, headers: &hyper::HeaderMap, summary: bool) {
+        if let Some(id) = headers
+            .get("x-clickhouse-query-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.page_reads.lock().await.push((id.to_owned(), summary));
+        }
+    }
+    async fn record_threads(&self, uri: &hyper::Uri) {
+        let settings: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()).collect();
+        if let Some(threads) = settings.get("max_threads").and_then(|s| s.parse().ok())
+            && let Some(final_threads) = settings
+                .get("max_final_threads")
+                .and_then(|s| s.parse().ok())
+        {
+            self.raw_threads.lock().await.push((threads, final_threads));
+        }
+    }
 }
 pub(super) struct Proxy {
     pub endpoint: String,
@@ -73,6 +177,11 @@ impl Proxy {
             hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
                 .build(connector);
         let state = Arc::new(State {
+            wire_bytes: Arc::default(),
+            page_reads: Mutex::default(),
+            hold_sql: Mutex::default(),
+            bucket_width: AtomicU64::default(),
+            slow_reads: AtomicUsize::default(),
             mode: AtomicU8::new(0),
             dropped: AtomicUsize::new(0),
             saved: Mutex::new(None),
@@ -93,7 +202,7 @@ impl Proxy {
                 tokio::select! {
                     accepted=listener.accept()=>{let Ok((tcp,_))=accepted else {break;};let acceptor=acceptor.clone();let state=shared.clone();connections.spawn(async move {
                         let tls=acceptor.accept(tcp).await?;let connection=state.connections.fetch_add(1,Ordering::SeqCst);
-                        hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls),hyper::service::service_fn(move |request|serve(state.clone(),connection,request))).await?;
+                        hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(metered::Metered(tls, state.wire_bytes.clone())),hyper::service::service_fn(move |request|serve(state.clone(),connection,request))).await?;
                         Ok::<_,anyhow::Error>(())
                     });}
                     Some(_)=connections.join_next(),if !connections.is_empty()=>{}
@@ -106,6 +215,27 @@ impl Proxy {
             state,
             task,
         })
+    }
+    pub fn wire_bytes(&self) -> u64 {
+        self.state.wire_bytes.load(Ordering::Relaxed)
+    }
+    pub async fn take_page_reads(&self) -> Vec<(String, bool)> {
+        std::mem::take(&mut *self.state.page_reads.lock().await)
+    }
+    pub fn delay_wide_reads(&self, width: u64) {
+        self.state.slow_reads.store(0, Ordering::SeqCst);
+        self.state.bucket_width.store(width, Ordering::SeqCst);
+        self.arm(8);
+    }
+    pub fn slow_reads(&self) -> usize {
+        self.state.slow_reads.load(Ordering::SeqCst)
+    }
+    pub async fn hold_matching(&self, sql: String) {
+        *self.state.hold_sql.lock().await = Some(sql);
+        self.arm(7);
+    }
+    pub fn matching_gate_unused(&self) -> bool {
+        self.state.mode.load(Ordering::SeqCst) == 7
     }
     pub fn arm(&self, mode: u8) {
         self.state.mode.store(mode, Ordering::SeqCst);
@@ -216,36 +346,19 @@ async fn serve(
     let reads_raw = sql.contains("FROM rss_ts_ch.raw") || body_sql.contains("FROM rss_ts_ch.raw");
     let reads_summary = sql.contains("FROM rss_ts_ch.summaries FINAL")
         || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
-    let reads_page = sql.contains("FROM rss_ts_ch.raw FINAL")
-        || body_sql.contains("FROM rss_ts_ch.raw FINAL")
-        || sql.contains("FROM rss_ts_ch.summaries FINAL")
-        || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
+    let reads_page = reads_summary
+        || sql.contains("FROM rss_ts_ch.raw FINAL")
+        || body_sql.contains("FROM rss_ts_ch.raw FINAL");
     if reads_raw {
-        let settings: std::collections::HashMap<_, _> =
-            url::form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes()).collect();
-        if let Some(threads) = settings.get("max_threads").and_then(|s| s.parse().ok())
-            && let Some(final_threads) = settings
-                .get("max_final_threads")
-                .and_then(|s| s.parse().ok())
-        {
-            state
-                .raw_threads
-                .lock()
-                .await
-                .push((threads, final_threads));
-        }
+        state.record_threads(&parts.uri).await;
     }
     let is_insert = ["raw", "summaries"].iter().any(|table| {
         let prefix = format!("INSERT INTO rss_ts_ch.{table}");
         sql.starts_with(&prefix) || data.starts_with(prefix.as_bytes())
     });
     let mode = state
-        .mode
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
-            ((m == 5 && reads_page) || (m == 6 && reads_summary) || (m < 5 && is_insert))
-                .then_some(0)
-        })
-        .unwrap_or(0);
+        .take_mode(is_insert, reads_page, reads_summary, &sql, &body_sql)
+        .await;
     let captured = Captured {
         uri: parts.uri,
         headers: parts.headers,
@@ -258,32 +371,14 @@ async fn serve(
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("withheld before registration"));
     }
-    if mode == 6 {
-        state.entered.add_permits(1);
-        state
-            .release
-            .acquire()
-            .await
-            .map_err(|_| std::io::Error::other("gate closed"))?
-            .forget();
-    }
+    state.delay_before_forward(mode).await?;
     let response = forward(&state, captured)
         .await
         .map_err(|_| std::io::Error::other("upstream transport"))?;
-    if mode == 1 && response.status().is_success() {
-        state.dropped.fetch_add(1, Ordering::SeqCst);
-        return Err(std::io::Error::other("discarded real response"));
+    if reads_page {
+        state.record_read(response.headers(), reads_summary).await;
     }
-    if matches!(mode, 4 | 5) && response.status().is_success() {
-        state.entered.add_permits(1);
-        state
-            .release
-            .acquire()
-            .await
-            .map_err(|_| std::io::Error::other("gate closed"))?
-            .forget();
-    }
-    Ok(response)
+    state.gated_response(response, mode).await
 }
 #[tokio::test]
 async fn lost_real_response_and_pre_registration_late_request() -> anyhow::Result<()> {

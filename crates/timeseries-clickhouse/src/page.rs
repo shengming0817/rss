@@ -49,8 +49,14 @@ pub(crate) trait Request {
         store: &Operation<'_, C>,
         view: View<Self::Position>,
         metadata: &mut Self::Metadata,
-        deadline: Deadline,
+        budget: &mut ReadBudget,
     ) -> Result<(Self::Page, Option<Self::Position>), Error>;
+}
+// The absolute call deadline and the one optional allowance belong to the whole
+// page, including both paths and a retry after PostgreSQL reference revalidation.
+pub(crate) struct ReadBudget {
+    pub deadline: Deadline,
+    pub prefetch_until: Option<Deadline>,
 }
 pub(crate) struct Recheck {
     pub ceiling: i64,
@@ -103,6 +109,12 @@ impl<C: Clock> Operation<'_, C> {
         }
         let scope = q.selection().scope();
         let mut first = None;
+        let started = self.clock.now();
+        let remaining = deadline.remaining(started).ok_or(Error::Deadline)?;
+        let mut budget = ReadBudget {
+            deadline,
+            prefetch_until: Some(Deadline::at(started + remaining / 2)),
+        };
         for _ in 0..2 {
             let mut tx = self
                 .session(
@@ -164,7 +176,7 @@ impl<C: Clock> Operation<'_, C> {
             let (view, mut metadata, tag, expires) = tx.read(snapshot).await?;
             let ceiling = view.published;
             // Keep attempted-object evidence even when the ClickHouse read fails.
-            let result = request.read(self, view, &mut metadata, deadline).await;
+            let result = request.read(self, view, &mut metadata, &mut budget).await;
             let tag = request.state(self, &metadata, tag)?;
             let mut tx = self
                 .session(

@@ -2,7 +2,7 @@ use crate::{
     ChStore, Operation,
     control::{self, Fence},
     cursor::Position,
-    page::{Dependencies, Recheck, Request, View},
+    page::{Dependencies, ReadBudget, Recheck, Request, View},
     projection::{RAW_FIELDS, Raw, hex, literal},
 };
 use rss_request_context::{Clock, Deadline};
@@ -200,8 +200,9 @@ impl Request for Query {
         store: &Operation<'_, C>,
         view: View<Position>,
         _: &mut (),
-        deadline: Deadline,
+        budget: &mut ReadBudget,
     ) -> Result<(Page, Option<Position>), Error> {
+        let deadline = budget.deadline;
         let q = self;
         let availability = control::availability(q, &view.fences)?;
         if !view.exists {

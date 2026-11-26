@@ -1,3 +1,4 @@
+mod batch_read;
 mod pages;
 mod revision;
 mod snapshots;
@@ -261,9 +262,6 @@ async fn publication_settles_the_installation_window_at_its_upper_bound() -> any
         .execute(&f.admin)
         .await;
     assert!(matches!(invalid, Err(sqlx::Error::Database(e)) if e.code().as_deref()==Some("23514")));
-    sqlx::query("UPDATE rss_ts_ch.installation SET max_pending_batches=16")
-        .execute(&f.admin)
-        .await?;
     let d = definition(TENANT)?;
     f.register(&d).await?;
     let head = stream_batch(&d, "head", "head", 1)?;
