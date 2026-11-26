@@ -9,7 +9,7 @@ workspace = true
 [dev-dependencies]
 tracing-subscriber.workspace = true
 rss-examples = { path = "../../crates/examples", features = ["timeseries-timescaledb"] }
-rss-timeseries.workspace = true
+rss-timeseries = { workspace = true, features = ["integration"] }
 rss-timeseries-postgres = { workspace = true, features = ["integration", "timescaledb"] }
 rss-request-context.workspace = true
 rss-contract.workspace = true
