@@ -66,7 +66,7 @@ pub(super) async fn measure(
     let n = n.parse::<u32>()?;
     BatchLimit::new(n)?;
     let size = size.parse::<usize>()?;
-    anyhow::ensure!(size <= 1_048_576);
+    anyhow::ensure!(size <= Event::MAX_PAYLOAD_BYTES as usize);
     let bytes = Arc::new(AtomicUsize::new(0));
     let count = bytes.clone();
     let proxy = Proxy::observe(fixture, move || bind_meter(count.clone())).await?;

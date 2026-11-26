@@ -158,6 +158,7 @@ async fn projection_postgres_suite() -> anyhow::Result<()> {
         scenarios::baseline_receipts_prevent_cross_start_duplicates(&store,&owner,&control).await?;
         scenarios::invalid_baselines_are_atomic(&store,&owner,&control).await?;
         scenarios::isolation(&store, &pool, &owner, &control).await?;
+        scenarios::journal_page::verify(&store, &pool, &owner, &control).await?;
         scenarios::ordered_append(&store, &control).await?;
         scenarios::borrowed_append_rolls_back(&pool, &store, &control).await?;
         scenarios::replay(&store, &owner, &control).await?;
