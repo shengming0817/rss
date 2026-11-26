@@ -161,8 +161,9 @@ async fn worker_child() -> anyhow::Result<()> {
             store,
             JournalReadGrant::verify(&Trusted, TenantId::parse(CRASH_TENANT)?)?,
             rss_projection::SourceScope::new(TenantId::parse(CRASH_TENANT)?, "rss.observation.v1")?,
+            32 * 1024 * 1024,
         )?
-        .into_local(32 * 1024 * 1024)?,
+        .into_local(),
     );
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();

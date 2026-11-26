@@ -114,7 +114,7 @@ ref: baseline 5b63e10 adapters/postgres/src/device_command.rs (exact receipt rec
 
 Enable `projection` for Source and independent resolution, without loading `rss-projection-postgres`.
 Enable the additive `projection-postgres` feature for borrowed PostgreSQL transaction resolution.
-Both features use the same journal and reference format. Use `PgSource::new(Arc<PgStore<C>>, JournalReadGrant, SourceScope)`. It implements
+Both features use the same journal and reference format. Use `PgSource::new(Arc<PgStore<C>>, JournalReadGrant, SourceScope, page_bytes)`. It implements
 `rss_projection::Source` for that exact scope; the constructor rejects a tenant different from
 the grant, and reads/resolution reject scope mismatches. The application declares the journal's
 source lineage (the example uses `rss.observation.v1`), reuses it across restarts and changes it
@@ -127,6 +127,10 @@ an earlier cursor gets HistoryExpired, including an empty page. Exact references
 so a retained active record below the floor can still resolve. Initialize a new generation with `GenerationStart::after`, a host-prepared read model and
 complete deduplication receipts at or beyond the floor. The old generation keeps its original start.
 
+Both modes select an ordered prefix using the runner's count limit and the host's canonical-report byte budget.
+The constructor requires at least `Batch::MAX_ENCODED_BYTES` so a legal first report always fits.
+The allowance covers report bodies transferred to the reader. Decoded facts, references and driver buffers consume additional memory.
+
 `read` validates rows one at a time and emits bounded immutable version-1 references containing
 Scope, batch ID and the full Observation fingerprint. Event IDs are ASCII hex fingerprints. No
 consumer mapping runs in the source. The reference therefore remains stable across projection
@@ -135,12 +139,9 @@ Reference encoding is private; unknown, changed or misplaced references are reje
 reconstruction from the validated durable record. Debug/error formatting does not expose facts.
 
 `resolve(event, &control)` returns `ApplicableRecord` under the source's tenant grant.
-For a same-database effect, select `source.into_local(page_bytes)?` and implement
-`PgEffect<Item = EventWith<VerifiedObservation>>`. Give the source an explicit canonical-byte allowance
-of at least 4 MiB. Together with the runner's count limit it selects an ordered prefix;
-the returned page is the atomic unit in `run_batched`. For eight maximum-size reports in one
-transaction allow 32 MiB. Decoded facts, references, driver buffers and application data consume
-additional memory. The page owns the verified inputs through settlement.
+For a same-database effect, select `source.into_local()` and implement
+`PgEffect<Item = EventWith<VerifiedObservation>>`. The returned page is the atomic unit in `run_batched`.
+The page owns the verified inputs through settlement.
 
 Set `PgEffect::ISOLATION` to `EffectIsolation::ReadCommitted` for this mapping.
 Call `resolve_in_transaction(tx, item)` at each callback before consuming facts.

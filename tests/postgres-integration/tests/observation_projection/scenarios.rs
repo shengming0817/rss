@@ -728,12 +728,13 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
     let wrong =
         rss_projection::SourceScope::new(rss_request_context::TenantId::parse(OTHER)?, "rebuilt")?;
     assert!(
-        matches!(rss_observation_postgres::PgSource::new(input.store.clone(), grant, wrong), Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
+        matches!(rss_observation_postgres::PgSource::new(input.store.clone(), grant, wrong, rss_observation::Batch::MAX_ENCODED_BYTES), Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
     );
     let rebuilt = rss_observation_postgres::PgSource::new(
         input.store.clone(),
         rss_observation::JournalReadGrant::verify(&Trusted, tenant)?,
         rss_projection::SourceScope::new(tenant, "rebuilt")?,
+        32 * 1024 * 1024,
     )?;
     let original = input
         .source
@@ -749,7 +750,7 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
     assert!(
         matches!(rebuilt.resolve(original[0].as_ref(), &control).await, Err(e) if e.kind() == rss_projection::ErrorKind::ScopeMismatch)
     );
-    Ok(rebuilt.into_local(32 * 1024 * 1024)?)
+    Ok(rebuilt.into_local())
 }
 
 async fn rebuilt_checkpoint(

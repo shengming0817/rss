@@ -210,8 +210,9 @@ impl Fixture {
                 store,
                 JournalReadGrant::verify(&Trusted, TenantId::parse(tenant)?)?,
                 rss_projection::SourceScope::new(TenantId::parse(tenant)?, "rss.observation.v1")?,
+                32 * 1024 * 1024,
             )?
-            .into_local(32 * 1024 * 1024)?,
+            .into_local(),
         ))
     }
     pub async fn projection(
