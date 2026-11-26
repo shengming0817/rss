@@ -69,6 +69,11 @@ async fn reclaim_after_first_effect_rolls_back_all_eight() -> anyhow::Result<()>
         .read(source.scope(), None, BatchLimit::new(8)?, &control)
         .await?;
     assert_eq!(events.len(), 8);
+    // This new projection pool inherits a stricter role default. Its effect transactions
+    // must still observe commits that occur between ordered callbacks.
+    sqlx::raw_sql("ALTER ROLE handoff_runtime SET default_transaction_isolation='repeatable read'")
+        .execute(&f.admin)
+        .await?;
     let pg = f.projection(&control).await?;
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "mid-page")?;
     pg.initialize(

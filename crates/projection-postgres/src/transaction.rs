@@ -170,7 +170,12 @@ impl PgStore {
         control.check()?;
         let mut tx = match mode {
             TransactionMode::ReadOnly => lease.connection.begin_with("BEGIN READ ONLY").await,
-            TransactionMode::ReadWrite => lease.connection.begin().await,
+            TransactionMode::ReadWrite => {
+                lease
+                    .connection
+                    .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
+                    .await
+            }
         }
         .map_err(|e| sql_error(e, Phase::Begin))?;
         #[cfg(feature = "integration")]
