@@ -16,7 +16,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingIoOutcome, TransactionalMessagingObservation,
     TransactionalMessagingRuntimePhase, TransactionalMessagingSubscribeOutcome,
 };
-use rss_transactional_messaging::policy::{ConsumerExecutionPolicy, ExecutionDeadlines, within};
+use rss_transactional_messaging::policy::{ConsumerExecutionPolicy, ExecutionDeadlines, RemoteClaimWaitPolicy, within};
 use rss_transactional_messaging::transaction::{
     CommittedTransaction, ConsumerTx, EnvelopeValidationFailure, FailureClass, IngressValidator,
     SettlementDecision, SettlementKind, TerminalDisposition, TransactionOutcome,
@@ -322,8 +322,8 @@ where
     E: TransactionalMessagingEmitter,
 {
     let budget = execution.policy.budget();
-    let probe_reserve =
-        ((budget.total() - budget.settlement_reserve()) / 4).min(Duration::from_millis(250));
+    let policy = execution.policy.remote_claim_wait();
+    let probe_reserve = policy.final_window(budget.total() - budget.settlement_reserve());
     // Both cutoffs were minted from the same original operation budget.
     let last_probe = Deadline::at(cutoff.instant() - probe_reserve);
     let mut capacity_wait = None;
@@ -335,6 +335,7 @@ where
             execution,
             binding,
             cutoff,
+            backoff.as_ref().map(|_| last_probe),
             &mut capacity_wait,
             &mut known_busy,
         )
@@ -362,7 +363,7 @@ where
             .remaining(execution.timer.now())
             .unwrap_or_default();
         let delay = backoff
-            .get_or_insert_with(ClaimBackoff::new)
+            .get_or_insert_with(|| ClaimBackoff::new(policy))
             .next(retry_after, left);
         let wake = delay.map_or(cutoff, |delay| last_probe.capped(execution.timer, delay));
         if within(execution.timer, cutoff, |_| {
@@ -391,6 +392,7 @@ async fn claim_once<I, V, R, E>(
     execution: &ConsumerExecution<'_, V, R, E>,
     binding: &VerifiedConsumerBinding,
     cutoff: Deadline,
+    latest_retry_start: Option<Deadline>,
     capacity_wait: &mut Option<Duration>,
     known_busy: &mut Option<ProcessingDisposition>,
 ) -> Result<IdempotencyDisposition<I::Claim>, MessagingError>
@@ -424,6 +426,12 @@ where
     let permit = permit?;
     // The timeout-first watchdog may expire after permit transfer but before this poll.
     within(timer, cutoff, |_| async {
+        if latest_retry_start.is_some_and(|latest| timer.now() > latest.instant()) {
+            // A late wake or permit transfer used the final I/O reserve. Keep the known
+            // busy outcome until the original watchdog expires without holding the slot.
+            drop(permit);
+            return std::future::pending().await;
+        }
         *known_busy = None;
         inbox.claim(permit).await
     })
@@ -431,6 +439,7 @@ where
 }
 
 struct ClaimBackoff {
+    policy: RemoteClaimWaitPolicy,
     base: Duration,
     random: std::hash::RandomState,
     probe: u64,
@@ -438,10 +447,10 @@ struct ClaimBackoff {
 }
 
 impl ClaimBackoff {
-    const FIRST: Duration = Duration::from_micros(2500);
-    fn new() -> Self {
+    fn new(policy: RemoteClaimWaitPolicy) -> Self {
         Self {
-            base: Self::FIRST,
+            policy,
+            base: policy.initial_base(),
             random: std::hash::RandomState::new(),
             probe: 0,
             final_scheduled: false,
@@ -456,26 +465,26 @@ impl ClaimBackoff {
         // One earlier tier for a near expiry; a constantly renewed short lease still backs off.
         let lower = hint
             .unwrap_or(self.base)
-            .clamp((self.base / 2).max(Self::FIRST), self.base);
-        self.base = (self.base * 2).min(Duration::from_secs(1));
+            .clamp((self.base / 2).max(self.policy.initial_base()), self.base);
+        self.base = (self.base * 2).min(self.policy.max_base());
         let sample = self.random.hash_one(self.probe);
         self.probe = self.probe.wrapping_add(1);
         if until_final <= lower * 2 {
             // Spend the final probe once and spread its wake before the reserved I/O window.
             self.final_scheduled = true;
-            return Some(Self::final_delay(hint, until_final, sample));
+            return Some(self.final_delay(hint, until_final, sample));
         }
         Some(lower + Duration::from_nanos(sample % (lower.as_nanos() as u64)))
     }
 
-    fn final_delay(hint: Option<Duration>, latest: Duration, sample: u64) -> Duration {
-        let fallback = (latest / 4).min(Duration::from_millis(250));
+    fn final_delay(&self, hint: Option<Duration>, latest: Duration, sample: u64) -> Duration {
+        let fallback = self.policy.final_window(latest);
         // If eligibility fits, spend the last probe at or after it. An owner can still
         // release early, so keep a bounded fallback when eligibility is beyond our cutoff.
         let width = hint
             .and_then(|lease| latest.checked_sub(lease))
             .map_or(fallback, |after_expiry| fallback.min(after_expiry));
-        latest - Duration::from_nanos(sample % (width.as_nanos() as u64 + 1))
+        latest - Duration::from_nanos((u128::from(sample) % (width.as_nanos() + 1)) as u64)
     }
 }
 
@@ -483,56 +492,40 @@ impl ClaimBackoff {
 mod claim_backoff_tests {
     use super::*;
 
+    fn policy() -> RemoteClaimWaitPolicy {
+        RemoteClaimWaitPolicy::new(Duration::from_millis(5), Duration::from_millis(80), Duration::from_millis(12))
+            .expect("valid test schedule")
+    }
+
     #[test]
-    fn last_probe_keeps_the_available_io_window_once_the_tier_reaches_it() {
-        let mut backoff = ClaimBackoff::new();
-        backoff.base = Duration::from_secs(1);
-        let latest = Duration::from_millis(1250);
-        let final_delay = backoff.next(Some(Duration::from_secs(1)), latest);
-        assert!(
-            matches!(final_delay, Some(delay) if (Duration::from_secs(1)..=latest).contains(&delay))
-        );
+    fn final_jitter_respects_reachable_expiry_at_both_edges_and_only_runs_once() {
+        let policy = policy();
+        let mut backoff = ClaimBackoff::new(policy);
+        backoff.base = policy.max_base();
+        let latest = policy.max_base();
+        let width = policy.final_window(latest);
+        let hint = latest - width / 2;
+        assert_eq!(backoff.final_delay(Some(hint), latest, (width / 2).as_nanos() as u64), hint);
+        assert_eq!(backoff.final_delay(Some(hint), latest, 0), latest);
+        assert_eq!(backoff.final_delay(Some(latest), latest, u64::MAX), latest);
+        assert_eq!(backoff.final_delay(Some(Duration::MAX), latest, width.as_nanos() as u64), latest - width);
+        assert!(matches!(backoff.next(Some(hint), latest), Some(delay) if (hint..=latest).contains(&delay)));
         assert_eq!(backoff.next(None, latest), None);
     }
 
     #[test]
-    fn final_jitter_respects_reachable_expiry_at_both_edges() {
-        let latest = Duration::from_millis(850);
-        let hint = Duration::from_millis(800);
-        assert_eq!(
-            ClaimBackoff::final_delay(Some(hint), latest, 50_000_000),
-            hint
-        );
-        assert_eq!(ClaimBackoff::final_delay(Some(hint), latest, 0), latest);
-        assert_eq!(
-            ClaimBackoff::final_delay(Some(latest), latest, u64::MAX),
-            latest
-        );
-        assert_eq!(
-            ClaimBackoff::final_delay(Some(Duration::MAX), latest, 100_000_000),
-            Duration::from_millis(750)
-        );
-    }
-
-    #[test]
     fn lease_hint_recovers_one_tier_and_jitter_continues_at_the_cap() {
-        for (hint, cap_floor) in [(None, 1000), (Some(Duration::ZERO), 500)] {
-            let mut backoff = ClaimBackoff::new();
+        let policy = policy();
+        for hint in [None, Some(Duration::ZERO)] {
+            let mut backoff = ClaimBackoff::new(policy);
             let mut plateau = Vec::new();
-            for index in 0..24 {
-                let base =
-                    (ClaimBackoff::FIRST * (1u32 << index.min(10))).min(Duration::from_secs(1));
-                let floor = if hint.is_some() {
-                    (base / 2).max(ClaimBackoff::FIRST)
-                } else {
-                    base
-                };
-                let delay = backoff.next(hint, Duration::MAX).unwrap_or_default();
-                assert!((floor..floor * 2).contains(&delay));
-                if index > 10 {
-                    assert!(delay >= Duration::from_millis(cap_floor));
-                    plateau.push(delay);
-                }
+            let mut base = policy.initial_base();
+            for _ in 0..24 {
+                let lower = if hint.is_some() { (base / 2).max(policy.initial_base()) } else { base };
+                let delay = backoff.next(hint, Duration::MAX).expect("ordinary probe");
+                assert!((lower..lower * 2).contains(&delay));
+                if base == policy.max_base() { plateau.push(delay); }
+                base = (base * 2).min(policy.max_base());
             }
             assert!(plateau.windows(2).any(|pair| pair[0] != pair[1]));
         }
