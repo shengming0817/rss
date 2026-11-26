@@ -53,7 +53,7 @@ async fn arrivals() -> anyhow::Result<()> {
     let elapsed = started.elapsed();
     let report = measurement::finish();
     assert_eq!(f.store.available_preparation(), full);
-    assert_eq!((report.live_bytes, report.reserved_bytes, report.encoders, report.slots_waiting_bytes), (0,0,0,0));
+    assert_eq!((report.live_bytes, report.reserved_bytes, report.encoders), (0,0,0));
     for (label, values) in ["small","large"].into_iter().zip(&mut latencies) {
         if values.is_empty() { continue; }
         values.sort_unstable();
@@ -62,7 +62,7 @@ async fn arrivals() -> anyhow::Result<()> {
             values.len(), p(95), p(99), values.len() as f64 / elapsed.as_secs_f64());
     }
     for ((class, stage), total) in &report.probe_stages {
-        if ["slot_wait","byte_wait","permit_wait","pool_wait","prepare"].contains(stage) {
+        if ["queued_without_slot","queued_without_bytes","queued_by_order","permit_wait","pool_wait","prepare"].contains(stage) {
             println!("MIX_STAGE {load} {class} {stage} calls={} us={} charge_bytes={}", total.calls, total.elapsed.as_micros(), if *stage=="permit_wait" {total.json_bytes} else {0});
         }
     }
@@ -73,7 +73,7 @@ async fn arrivals() -> anyhow::Result<()> {
         };
         assert!(charge("large") * 2 > full.1 as u64 && charge("large") + charge("small") <= full.1 as u64);
     }
-    println!("MIX_CAP {load} input_bytes={sizes:?} slots={} bytes={} peak_reserved={} peak_buffers={} peak_encoders={} peak_slots_waiting_bytes={}",full.0,full.1,report.peak_reserved_bytes,report.peak_live_bytes,report.peak_encoders,report.peak_slots_waiting_bytes);
+    println!("MIX_CAP {load} input_bytes={sizes:?} slots={} bytes={} peak_reserved={} peak_buffers={} peak_encoders={}",full.0,full.1,report.peak_reserved_bytes,report.peak_live_bytes,report.peak_encoders);
     Ok(())
 }
 

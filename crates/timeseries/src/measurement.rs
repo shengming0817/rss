@@ -30,8 +30,6 @@ pub struct Report {
     pub peak_reserved_bytes: usize,
     pub encoders: usize,
     pub peak_encoders: usize,
-    pub slots_waiting_bytes: usize,
-    pub peak_slots_waiting_bytes: usize,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
