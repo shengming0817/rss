@@ -1,5 +1,6 @@
 use super::super::retention::{EXPIRY, maintenance_role};
 use super::*;
+use anyhow::Context;
 use rss_observation::{MaintenanceGrant, ObservationMaintenance, ScanWindow};
 use rss_observation_postgres::{PgMaintenance, VerifiedObservation};
 use rss_projection::{BatchExecution, ReceiptQuery, ReceiptStatus};
@@ -99,11 +100,10 @@ async fn reclaim_after_first_effect_rolls_back_all_eight() -> anyhow::Result<()>
     let (error, ()) = tokio::time::timeout(Duration::from_secs(20), async {
         tokio::try_join!(
             async {
-                Ok::<_, anyhow::Error>(
-                    exec.execute_batch(None, events.clone(), &control)
-                        .await
-                        .expect_err("eighth record expired"),
-                )
+                exec.execute_batch(None, events.clone(), &control)
+                    .await
+                    .err()
+                    .context("eighth record expired")
             },
             async {
                 staged.notified().await;
@@ -167,7 +167,8 @@ async fn changed_receipt_uses_current_row_and_retries_atomically() -> anyhow::Re
     let e = exec
         .execute_batch(None, events.clone(), &control)
         .await
-        .expect_err("changed transition");
+        .err()
+        .context("changed transition")?;
     assert_restore_error(&e, rss_projection::ErrorKind::Rejected, Position::new(2)?)?;
     assert_eq!(exec.checkpoint(&control).await?.position, None);
     assert!(values(&f, "changed-receipt", "inside").await?.is_empty());
@@ -216,7 +217,8 @@ async fn exact_reference_is_checked_against_current_identity_and_tenant() -> any
     let wrong = f.source(input.store.clone(), OTHER)?;
     let e = resolve_on(&pg, &control, wrong.scope(), source, item)
         .await?
-        .expect_err("cross-tenant borrowed tx");
+        .err()
+        .context("cross-tenant borrowed tx")?;
     assert_eq!(e.kind(), rss_projection::ErrorKind::ScopeMismatch);
     let diagnostic = e
         .diagnostic()
@@ -243,14 +245,14 @@ async fn exact_reference_is_checked_against_current_identity_and_tenant() -> any
     .await?;
     let restore = || resolve_on(&pg, &control, source.scope(), source, item);
     assert_restore_error(
-        &restore().await?.expect_err("digest mismatch"),
+        &restore().await?.err().context("digest mismatch")?,
         rss_projection::ErrorKind::StorageContract,
         pos,
     )?;
     sqlx::query("UPDATE rss_observation.batches SET fingerprint=$1 WHERE tenant_id=$2::uuid AND log_position=$3")
         .bind(replacement.fingerprint().as_slice()).bind(TENANT).bind(pos.get() as i64).execute(&f.admin).await?;
     assert_restore_error(
-        &restore().await?.expect_err("valid replacement"),
+        &restore().await?.err().context("valid replacement")?,
         rss_projection::ErrorKind::InvalidInput,
         pos,
     )?;
@@ -260,7 +262,7 @@ async fn exact_reference_is_checked_against_current_identity_and_tenant() -> any
         .execute(&f.admin)
         .await?;
     assert_restore_error(
-        &restore().await?.expect_err("missing row"),
+        &restore().await?.err().context("missing row")?,
         rss_projection::ErrorKind::StorageContract,
         pos,
     )?;
