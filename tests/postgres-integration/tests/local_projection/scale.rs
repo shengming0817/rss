@@ -494,6 +494,10 @@ pub(super) async fn worker_continuation(f: &Fixture) -> anyhow::Result<()> {
         }
         sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
     }
+    finish_retired_sweep(f).await
+}
+
+async fn finish_retired_sweep(f: &Fixture) -> anyhow::Result<()> {
     // The worker stopped on its first publication. The fixture then explicitly retired
     // its remaining sources. Finish any frozen sweep before handing the domain back.
     for _ in 0..2 {
