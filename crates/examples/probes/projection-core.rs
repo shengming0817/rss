@@ -7,9 +7,9 @@ async fn main() -> anyhow::Result<()> {
     )?;
     anyhow::ensure!(BatchLimit::new(1024)?.get() == 1024, "projection capacity");
     let position = Position::new(1)?;
-    let event = Event::new(scope.clone(), position, "event", vec![1])?;
+    let event = Event::new(scope.clone(), position, "event", vec![1, 2])?;
     anyhow::ensure!(
-        event.position() == position && event.payload() == [1],
+        event.position() == position && event.payload() == [1, 2],
         "event identity changed"
     );
     anyhow::ensure!(BatchLimit::new(0).is_err(), "unbounded batch accepted");
@@ -18,8 +18,15 @@ async fn main() -> anyhow::Result<()> {
     let control = Control::new(&clock, std::time::Duration::from_secs(60), &cancel);
     let consumer = Consumer { scope: ProjectionScope::new(scope,"consumer","v1")?, event, position: std::sync::Mutex::new(None) };
     anyhow::ensure!(consumer.high_water(consumer.scope.source(), &control).await? == Some(position));
-    let report = run(&consumer,&consumer,&control,RunLimit::new(BatchLimit::new(1)?,1)?).await.into_result()?;
-    anyhow::ensure!(report.applied == 1 && consumer.checkpoint(&control).await?.position == Some(position));
+    let small = RunLimit::new(PageBudget::new(1, 1)?, 2)?;
+    let stopped = run(&consumer, &consumer, &control, small).await.into_result()?;
+    let Stop::PayloadBudget { position: pending, required_bytes } = stopped.stop else {
+        anyhow::bail!("expected a blocked page");
+    };
+    anyhow::ensure!(pending == position && stopped.position.is_none() && required_bytes == 2);
+    let larger = RunLimit::new(PageBudget::new(1, required_bytes)?, 2)?;
+    let report = run(&consumer,&consumer,&control,larger).await.into_result()?;
+    anyhow::ensure!(report.stop == Stop::CaughtUp && report.applied == 1 && consumer.checkpoint(&control).await?.position == Some(position));
     cancel.cancel();
     anyhow::ensure!(consumer.high_water(consumer.scope.source(), &control).await.err().map(|e|e.kind()) == Some(ErrorKind::Cancelled));
     Ok(())
@@ -35,7 +42,17 @@ const DEFINITION: DefinitionIdentity = DefinitionIdentity::new([7;32]);
 impl Source for Consumer {
     type Item = rss_projection::Event;
     async fn high_water<T: Timer>(&self, _: &SourceScope, control: &Control<'_,T>) -> Result<Option<Position>,Error> {control.check()?; Ok(Some(self.event.position()))}
-    async fn read<T: Timer>(&self, _: &SourceScope, after: Option<Position>, _: BatchLimit, control: &Control<'_,T>) -> Result<Vec<Event>,Error> {control.check()?; Ok(if after.is_none() {vec![self.event.clone()]} else {vec![]})}
+    async fn read<T: Timer>(&self, _: &SourceScope, after: Option<Position>, budget: PageBudget, control: &Control<'_,T>) -> Result<ReadPage<Event>,Error> {
+        control.check()?;
+        let size = self.event.payload().len() as u32;
+        if after.is_some_and(|cursor| cursor >= self.event.position()) {
+            Ok(ReadPage::Events(vec![]))
+        } else if size > budget.payload_bytes() {
+            Ok(ReadPage::Blocked {position: self.event.position(), required_bytes: size})
+        } else {
+            Ok(ReadPage::Events(vec![self.event.clone()]))
+        }
+    }
 }
 impl Execution for Consumer {
     type Item = rss_projection::Event;

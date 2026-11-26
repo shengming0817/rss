@@ -25,7 +25,7 @@ pub(super) async fn verify(
         .inject_next_fault(rss_observation_postgres::Fault::RollbackAckLost);
     let read = input
         .source
-        .read(input.source.scope(), None, BatchLimit::new(2)?, &inspect)
+        .read(input.source.scope(), None, page_budget(2)?, &inspect)
         .await;
     assert_rollback(
         read.err()
@@ -58,7 +58,7 @@ pub(super) async fn verify(
         .await?;
     // This injection must still be armed for the following run after checkpoint expires.
     let entered = input.store.inject_pending_rollback();
-    let limit = RunLimit::new(BatchLimit::new(2)?, 2)?;
+    let limit = RunLimit::new(page_budget(2)?, 2)?;
     let timer = ManualTimer::new();
     let control = Control::new(&timer, Duration::from_secs(END), &cancel);
     let run = rss_projection::run(input.source.as_ref(), execution, &control, limit);

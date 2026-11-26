@@ -120,7 +120,10 @@ impl Source for Fixture {
     }
 }
 fn limit(events: u64) -> anyhow::Result<RunLimit> {
-    Ok(RunLimit::new(PageBudget::new(3, Event::MAX_PAYLOAD_BYTES)?, events)?)
+    Ok(RunLimit::new(
+        PageBudget::new(3, Event::MAX_PAYLOAD_BYTES)?,
+        events,
+    )?)
 }
 fn first() -> anyhow::Result<ConfirmedProgress> {
     Ok(ConfirmedProgress {

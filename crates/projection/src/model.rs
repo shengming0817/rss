@@ -86,12 +86,19 @@ impl PageBudget {
         if payload_bytes == 0 {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
-        Ok(Self { rows: BatchLimit::new(rows)?, payload_bytes })
+        Ok(Self {
+            rows: BatchLimit::new(rows)?,
+            payload_bytes,
+        })
     }
     /// Maximum event count, independently of payload sizes.
-    pub const fn rows(self) -> u32 { self.rows.get() }
+    pub const fn rows(self) -> u32 {
+        self.rows.get()
+    }
     /// Maximum sum of `Event::payload().len()` across this page.
-    pub const fn payload_bytes(self) -> u32 { self.payload_bytes }
+    pub const fn payload_bytes(self) -> u32 {
+        self.payload_bytes
+    }
 }
 
 /// Result of one ordered source read. A short nonempty page can have a successor.

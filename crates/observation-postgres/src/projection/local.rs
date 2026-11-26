@@ -55,9 +55,9 @@ impl<C: Clock> Source for PgSource<C, LocalPages> {
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Self::Item>, rss_projection::Error> {
+    ) -> Result<ReadPage<Self::Item>, rss_projection::Error> {
         self.read_page(
             scope,
             after,

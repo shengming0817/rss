@@ -1,6 +1,6 @@
 use crate::{
-    ApplyOutcome, PageBudget, ReadPage, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event,
-    Position, ProjectionScope, SourceScope, Timer,
+    ApplyOutcome, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event, PageBudget,
+    Position, ProjectionScope, ReadPage, SourceScope, Timer,
 };
 use std::future::Future;
 

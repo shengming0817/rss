@@ -2,7 +2,7 @@ use super::{fixture::*, scenarios::model};
 use rss_observation::{Body, Change, Id, JournalReadGrant, ObservationStore};
 use rss_observation_postgres::{PgSource, PgStore};
 use rss_projection::{
-    BatchLimit, Control, Execution, GenerationStart, ProjectionScope, ReplayBound, RunLimit, Source,
+    Control, Execution, GenerationStart, ProjectionScope, ReplayBound, RunLimit, Source,
 };
 use rss_projection_postgres::{PgEffect, PgEffectOutcome, PgOperationError, PgTransaction};
 use rss_request_context::TenantId;
@@ -44,7 +44,7 @@ pub async fn crash(f: &Fixture) -> anyhow::Result<()> {
         source.as_ref(),
         &execution,
         &control,
-        RunLimit::new(BatchLimit::new(1)?, 10)?,
+        RunLimit::new(page_budget(1)?, 10)?,
     )
     .await
     .into_result()?;
@@ -176,9 +176,11 @@ async fn worker_child() -> anyhow::Result<()> {
     )
     .await?;
     let scope = ProjectionScope::new(source.scope().clone(), "facts", "crash")?;
-    let event = source
-        .read(source.scope(), None, BatchLimit::new(1)?, &control)
-        .await?;
+    let event = expected_events(
+        source
+            .read(source.scope(), None, page_budget(1)?, &control)
+            .await?,
+    )?;
     let execution = projection.projection(
         projection
             .takeover(&scope, &model::DEFINITION, &control)

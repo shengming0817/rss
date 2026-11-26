@@ -77,7 +77,7 @@ async fn measure(shape: &str) -> anyhow::Result<()> {
     let scope = ProjectionScope::new(source.scope().clone(), "read-cost", shape)?;
     let exec = session(&pg, &scope, &source, &control).await?;
     let before = batch_cost::counters(&pool).await?;
-    let limit = RunLimit::new(BatchLimit::new(8)?, 8)?;
+    let limit = RunLimit::new(page_budget(8)?, 8)?;
     let run = rss_projection::run_batched(&*source, &exec, &control, limit);
     let (report, profile) = profiled(shape, std::future::IntoFuture::into_future(run)).await?;
     assert_eq!(report.into_result()?.applied, 8);

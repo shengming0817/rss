@@ -226,7 +226,14 @@ pub(super) async fn ordered_append(
     let (a, b) = tokio::join!(first, second);
     assert_eq!(a?.get(), 0);
     assert_eq!(b?.get(), 1);
-    let page = store.read(s.source(), None, PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, control).await?;
+    let page = store
+        .read(
+            s.source(),
+            None,
+            PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?,
+            control,
+        )
+        .await?;
     assert!(matches!(page, ReadPage::Events(events) if events.len() == 2));
     assert_eq!(append(store, &s, "first", b"1", control).await?.get(), 0);
     assert_eq!(

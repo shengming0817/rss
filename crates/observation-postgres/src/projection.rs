@@ -7,7 +7,9 @@ use crate::{
 };
 use futures::TryStreamExt;
 use rss_observation::{ApplicableRecord, Clock, Error, ErrorKind, Id, JournalReadGrant, Scope};
-use rss_projection::{BatchLimit, Control, Event, Phase, Position, Source, SourceScope, Timer};
+use rss_projection::{
+    Control, Event, PageBudget, Phase, Position, ReadPage, Source, SourceScope, Timer,
+};
 #[cfg(feature = "projection-postgres")]
 mod local;
 #[cfg(feature = "projection-postgres")]
@@ -196,9 +198,9 @@ impl<C: Clock> Source for PgSource<C> {
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, rss_projection::Error> {
+    ) -> Result<ReadPage<Event>, rss_projection::Error> {
         self.read_page(
             scope,
             after,
@@ -219,15 +221,15 @@ impl<C: Clock> Source for PgSource<C> {
     }
 }
 impl<C: Clock, M: Send + Sync> PgSource<C, M> {
-    async fn read_page<T: Timer, I: Send + 'static>(
+    async fn read_page<T: Timer, I: rss_projection::EventInput + 'static>(
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
         bytes: Option<i64>,
         item: fn(&SourceScope, Position, ApplicableRecord, [u8; 32]) -> Result<I, Error>,
-    ) -> Result<Vec<I>, rss_projection::Error> {
+    ) -> Result<ReadPage<I>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
@@ -236,7 +238,7 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                 let query = sqlx::query(if bytes.is_some() { READ_LOCAL } else { READ })
                     .bind(tenant.to_string())
                     .bind(after.map_or(0, |p| p.get() as i64))
-                    .bind(i64::from(limit.get()));
+                    .bind(i64::from(limit.rows()));
                 let query = if let Some(bytes) = bytes {
                     query.bind(bytes)
                 } else {
@@ -244,6 +246,7 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                 };
                 let mut rows = query.fetch(connection);
                 let mut events = Vec::new();
+                let mut remaining = limit.payload_bytes() as usize;
                 while let Some(row) = rows.try_next().await.map_err(sql_error)? {
                     budget()?;
                     #[cfg(feature = "integration")]
@@ -260,13 +263,24 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                         continue;
                     }
                     let (pos, record, fp) = restore_row(row)?;
-                    events.push(
-                        item(&scope, pos, record, fp).map_err(|e| restore_error(Some(pos), e))?,
-                    );
+                    let event =
+                        item(&scope, pos, record, fp).map_err(|e| restore_error(Some(pos), e))?;
                     budget()?;
+                    let size = event.as_ref().payload().len();
+                    if size > remaining {
+                        if events.is_empty() {
+                            return Ok(ReadPage::Blocked {
+                                position: pos,
+                                required_bytes: size as u32,
+                            });
+                        }
+                        break;
+                    }
+                    remaining -= size;
+                    events.push(event);
                     tokio::task::yield_now().await;
                 }
-                Ok(events)
+                Ok(ReadPage::Events(events))
             })
         });
         #[cfg(feature = "integration")]

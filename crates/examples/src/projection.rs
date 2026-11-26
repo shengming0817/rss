@@ -5,7 +5,7 @@ const DEFINITION: rss_projection::DefinitionIdentity = rss_projection::Definitio
     56, 173, 45, 32, 8, 173, 6, 218, 162, 142, 19, 36,
 ]);
 use rss_projection::{
-    BatchLimit, Control, Event, GenerationStart, ObservationStatus, ProjectionScope, ReceiptQuery,
+    Control, Event, GenerationStart, ObservationStatus, PageBudget, ProjectionScope, ReceiptQuery,
     ReplayBound, RunLimit, Source, SourceScope, Timer,
 };
 use rss_projection_postgres::{
@@ -153,7 +153,7 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
     let worker = store.projection(store.takeover(&live, &DEFINITION, &control).await?, Counter)?;
     use rss_projection::Execution as _;
     let high_water = store.high_water(&source, &control).await?;
-    let limits = RunLimit::new(BatchLimit::new(100)?, 1000)?;
+    let limits = RunLimit::new(PageBudget::new(100, Event::MAX_PAYLOAD_BYTES)?, 1000)?;
     let work = rss_projection::run(store, &worker, &control, limits);
     let observation = work.observation();
     assert_eq!(observation.read(), ObservationStatus::Pending);
@@ -176,7 +176,10 @@ pub async fn demo(store: &PgStore, tenant: TenantId) -> anyhow::Result<()> {
     let resumed = rss_projection::run(store, &worker, &control, limits)
         .await
         .into_result()?;
-    anyhow::ensure!(resumed.applied == 0, "resume duplicated effects");
+    anyhow::ensure!(
+        resumed.stop == rss_projection::Stop::CaughtUp && resumed.applied == 0,
+        "resume duplicated effects"
+    );
     replay_snapshot(store, &source, &control, limits).await?;
     let tenant = source.tenant();
     let totals=store.local_tx(&source,&control,move |tx| Box::pin(async move {

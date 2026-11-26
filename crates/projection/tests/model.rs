@@ -13,7 +13,15 @@ fn position_and_source_identity_are_validated() -> anyhow::Result<()> {
     assert!(PageBudget::new(1, 0).is_err());
     assert!(PageBudget::new(0, Event::MAX_PAYLOAD_BYTES).is_err());
     assert!(PageBudget::new(1025, Event::MAX_PAYLOAD_BYTES).is_err());
-    assert!(Event::new(source.clone(), Position::new(0)?, "large", vec![0; Event::MAX_PAYLOAD_BYTES as usize + 1]).is_err());
+    assert!(
+        Event::new(
+            source.clone(),
+            Position::new(0)?,
+            "large",
+            vec![0; Event::MAX_PAYLOAD_BYTES as usize + 1]
+        )
+        .is_err()
+    );
     assert!(Position::new(u64::MAX).is_err());
     let event = Event::new(source, Position::new(0)?, "event-1", b"secret".to_vec())?;
     assert_eq!(event.position().get(), 0);

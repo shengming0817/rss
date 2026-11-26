@@ -61,11 +61,19 @@ impl Source for Journal {
         control.check()?;
         let mut events = Vec::new();
         let mut bytes = limit.payload_bytes() as usize;
-        for event in self.0.iter().filter(|e| after.is_none_or(|p| e.position() > p)).take(limit.rows() as usize) {
+        for event in self
+            .0
+            .iter()
+            .filter(|e| after.is_none_or(|p| e.position() > p))
+            .take(limit.rows() as usize)
+        {
             let size = event.payload().len();
             if size > bytes {
                 if events.is_empty() {
-                    return Ok(ReadPage::Blocked { position: event.position(), required_bytes: size as u32 });
+                    return Ok(ReadPage::Blocked {
+                        position: event.position(),
+                        required_bytes: size as u32,
+                    });
                 }
                 break;
             }

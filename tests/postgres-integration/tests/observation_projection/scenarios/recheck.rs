@@ -68,9 +68,11 @@ async fn reclaim_after_first_effect_rolls_back_all_eight() -> anyhow::Result<()>
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
     let source = f.source(store, TENANT)?;
-    let events = source
-        .read(source.scope(), None, BatchLimit::new(8)?, &control)
-        .await?;
+    let events = expected_events(
+        source
+            .read(source.scope(), None, page_budget(8)?, &control)
+            .await?,
+    )?;
     assert_eq!(events.len(), 8);
     // This new projection pool inherits a stricter role default. Its effect transactions
     // must still observe commits that occur between ordered callbacks.
@@ -155,10 +157,12 @@ async fn changed_receipt_uses_current_row_and_retries_atomically() -> anyhow::Re
     let pg = f.projection(&control).await?;
     let scope = ProjectionScope::new(input.source.scope().clone(), "facts", "changed-receipt")?;
     let exec = session(&pg, &scope, &input.source, &control).await?;
-    let events = input
-        .source
-        .read(input.source.scope(), None, BatchLimit::new(2)?, &control)
-        .await?;
+    let events = expected_events(
+        input
+            .source
+            .read(input.source.scope(), None, page_budget(2)?, &control)
+            .await?,
+    )?;
     let current:i64=sqlx::query_scalar("UPDATE rss_observation.batches SET received_at=received_at+1 WHERE log_position=2 RETURNING received_at")
         .fetch_one(&f.admin).await?;
     let resolved = resolve_on(
@@ -223,9 +227,11 @@ async fn exact_reference_is_checked_against_current_identity_and_tenant() -> any
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
     let pg = f.projection(&control).await?;
     let source = &input.source;
-    let page = source
-        .read(source.scope(), None, BatchLimit::new(1)?, &control)
-        .await?;
+    let page = expected_events(
+        source
+            .read(source.scope(), None, page_budget(1)?, &control)
+            .await?,
+    )?;
     let item = &page[0];
     let wrong = f.source(input.store.clone(), OTHER)?;
     let e = resolve_on(&pg, &control, wrong.scope(), source, item)
@@ -304,9 +310,11 @@ async fn bounded_prefix_releases_records_and_resumes_at_exact_position() -> anyh
     let exec = session(&pg, &s, &source, &control).await?;
     let mut after = None;
     for end in [2, 4, 6, 8] {
-        let page = source
-            .read(source.scope(), after, BatchLimit::new(8)?, &control)
-            .await?;
+        let page = expected_events(
+            source
+                .read(source.scope(), after, page_budget(8)?, &control)
+                .await?,
+        )?;
         assert_eq!(page.len(), 2);
         assert_eq!(
             (page[0].as_ref().position(), page[1].as_ref().position()),
@@ -325,10 +333,12 @@ async fn bounded_prefix_releases_records_and_resumes_at_exact_position() -> anyh
         assert_eq!(exec.checkpoint(&control).await?.position, after);
     }
     assert!(
-        source
-            .read(source.scope(), after, BatchLimit::new(8)?, &control)
-            .await?
-            .is_empty()
+        expected_events(
+            source
+                .read(source.scope(), after, page_budget(8)?, &control)
+                .await?
+        )?
+        .is_empty()
     );
     Ok(())
 }
@@ -364,9 +374,11 @@ async fn ordinary_sessions_inherit_fixed_snapshots_and_borrowed_resolve_rejects_
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
     let source = &input.source;
-    let items = source
-        .read(source.scope(), None, BatchLimit::new(2)?, &control)
-        .await?;
+    let items = expected_events(
+        source
+            .read(source.scope(), None, page_budget(2)?, &control)
+            .await?,
+    )?;
     sqlx::raw_sql("ALTER ROLE handoff_runtime SET default_transaction_isolation='serializable'")
         .execute(&f.admin)
         .await?;

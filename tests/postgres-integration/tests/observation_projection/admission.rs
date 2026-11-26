@@ -1,6 +1,6 @@
 use super::fixture::*;
 use rss_observation::{Body, ObservationStore};
-use rss_projection::{BatchLimit, Source};
+use rss_projection::Source;
 #[tokio::test]
 async fn required_permissions_are_checked() -> anyhow::Result<()> {
     let f = Fixture::new().await?;
@@ -86,9 +86,11 @@ async fn resolver_record(
         )
         .await?;
     let source = f.source(store, TENANT)?;
-    let events = source
-        .read(source.scope(), None, BatchLimit::new(1)?, &control)
-        .await?;
+    let events = expected_events(
+        source
+            .read(source.scope(), None, page_budget(1)?, &control)
+            .await?,
+    )?;
     Ok((source, events[0].clone()))
 }
 async fn reject_permanent(

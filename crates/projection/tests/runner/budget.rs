@@ -110,7 +110,12 @@ async fn read_port(
             .await
             .map(|_| ()),
         1 => ports
-            .read(ports.0.scope().source(), None, PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?, control)
+            .read(
+                ports.0.scope().source(),
+                None,
+                PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?,
+                control,
+            )
             .await
             .map(|_| ()),
         2 => ports.checkpoint(control).await.map(|_| ()),

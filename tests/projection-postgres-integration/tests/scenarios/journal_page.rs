@@ -2,7 +2,7 @@ use super::*;
 
 const PAGE_SQL: &str = include_str!("../../../../crates/projection-postgres/src/journal_page.sql");
 
-pub(super) async fn verify(
+pub(crate) async fn verify(
     store: &PgStore, runtime: &PgPool, owner: &PgPool, c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let scope = scope("page-bytes", TENANT)?;

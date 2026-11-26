@@ -1,8 +1,8 @@
 //! ref: baseline 5b63e10 crates/eventexec/src/projection.rs; ordered resume algorithm only.
 use crate::observation::Publisher;
 use crate::{
-    ApplyOutcome, BatchExecution, PageBudget, ReadPage, Checkpoint, Control, Error, ErrorKind, Event,
-    Execution, Position, ReplayBound, RunObservation, Source, Timer,
+    ApplyOutcome, BatchExecution, Checkpoint, Control, Error, ErrorKind, Event, Execution,
+    PageBudget, Position, ReadPage, ReplayBound, RunObservation, Source, Timer,
 };
 use std::future::{Future, IntoFuture};
 
@@ -94,7 +94,8 @@ fn validate_batch(
         if previous.is_some_and(|p| event.position() <= p) {
             return Err(Error::new(ErrorKind::OutOfOrder));
         }
-        bytes_left = bytes_left.checked_sub(event.payload().len())
+        bytes_left = bytes_left
+            .checked_sub(event.payload().len())
             .ok_or(Error::new(ErrorKind::SourceContract))?;
         previous = Some(event.position());
     }
@@ -204,11 +205,21 @@ async fn drive<S: Source<Item = E::Item>, E: Execution, T: Timer, M: Settlement<
         }
         let rows = remaining.min(u64::from(limit.page.rows())) as u32;
         let page = PageBudget::new(rows, limit.page.payload_bytes())?;
-        let read = source.read(execution.scope().source(), checkpoint.position, page, control).await?;
+        let read = source
+            .read(
+                execution.scope().source(),
+                checkpoint.position,
+                page,
+                control,
+            )
+            .await?;
         control.check()?;
         let events = match read {
             ReadPage::Events(events) => events,
-            ReadPage::Blocked { position, required_bytes } => {
+            ReadPage::Blocked {
+                position,
+                required_bytes,
+            } => {
                 if checkpoint.position.is_some_and(|p| position <= p)
                     || matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if position > end)
                     || required_bytes <= page.payload_bytes()
@@ -216,7 +227,10 @@ async fn drive<S: Source<Item = E::Item>, E: Execution, T: Timer, M: Settlement<
                 {
                     return Err(Error::new(ErrorKind::SourceContract));
                 }
-                return Ok(Stop::PayloadBudget { position, required_bytes });
+                return Ok(Stop::PayloadBudget {
+                    position,
+                    required_bytes,
+                });
             }
         };
         validate_batch(&events, execution, checkpoint.position, page)?;

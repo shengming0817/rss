@@ -71,14 +71,11 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
         TENANT,
     )?;
     let projection = rss_projection_postgres::PgStore::new(pool.clone(), &control).await?;
-    let all = source
-        .read(
-            source.scope(),
-            None,
-            BatchLimit::new(EVENTS as u32)?,
-            &control,
-        )
-        .await?;
+    let all = expected_events(
+        source
+            .read(source.scope(), None, page_budget(EVENTS as u32)?, &control)
+            .await?,
+    )?;
     let mut expected: Vec<_> = all
         .iter()
         .map(|e| {
@@ -102,7 +99,7 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
             .execute(&f.admin)
             .await?;
         let before = counters(&pool).await?;
-        let limit = RunLimit::new(BatchLimit::new(PAGE)?, EVENTS)?;
+        let limit = RunLimit::new(page_budget(PAGE)?, EVENTS)?;
         println!("PROJECTION_PROFILE_BEGIN {mode}");
         let start = clock.now();
         let report = if mode == "single" {

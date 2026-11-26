@@ -2,7 +2,7 @@
 use super::fixture::*;
 use anyhow::Context as _;
 use rss_observation::{Body, ObservationStore};
-use rss_projection::{BatchLimit, Control, ErrorKind, Event, Source, Timer};
+use rss_projection::{Control, ErrorKind, Event, Source, Timer};
 use std::{
     sync::{
         Arc,
@@ -76,9 +76,11 @@ pub(super) async fn verify(f: &Fixture) -> anyhow::Result<()> {
     let source = f.source(store.clone(), TENANT)?;
     let cancel = CancellationToken::new();
     let control = Control::new(&timer, Duration::from_secs(60), &cancel);
-    let events = source
-        .read(source.scope(), None, BatchLimit::new(1024)?, &control)
-        .await?;
+    let events = expected_events(
+        source
+            .read(source.scope(), None, page_budget(1024)?, &control)
+            .await?,
+    )?;
     let event = events
         .last()
         .ok_or_else(|| anyhow::anyhow!("missing fixture event"))?
@@ -113,7 +115,7 @@ async fn read(
     match stage {
         0 => source.high_water(source.scope(), control).await.map(|_| ()),
         1 => source
-            .read(source.scope(), None, BatchLimit::new(1024)?, control)
+            .read(source.scope(), None, page_budget(1024)?, control)
             .await
             .map(|_| ()),
         _ => source.resolve(event, control).await.map(|_| ()),
