@@ -34,6 +34,25 @@ Registry consumers obtain the same versioned SQL through
 file. Pin the adapter version in the external migrator (`rss-transactional-messaging-postgres =
 "=0.1.0"`) so its SQL and runtime come from the same release. The constant does not execute DDL.
 
+### Database delivery policy
+
+The fresh installer seeds one policy row. To choose a different initial policy, execute
+`SET LOCAL` in the same installation transaction before `MIGRATION_SQL`. The five
+integer-second settings are `rss.install_window_seconds`, `rss.install_safety_seconds`,
+`rss.install_receipt_seconds`, `rss.install_retry_initial_seconds` and
+`rss.install_retry_max_seconds`. Defaults are 86400, 86400, 604800, 1 and 3600 respectively.
+All durations are positive signed 32-bit seconds. Receipt retention must strictly exceed window
+plus safety, and maximum retry must cover the initial retry.
+
+After installation the external owner changes these five columns together using SQL UPDATE
+on `rss_transactional_messaging.policy WHERE revision=1`. The database serializes the change
+with first claims and archive decisions. On a reduction, the row preserves the furthest prior
+HOT and receipt protection deadlines. This can defer HOT cleanup across the database until
+outstanding protection expires. Reapplying the same values does not move either deadline.
+The next first claim freezes its window using database time. Renewal, redrive and DR use the
+stored absolute deadline; an existing retry keeps its scheduled time. An archive whose proof
+falls short after a policy increase returns a retention error and keeps its HOT capsule.
+
 The runtime login must not own the schema/tables, be superuser, have BYPASSRLS, or belong to the
 relay role. Grant it schema USAGE; policy SELECT; Inbox SELECT/INSERT/UPDATE/DELETE; Outbox
 SELECT; and EXECUTE on `check_execution`, the three relay functions, `next_outbox_wakeup(uuid,text)`, `prepare_outbox_partitions(jsonb)`

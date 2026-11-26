@@ -5,10 +5,14 @@ CREATE SCHEMA rss_transactional_messaging;
 
 CREATE TABLE rss_transactional_messaging.policy (
   revision integer PRIMARY KEY CHECK (revision = 1),
-  automatic_window_seconds bigint NOT NULL CHECK (automatic_window_seconds = 86400),
-  safety_seconds bigint NOT NULL CHECK (safety_seconds = 86400),
-  receipt_retention_seconds bigint NOT NULL CHECK
-    (receipt_retention_seconds > automatic_window_seconds + safety_seconds)
+  automatic_window_seconds integer NOT NULL CHECK (automatic_window_seconds > 0),
+  safety_seconds integer NOT NULL CHECK (safety_seconds > 0),
+  receipt_retention_seconds integer NOT NULL CONSTRAINT policy_check CHECK
+    (receipt_retention_seconds > automatic_window_seconds::bigint + safety_seconds),
+  retry_initial_seconds integer NOT NULL CHECK (retry_initial_seconds > 0),
+  retry_max_seconds integer NOT NULL CONSTRAINT policy_retry_max_seconds_check CHECK (retry_max_seconds >= retry_initial_seconds),
+  hot_floor_until timestamptz NOT NULL DEFAULT '-infinity',
+  receipt_floor_until timestamptz NOT NULL DEFAULT '-infinity'
 );
 
 CREATE TABLE rss_transactional_messaging.inbox (
@@ -187,7 +191,48 @@ CREATE TABLE rss_transactional_messaging.consumer_scope (
  consumer_group text NOT NULL CHECK (length(consumer_group)>0)
 );
 
-INSERT INTO rss_transactional_messaging.policy VALUES (1,86400,86400,604800);
+-- These optional transaction settings are consumed only by the fresh installer.
+INSERT INTO rss_transactional_messaging.policy
+ (revision,automatic_window_seconds,safety_seconds,receipt_retention_seconds,retry_initial_seconds,retry_max_seconds)
+ VALUES (1,coalesce(current_setting('rss.install_window_seconds',true)::integer,86400),
+           coalesce(current_setting('rss.install_safety_seconds',true)::integer,86400),
+           coalesce(current_setting('rss.install_receipt_seconds',true)::integer,604800),
+           coalesce(current_setting('rss.install_retry_initial_seconds',true)::integer,1),
+           coalesce(current_setting('rss.install_retry_max_seconds',true)::integer,3600));
+
+-- UPDATE already holds the row lock, including after waiting for concurrent readers.
+CREATE FUNCTION rss_transactional_messaging.protect_policy_change() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
+DECLARE n timestamptz:=clock_timestamp();
+ old_hot bigint:=OLD.automatic_window_seconds::bigint+OLD.safety_seconds;
+BEGIN
+ NEW.hot_floor_until:=OLD.hot_floor_until;
+ NEW.receipt_floor_until:=OLD.receipt_floor_until;
+ IF NEW.automatic_window_seconds::bigint+NEW.safety_seconds < old_hot THEN
+  NEW.hot_floor_until:=greatest(OLD.hot_floor_until,n+old_hot*interval '1 second');
+ END IF;
+ IF NEW.receipt_retention_seconds < OLD.receipt_retention_seconds THEN
+  NEW.receipt_floor_until:=greatest(OLD.receipt_floor_until,n+OLD.receipt_retention_seconds*interval '1 second');
+ END IF;
+ RETURN NEW;
+END $f$;
+CREATE TRIGGER protect_policy_change BEFORE UPDATE ON rss_transactional_messaging.policy
+ FOR EACH ROW EXECUTE FUNCTION rss_transactional_messaging.protect_policy_change();
+
+-- The table owner can lock this row without granting any policy UPDATE to relay.
+CREATE FUNCTION rss_transactional_messaging.lock_outbox_policy() RETURNS rss_transactional_messaging.policy
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
+DECLARE p policy;
+BEGIN
+ SELECT * INTO STRICT p FROM policy WHERE revision=1 FOR SHARE;
+ RETURN p;
+END $f$;
+
+-- Restricted startup profiles can verify installation without reading policy data.
+CREATE FUNCTION rss_transactional_messaging.outbox_policy_present() RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
+ SELECT EXISTS(SELECT FROM policy WHERE revision=1)
+$f$;
 
 CREATE UNIQUE INDEX outbox_partition ON rss_transactional_messaging.outbox(tenant_id,domain,partition_key,partition_seq)
  WHERE partition_key IS NOT NULL;
@@ -277,7 +322,8 @@ GRANT INSERT ON rss_transactional_messaging.outbox TO rss_tmsg_relay;
 
 GRANT USAGE ON SEQUENCE rss_transactional_messaging.outbox_seq_seq TO rss_tmsg_relay;
 
-GRANT SELECT ON rss_transactional_messaging.consumer_scope TO rss_tmsg_relay;
+GRANT SELECT ON rss_transactional_messaging.consumer_scope,rss_transactional_messaging.policy TO rss_tmsg_relay;
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.lock_outbox_policy() TO rss_tmsg_relay;
 
 CREATE FUNCTION rss_transactional_messaging.check_execution() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
@@ -735,7 +781,7 @@ CREATE FUNCTION rss_transactional_messaging.claim_outbox(p_tenant uuid,p_domain 
 RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_key text,lease_token uuid,lease_until timestamptz,envelope jsonb,payload bytea,fingerprint bytea,dr_operation uuid,remaining_us bigint,delivery_us bigint)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
- progress outbox_scan; frontier outbox_scan; examined integer:=0;
+ automatic_window integer; progress outbox_scan; frontier outbox_scan; examined integer:=0;
  owns_progress boolean; had_cursor boolean; resumed boolean; exhausted boolean:=false; contested boolean:=false; historical_due boolean:=false; action text:='complete';
  candidates NO SCROLL CURSOR FOR
   SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,p_scan_budget) ORDER BY source_seq,lane;
@@ -772,7 +818,11 @@ BEGIN
   n:=clock_timestamp();
   IF r.dr_operation IS NULL THEN
    IF NOT (o.status='pending' OR (o.status='publishing' AND (o.lease_until<=n OR o.claim_epoch<>e OR o.claim_lineage IS DISTINCT FROM l))) OR o.retry_after>n OR NOT (o.partition_head OR o.partition_key IS NULL) THEN contested:=true; CONTINUE; END IF;
-   UPDATE outbox src SET status='publishing',lease_token=gen_random_uuid(),lease_until=n+(p_ttl_ms::text || ' milliseconds')::interval,automatic_retry_deadline=COALESCE(src.automatic_retry_deadline,n+interval '24 hours') WHERE src.seq=o.seq RETURNING * INTO o;
+   IF o.automatic_retry_deadline IS NULL AND automatic_window IS NULL THEN
+    automatic_window:=(lock_outbox_policy()).automatic_window_seconds;
+    n:=clock_timestamp();
+   END IF;
+   UPDATE outbox src SET status='publishing',lease_token=gen_random_uuid(),lease_until=n+(p_ttl_ms::text || ' milliseconds')::interval,automatic_retry_deadline=COALESCE(src.automatic_retry_deadline,n+automatic_window*interval '1 second') WHERE src.seq=o.seq RETURNING * INTO o;
   ELSE
    SELECT * INTO m FROM dr_members x WHERE x.tenant_id=p_tenant AND x.operation_id=r.dr_operation AND x.outbox_seq=o.seq FOR UPDATE SKIP LOCKED;
    IF NOT FOUND OR NOT (m.status='pending' OR (m.status='publishing' AND m.lease_until<=n)) OR m.retry_after>n THEN contested:=true; CONTINUE; END IF;
@@ -952,15 +1002,18 @@ END $f$;
 
 CREATE FUNCTION rss_transactional_messaging.archive_claim(p_op uuid,p_id uuid,p_version bigint,p_digest bytea,p_hot bigint,p_cold bigint,p_hold boolean,p_ttl bigint,p_scan integer)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
-DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid; d consumer_dead_letter; j archive_jobs; p policy; a archive_objects; n timestamptz; retired jsonb;
+DECLARE t uuid:=nullif(current_setting('rss.tenant_id',true),'')::uuid; d consumer_dead_letter; j archive_jobs; p policy; a archive_objects; n timestamptz; retired jsonb; receipt_seconds bigint; hot_until timestamptz;
 BEGIN
  PERFORM rss_transactional_messaging.check_execution();
  SELECT * INTO d FROM consumer_dead_letter WHERE tenant_id=t AND id=p_id FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'archive not found' USING ERRCODE='P0002'; END IF;
- SELECT * INTO p FROM policy WHERE revision=1;
- IF p_hot<p.automatic_window_seconds+p.safety_seconds OR p_cold<=0 OR p_ttl NOT BETWEEN 1 AND 9223372036854775 OR p_scan IS NULL OR p_scan NOT BETWEEN 1 AND 1024 THEN RAISE EXCEPTION 'archive retention' USING ERRCODE='22023'; END IF;
- SELECT * INTO j FROM archive_jobs WHERE tenant_id=t AND operation_id=p_op FOR UPDATE;
+ p:=lock_outbox_policy();
+ IF p_hot<p.automatic_window_seconds::bigint+p.safety_seconds OR p_cold<=0 OR p_ttl NOT BETWEEN 1 AND 9223372036854775 OR p_scan IS NULL OR p_scan NOT BETWEEN 1 AND 1024 THEN RAISE EXCEPTION 'archive retention' USING ERRCODE='22023'; END IF;
  n:=clock_timestamp();
+ receipt_seconds:=greatest(p.receipt_retention_seconds,
+  CASE WHEN p.receipt_floor_until>n THEN ceil(extract(epoch FROM p.receipt_floor_until-n))::bigint END);
+ hot_until:=greatest(d.created_at+p_hot*interval '1 second',p.hot_floor_until);
+ SELECT * INTO j FROM archive_jobs WHERE tenant_id=t AND operation_id=p_op FOR UPDATE;
  IF FOUND THEN
   IF j.request_digest<>p_digest OR j.dead_letter_id<>p_id THEN RAISE EXCEPTION 'archive conflict' USING ERRCODE='40001'; END IF;
   IF j.source_version<>d.recovery_version THEN RAISE EXCEPTION 'archive fenced' USING ERRCODE='PZ001'; END IF;
@@ -981,7 +1034,7 @@ BEGIN
   END IF;
  END IF;
  SELECT * INTO a FROM archive_objects WHERE tenant_id=t AND generation=j.generation;
- IF d.capsule IS NOT NULL AND FOUND AND (a.object->>'retainUntil')::bigint <= extract(epoch FROM n)::bigint+greatest(p_cold,p.receipt_retention_seconds) THEN
+ IF d.capsule IS NOT NULL AND FOUND AND (a.object->>'retainUntil')::bigint <= extract(epoch FROM n)+greatest(p_cold,receipt_seconds) THEN
   -- Retain coordinates but discard redundant ciphertext of expired generations.
   UPDATE archive_objects SET prepared=NULL WHERE tenant_id=t AND generation=j.generation;
   UPDATE archive_jobs SET generation=gen_random_uuid() WHERE tenant_id=t AND operation_id=p_op RETURNING * INTO j;
@@ -996,7 +1049,7 @@ BEGIN
  ), scanned AS (
   UPDATE archive_objects o SET last_checked=n FROM batch b WHERE o.tenant_id=t AND o.generation=b.generation RETURNING o.object
  ) SELECT coalesce(jsonb_agg(object),'[]'::jsonb) INTO retired FROM scanned;
- RETURN jsonb_build_object('retired',retired,'job',to_jsonb(j),'source',to_jsonb(d)-'capsule','capsule',encode(d.capsule,'hex'),'now',floor(extract(epoch FROM n))::bigint,'receipt',p.receipt_retention_seconds,'captured',floor(extract(epoch FROM d.created_at)*1000000)::bigint);
+ RETURN jsonb_build_object('retired',retired,'job',to_jsonb(j),'source',to_jsonb(d)-'capsule','capsule',encode(d.capsule,'hex'),'now',floor(extract(epoch FROM n))::bigint,'receipt',receipt_seconds,'hot_until',ceil(extract(epoch FROM hot_until))::bigint,'captured',floor(extract(epoch FROM d.created_at)*1000000)::bigint);
 END $f$;
 
 CREATE FUNCTION rss_transactional_messaging.archive_prepare(p_op uuid,p_token uuid,p_digest bytea,p_object jsonb,p_bytes bytea)
@@ -1029,10 +1082,18 @@ BEGIN
  PERFORM rss_transactional_messaging.check_execution();
  j:=archive_fence(p_op,p_token,p_digest);
  SELECT * INTO d FROM consumer_dead_letter WHERE tenant_id=j.tenant_id AND id=j.dead_letter_id;
- SELECT * INTO p FROM policy WHERE revision=1;
+ p:=lock_outbox_policy();
  SELECT * INTO a FROM archive_objects WHERE tenant_id=j.tenant_id AND generation=j.generation;
  n:=clock_timestamp();
- IF j.held OR j.fault IS NOT NULL OR NOT a.verified OR a.object IS DISTINCT FROM p_object OR j.hot_seconds<p.automatic_window_seconds+p.safety_seconds OR d.created_at+j.hot_seconds*interval '1 second'>n OR (p_object->>'retainUntil')::bigint<=extract(epoch FROM n)+greatest(j.cold_seconds,p.receipt_retention_seconds) THEN RAISE EXCEPTION 'archive unsafe purge' USING ERRCODE='23514'; END IF;
+ IF j.held OR j.fault IS NOT NULL OR a.verified IS NOT TRUE OR a.object IS DISTINCT FROM p_object THEN
+  RAISE EXCEPTION 'archive unsafe purge' USING ERRCODE='23514';
+ END IF;
+ IF j.hot_seconds<p.automatic_window_seconds::bigint+p.safety_seconds OR
+  greatest(d.created_at+j.hot_seconds*interval '1 second',p.hot_floor_until)>n OR
+  (p_object->>'retainUntil')::bigint<=greatest(extract(epoch FROM n)+greatest(j.cold_seconds,p.receipt_retention_seconds),
+   extract(epoch FROM p.receipt_floor_until)) THEN
+  RAISE EXCEPTION 'archive retention' USING ERRCODE='22023';
+ END IF;
  UPDATE consumer_dead_letter SET capsule=NULL WHERE tenant_id=j.tenant_id AND id=j.dead_letter_id;
  UPDATE archive_jobs SET purged=true WHERE tenant_id=j.tenant_id AND operation_id=p_op;
 END $f$;
@@ -1215,5 +1276,5 @@ CREATE TRIGGER dr_consumer AFTER INSERT OR UPDATE ON rss_transactional_messaging
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_transactional_messaging FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_transactional_messaging FROM PUBLIC;
 -- Caller-scope predicates are the only public entrypoints, including inside restrictive RLS.
-GRANT EXECUTE ON FUNCTION rss_transactional_messaging.consumer_scope_domain(),rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text),rss_transactional_messaging.projection_scope_matches(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.consumer_scope_domain(),rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text),rss_transactional_messaging.projection_scope_matches(text,text),rss_transactional_messaging.outbox_policy_present() TO PUBLIC;
 REVOKE CREATE ON SCHEMA rss_transactional_messaging FROM rss_tmsg_relay;

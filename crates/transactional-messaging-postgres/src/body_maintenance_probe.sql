@@ -18,7 +18,7 @@ SELECT EXISTS(SELECT FROM pg_proc p WHERE p.oid=to_regprocedure('rss_transaction
     'rss_transactional_messaging.reclaim_published_bodies(bigint,bigint,integer,bigint)'::regprocedure,
     'rss_transactional_messaging.consumer_scope_domain()'::regprocedure,
     'rss_transactional_messaging.consumer_inbox_allowed(uuid,text,text)'::regprocedure,
-    'rss_transactional_messaging.projection_scope_matches(text,text)'::regprocedure))
+    'rss_transactional_messaging.outbox_policy_present()'::regprocedure,'rss_transactional_messaging.projection_scope_matches(text,text)'::regprocedure))
  AND EXISTS(SELECT FROM pg_constraint WHERE conrelid='rss_transactional_messaging.outbox'::regclass
   AND conname='outbox_body_shape' AND convalidated AND NOT condeferrable
   AND pg_get_constraintdef(oid)='CHECK ((((payload IS NULL) = body_retired) AND ((NOT body_retired) OR ((status = ''published''::text) AND (body_digest IS NOT NULL) AND (authored_evidence IS NOT NULL)))))')

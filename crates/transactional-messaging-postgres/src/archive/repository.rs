@@ -124,9 +124,8 @@ impl ArchiveRepository for PgArchiveRepository {
                     prepared=Some(Prepared{object:facts,bytes:row.try_get::<Option<Vec<u8>>,_>("prepared")?.ok_or_else(invalid)?});
                 }
             }
-            let captured=integer(&v,"captured")?.div_euclid(1_000_000);
             let retired=serde_json::from_value::<Vec<Object>>(v["retired"].clone()).map_err(|_|invalid())?;
-            Ok(Claim{retired,generation,token:string(j,"lease_token")?.to_owned(),request_digest:r.digest(),candidate:candidate(&v,r)?,prepared,object,now:integer(&v,"now")?,hot_until:captured.checked_add(r.retention().hot_seconds()).ok_or_else(invalid)?,receipt_seconds:integer(&v,"receipt")?,purged:j.get("purged").and_then(Value::as_bool).ok_or_else(invalid)?})
+            Ok(Claim{retired,generation,token:string(j,"lease_token")?.to_owned(),request_digest:r.digest(),candidate:candidate(&v,r)?,prepared,object,now:integer(&v,"now")?,hot_until:integer(&v,"hot_until")?,receipt_seconds:integer(&v,"receipt")?,purged:j.get("purged").and_then(Value::as_bool).ok_or_else(invalid)?})
         })).await)
     }
     async fn prepare(

@@ -46,7 +46,8 @@ companion repository 在任何读写之前调用，包括不会追加消息的�
 `INVARIANT: OUTBOX-SAME-ID-WINDOW-01`：automatic retry/safety 与 inbox retention policy 由数据库约束，
 retention 必须严格覆盖投递窗口与安全余量；v0.1 不自动清理 receipt。
 
-- 首次 claim 冻结 24 小时 automatic deadline；续租只延长 lease，不重置投递窗口。
+- 首次 claim 以数据库时间和当时的持久策略冻结 automatic deadline；重启、续租、redrive 与 DR 复用原期限和身份。
+- 安装器拥有窗口、安全余量、回执保留和持久退避的整秒策略。降低保护时，数据库保留尚有效的热数据及回执截止点；归档清理在同一事务复核保留期与实际对象锁。
 - 只有数据库确认窗口过期才 DeadLetter；尚未过期但预算不足时 Retry，均不得 publish。
 - provider 调用耗时从 lease/window 预算中扣除；无 publish 的结算只消费有效 lease 预算。
 - 基础组合不启用恢复；recovery 提供显式 redrive/resolve，但不提供 retention worker；Medium carrier 为统一 conformance 与真实 PostgreSQL T2，
