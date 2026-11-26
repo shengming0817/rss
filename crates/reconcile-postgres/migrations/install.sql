@@ -239,9 +239,11 @@ BEGIN
     SELECT array_agg(s.entity ORDER BY s.ticket),array_agg(s.ticket ORDER BY s.ticket)
      INTO sampled_entities,sampled_tickets
      FROM unnest(sampled_entities,sampled_tickets) AS s(entity,ticket)
-     WHERE s.ticket>scan.cursor_ticket AND s.ticket<=scan.high_watermark AND NOT EXISTS(
-      SELECT FROM rss_reconcile.target_resources d WHERE d.tenant_id=t AND d.reconciler=r
-       AND d.entity=s.entity AND d.waiting_ticket=s.ticket);
+     WHERE s.ticket>scan.cursor_ticket AND s.ticket<=scan.high_watermark AND (
+      -- Registration sets the same ticket on every declaration atomically.
+      SELECT d.waiting_ticket FROM rss_reconcile.target_resources d
+      WHERE d.tenant_id=t AND d.reconciler=r AND d.entity=s.entity ORDER BY d.resource LIMIT 1
+     ) IS DISTINCT FROM s.ticket;
     hints_prepared:=true;
    END IF;
    WHILE sampled_tickets[next_sample]<=scan.cursor_ticket LOOP
