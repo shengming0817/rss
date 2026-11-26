@@ -129,6 +129,79 @@ async fn fixed_admission() -> anyhow::Result<()> {
             print_write("early", related, noise, c);
         }
     }
+    same_resource_cost(&f, &d).await?;
+    Ok(())
+}
+
+// Two opposite ends of a batch span can intersect many fences with no requested keys.
+async fn same_resource_cost(f: &Fixture, d: &Definition) -> anyhow::Result<()> {
+    let exact = std::env::var_os("RSS_CH_EXACT_COST").is_some();
+    let mut def = d.spec().clone();
+    def.key = id("wide")?;
+    def.dimensions.allowed = (0..64)
+        .map(|i| id(&format!("dim-{i}")))
+        .collect::<anyhow::Result<_>>()?;
+    def.dimensions.max_count = 64;
+    let d = Definition::new(def)?;
+    f.register(&d).await?;
+    let mut input = sample(&d, "wide", 1, 1)?.input().clone();
+    let dimensions = d
+        .spec()
+        .dimensions
+        .allowed
+        .iter()
+        .cloned()
+        .map(|k| (k, id("value")))
+        .map(|(k, v)| Ok((k, v?)))
+        .collect::<anyhow::Result<_>>()?;
+    input.series = Series::new(d, id("device")?, id("resource")?, dimensions)?;
+    let (name, selection, count, samples) = if exact {
+        (
+            "dim64-gaps",
+            Selection::Exact {
+                stream: input.stream.clone(),
+                series: input.series.clone(),
+            },
+            8,
+            48,
+        )
+    } else {
+        let keys = (0..64)
+            .map(|i| id(&format!("unused-{i}")))
+            .collect::<anyhow::Result<_>>()?;
+        (
+            "wide-keys",
+            Selection::Resource {
+                scope: input.stream.scope().clone(),
+                subject: id("device")?,
+                resource: id("resource")?,
+                keys,
+            },
+            64,
+            2,
+        )
+    };
+    sqlx::query("DELETE FROM rss_ts_ch.fences")
+        .execute(&f.admin)
+        .await?;
+    sqlx::query("INSERT INTO rss_ts_ch.fences(tenant_id,namespace,id,kind,selection,lo,hi)
+        SELECT $1::text::uuid,'metrics','wide-'||n,'delete',$2::text::jsonb,2*n,2*n+1 FROM generate_series(0,$3::int-1) n")
+        .bind(TENANT).bind(serde_json::to_string(&selection)?).bind(count).execute(&f.admin).await?;
+    let mut points = Vec::new();
+    for i in 0..samples {
+        input.id = id(&format!("wide-{i}"))?;
+        input.observed_at = Timestamp::new(if exact { 2 * i + 1 } else { i * 130 })?;
+        points.push(Sample::new(input.clone())?);
+    }
+    let b = batch(name, points)?;
+    let (result, c) = measure(thread_cpu, f.write(&b)).await;
+    assert_eq!(confirmed(result?)?.new_samples(), samples as u32);
+    print_write(
+        name,
+        if exact { count } else { 0 },
+        if exact { 0 } else { count },
+        c,
+    );
     Ok(())
 }
 
@@ -176,7 +249,14 @@ async fn measured_step(
 #[tokio::test]
 #[ignore = "isolated release-mode PostgreSQL + ClickHouse control workload"]
 async fn fixed_invalidation() -> anyhow::Result<()> {
-    let f = Fixture::new("ch-maint-cost").await?;
+    for noise in [0, 8] {
+        invalidation_load(noise).await?;
+    }
+    Ok(())
+}
+
+async fn invalidation_load(noise: usize) -> anyhow::Result<()> {
+    let f = Fixture::new(&format!("ch-maint-cost-{noise}")).await?;
     let d = definition(TENANT)?;
     f.register(&d).await?;
     let b = batch("seed", vec![sample(&d, "seed", 1, 1)?])?;
@@ -193,60 +273,58 @@ async fn fixed_invalidation() -> anyhow::Result<()> {
         spec: spec.clone(),
         window: window(0, 80)?,
     };
-    for noise in [0, 8] {
-        if noise > 0 {
-            let other = Series::new(d.clone(), id("other")?, id("resource")?, Default::default())?;
-            let spec = SummarySpec::new(
-                b.stream().clone(),
-                other,
-                NonZeroU64::new(10).ok_or(Error::Invariant)?,
-                CoveragePolicy::ObservedOnly,
-                None,
-            )?;
-            f.maintain(
-                "noise",
-                MaintenanceAction::Recompute {
-                    spec,
-                    window: window(0, 80)?,
-                },
-            )
-            .await?;
-        }
-        for hits in [0, 1, 8] {
-            let tag = format!("{noise}-{hits}");
-            f.maintain(&format!("clean-{tag}"), cache.clone()).await?;
-            let selected = if hits == 0 {
-                window(100, 110)?
-            } else {
-                window(0, hits as i64 * 10)?
-            };
-            let deletion = format!("delete-{tag}");
-            measured_step(
-                &f,
-                &deletion,
-                MaintenanceAction::Delete {
-                    selection: spec.selection(),
-                    window: selected,
-                    restore_until: Timestamp::new(i64::MAX)?,
-                },
-                hits,
-                noise,
-            )
-            .await?;
-            f.maintain(&format!("masked-{tag}"), cache.clone()).await?;
-            measured_step(
-                &f,
-                &format!("restore-{tag}"),
-                MaintenanceAction::Restore {
-                    selection: spec.selection(),
-                    window: selected,
-                    deletion_fence: id(&deletion)?,
-                },
-                hits,
-                noise,
-            )
-            .await?;
-        }
+    if noise > 0 {
+        let other = Series::new(d.clone(), id("other")?, id("resource")?, Default::default())?;
+        let spec = SummarySpec::new(
+            b.stream().clone(),
+            other,
+            NonZeroU64::new(10).ok_or(Error::Invariant)?,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )?;
+        f.maintain(
+            "noise",
+            MaintenanceAction::Recompute {
+                spec,
+                window: window(0, 80)?,
+            },
+        )
+        .await?;
+    }
+    for hits in [0, 1, 8] {
+        let tag = format!("{noise}-{hits}");
+        f.maintain(&format!("clean-{tag}"), cache.clone()).await?;
+        let selected = if hits == 0 {
+            window(100, 110)?
+        } else {
+            window(0, hits as i64 * 10)?
+        };
+        let deletion = format!("delete-{tag}");
+        measured_step(
+            &f,
+            &deletion,
+            MaintenanceAction::Delete {
+                selection: spec.selection(),
+                window: selected,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+            hits,
+            noise,
+        )
+        .await?;
+        f.maintain(&format!("masked-{tag}"), cache.clone()).await?;
+        measured_step(
+            &f,
+            &format!("restore-{tag}"),
+            MaintenanceAction::Restore {
+                selection: spec.selection(),
+                window: selected,
+                deletion_fence: id(&deletion)?,
+            },
+            hits,
+            noise,
+        )
+        .await?;
     }
     Ok(())
 }

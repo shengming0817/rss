@@ -232,3 +232,60 @@ async fn delete_and_restore_validate_every_key_and_roll_back_together() -> anyho
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn update_pairs_each_digest_with_its_own_bucket_start() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-invalidate-pairs").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch("seed", vec![sample(&d, "seed", 15, 1)?])?;
+    confirmed(f.write(&b).await?)?;
+    let spec = |resolution| {
+        SummarySpec::new(
+            b.stream().clone(),
+            b.samples()[0].input().series.clone(),
+            NonZeroU64::new(resolution).ok_or(Error::Invariant)?,
+            CoveragePolicy::ObservedOnly,
+            None,
+        )
+    };
+    let fine = spec(10)?;
+    let coarse = spec(20)?;
+    let fine_id = fine.binding()?.as_bytes().to_vec();
+    let coarse_id = coarse.binding()?.as_bytes().to_vec();
+    assert_ne!(fine_id, coarse_id);
+    let window = Interval::new(Timestamp::new(15)?, Timestamp::new(16)?)?;
+    let selection = fine.selection();
+    let delete = MaintenanceAction::Delete {
+        selection: selection.clone(),
+        window,
+        restore_until: Timestamp::new(i64::MAX)?,
+    };
+    let restore = MaintenanceAction::Restore {
+        selection,
+        window,
+        deletion_fence: id("delete")?,
+    };
+    for (name, action) in [("delete", delete), ("restore", restore)] {
+        for s in [&fine, &coarse] {
+            let cache = MaintenanceAction::Recompute {
+                spec: s.clone(),
+                window: Interval::new(Timestamp::new(0)?, Timestamp::new(60)?)?,
+            };
+            f.maintain(&format!("{name}-cache-{}", s.resolution_micros()), cache)
+                .await?;
+        }
+        let mut want = dirty_keys(&f).await?;
+        assert_eq!(want.len(), 9);
+        for (digest, lo, _, _, dirty) in &mut want {
+            assert!(dirty.is_none());
+            if (digest == &fine_id && *lo == 10) || (digest == &coarse_id && *lo == 0) {
+                *dirty = Some(0);
+            }
+        }
+        assert_eq!(want.iter().filter(|r| r.4.is_some()).count(), 2);
+        f.maintain(name, action).await?;
+        assert_eq!(dirty_keys(&f).await?, want);
+    }
+    Ok(())
+}

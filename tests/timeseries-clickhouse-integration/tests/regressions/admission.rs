@@ -224,5 +224,35 @@ async fn ordered_windows_use_full_stream_series_and_resource_keys() -> anyhow::R
             assert_eq!(confirmed(f.write(&b).await?)?.new_samples(), 1);
         }
     }
+    cutoff_boundary(&f, &d, resource(Default::default())).await?;
+    Ok(())
+}
+
+async fn cutoff_boundary(f: &Fixture, d: &Definition, selection: Selection) -> anyhow::Result<()> {
+    f.maintain(
+        "retain",
+        MaintenanceAction::AdvanceCutoff {
+            selection,
+            before: Timestamp::new(50)?,
+        },
+    )
+    .await?;
+    let before = watermarks(f).await?;
+    let blocked = batch("before-cutoff", vec![sample(d, "before-cutoff", 49, 1)?])?;
+    let lookup = Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(&blocked)?)?;
+    assert_eq!(write_error(&f.store, blocked).await?, Error::HistoryExpired);
+    assert!(matches!(
+        f.store.receipt(&lookup, deadline()?).await?,
+        Lookup::NotVisible
+    ));
+    assert_eq!(watermarks(f).await?, before);
+    let at = batch("at-cutoff", vec![sample(d, "at-cutoff", 50, 1)?])?;
+    let got = confirmed(f.write(&at).await?)?;
+    assert_eq!(got.new_samples(), 1);
+    let lookup = Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(&at)?)?;
+    assert!(
+        matches!(f.store.receipt(&lookup,deadline()?).await?,Lookup::Found(r) if r.identity().digest==got.identity().digest)
+    );
+    assert_eq!(watermarks(f).await?, (before.0 + 1, before.1 + 1));
     Ok(())
 }
