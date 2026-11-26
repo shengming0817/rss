@@ -47,7 +47,9 @@ pub(super) async fn run(
     let before = position(owner, scope).await?;
     live_and_future(store, owner, c, &t, before).await?;
     empty_and_locked(store, owner, c, &t).await?;
-    windows(store, owner, c).await
+    windows(store, owner, c).await?;
+    sampled_window(store, owner, c, false).await?;
+    sampled_window(store, owner, c, true).await
 }
 async fn live_and_future(
     store: &PgStore,
@@ -192,5 +194,61 @@ async fn rediscover_wakes(
     let targets: Vec<_> = next.claims.iter().map(Claim::target).collect();
     assert_eq!(targets, [old, &new]);
     assert!(!next.more);
+    Ok(())
+}
+
+async fn sampled_window(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    lock_sample: bool,
+) -> anyhow::Result<()> {
+    let name = if lock_sample {
+        "locked-sample"
+    } else {
+        "due-sample"
+    };
+    let scope = Scope::new(TenantId::parse(TENANT)?, name)?;
+    let keys = ResourceSet::empty(scope.tenant());
+    for entity in ["future-1", "future-2", "old", "a", "b", "c", "d"] {
+        store
+            .wake(&Target::new(scope.clone(), entity)?, &keys, c)
+            .await?;
+    }
+    // The earliest four due times omit "old", which has the oldest due ticket.
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=now()+CASE WHEN entity LIKE 'future-%' THEN interval '1 hour' WHEN entity='old' THEN interval '-1 minute' ELSE interval '-1 hour' END WHERE tenant_id=$1::uuid AND reconciler=$2")
+        .bind(TENANT).bind(name).execute(owner).await?;
+    let frontier: i64 = sqlx::query_scalar("SELECT queue_ticket FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity='future-2'")
+        .bind(TENANT).bind(name).fetch_one(owner).await?;
+    let mut held = owner.begin().await?;
+    if lock_sample {
+        sqlx::query("SELECT FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity IN ('a','b','c','d') FOR UPDATE")
+            .bind(TENANT).bind(name).execute(&mut *held).await?;
+    }
+    let lease = Duration::from_secs(60);
+    let first = store.claim_due(&scope, 2, 2, lease, c).await?;
+    let entities = |claims: &[PgClaim]| {
+        claims
+            .iter()
+            .map(|c| c.target().entity().to_owned())
+            .collect::<Vec<_>>()
+    };
+    if lock_sample {
+        assert!(first.claims.is_empty());
+    } else {
+        assert_eq!(entities(&first.claims), ["a", "b"]);
+    }
+    assert!(first.more);
+    assert_eq!(position(owner, &scope).await?.0, frontier);
+    let second = store.claim_due(&scope, 2, 2, lease, c).await?;
+    if lock_sample {
+        assert_eq!(entities(&second.claims), ["old"]);
+    } else {
+        assert_eq!(entities(&second.claims), ["old", "c"]);
+        let tail = store.claim_due(&scope, 2, 2, lease, c).await?;
+        assert_eq!(entities(&tail.claims), ["d"]);
+        assert!(!tail.more);
+    }
+    held.rollback().await?;
     Ok(())
 }

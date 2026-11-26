@@ -10,12 +10,12 @@ import time
 
 import psycopg
 
-BASE = "95bce6240cddba79957cb8f3265c7f571db3acd1"
+BASE = "5d4c547dc86872d2c9b9b400ee1eee2aafe93c0a"
 INSTALL = "crates/reconcile-postgres/migrations/install.sql"
 TENANT = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 OTHER = "f47ac10b-58cc-4372-a567-0e02b2c3d478"
 CALL = """SELECT cardinality(claims), more, (claims[1]).entity
-          FROM rss_reconcile.claim_due(%s,'profile',1,%s,60000)"""
+          FROM rss_reconcile.claim_due(%s,'profile',%s,%s,60000)"""
 
 
 def nodes(plan):
@@ -70,20 +70,20 @@ def seed(admin, future, due, skew=0):
     admin.execute("ANALYZE rss_reconcile.targets")
 
 
-def first(conn, budget=128, pause=0, call=CALL, after_page=None):
+def first(conn, budget=128, pause=0, call=CALL, after_page=None, limit=1):
     start = time.perf_counter_ns()
     for page in range(1, 10002):
-        count, more, entity = conn.execute(call, (TENANT, budget)).fetchone()
+        count, more, entity = conn.execute(call, (TENANT, limit, budget)).fetchone()
         if after_page is not None:
             after_page()
         if count or not more:
-            return page, entity, (time.perf_counter_ns()-start)//1000
+            return page, entity, (time.perf_counter_ns()-start)//1000, count
         if pause:
             time.sleep(pause)
     raise RuntimeError("round failed to terminate")
 
 
-def observed_first(conn, budget=128):
+def observed_first(conn, budget=128, limit=1):
     counts = Counter()
     errors = []
     def collect(diag):
@@ -100,7 +100,8 @@ def observed_first(conn, budget=128):
         previous = current
     conn.add_notice_handler(collect)
     try:
-        pages, entity, _ = first(conn, budget, after_page=after_page)
+        pages, entity, _, returned = first(conn, budget, after_page=after_page, limit=limit)
+        counts["returned"] = returned
     finally:
         conn.remove_notice_handler(collect)
     if errors:
@@ -109,26 +110,30 @@ def observed_first(conn, budget=128):
     return pages, entity, counts
 
 
-def compare(admin, runtime, instrumented, revision, future, due, skew=0):
+def compare(admin, runtime, instrumented, revision, future, due, skew=0, limit=1, budget=128):
     seed(admin, future, due, skew)
-    pages, entity, counts = observed_first(instrumented)
-    assert entity == (str(future+1) if due else None)
-    assert counts["nested_sql"] > 0 and counts["buffers"] > 0
-    if revision != BASE:
-        assert counts["completed_lock_queries"] == counts["target_locks"] == int(bool(due))
-        if due <= 2:
-            assert pages == 1
-        elif future >= 10000:
-            assert 0 < counts["max_page_candidate_reads"] <= 132, counts
-    elif future == 10000 and due <= 1:
-        assert pages == 79 and counts["target_locks"] == future+due
+    pages, entity, counts = observed_first(instrumented, budget, limit)
+    slots = min(budget, limit)
+    probe_limit = slots + 2  # A page, its lookahead, and the truncation sentinel.
+    old_ticket_scan = revision == BASE and due >= probe_limit
+    assert pages == (future // budget + 1 if old_ticket_scan else 1)
+    expected_count = min(due, limit, budget - future % budget if old_ticket_scan else budget)
+    assert counts["returned"] == counts["completed_lock_queries"] == counts["target_locks"] == expected_count
+    if due:
+        assert future < int(entity) <= future + due
+        if revision == BASE or due < probe_limit or not future:
+            assert entity == str(future + 1)
+        assert 0 < counts["max_page_candidate_reads"] <= probe_limit + budget + 1, counts
+    else:
+        assert entity is None
     times = []
     for _ in range(3):
         seed(admin, future, due, skew)
-        actual_pages, actual_entity, elapsed = first(runtime)
-        assert (actual_pages, actual_entity) == (pages, entity)
+        actual_pages, actual_entity, elapsed, returned = first(runtime, budget, limit=limit)
+        assert (actual_pages, actual_entity, returned) == (pages, entity, expected_count)
         times.append(elapsed)
-    print(f"DUE revision={revision} future={future} eligible={due} skew={skew} pages={pages} "
+    print(f"DUE revision={revision} future={future} eligible={due} skew={skew} limit={limit} budget={budget} "
+          f"pages={pages} claims={expected_count} candidates={counts['candidate_reads']} "
           f"examined={counts['target_rows_examined']} completed_lock_queries={counts['completed_lock_queries']} "
           f"locked={counts['target_locks']} sql={counts['nested_sql']} buffers={counts['buffers']} "
           f"max_candidate_reads={counts['max_page_candidate_reads']} median_us={statistics.median(times)}", flush=True)
@@ -163,7 +168,7 @@ def deep_progress(admin, runtime, instrumented, revision):
     runtime.execute("SET statement_timeout='20ms'")
     try:
         for ticket in range(450001, 450004):
-            count, more, entity = runtime.execute(CALL, (TENANT, 128)).fetchone()
+            count, more, entity = runtime.execute(CALL, (TENANT, 1, 128)).fetchone()
             assert (count, more, entity) == (1, True, str(ticket))
     finally:
         runtime.execute("RESET statement_timeout")
@@ -193,7 +198,7 @@ def hot_progress(admin, runtime, instrumented):
 
 def renewal(admin, runtime, revision):
     seed(admin, 0, 1)
-    _, entity, _ = first(runtime)
+    _, entity, _, _ = first(runtime)
     token, epoch = admin.execute("SELECT token,epoch FROM rss_reconcile.targets WHERE tenant_id=%s AND entity=%s",
                                  (TENANT, entity)).fetchone()
     lsn = admin.execute("SELECT pg_current_wal_insert_lsn()").fetchone()[0]
@@ -210,7 +215,7 @@ def wake_strategies(admin, runtime):
         seed(admin, 1, 0)
         admin.execute("UPDATE rss_reconcile.targets SET next_run=clock_timestamp()+interval '100 ms'")
         start = time.perf_counter()
-        _, entity, _ = first(runtime)
+        _, entity, _, _ = first(runtime)
         assert entity is None
         delay = 0.5
         if earliest:
@@ -233,15 +238,24 @@ def wake_strategies(admin, runtime):
     seed(admin, 0, 5)
     with admin.transaction():
         admin.execute("SELECT FROM rss_reconcile.targets WHERE queue_ticket<5 FOR UPDATE")
-        pages, entity, _ = first(runtime, budget=1, call=CALL.replace("rss_reconcile.claim_due", "lock_probe.claim_due"))
+        pages, entity, _, _ = first(runtime, budget=1, call=CALL.replace("rss_reconcile.claim_due", "lock_probe.claim_due"))
         attempts = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0]
         assert (pages, entity, attempts) == (5, "5", 5)
         print(f"LOCKS known_held=4 attempts={attempts} locked=1")
+    # Two future positions try locked hints 5 and 6. The ticket stream later crosses both.
+    seed(admin, 2, 5)
+    with admin.transaction():
+        admin.execute("SELECT FROM rss_reconcile.targets WHERE queue_ticket>2 FOR UPDATE")
+        before = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0]
+        pages, entity, _, _ = first(runtime, budget=8, call=CALL.replace("rss_reconcile.claim_due", "lock_probe.claim_due"))
+        attempts = admin.execute("SELECT last_value FROM lock_probe.attempts").fetchone()[0] - before
+        assert (pages, entity, attempts) == (1, None, 5)
+        print(f"LOCKS overlapping_hints=2 attempts={attempts} locked=0")
     for pause in (0, 0.01):
         seed(admin, 0, 5)
         with admin.transaction():
             admin.execute("SELECT FROM rss_reconcile.targets WHERE queue_ticket<5 FOR UPDATE")
-            pages, entity, us = first(runtime, budget=1, pause=pause)
+            pages, entity, us, _ = first(runtime, budget=1, pause=pause)
             assert pages == 5 and entity == "5"
             print(f"EMPTY_PAGE pause_ms={pause*1000} pages={pages} first_us={us}")
 
@@ -272,6 +286,10 @@ def main():
                     for future in (0, 128, 1024, 10000):
                         for due in (0, 1):
                             compare(admin, runtime, instrumented, revision, future, due)
+                    for future, limit, budget in [(100000, 32, 128), (4096, 8, 8), (4096, 16, 8), (512, 4, 1)]:
+                        threshold = min(limit, budget) + 2
+                        for due in range(threshold - 1, threshold + 2):
+                            compare(admin, runtime, instrumented, revision, future, due, limit=limit, budget=budget)
                     if revision == head:
                         for due in (1, 127, 128, 129, 1024):
                             compare(admin, runtime, instrumented, revision, 10000, due, skew=10000)
