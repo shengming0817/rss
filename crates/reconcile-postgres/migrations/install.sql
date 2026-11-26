@@ -1,7 +1,7 @@
 -- Fresh installation by a dedicated NOSUPERUSER NOBYPASSRLS owner.
 -- ref: tokio-rs/tokio tokio/src/sync/batch_semaphore.rs@tokio-1.48.0 (old waiter first).
 CREATE SCHEMA rss_reconcile;
-COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:2';
+COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:3';
 
 CREATE TABLE rss_reconcile.targets (
     tenant_id uuid NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE rss_reconcile.targets (
  CONSTRAINT target_queue CHECK((next_run IS NULL)=(queue_ticket IS NULL) AND (queue_ticket IS NULL OR queue_ticket>0))
 );
 
-CREATE INDEX targets_due ON rss_reconcile.targets(tenant_id,reconciler,next_run,entity) WHERE next_run IS NOT NULL;
+CREATE INDEX targets_due ON rss_reconcile.targets(tenant_id,reconciler,(GREATEST(next_run,lease_until))) WHERE next_run IS NOT NULL;
 
 ALTER TABLE rss_reconcile.targets ENABLE ROW LEVEL SECURITY;
 
@@ -184,7 +184,9 @@ END $$;
 CREATE FUNCTION rss_reconcile.claim_due(t uuid,r text,n integer,scan_budget integer,ttl bigint)
 RETURNS TABLE(claims rss_reconcile.targets[],more boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog,rss_reconcile AS $$
-DECLARE scan rss_reconcile.scans; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
+DECLARE scan rss_reconcile.scans; page refcursor; candidate record; row rss_reconcile.targets; at_time timestamptz; desired_ticket bigint;
+ cutoff timestamptz; page_limit bigint; examined integer:=0;
+ probe_limit integer; sampled_entities text[]; sampled_tickets bigint[];
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -198,10 +200,35 @@ BEGIN
   SELECT coalesce(max(queue_ticket),0) INTO scan.high_watermark FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL;
   scan.cursor_ticket:=0;
  END IF;
- FOR candidate IN SELECT entity,queue_ticket FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL
-   AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark ORDER BY queue_ticket LIMIT scan_budget
+ -- Only a complete scope sample can skip ticket ranges. Reserve a lookahead
+ -- for more and a sentinel to distinguish a complete sample from a truncated one.
+ cutoff:=clock_timestamp();
+ page_limit:=scan_budget::bigint+1;
+ probe_limit:=least(n,scan_budget)+2;
+ SELECT array_agg(entity),array_agg(queue_ticket) INTO sampled_entities,sampled_tickets
+ FROM (SELECT entity,queue_ticket FROM rss_reconcile.targets
+       WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL AND GREATEST(next_run,lease_until)<=cutoff
+       ORDER BY GREATEST(next_run,lease_until) LIMIT probe_limit) AS due_sample;
+ IF cardinality(sampled_tickets)=probe_limit THEN
+  -- Seek directly from the persisted cursor. Filtering after the ticket LIMIT
+  -- bounds both future prefixes and already-passed hot waiters on every page.
+  OPEN page NO SCROLL FOR SELECT entity,queue_ticket,GREATEST(next_run,lease_until)<=cutoff AS eligible
+   FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL
+    AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark
+   ORDER BY queue_ticket LIMIT page_limit;
+ ELSE
+  OPEN page NO SCROLL FOR SELECT entity,queue_ticket,true AS eligible
+   FROM unnest(sampled_entities,sampled_tickets) AS sample(entity,queue_ticket)
+   WHERE queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark ORDER BY queue_ticket;
+ END IF;
  LOOP
+  FETCH page INTO candidate;
+  EXIT WHEN NOT FOUND;
+  -- Leave the lookahead for the next page; its eligibility may change before then.
+  IF examined=scan_budget OR cardinality(claims)=n THEN more:=true; EXIT; END IF;
+  examined:=examined+1;
   scan.cursor_ticket:=candidate.queue_ticket;
+  IF NOT candidate.eligible THEN CONTINUE; END IF;
   BEGIN
    SELECT * INTO row FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND entity=candidate.entity FOR UPDATE NOWAIT;
    at_time:=clock_timestamp();
@@ -231,9 +258,8 @@ BEGIN
    claims:=array_append(claims,row);
   EXCEPTION WHEN lock_not_available THEN NULL; -- An unacquired candidate consumes no execution slot.
   END;
-  IF cardinality(claims)=n THEN EXIT; END IF;
  END LOOP;
- more:=EXISTS(SELECT FROM rss_reconcile.targets WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL AND queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark);
+ CLOSE page;
  IF NOT more THEN scan.cursor_ticket:=scan.high_watermark; END IF;
  -- Locks remain necessary; only a changed durable scan position needs a new tuple version.
  UPDATE rss_reconcile.scans AS persisted SET cursor_ticket=scan.cursor_ticket,high_watermark=scan.high_watermark

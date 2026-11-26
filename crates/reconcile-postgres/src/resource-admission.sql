@@ -26,6 +26,7 @@ WITH expected(table_name,columns,types,required) AS (VALUES
  FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='rss_reconcile' AND c.relname IN ('resources','target_resources','scans') AND k.contype IN ('p','f','c')
 ), expected_indexes(name,definition) AS (VALUES
+ ('targets_due','CREATE INDEX targets_due ON rss_reconcile.targets USING btree (tenant_id, reconciler, GREATEST(next_run, lease_until)) WHERE (next_run IS NOT NULL)'),
  ('targets_queue','CREATE INDEX targets_queue ON rss_reconcile.targets USING btree (tenant_id, reconciler, queue_ticket) WHERE (next_run IS NOT NULL)'),
  ('targets_unbound','CREATE INDEX targets_unbound ON rss_reconcile.targets USING btree (tenant_id, reconciler) WHERE ((binding_revision = 0) AND (next_run IS NOT NULL))'),
  ('resources_owner','CREATE INDEX resources_owner ON rss_reconcile.resources USING btree (tenant_id, owner_reconciler, owner_entity, owner_token, owner_epoch) WHERE (owner_token IS NOT NULL)'),

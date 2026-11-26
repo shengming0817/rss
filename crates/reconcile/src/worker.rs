@@ -634,3 +634,61 @@ async fn renew_lease<S: DurableStore, T: Timer>(
         .checked_add(policy.lease / 3)
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PolicyConfig;
+    use rss_request_context::TenantId;
+
+    #[test]
+    fn acknowledged_deadline_hint_peak_and_drain() -> anyhow::Result<()> {
+        let idle = Duration::from_secs(3600);
+        let after = Duration::from_secs(60);
+        let policy = Policy::try_from(PolicyConfig {
+            concurrency: 1,
+            claim_batch_size: 1,
+            scan_budget: 1,
+            lease_ttl: after,
+            attempt_timeout: after,
+            scan_interval: after,
+            idle_scan_interval: idle,
+            initial_backoff: after,
+            max_backoff: after,
+            max_attempts: 1,
+        })?;
+        let scope = Scope::new(
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+            "hints",
+        )?;
+        for completion in [Completion::Converged, Completion::Reobserve(after)] {
+            let mut active = Active::new(policy, |_| {});
+            let mut peak = 0;
+            for millis in 0..10_000 {
+                let now = Duration::from_millis(millis);
+                active.scanned_through(now);
+                active.record(
+                    Target::new(scope.clone(), format!("t-{millis}"))?,
+                    Outcome {
+                        result: Ok(completion),
+                        prior: vec![],
+                    },
+                    now,
+                );
+                peak = peak.max(active.due.len());
+            }
+            println!("idle_s=3600 completions_s=1000 completion={completion:?} peak_hints={peak}");
+            assert_eq!(
+                peak,
+                if completion == Completion::Converged {
+                    0
+                } else {
+                    10_000
+                }
+            );
+            active.scanned_through(after + Duration::from_secs(10));
+            assert!(active.due.is_empty());
+        }
+        Ok(())
+    }
+}
