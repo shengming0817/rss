@@ -37,6 +37,61 @@ struct State {
     raw_threads: Mutex<Vec<(u32, u32)>>,
 }
 impl State {
+    async fn hold(&self) -> std::io::Result<()> {
+        self.entered.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .map_err(|_| std::io::Error::other("gate closed"))?
+            .forget();
+        Ok(())
+    }
+    async fn gated_response(
+        &self,
+        response: Response<Full<Bytes>>,
+        mode: u8,
+    ) -> std::io::Result<Response<Full<Bytes>>> {
+        if mode == 1 && response.status().is_success() {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            return Err(std::io::Error::other("discarded real response"));
+        }
+        if matches!(mode, 4 | 5) && response.status().is_success() {
+            self.hold().await?;
+        }
+        Ok(response)
+    }
+    async fn take_mode(
+        &self,
+        is_insert: bool,
+        reads_page: bool,
+        reads_summary: bool,
+        sql: &str,
+        body_sql: &str,
+    ) -> u8 {
+        let hold = self
+            .hold_sql
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|needle| sql.contains(needle) || body_sql.contains(needle));
+        self.mode
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
+                ((m == 7 && hold)
+                    || (m == 5 && reads_page)
+                    || (m == 6 && reads_summary)
+                    || (m < 5 && is_insert))
+                    .then_some(0)
+            })
+            .unwrap_or(0)
+    }
+    async fn record_read(&self, headers: &hyper::HeaderMap, summary: bool) {
+        if let Some(id) = headers
+            .get("x-clickhouse-query-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.page_reads.lock().await.push((id.to_owned(), summary));
+        }
+    }
     async fn record_threads(&self, uri: &hyper::Uri) {
         let settings: std::collections::HashMap<_, _> =
             url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()).collect();
@@ -249,10 +304,9 @@ async fn serve(
     let reads_raw = sql.contains("FROM rss_ts_ch.raw") || body_sql.contains("FROM rss_ts_ch.raw");
     let reads_summary = sql.contains("FROM rss_ts_ch.summaries FINAL")
         || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
-    let reads_page = sql.contains("FROM rss_ts_ch.raw FINAL")
-        || body_sql.contains("FROM rss_ts_ch.raw FINAL")
-        || sql.contains("FROM rss_ts_ch.summaries FINAL")
-        || body_sql.contains("FROM rss_ts_ch.summaries FINAL");
+    let reads_page = reads_summary
+        || sql.contains("FROM rss_ts_ch.raw FINAL")
+        || body_sql.contains("FROM rss_ts_ch.raw FINAL");
     if reads_raw {
         state.record_threads(&parts.uri).await;
     }
@@ -260,22 +314,9 @@ async fn serve(
         let prefix = format!("INSERT INTO rss_ts_ch.{table}");
         sql.starts_with(&prefix) || data.starts_with(prefix.as_bytes())
     });
-    let hold = state
-        .hold_sql
-        .lock()
-        .await
-        .as_ref()
-        .is_some_and(|needle| sql.contains(needle) || body_sql.contains(needle));
     let mode = state
-        .mode
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
-            ((m == 7 && hold)
-                || (m == 5 && reads_page)
-                || (m == 6 && reads_summary)
-                || (m < 5 && is_insert))
-                .then_some(0)
-        })
-        .unwrap_or(0);
+        .take_mode(is_insert, reads_page, reads_summary, &sql, &body_sql)
+        .await;
     let captured = Captured {
         uri: parts.uri,
         headers: parts.headers,
@@ -288,44 +329,16 @@ async fn serve(
         state.dropped.fetch_add(1, Ordering::SeqCst);
         return Err(std::io::Error::other("withheld before registration"));
     }
-    if matches!(mode, 6 | 7) {
-        state.entered.add_permits(1);
-        state
-            .release
-            .acquire()
-            .await
-            .map_err(|_| std::io::Error::other("gate closed"))?
-            .forget();
+    if mode >= 6 {
+        state.hold().await?;
     }
     let response = forward(&state, captured)
         .await
         .map_err(|_| std::io::Error::other("upstream transport"))?;
-    if reads_page
-        && let Some(id) = response
-            .headers()
-            .get("x-clickhouse-query-id")
-            .and_then(|v| v.to_str().ok())
-    {
-        state
-            .page_reads
-            .lock()
-            .await
-            .push((id.to_owned(), reads_summary));
+    if reads_page {
+        state.record_read(response.headers(), reads_summary).await;
     }
-    if mode == 1 && response.status().is_success() {
-        state.dropped.fetch_add(1, Ordering::SeqCst);
-        return Err(std::io::Error::other("discarded real response"));
-    }
-    if matches!(mode, 4 | 5) && response.status().is_success() {
-        state.entered.add_permits(1);
-        state
-            .release
-            .acquire()
-            .await
-            .map_err(|_| std::io::Error::other("gate closed"))?
-            .forget();
-    }
-    Ok(response)
+    state.gated_response(response, mode).await
 }
 #[tokio::test]
 async fn lost_real_response_and_pre_registration_late_request() -> anyhow::Result<()> {

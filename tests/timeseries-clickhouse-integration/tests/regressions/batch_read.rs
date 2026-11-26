@@ -176,6 +176,7 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     let before = proxy.requests().await.len();
     let split = bounded.aggregate(&all, None, deadline()?).await?;
     let requests = proxy.requests().await.len() - before;
+    eprintln!("ch-page byte-limited raw requests={requests}");
     assert!(
         (2..=16).contains(&requests),
         "byte-limited raw requests: {requests}"
@@ -234,6 +235,7 @@ async fn page_io_matches_raw_mixed_full_and_fragmented_coverage() -> anyhow::Res
     let before = proxy.requests().await.len();
     let narrow = store.aggregate(&all, None, deadline()?).await?;
     let requests = proxy.requests().await.len() - before;
+    eprintln!("ch-page parser-limited summary requests={requests}");
     assert!(
         (2..=10).contains(&requests),
         "parser-limited requests: {requests}"
