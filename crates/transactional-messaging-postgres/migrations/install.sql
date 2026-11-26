@@ -727,7 +727,7 @@ RETURNS TABLE(seq bigint,tenant_id uuid,message_id text,domain text,partition_ke
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,rss_transactional_messaging,pg_temp AS $f$
 DECLARE r record; o outbox; m dr_members; n timestamptz; e bigint:=nullif(current_setting('rss.execution_epoch',true),'')::bigint; l bytea:=decode(current_setting('rss.storage_lineage',true),'hex'); used integer:=0;
  progress outbox_scan; frontier outbox_scan; examined integer:=0;
- owns_progress boolean; resumed boolean; exhausted boolean:=false; action text:='complete';
+ owns_progress boolean; had_cursor boolean; resumed boolean; exhausted boolean:=false; action text:='complete';
  scan_limit integer:=greatest(64,least(p_limit::bigint*4,1024))::integer;
  candidates NO SCROLL CURSOR FOR
   SELECT * FROM outbox_claim_window(p_tenant,p_domain,progress.eligible_at,progress.source_seq,progress.lane,progress.through_at,scan_limit) ORDER BY source_seq,lane;
@@ -742,9 +742,10 @@ BEGIN
  -- Contention may repeat metadata work, but never serializes relay transactions.
  owns_progress:=pg_try_advisory_xact_lock(hashtextextended('rss-tmsg-claim:'||p_tenant::text||':'||p_domain,0));
  SELECT * INTO progress FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
- resumed:=FOUND;
+ had_cursor:=FOUND;
+ resumed:=had_cursor AND (progress.epoch,progress.lineage) IS NOT DISTINCT FROM (e,l);
  -- A prior execution generation cannot bound this generation's DR or reclaimed heads.
- IF NOT resumed OR (progress.epoch,progress.lineage) IS DISTINCT FROM (e,l) THEN
+ IF NOT resumed THEN
   progress.epoch:=e; progress.lineage:=l; progress.through_at:=clock_timestamp(); progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
  frontier:=progress;
  OPEN candidates;
@@ -794,7 +795,7 @@ BEGIN
  PERFORM set_config('rss.outbox_scan_progress',action,true);
  IF owns_progress THEN
   IF exhausted THEN
-   IF resumed THEN DELETE FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain; END IF;
+   IF had_cursor THEN DELETE FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain; END IF;
   ELSE
    -- Locks are taken in source order. A capacity stop can leave earlier eligibility
    -- keys unvisited. Keep the window entrance and its frozen horizon in that case.

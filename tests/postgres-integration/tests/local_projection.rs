@@ -1200,7 +1200,9 @@ async fn dr_recovery(f: &Fixture) -> anyhow::Result<()> {
         p.resolve(&pending, deadline()).await?.is_none(),
         "historical source and Inbox success cannot prove a new DR member completed"
     );
-    sqlx::query("UPDATE rss_transactional_messaging.dr_members SET lease_until=clock_timestamp()-interval '1 second' WHERE message_id='atomic-success' AND status='publishing'").execute(&f.owner).await?;
+    // Make this exact member eligible inside the frozen sweep, regardless of how long
+    // the deliberately unacknowledged effect transaction took to time out.
+    sqlx::query("UPDATE rss_transactional_messaging.dr_members SET lease_until=retry_after WHERE message_id='atomic-success' AND status='publishing'").execute(&f.owner).await?;
     assert_eq!(
         committed_projection(only(
             collect_batch(p.project_batch(
