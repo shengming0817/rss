@@ -1,5 +1,6 @@
 //! Set-based admission inside the locked namespace transaction.
 //! ref: transact-rs/sqlx FAQ.md@v0.9.0 (PostgreSQL typed UNNEST).
+use super::fences::AdmissionFences;
 use crate::{control::Fence, definition, projection::Raw, transaction::sql_error};
 use rss_timeseries::*;
 use sqlx::PgConnection;
@@ -36,6 +37,15 @@ pub(super) async fn admit(
         })
         .collect();
     let definitions = definitions(c, scope, &wanted).await?;
+    #[cfg(feature = "integration")]
+    let start = crate::measurement::cpu_start();
+    let index = if wanted.is_empty() || fences.is_empty() {
+        None
+    } else {
+        Some(AdmissionFences::from_ordered(stream, fences)?)
+    };
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| m.build_cpu += crate::measurement::elapsed(start));
     let mut rows = Vec::new();
     let mut new_ids = Vec::new();
     let mut digests = Vec::new();
@@ -49,24 +59,15 @@ pub(super) async fn admit(
             }
             continue;
         }
-        #[cfg(feature = "integration")]
-        let start = crate::measurement::cpu_start();
-        #[cfg(feature = "integration")]
-        let mut comparisons = 0;
-        let expired = fences.iter().any(|f| {
+        if let Some(index) = &index {
             #[cfg(feature = "integration")]
-            {
-                comparisons += 1;
+            let start = crate::measurement::cpu_start();
+            let expired = index.matches(sample)?;
+            #[cfg(feature = "integration")]
+            crate::measurement::record(|m| m.match_cpu += crate::measurement::elapsed(start));
+            if expired {
+                return Err(Error::HistoryExpired);
             }
-            f.matches(sample)
-        });
-        #[cfg(feature = "integration")]
-        crate::measurement::record(|m| {
-            m.match_cpu += crate::measurement::elapsed(start);
-            m.comparisons += comparisons;
-        });
-        if expired {
-            return Err(Error::HistoryExpired);
         }
         let def = input.series.definition();
         let stored = definitions

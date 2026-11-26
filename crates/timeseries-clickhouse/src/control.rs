@@ -17,16 +17,35 @@ pub(crate) async fn invalidate(
     let rows = invalidation_targets(c, s, selection, window, max).await?;
     #[cfg(feature = "integration")]
     crate::measurement::record(|m| m.candidates += rows.len());
+    let mut digests = Vec::<Vec<u8>>::new();
+    let mut starts = Vec::<i64>::new();
     for row in rows {
-        let spec: SummarySpec = decode(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)?;
+        let spec: SummarySpec = decode(row.try_get::<&[u8], _>("spec").map_err(sql_error)?)?;
         if overlaps(selection, &spec.selection()) {
-            let updated = sqlx::query("UPDATE rss_ts_ch.summaries SET dirty_from=0 WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=$4")
-                .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(row.try_get::<Vec<u8>,_>("spec_digest").map_err(sql_error)?).bind(row.try_get::<i64,_>("lo").map_err(sql_error)?).execute(&mut *c).await.map_err(sql_error)?;
-            #[cfg(feature = "integration")]
-            crate::measurement::record(|m| m.updated += updated.rows_affected());
-            #[cfg(not(feature = "integration"))]
-            let _ = updated;
+            digests.push(row.try_get("spec_digest").map_err(sql_error)?);
+            starts.push(row.try_get("lo").map_err(sql_error)?);
         }
+    }
+    if !digests.is_empty() {
+        let changed = sqlx::query(
+            "UPDATE rss_ts_ch.summaries s SET dirty_from=0
+             FROM unnest($3::bytea[], $4::bigint[]) AS target(digest, lo)
+             WHERE s.tenant_id=$1::text::uuid AND s.namespace=$2
+               AND s.spec_digest=target.digest AND s.lo=target.lo",
+        )
+        .bind(s.tenant().to_string())
+        .bind(s.namespace().as_str())
+        .bind(&digests)
+        .bind(&starts)
+        .execute(&mut *c)
+        .await
+        .map_err(sql_error)?
+        .rows_affected();
+        if changed != digests.len() as u64 {
+            return Err(Error::Invariant);
+        }
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| m.updated += changed);
     }
     bump(c, s).await
 }
@@ -61,13 +80,6 @@ pub(crate) struct Fence {
     pub window: Interval,
     pub until: Option<i64>,
     pub restored: bool,
-}
-impl Fence {
-    pub fn matches(&self, sample: &Sample) -> bool {
-        self.selection.matches(sample)
-            && sample.input().observed_at >= self.window.start()
-            && sample.input().observed_at < self.window.end()
-    }
 }
 pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<Vec<Fence>, Error> {
     let rows=sqlx::query("SELECT id,kind,selection::text,lo,hi,restore_until,restored FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 ORDER BY lo,id LIMIT $3")

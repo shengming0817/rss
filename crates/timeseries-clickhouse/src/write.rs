@@ -7,6 +7,7 @@ use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::{PgConnection, Row, postgres::PgRow};
 mod admission;
+mod fences;
 mod publication;
 
 /// Provider progress is separate from the immutable successful admission receipt.
