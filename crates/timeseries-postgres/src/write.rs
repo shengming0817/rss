@@ -1,3 +1,4 @@
+mod encoding;
 #[cfg(feature = "integration")]
 mod measurement;
 use crate::{
@@ -51,128 +52,10 @@ struct PreparedBatch {
     identity: ReceiptQuery,
     count: usize,
     query: SqlQuery<'static, Postgres, PgArguments>,
+    _permit: crate::prepare::Permit,
 }
 
 impl PreparedBatch {
-    async fn new(
-        batch: &Batch,
-        clock: &impl Clock,
-        budget: Budget,
-        horizon: u64,
-    ) -> Result<Self, Error> {
-        budget.remaining(clock)?;
-        let identity = ReceiptQuery {
-            stream: batch.stream().clone(),
-            batch_id: batch.id().clone(),
-            digest: batch.digest()?,
-        };
-        let mut payloads = Vec::with_capacity(batch.samples().len());
-        let mut sample_digests = Vec::with_capacity(payloads.capacity());
-        let mut series_digests = Vec::with_capacity(payloads.capacity());
-        // A repeated ID binds to its last occurrence before individual samples are checked.
-        let mut bindings = std::collections::BTreeMap::new();
-        for (index, sample) in batch.samples().iter().enumerate() {
-            if index > 0 && index % 32 == 0 { tokio::task::yield_now().await; }
-            budget.remaining(clock)?;
-            let series = &sample.input().series;
-            let def = series.definition();
-            bindings.insert((&def.spec().key, def.spec().version), def);
-            #[cfg(feature = "integration")]
-            payloads.push(measurement::raw("sample_payload", sample)?);
-            #[cfg(not(feature = "integration"))]
-            payloads.push(crate::lifecycle::bytes(sample)?);
-            sample_digests.push(sample.digest()?.as_bytes().to_vec());
-            series_digests.push(series.digest()?.as_bytes().to_vec());
-        }
-        let mut definitions = Vec::with_capacity(bindings.len());
-        let mut definition_digests = Vec::with_capacity(bindings.len());
-        for (index, def) in bindings.into_values().enumerate() {
-            if index > 0 && index % 32 == 0 { tokio::task::yield_now().await; }
-            budget.remaining(clock)?;
-            #[cfg(feature = "integration")]
-            definitions.push(measurement::raw("definition_payload", def)?);
-            #[cfg(not(feature = "integration"))]
-            definitions.push(crate::lifecycle::bytes(def)?);
-            definition_digests.push(def.digest()?.as_bytes().to_vec());
-        }
-        budget.remaining(clock)?;
-        let stream = &identity.stream;
-        let count = payloads.len();
-        let horizon = i64::try_from(horizon).map_err(|_| Error::NumericRange)?;
-        #[cfg(feature = "integration")]
-        let buffers = measurement::Buffers::default();
-        #[cfg(feature = "integration")]
-        let (payloads, sample_digests, series_digests, definitions, definition_digests, horizon) = {
-            use measurement::{Observed, nested};
-            let e = nested(&definition_digests);
-            let d = e + nested(&definitions);
-            let c = d + nested(&series_digests);
-            let b = c + nested(&sample_digests);
-            let a = b + nested(&payloads);
-            buffers.set(a);
-            (
-                Observed {
-                    value: payloads,
-                    buffers: &buffers,
-                    scratch: a,
-                    final_arg: false,
-                },
-                Observed {
-                    value: sample_digests,
-                    buffers: &buffers,
-                    scratch: b,
-                    final_arg: false,
-                },
-                Observed {
-                    value: series_digests,
-                    buffers: &buffers,
-                    scratch: c,
-                    final_arg: false,
-                },
-                Observed {
-                    value: definitions,
-                    buffers: &buffers,
-                    scratch: d,
-                    final_arg: false,
-                },
-                Observed {
-                    value: definition_digests,
-                    buffers: &buffers,
-                    scratch: e,
-                    final_arg: false,
-                },
-                Observed {
-                    value: horizon,
-                    buffers: &buffers,
-                    scratch: 0,
-                    final_arg: true,
-                },
-            )
-        };
-        let query = sqlx::query(
-            "SELECT * FROM rss_timeseries.admit_batch($1::text::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-        )
-        .bind(stream.scope().tenant().to_string())
-        .bind(stream.scope().namespace().as_str())
-        .bind(stream.source().as_str())
-        .bind(stream.generation().as_str())
-        .bind(identity.batch_id.as_str())
-        .bind(identity.digest.as_bytes().as_slice())
-        .bind(payloads)
-        .bind(sample_digests)
-        .bind(series_digests)
-        .bind(definitions)
-        .bind(definition_digests)
-        .bind(horizon);
-        Ok(Self {
-            #[cfg(feature = "integration")]
-            _buffers: buffers,
-            identity,
-            count,
-            query,
-        })
-    }
-
     async fn admit(self, c: &mut PgConnection) -> Result<Outcome<Receipt>, Error> {
         let row = self.query.fetch_one(c).await.map_err(sql_error)?;
         if let Some(raw) = row
@@ -212,16 +95,19 @@ impl<C: Clock> Writer for PgStore<C> {
                     let permit = self.preparation.acquire(request.request()).await?;
                     #[cfg(feature = "integration")]
                     let start = rss_timeseries::measurement::timer();
-                    let prepared = PreparedBatch::new(request.request(), &self.clock, budget, self.limits.replay_micros.get()).await?;
+                    let prepared = encoding::prepare(
+                        request.request(),
+                        &self.clock,
+                        budget,
+                        self.limits.replay_micros.get(),
+                        permit,
+                    )
+                    .await?;
                     #[cfg(feature = "integration")]
                     rss_timeseries::measurement::record("prepare", start, 0, 0);
-                    Ok((prepared, permit))
+                    Ok(prepared)
                 },
-                |c, _, (batch, permit)| Box::pin(async move {
-                    let result = batch.admit(c).await;
-                    drop(permit);
-                    result
-                }),
+                |c, _, batch| Box::pin(batch.admit(c)),
             )
             .await?;
         Ok(flatten(out))

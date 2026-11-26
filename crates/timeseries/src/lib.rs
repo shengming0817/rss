@@ -71,12 +71,63 @@ impl std::fmt::Debug for Digest {
 // V1 is typed serde JSON (not a serde_json::Value roundtrip): field order is
 // declared, maps are BTreeMap, numbers retain tagged i64/u64/f64 identity.
 // Domain and encoding version prevent cross-kind reuse. This is not a wire API.
-fn digest<T: serde::Serialize>(domain: &[u8], value: &T) -> Result<Digest, Error> {
+const DIGEST_V1: &[u8] = b"rss.timeseries.v1\0";
+fn hasher(domain: &[u8]) -> sha2::Sha256 {
     use sha2::{Digest as _, Sha256};
     let mut h = Sha256::new();
-    h.update(b"rss.timeseries.v1\0");
+    h.update(DIGEST_V1);
     h.update(domain);
     h.update([0]);
+    h
+}
+
+fn append_canonical<T: serde::Serialize>(
+    domain: &[u8],
+    value: &T,
+    bytes: &mut Vec<u8>,
+) -> Result<Digest, Error> {
+    use sha2::Digest as _;
+    let begin = bytes.len();
+    #[cfg(feature = "integration")]
+    let start = measurement::timer();
+    if serde_json::to_writer(&mut *bytes, value).is_err() {
+        bytes.truncate(begin);
+        return Err(Error::InvalidInput);
+    }
+    let appended = &bytes[begin..];
+    #[cfg(feature = "integration")]
+    let start = {
+        measurement::record(
+            if domain == b"sample" {
+                "sample_payload"
+            } else {
+                "definition_payload"
+            },
+            start,
+            appended.len(),
+            0,
+        );
+        measurement::timer()
+    };
+    let mut h = hasher(domain);
+    h.update(appended);
+    let digest = Digest(h.finalize().into());
+    #[cfg(feature = "integration")]
+    measurement::record(
+        if domain == b"sample" {
+            "sample_sha"
+        } else {
+            "definition_sha"
+        },
+        start,
+        0,
+        DIGEST_V1.len() + domain.len() + 1 + appended.len(),
+    );
+    Ok(digest)
+}
+fn digest<T: serde::Serialize>(domain: &[u8], value: &T) -> Result<Digest, Error> {
+    use sha2::Digest as _;
+    let mut h = hasher(domain);
     #[cfg(feature = "integration")]
     if let Some(start) = measurement::timer() {
         let mut count = measurement::Count {
@@ -95,7 +146,7 @@ fn digest<T: serde::Serialize>(domain: &[u8], value: &T) -> Result<Digest, Error
             },
             Some(start),
             bytes,
-            bytes + b"rss.timeseries.v1\0".len() + domain.len() + 1,
+            bytes + DIGEST_V1.len() + domain.len() + 1,
         );
         return Ok(Digest(h.finalize().into()));
     }

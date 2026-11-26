@@ -168,6 +168,10 @@ impl Sample {
     pub const fn input(&self) -> &SampleInput {
         &self.0
     }
+    /// Append the canonical V1 payload and return its sample-domain digest.
+    pub fn append_canonical(&self, bytes: &mut Vec<u8>) -> Result<Digest, Error> {
+        crate::append_canonical(b"sample", self, bytes)
+    }
     pub fn digest(&self) -> Result<Digest, Error> {
         digest(b"sample", self)
     }
@@ -262,7 +266,9 @@ impl Batch {
         &self.id
     }
     /// Size of the complete canonical V1 JSON, measured during validation.
-    pub const fn encoded_len(&self) -> usize { self.encoded_len }
+    pub const fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
     pub fn samples(&self) -> &[Sample] {
         &self.samples
     }

@@ -62,10 +62,18 @@ pub(crate) struct Budget {
     end: tokio::time::Instant,
 }
 impl Budget {
+    #[allow(clippy::disallowed_methods)] // reason: inspect the same Tokio watchdog that wakes pool and admission waits.
     pub(crate) fn remaining(self, clock: &impl Clock) -> Result<std::time::Duration, Error> {
-        let logical = self.deadline.remaining(clock.now()).ok_or(Error::Deadline)?;
-        let wall = self.end.saturating_duration_since(tokio::time::Instant::now());
-        if wall.is_zero() { return Err(Error::Deadline); }
+        let logical = self
+            .deadline
+            .remaining(clock.now())
+            .ok_or(Error::Deadline)?;
+        let wall = self
+            .end
+            .saturating_duration_since(tokio::time::Instant::now());
+        if wall.is_zero() {
+            return Err(Error::Deadline);
+        }
         Ok(wall.min(logical))
     }
 }
@@ -90,7 +98,11 @@ impl<C: Clock> PgStore<C> {
 
     // One tenant gate and one wall-clock watchdog cover capacity, cooperative
     // preparation, BEGIN and settlement, even when injected clock readings repeat.
-    pub(crate) async fn prepared_transaction<T: Send, P: Send, F: Future<Output = Result<P, Error>> + Send>(
+    pub(crate) async fn prepared_transaction<
+        T: Send,
+        P: Send,
+        F: Future<Output = Result<P, Error>> + Send,
+    >(
         &self,
         tenant: TenantId,
         deadline: Deadline,
@@ -110,7 +122,11 @@ impl<C: Clock> PgStore<C> {
             .ok_or(Error::Deadline)?;
         let mutation = mode == Mode::Write;
         let fault = if mutation { self.take_fault() } else { 0 };
-        let end = tokio::time::Instant::now().checked_add(remaining).ok_or(Error::InvalidInput)?;
+        #[allow(clippy::disallowed_methods)]
+        // reason: capture the executor watchdog once alongside the injected clock.
+        let end = tokio::time::Instant::now()
+            .checked_add(remaining)
+            .ok_or(Error::InvalidInput)?;
         let budget = Budget { deadline, end };
         let result=tokio::time::timeout_at(end, async {
             let prepared = prepare(budget).await?;

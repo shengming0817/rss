@@ -622,6 +622,27 @@ fn canonical_v1_golden_and_duplicate_dimensions() -> TestResult {
             87, 13, 1, 48, 238, 137, 69, 245, 218, 221, 211, 75
         ]
     );
+    assert_eq!(b.encoded_len(), encoded.len());
+    assert_eq!(Batch::decode(&encoded)?.encoded_len(), encoded.len());
+    assert_eq!(
+        b.samples()[0].input().series.digest()?.as_bytes(),
+        &[
+            106, 103, 22, 137, 255, 92, 48, 180, 80, 188, 167, 133, 24, 152, 147, 181, 124, 58,
+            217, 183, 125, 137, 189, 79, 14, 178, 245, 143, 172, 27, 83, 117
+        ]
+    );
+    assert_eq!(
+        b.samples()[0]
+            .input()
+            .series
+            .definition()
+            .digest()?
+            .as_bytes(),
+        &[
+            219, 77, 88, 221, 241, 143, 238, 42, 116, 98, 99, 193, 81, 124, 201, 23, 163, 120, 141,
+            238, 77, 225, 227, 140, 186, 69, 235, 251, 215, 1, 49, 143
+        ]
+    );
     let raw = String::from_utf8(b.encode()?)?.replace(
         "\"dimensions\":{}",
         "\"dimensions\":{\"core\":\"1\",\"core\":\"2\"}",
@@ -829,6 +850,7 @@ fn exact_batch_protocol_limits() -> TestResult {
     assert_eq!(remaining, 0);
     let b = batch(samples.clone())?;
     assert_eq!(b.encode()?.len(), Batch::MAX_BYTES);
+    assert_eq!(b.encoded_len(), Batch::MAX_BYTES);
     assert_eq!(
         Batch::new(stream()?, id("batch-11")?, samples),
         Err(Error::BudgetExceeded)

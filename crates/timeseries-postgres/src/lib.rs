@@ -42,7 +42,10 @@ pub struct Limits {
 }
 impl Limits {
     /// Smallest byte budget admitting every legal batch.
-    pub const MIN_PREPARE_BYTES: u32 = prepare::charge(rss_timeseries::Batch::MAX_BYTES, rss_timeseries::Batch::MAX_SAMPLES);
+    pub const MIN_PREPARE_BYTES: u32 = prepare::charge(
+        rss_timeseries::Batch::MAX_BYTES,
+        rss_timeseries::Batch::MAX_SAMPLES,
+    );
 }
 /// Dedicated pool adopted by this adapter; closing it affects all pool clones.
 pub struct PgStore<C> {
@@ -119,7 +122,9 @@ impl<C: Clock> PgStore<C> {
     }
     /// Remaining batch and byte permits, for provider conformance fixtures.
     #[cfg(feature = "integration")]
-    pub fn available_preparation(&self) -> (usize,usize) { self.preparation.available() }
+    pub fn available_preparation(&self) -> (usize, usize) {
+        self.preparation.available()
+    }
 
     #[cfg(feature = "integration")]
     pub fn inject_next_fault(&self, fault: Fault) {

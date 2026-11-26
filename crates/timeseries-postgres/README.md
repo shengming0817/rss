@@ -98,12 +98,22 @@ the result; a digest mismatch conflicts; `NotVisible` is never rollback evidence
 Confirmed receipts contain only immutable admission facts. Query results report
 availability independently of acceptance.
 
+Each store shares two write preparation limits across tenants. Set
+`Limits::max_prepare_batches` and `max_prepare_bytes` explicitly. The latter
+must be at least `Limits::MIN_PREPARE_BYTES` so every legal batch fits.
+Each prepared write reserves one slot and a byte allowance computed from its
+validated canonical JSON length and sample count. This covers JSON arenas,
+offsets, digests, definition bindings and the SQLx argument buffer. Caller-owned
+input, allocator overhead and connection-owned I/O buffers have separate lifetimes.
+Preparation completes before pool checkout. Both permits travel with the batch
+through checkout and execution of the admission query. Receipt reads use the pool
+directly. Closing the store wakes queued writers.
+
 The injected monotonic Clock shares the caller Deadline domain. One absolute budget
 covers acquire, lock, statements, decoding and settlement, with server statement/lock
 watchdogs. PostgreSQL provides persisted UTC receipt timestamps. `close(deadline)`
 closes the adopted pool (including its clones) and waits for borrowers within budget;
-the host owns worker/task shutdown. The `integration` feature only exposes one-shot
-settlement faults and changes no normal storage guarantees.
+the host owns worker/task shutdown. The `integration` feature exposes provider conformance probes and opt-in fixed-load measurements.
 
 ## Query and cursor contract
 

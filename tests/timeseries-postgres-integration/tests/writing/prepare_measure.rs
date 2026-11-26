@@ -11,7 +11,12 @@ fn rss_kib() -> anyhow::Result<usize> {
     Ok(std::str::from_utf8(&out.stdout)?.trim().parse()?)
 }
 
-fn items(d: &Definition, lane: usize, n: usize, unique: bool) -> anyhow::Result<Vec<Sample>> {
+pub(super) fn items(
+    d: &Definition,
+    lane: usize,
+    n: usize,
+    unique: bool,
+) -> anyhow::Result<Vec<Sample>> {
     let source = id(&format!("source-{lane:03}"))?;
     let wide = n == Batch::MAX_SAMPLES;
     let resource = id(&"r".repeat(if wide { 200 } else { 8 }))?;
