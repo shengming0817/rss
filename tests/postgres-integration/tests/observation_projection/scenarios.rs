@@ -1,4 +1,5 @@
 use super::fixture::*;
+mod batch_cost;
 mod settlement;
 use rss_observation::{
     Body, Change, Id, LookupOutcome, ObservationStore, ReadGrant, ReceiveOutcome,

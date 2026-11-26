@@ -4,6 +4,11 @@ PostgreSQL 16+ committed-order journals and atomic projection execution. With `r
 adapter locks the checkpoint, validates the worker epoch and definition identity, applies trusted read-model SQL, records
 fact identity and advances the checkpoint. An old worker is fenced **before** the effect.
 
+Within a batch, callbacks can read earlier business writes on the borrowed transaction.
+Projection receipts and the checkpoint retain their pre-page values throughout those callbacks.
+The adapter checks historical and intra-page fingerprints before the first callback, skips matching
+duplicates, and records filtered facts along with applied facts at page settlement.
+
 The caller provides a configured SQLx `PgPool`; the adapter adopts its lifecycle. Configure TLS
 and authenticated database credentials before `PgStore::new`, which verifies the dedicated runtime
 role, component revision and forced RLS. `close` closes this pool and its clones. Stop/join workers
@@ -37,11 +42,6 @@ connection through SQLx `close_on_drop`; successful probes return the connection
 Admission failure does not explicitly close other owners' pool clones. Returning from admission
 is not proof that asynchronous connection cleanup or the remote query has already terminated.
 
-This replaces the old one-argument Rust constructor; no overload, default budget, or compatibility
-feature remains. The provider requires schema revision 4. RSS workspace consumers move
-together; independently pinned product consumers, including rss-mdm, must update their callsites
-when upgrading their RSS revision.
-
 ref: launchbadge/sqlx sqlx-core/src/pool/connection.rs@75bc0487eb661da811bb7a3c5d158f1bd463fef4
 
 ## Storage installation
@@ -59,9 +59,12 @@ and business-table policies. The tenant setting provides isolation within a trus
 it does not authenticate a caller that already holds database credentials.
 
 The schema contains only source allocators, events, generation/checkpoint state and fact receipts.
-It does not contain product read models or settings. Revision 4 binds each generation to one 32-byte definition and accepts
+It does not contain product read models or settings. Revision 5 binds each generation to one 32-byte definition and accepts
 source/projection names up to 255 bytes. Install as the dedicated schema owner in a database where `rss_projection` is absent.
 Run the script outside an enclosing transaction: it owns its BEGIN and COMMIT. Runtime admission verifies its identity and permissions.
+Consumers with explicit function grants must also grant EXECUTE on
+`rss_projection.lock_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea)`
+and `rss_projection.finish_batch` with the same signature when adopting this revision.
 
 ## API and recovery
 

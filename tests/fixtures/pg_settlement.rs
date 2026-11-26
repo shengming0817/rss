@@ -36,6 +36,17 @@ impl Drop for Proxy {
 }
 impl Proxy {
     pub async fn new(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Self> {
+        Self::observe(fixture, || |_| {}).await
+    }
+    /// Observe complete frontend frames per connection on the isolated loopback leg.
+    pub async fn observe<F, O>(
+        fixture: &testkit::PgTlsFixture,
+        make_observer: F,
+    ) -> anyhow::Result<Self>
+    where
+        F: Fn() -> O + Send + 'static,
+        O: FnMut(&[u8]) + Send + 'static,
+    {
         // Only the private loopback test leg is plaintext; PostgreSQL still requires verified TLS.
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -62,7 +73,8 @@ impl Proxy {
                         let Ok((client,_))=incoming else { break };
                         let params=params.clone(); let connector=connector.clone();
                         let next=next.clone(); let losses=losses.clone(); let gate=listener_gate.clone();
-                        connections.spawn(async move { relay(client,params,connector,next,losses,gate).await });
+                        let observe=make_observer();
+                        connections.spawn(async move { relay(client,params,connector,next,losses,gate,observe).await });
                     }
                     Some(_) = connections.join_next(), if !connections.is_empty()=> {}
                 }
@@ -97,6 +109,7 @@ async fn relay(
     arm: Arc<AtomicU8>,
     lost: Arc<AtomicUsize>,
     gate: ReturnGate,
+    mut observe: impl FnMut(&[u8]),
 ) -> anyhow::Result<()> {
     let server = connect_upstream(&mut client, params, connector).await?;
     let (mut cr, mut cw) = client.into_split();
@@ -108,6 +121,7 @@ async fn relay(
                 Ok(bytes) => bytes,
                 Err(_) => return Ok::<(), anyhow::Error>(()),
             };
+            observe(&bytes);
             arm_frame(&bytes, &arm, &active)?;
             sw.write_all(&bytes).await?;
             sw.flush().await?;

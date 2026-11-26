@@ -219,6 +219,8 @@ async fn invalid_sql_identity(owner: &PgPool) -> anyhow::Result<()> {
             "SELECT rss_projection.takeover(tenant_id,source_id,projection_id,generation,worker_token,$2) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='definition'",
             "SELECT rss_projection.lock_event(tenant_id,source_id,projection_id,generation,epoch,worker_token,position,1,'two',decode(repeat('01',32),'hex'),$2) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='definition'",
             "SELECT rss_projection.finish_event(tenant_id,source_id,projection_id,generation,epoch,worker_token,position,1,'two',decode(repeat('01',32),'hex'),$2) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='definition'",
+            "SELECT rss_projection.lock_batch(tenant_id,source_id,projection_id,generation,epoch,worker_token,position,ARRAY[1::bigint],ARRAY['two'],ARRAY[decode(repeat('01',32),'hex')],$2) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='definition'",
+            "SELECT rss_projection.finish_batch(tenant_id,source_id,projection_id,generation,epoch,worker_token,position,ARRAY[1::bigint],ARRAY['two'],ARRAY[decode(repeat('01',32),'hex')],$2) FROM rss_projection.checkpoints WHERE tenant_id=$1::uuid AND source_id='definition'",
         ] {
             let mut tx = owner.begin().await?;
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")

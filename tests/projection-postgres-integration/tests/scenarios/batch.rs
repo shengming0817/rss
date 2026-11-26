@@ -1,3 +1,6 @@
+mod space;
+mod standalone;
+mod visibility;
 use super::*;
 use crate::pg_settlement::{LOSE_COMMIT, Proxy};
 use std::future::IntoFuture;
@@ -80,7 +83,13 @@ pub(crate) async fn verify(
     fixture: &testkit::PgTlsFixture,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    sqlx::raw_sql("CREATE TABLE public.batch_steps(ordinal bigint GENERATED ALWAYS AS IDENTITY, tenant_id uuid NOT NULL,source_id text NOT NULL,projection_id text NOT NULL,generation text NOT NULL,position bigint NOT NULL,xid xid8 NOT NULL); GRANT INSERT ON public.batch_steps TO projection_runtime").execute(owner).await?;
+    sqlx::raw_sql("CREATE TABLE public.batch_steps(ordinal bigint GENERATED ALWAYS AS IDENTITY, tenant_id uuid NOT NULL,source_id text NOT NULL,projection_id text NOT NULL,generation text NOT NULL,position bigint NOT NULL,xid xid8 NOT NULL); GRANT SELECT,INSERT ON public.batch_steps TO projection_runtime").execute(owner).await?;
+    if let Some(shape) = std::env::var_os("RSS_PROJECTION_SPACE") {
+        space::measure(fixture, owner, c, &shape.to_string_lossy()).await?;
+    }
+    standalone::skips_settlement(store, owner, c).await?;
+    standalone::verify(store, owner, c).await?;
+    Box::pin(visibility::verify(store, owner, c)).await?;
     atomic(store, owner, c).await?;
     interrupted_page(store, owner, c).await?;
     lost_ack(store, owner, fixture, c).await?;
@@ -131,12 +140,24 @@ async fn retry(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     recorder.reject.store(false, Ordering::SeqCst);
+    let before = recorder.calls.load(Ordering::SeqCst);
+    let mut reversed = events.clone();
+    reversed.swap(1, 2);
+    assert_eq!(
+        exec.execute_batch(None, reversed, c)
+            .await
+            .map_err(|e| e.kind()),
+        Err(ErrorKind::OutOfOrder)
+    );
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), before);
+    assert_eq!(snapshot(owner, s).await?, (None, 0, vec![], 0));
     let mut conflict = events.clone();
     conflict[1] = event(s, 1, "one", b"changed")?;
     assert!(
         matches!(exec.execute_batch(None,conflict,c).await,Err(e) if e.kind()==ErrorKind::Conflict)
     );
     assert_eq!(snapshot(owner, s).await?, (None, 0, vec![], 0));
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), before);
     takeover(store, owner, s, peer, exec, recorder, events, c).await
 }
 
