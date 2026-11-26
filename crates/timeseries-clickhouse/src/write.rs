@@ -132,8 +132,13 @@ impl<C: Clock> Operation<'_, C> {
     async fn prepare(&self, b: &Batch, deadline: Deadline) -> Result<Outcome<Admission>, Error> {
         let scope = b.stream().scope();
         let mut tx = self.begin(scope, true, deadline).await?;
+        #[cfg(feature = "integration")]
+        let locked = self.clock.now();
         let result = self.prepare_in(tx.connection(), b).await;
-        tx.finish(result, true).await
+        let settled = tx.finish(result, true).await;
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| m.locked += self.clock.now() - locked);
+        settled
     }
     async fn prepare_in(&self, c: &mut PgConnection, b: &Batch) -> Result<Admission, Error> {
         let q = identity(b)?;

@@ -134,6 +134,8 @@ impl<C: Clock> Operation<'_, C> {
             return Err(Error::BudgetExceeded);
         }
         let mut tx = self.begin(r.scope(), true, deadline).await?;
+        #[cfg(feature = "integration")]
+        let locked = self.clock.now();
         let mut external = false;
         let result = async {
             let (mut state, complete) = load(tx.connection(), r).await?;
@@ -263,7 +265,10 @@ impl<C: Clock> Operation<'_, C> {
             Ok(Outcome::Accepted(progress))
         }
         .await;
-        match tx.finish(result, true).await {
+        let settled = tx.finish(result, true).await;
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| m.locked += self.clock.now() - locked);
+        match settled {
             Ok(v) => Ok(flatten(v)),
             Err(_) if external => Ok(Outcome::Unknown),
             Err(e) => Err(e),

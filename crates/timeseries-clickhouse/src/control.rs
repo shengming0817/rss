@@ -15,11 +15,17 @@ pub(crate) async fn invalidate(
     max: u32,
 ) -> Result<(), Error> {
     let rows = invalidation_targets(c, s, selection, window, max).await?;
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| m.candidates += rows.len());
     for row in rows {
         let spec: SummarySpec = decode(&row.try_get::<Vec<u8>, _>("spec").map_err(sql_error)?)?;
         if overlaps(selection, &spec.selection()) {
-            sqlx::query("UPDATE rss_ts_ch.summaries SET dirty_from=0 WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=$4")
+            let updated = sqlx::query("UPDATE rss_ts_ch.summaries SET dirty_from=0 WHERE tenant_id=$1::text::uuid AND namespace=$2 AND spec_digest=$3 AND lo=$4")
                 .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(row.try_get::<Vec<u8>,_>("spec_digest").map_err(sql_error)?).bind(row.try_get::<i64,_>("lo").map_err(sql_error)?).execute(&mut *c).await.map_err(sql_error)?;
+            #[cfg(feature = "integration")]
+            crate::measurement::record(|m| m.updated += updated.rows_affected());
+            #[cfg(not(feature = "integration"))]
+            let _ = updated;
         }
     }
     bump(c, s).await
@@ -35,6 +41,8 @@ async fn invalidation_targets(
     let selection = String::from_utf8(bytes(selection)?).map_err(|_| Error::Invariant)?;
     let rows = sqlx::query("SELECT spec,spec_digest,lo FROM rss_ts_ch.summaries CROSS JOIN LATERAL (SELECT convert_from(spec,'UTF8')::jsonb AS doc) d WHERE tenant_id=$1::text::uuid AND namespace=$2 AND hi>$3 AND dependency_start<$6 AND dirty_from IS DISTINCT FROM 0 AND CASE WHEN $5::text::jsonb->>'selection'='exact' THEN doc->'stream'=$5::text::jsonb->'stream' AND doc->'series'=$5::text::jsonb->'series' ELSE doc->'stream'->'scope'=$5::text::jsonb->'scope' AND doc->'series'->'subject'=$5::text::jsonb->'subject' AND doc->'series'->'resource'=$5::text::jsonb->'resource' AND ($5::text::jsonb->'keys'='[]'::jsonb OR ($5::text::jsonb->'keys') ? (doc->'series'->'definition'->>'key')) END LIMIT $4")
         .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(window.start().micros()).bind(i64::from(max)+1).bind(selection).bind(window.end().micros()).fetch_all(c).await.map_err(sql_error)?;
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| m.candidates += rows.len());
     if rows.len() > max as usize {
         return Err(Error::BudgetExceeded);
     }
@@ -64,6 +72,21 @@ impl Fence {
 pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<Vec<Fence>, Error> {
     let rows=sqlx::query("SELECT id,kind,selection::text,lo,hi,restore_until,restored FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 ORDER BY lo,id LIMIT $3")
         .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(i64::from(max)+1).fetch_all(c).await.map_err(sql_error)?;
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| {
+        use sqlx::ValueRef;
+        m.fence_rows += rows.len();
+        for row in &rows {
+            for i in 0..row.len() {
+                if let Ok(value) = row.try_get_raw(i)
+                    && !value.is_null()
+                    && let Ok(bytes) = value.as_bytes()
+                {
+                    m.fence_bytes += bytes.len();
+                }
+            }
+        }
+    });
     if rows.len() > max as usize {
         return Err(Error::BudgetExceeded);
     }

@@ -49,7 +49,23 @@ pub(super) async fn admit(
             }
             continue;
         }
-        if fences.iter().any(|f| f.matches(sample)) {
+        #[cfg(feature = "integration")]
+        let start = crate::measurement::cpu_start();
+        #[cfg(feature = "integration")]
+        let mut comparisons = 0;
+        let expired = fences.iter().any(|f| {
+            #[cfg(feature = "integration")]
+            {
+                comparisons += 1;
+            }
+            f.matches(sample)
+        });
+        #[cfg(feature = "integration")]
+        crate::measurement::record(|m| {
+            m.match_cpu += crate::measurement::elapsed(start);
+            m.comparisons += comparisons;
+        });
+        if expired {
             return Err(Error::HistoryExpired);
         }
         let def = input.series.definition();

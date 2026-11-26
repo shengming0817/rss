@@ -1,4 +1,6 @@
 mod batch_read;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod control_cost;
 mod pages;
 mod revision;
 mod snapshots;

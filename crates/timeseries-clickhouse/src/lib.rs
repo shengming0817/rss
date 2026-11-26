@@ -10,6 +10,8 @@ mod definition;
 mod install;
 mod lifecycle;
 mod maintain;
+#[cfg(feature = "integration")]
+pub mod measurement;
 mod page;
 mod probe;
 mod projection;
