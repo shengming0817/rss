@@ -172,7 +172,7 @@ async fn retention_window_cost() -> anyhow::Result<()> {
                 Ok((clock.now() - started).as_micros())
             };
             let baseline = lookup().await?;
-            let write_baseline = receive(0).await?;
+            let write_baseline = receive(start as u64).await?;
             let mut tx = pool.begin().await?;
             let (blocker, _): (i32, String) =
                 sqlx::query_as("SELECT pg_backend_pid(), set_config('rss.tenant_id',$1,true)")
@@ -184,7 +184,7 @@ async fn retention_window_cost() -> anyhow::Result<()> {
                 .fetch_one(&mut *tx).await?;
             assert_eq!(staged, 1024);
             let concurrent = lookup().await?;
-            let (write_concurrent, ()) = tokio::try_join!(receive(1), async {
+            let (write_concurrent, ()) = tokio::try_join!(receive(start as u64 + 1), async {
                 f.wait_for_blocked(blocker, 1).await?;
                 tx.rollback().await?;
                 Ok(())
@@ -196,12 +196,43 @@ async fn retention_window_cost() -> anyhow::Result<()> {
                 "retention_foreground operation=lookup candidates={count} baseline_us={baseline} concurrent_us={concurrent}"
             );
         }
-        let started = clock.now();
-        let page = maint.reclaim(grant()?, window, deadline()).await?;
-        println!(
-            "retention_cost limit={limit} page={page:?} transaction_us={}",
-            (clock.now() - started).as_micros()
-        );
+        let sweep = async {
+            let started = clock.now();
+            let page = maint.reclaim(grant()?, window, deadline()).await?;
+            Ok::<_, anyhow::Error>((page, started, clock.now()))
+        };
+        // Run an independent runtime receive against the ordinary committing API.
+        // Capture both call intervals separately from the deliberately held-lock probe.
+        let foreground = async {
+            if count != 64 && count != 1024 {
+                return Ok(None);
+            }
+            let input = batch(
+                &active,
+                &end.to_string(),
+                end as u64,
+                "all",
+                Body::Snapshot(vec![]),
+            )?;
+            let started = clock.now();
+            let outcome = store.receive(&input, deadline()).await?;
+            assert!(outcome.record().decision().outcome().is_applicable());
+            Ok(Some((started, clock.now())))
+        };
+        let ((page, sweep_start, sweep_end), receive) = tokio::try_join!(sweep, foreground)?;
+        let transaction_us = (sweep_end - sweep_start).as_micros();
+        println!("retention_cost limit={limit} page={page:?} transaction_us={transaction_us}");
+        if let Some((write_start, write_end)) = receive {
+            let overlap = sweep_end
+                .min(write_end)
+                .saturating_sub(sweep_start.max(write_start));
+            assert!(!overlap.is_zero());
+            println!(
+                "retention_live limit={limit} transaction_us={transaction_us} receive_us={} overlap_us={}",
+                (write_end - write_start).as_micros(),
+                overlap.as_micros()
+            );
+        }
         assert_eq!((page.scanned, page.reclaimed), (count, count));
         assert_eq!(page.released_bytes, sizes[start..end].iter().sum::<u64>());
         assert_eq!(page.last_examined, Some(u64::try_from(end - 1)?));
