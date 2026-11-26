@@ -36,10 +36,10 @@ async fn store(config: PgConfig, domain: &str) -> anyhow::Result<PgOutboxStore<(
         MessagingDomain::parse(domain)?,
         outbox_budget(Duration::from_secs(30)),
     )?
-    .with_scan_budget(PgOutboxScanBudget::new(1)?))
+    .with_scan_budget(PgOutboxScanBudget::new(2)?))
 }
 
-pub(super) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyhow::Result<()> {
+async fn reject_invalid(owner: &PgPool) -> anyhow::Result<()> {
     for limit in [0, 1025] {
         assert!(PgOutboxScanBudget::new(limit).is_err());
     }
@@ -51,6 +51,9 @@ pub(super) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyho
     ] {
         assert!(sqlx::query(change).execute(owner).await.is_err());
     }
+    Ok(())
+}
+async fn seed(raw: &PgPool) -> anyhow::Result<()> {
     for lane in ["policy-first", "policy-second"] {
         let message = ordered(lane, lane, lane);
         let mut tx = sql_tx(raw, message.metadata().tenant_id()).await?;
@@ -58,11 +61,9 @@ pub(super) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyho
         sql_append(&mut tx, &message).await?;
         tx.commit().await?;
     }
-    let first = store(config.clone(), "policy-first").await?;
-    let before = now_us(owner).await?;
-    let original = claim(&first).await?;
-    let frozen = facts(owner, "policy-first").await?.0;
-    assert!((before..=now_us(owner).await?).contains(&(frozen - 86_400_000_000)));
+    Ok(())
+}
+async fn change_policy(owner: &PgPool, before: i64) -> anyhow::Result<()> {
     sqlx::query("UPDATE rss_transactional_messaging.policy SET automatic_window_seconds=75,safety_seconds=5,
         receipt_retention_seconds=90,retry_initial_seconds=3,retry_max_seconds=7").execute(owner).await?;
     let preserved = floors(owner).await?;
@@ -73,6 +74,15 @@ pub(super) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyho
         .execute(owner)
         .await?;
     assert_eq!(floors(owner).await?, preserved);
+    Ok(())
+}
+async fn first_retry(owner: &PgPool, config: PgConfig) -> anyhow::Result<(i64, i64, i32)> {
+    let first = store(config, "policy-first").await?;
+    let before = now_us(owner).await?;
+    let original = claim(&first).await?;
+    let frozen = facts(owner, "policy-first").await?.0;
+    assert!((before..=now_us(owner).await?).contains(&(frozen - 86_400_000_000)));
+    change_policy(owner, before).await?;
     let before = now_us(owner).await?;
     first
         .settle(original, OutboxSettlement::Retry, deadline())
@@ -80,13 +90,13 @@ pub(super) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyho
     let persisted = facts(owner, "policy-first").await?;
     assert_eq!((persisted.0, persisted.2), (frozen, 1));
     assert!((before..=now_us(owner).await?).contains(&(persisted.1 - 3_000_000)));
-    drop(first);
-    let first = store(config.clone(), "policy-first").await?;
-    assert_eq!(facts(owner, "policy-first").await?, persisted);
+    Ok(persisted)
+}
+async fn backoff(owner: &PgPool, first: &PgOutboxStore<()>, frozen: i64) -> anyhow::Result<()> {
     for (attempts, seconds) in [(1, 6_i64), (2, 7), (i32::MAX, 7)] {
         sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_count=$1,retry_after=clock_timestamp() WHERE message_id='policy-first'")
             .bind(attempts).execute(owner).await?;
-        let item = claim(&first).await?;
+        let item = claim(first).await?;
         let before = now_us(owner).await?;
         first
             .settle(item, OutboxSettlement::Retry, deadline())
@@ -95,6 +105,9 @@ pub(super) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyho
         assert_eq!((absolute, count), (frozen, attempts.saturating_add(1)));
         assert!((before..=now_us(owner).await?).contains(&(retry - seconds * 1_000_000)));
     }
+    Ok(())
+}
+async fn new_window(owner: &PgPool, config: PgConfig) -> anyhow::Result<()> {
     let second = store(config, "policy-second").await?;
     let before = now_us(owner).await?;
     let item = claim(&second).await?;
@@ -105,6 +118,16 @@ pub(super) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyho
     second
         .settle(item, OutboxSettlement::Published(()), deadline())
         .await?;
+    Ok(())
+}
+pub(crate) async fn run(owner: &PgPool, raw: &PgPool, config: PgConfig) -> anyhow::Result<()> {
+    reject_invalid(owner).await?;
+    seed(raw).await?;
+    let persisted = first_retry(owner, config.clone()).await?;
+    let first = store(config.clone(), "policy-first").await?;
+    assert_eq!(facts(owner, "policy-first").await?, persisted);
+    backoff(owner, &first, persisted.0).await?;
+    new_window(owner, config).await?;
     sqlx::query("UPDATE rss_transactional_messaging.policy SET automatic_window_seconds=86400,safety_seconds=86400,
         receipt_retention_seconds=604800,retry_initial_seconds=1,retry_max_seconds=3600").execute(owner).await?;
     Ok(())

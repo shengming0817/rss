@@ -97,6 +97,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
         eprintln!("pg-suite phase=conformance");
         Box::pin(conformance::run(runtime.clone(), &owner)).await?;
         eprintln!("pg-suite phase=adversarial");
+        Box::pin(partition::policy::run(&owner, &raw_runtime, config.clone())).await?;
         Box::pin(partition::run(runtime.clone(), &owner, &raw_runtime, config.clone())).await?;
         Box::pin(adversarial::run(runtime.clone(), &owner, &raw_runtime, config.clone())).await?;
         eprintln!("pg-suite phase=lifecycle::close_during_transaction");

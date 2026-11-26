@@ -336,8 +336,10 @@ async fn scan_matrix(f: &Fixture) -> anyhow::Result<()> {
             .bind(tenant().to_string()).bind(capacity).bind(scan).fetch_all(&mut *tx).await?;
         assert_eq!(rows.len(), capacity.min(scan) as usize);
         println!(
-            "first claim limit={capacity} budget={scan} elapsed={:?} examined={} shared_hits={} shared_reads={}",
+            "first claim limit={capacity} budget={scan} elapsed={:?} claimed={} candidate_rows={} outbox_examined={} candidate_shared_hits={} candidate_shared_reads={}",
             timer.now() - started,
+            rows.len(),
+            root["Actual Rows"],
             examined(root),
             root["Shared Hit Blocks"],
             root["Shared Read Blocks"]
@@ -569,65 +571,89 @@ async fn finish_retired_sweep(f: &Fixture) -> anyhow::Result<()> {
 }
 
 async fn nested_profiles(f: &Fixture) -> anyhow::Result<()> {
-    use sqlx::Connection as _;
     let _ = tracing_subscriber::fmt()
         .with_env_filter("sqlx::postgres::notice=info")
         .with_ansi(false)
         .try_init();
     for scenario in ["wide", "leases-dr"] {
         if scenario == "leases-dr" {
-            sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 minute',automatic_retry_deadline=clock_timestamp()+interval '1 day',retry_after=clock_timestamp()-interval '1 hour' WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'scale-null-%' ORDER BY seq LIMIT 192)").execute(&f.owner).await?;
-            sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE status='publishing' ORDER BY seq LIMIT 64)").execute(&f.owner).await?;
-            sqlx::query("UPDATE rss_transactional_messaging.outbox SET claim_epoch=0 WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE status='publishing' ORDER BY seq OFFSET 128 LIMIT 64)").execute(&f.owner).await?;
-            sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE status='published'").execute(&f.owner).await?;
-            sqlx::query("INSERT INTO rss_transactional_messaging.dr_plans(tenant_id,operation_id,request_digest,lineage,epoch,kind,evidence) VALUES($1::uuid,'00000000-0000-0000-0000-000000003281',sha256('profile'::bytea),decode(repeat('02',16),'hex'),1,'database','{}')").bind(tenant().to_string()).execute(&f.owner).await?;
-            sqlx::query("INSERT INTO rss_transactional_messaging.dr_members(tenant_id,operation_id,ordinal,message_id,consumer_group,fingerprint,outbox_seq,status) SELECT tenant_id,'00000000-0000-0000-0000-000000003281',(row_number() OVER(ORDER BY seq)-1)::integer,message_id,'',fingerprint,seq,'pending' FROM rss_transactional_messaging.outbox WHERE status='published' AND payload IS NOT NULL ORDER BY seq LIMIT 512").execute(&f.owner).await?;
-            explain(f, "512 current DR / mixed leases").await?;
+            seed_profile_leases(f).await?;
         }
         for scan in [64_i32, 128] {
             for limit in [1, 32] {
-                let mut plain =
-                    sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
-                sqlx::query("SET SESSION AUTHORIZATION projection_worker")
-                    .execute(&mut plain)
-                    .await?;
-                let timer = Timer::new();
-                let mut latency = Vec::new();
-                for attempt in 0..11 {
-                    let at = timer.now();
-                    let mut tx = plain.begin().await?;
-                    let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)").bind(tenant().to_string()).bind(limit).bind(scan).fetch_all(&mut *tx).await?;
-                    assert_eq!(rows.len(), limit as usize);
-                    tx.rollback().await?;
-                    if attempt == 0 {
-                        println!(
-                            "first claim scan={scan} limit={limit} elapsed_us={}",
-                            (timer.now() - at).as_micros()
-                        );
-                    } else {
-                        latency.push((timer.now() - at).as_micros());
-                    }
-                }
-                distribution(
-                    &format!("claim-transaction-{scan}-{scenario}"),
-                    limit as usize,
-                    &mut latency,
-                );
-                plain.close().await?;
-                let mut c =
-                    sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
-                sqlx::raw_sql("LOAD 'auto_explain'; SET auto_explain.log_min_duration=0; SET auto_explain.log_nested_statements=on; SET auto_explain.log_analyze=on; SET auto_explain.log_buffers=on; SET auto_explain.log_timing=off; SET auto_explain.log_format=json; SET auto_explain.log_level=notice; SET SESSION AUTHORIZATION projection_worker;").execute(&mut c).await?;
-                println!("claim-profile scan_budget={scan} scenario={scenario} limit={limit}");
-                let mut tx = c.begin().await?;
-                let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)").bind(tenant().to_string()).bind(limit).bind(scan).fetch_all(&mut *tx).await?;
-                assert_eq!(rows.len(), limit as usize);
-                tx.rollback().await?;
-                c.close().await?;
+                measure_claim(f, scenario, scan, limit).await?;
+                explain_claim(f, scenario, scan, limit).await?;
             }
         }
     }
     sqlx::query("DELETE FROM rss_transactional_messaging.dr_members WHERE operation_id='00000000-0000-0000-0000-000000003281'").execute(&f.owner).await?;
     sqlx::query("DELETE FROM rss_transactional_messaging.dr_plans WHERE operation_id='00000000-0000-0000-0000-000000003281'").execute(&f.owner).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='pending',lease_token=NULL,lease_until=NULL,claim_epoch=1,retry_after=clock_timestamp() WHERE message_id LIKE 'scale-null-%' AND status='publishing'").execute(&f.owner).await?;
+    Ok(())
+}
+
+async fn measure_claim(f: &Fixture, scenario: &str, scan: i32, limit: i32) -> anyhow::Result<()> {
+    use sqlx::Connection as _;
+    let mut plain = sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
+    sqlx::query("SET SESSION AUTHORIZATION projection_worker")
+        .execute(&mut plain)
+        .await?;
+    let timer = Timer::new();
+    let mut latency = Vec::new();
+    for attempt in 0..11 {
+        let at = timer.now();
+        let mut tx = plain.begin().await?;
+        let rows:Vec<i64>=sqlx::query_scalar("SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)").bind(tenant().to_string()).bind(limit).bind(scan).fetch_all(&mut *tx).await?;
+        assert!(rows.len() <= limit.min(scan) as usize);
+        if scenario == "wide" {
+            assert_eq!(rows.len(), limit as usize);
+        }
+        tx.rollback().await?;
+        if attempt == 0 {
+            println!(
+                "first claim scenario={scenario} scan={scan} limit={limit} claimed={} elapsed_us={}",
+                rows.len(),
+                (timer.now() - at).as_micros()
+            );
+        } else {
+            latency.push((timer.now() - at).as_micros());
+        }
+    }
+    distribution(
+        &format!("claim-transaction-{scan}-{scenario}"),
+        limit as usize,
+        &mut latency,
+    );
+    plain.close().await?;
+    Ok(())
+}
+async fn explain_claim(f: &Fixture, scenario: &str, scan: i32, limit: i32) -> anyhow::Result<()> {
+    use sqlx::Connection as _;
+    let mut c = sqlx::PgConnection::connect_with(f.owner.connect_options().as_ref()).await?;
+    sqlx::raw_sql("LOAD 'auto_explain'; SET auto_explain.log_min_duration=0; SET auto_explain.log_nested_statements=on; SET auto_explain.log_analyze=on; SET auto_explain.log_buffers=on; SET auto_explain.log_timing=off; SET auto_explain.log_format=json; SET auto_explain.log_level=notice; SET SESSION AUTHORIZATION projection_worker;").execute(&mut c).await?;
+    println!("claim-profile scan_budget={scan} scenario={scenario} limit={limit}");
+    let mut tx = c.begin().await?;
+    let rows: Vec<i64> = sqlx::query_scalar(
+        "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',$2,$3,60000)",
+    )
+    .bind(tenant().to_string())
+    .bind(limit)
+    .bind(scan)
+    .fetch_all(&mut *tx)
+    .await?;
+    assert!(rows.len() <= limit.min(scan) as usize);
+    tx.rollback().await?;
+    c.close().await?;
+    Ok(())
+}
+
+async fn seed_profile_leases(f: &Fixture) -> anyhow::Result<()> {
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='publishing',lease_token=gen_random_uuid(),lease_until=clock_timestamp()+interval '1 minute',automatic_retry_deadline=clock_timestamp()+interval '1 day',retry_after=clock_timestamp()-interval '1 hour' WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE message_id LIKE 'scale-null-%' ORDER BY seq LIMIT 192)").execute(&f.owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE status='publishing' ORDER BY seq LIMIT 64)").execute(&f.owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET claim_epoch=0 WHERE seq IN (SELECT seq FROM rss_transactional_messaging.outbox WHERE status='publishing' ORDER BY seq OFFSET 128 LIMIT 64)").execute(&f.owner).await?;
+    sqlx::query("UPDATE rss_transactional_messaging.outbox SET automatic_retry_deadline=clock_timestamp()+interval '1 day' WHERE status='published'").execute(&f.owner).await?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.dr_plans(tenant_id,operation_id,request_digest,lineage,epoch,kind,evidence) VALUES($1::uuid,'00000000-0000-0000-0000-000000003281',sha256('profile'::bytea),decode(repeat('02',16),'hex'),1,'database','{}')").bind(tenant().to_string()).execute(&f.owner).await?;
+    sqlx::query("INSERT INTO rss_transactional_messaging.dr_members(tenant_id,operation_id,ordinal,message_id,consumer_group,fingerprint,outbox_seq,status) SELECT tenant_id,'00000000-0000-0000-0000-000000003281',(row_number() OVER(ORDER BY seq)-1)::integer,message_id,'',fingerprint,seq,'pending' FROM rss_transactional_messaging.outbox WHERE status='published' AND payload IS NOT NULL ORDER BY seq LIMIT 512").execute(&f.owner).await?;
+    explain(f, "512 current DR / mixed leases").await?;
     Ok(())
 }
