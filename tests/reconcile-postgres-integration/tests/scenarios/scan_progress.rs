@@ -48,8 +48,8 @@ pub(super) async fn run(
     live_and_future(store, owner, c, &t, before).await?;
     empty_and_locked(store, owner, c, &t).await?;
     windows(store, owner, c).await?;
-    sampled_window(store, owner, c, false).await?;
-    sampled_window(store, owner, c, true).await
+    sampled_window(store, owner, c).await?;
+    locked_sample(store, owner, c).await
 }
 async fn live_and_future(
     store: &PgStore,
@@ -197,17 +197,12 @@ async fn rediscover_wakes(
     Ok(())
 }
 
-async fn sampled_window(
+async fn seed_sample(
     store: &PgStore,
     owner: &PgPool,
     c: &Control<'_, Clock>,
-    lock_sample: bool,
-) -> anyhow::Result<()> {
-    let name = if lock_sample {
-        "locked-sample"
-    } else {
-        "due-sample"
-    };
+    name: &str,
+) -> anyhow::Result<(Scope, i64)> {
     let scope = Scope::new(TenantId::parse(TENANT)?, name)?;
     let keys = ResourceSet::empty(scope.tenant());
     for entity in ["future-1", "future-2", "old", "a", "b", "c", "d"] {
@@ -220,35 +215,51 @@ async fn sampled_window(
         .bind(TENANT).bind(name).execute(owner).await?;
     let frontier: i64 = sqlx::query_scalar("SELECT queue_ticket FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity='future-2'")
         .bind(TENANT).bind(name).fetch_one(owner).await?;
-    let mut held = owner.begin().await?;
-    if lock_sample {
-        sqlx::query("SELECT FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity IN ('a','b','c','d') FOR UPDATE")
-            .bind(TENANT).bind(name).execute(&mut *held).await?;
-    }
+    Ok((scope, frontier))
+}
+
+fn entities(batch: &ClaimBatch<PgClaim>) -> Vec<&str> {
+    batch
+        .claims
+        .iter()
+        .map(|claim| claim.target().entity())
+        .collect()
+}
+
+async fn sampled_window(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let (scope, frontier) = seed_sample(store, owner, c, "due-sample").await?;
     let lease = Duration::from_secs(60);
     let first = store.claim_due(&scope, 2, 2, lease, c).await?;
-    let entities = |claims: &[PgClaim]| {
-        claims
-            .iter()
-            .map(|c| c.target().entity().to_owned())
-            .collect::<Vec<_>>()
-    };
-    if lock_sample {
-        assert!(first.claims.is_empty());
-    } else {
-        assert_eq!(entities(&first.claims), ["a", "b"]);
-    }
+    assert_eq!(entities(&first), ["a", "b"]);
     assert!(first.more);
     assert_eq!(position(owner, &scope).await?.0, frontier);
     let second = store.claim_due(&scope, 2, 2, lease, c).await?;
-    if lock_sample {
-        assert_eq!(entities(&second.claims), ["old"]);
-    } else {
-        assert_eq!(entities(&second.claims), ["old", "c"]);
-        let tail = store.claim_due(&scope, 2, 2, lease, c).await?;
-        assert_eq!(entities(&tail.claims), ["d"]);
-        assert!(!tail.more);
-    }
+    assert_eq!(entities(&second), ["old", "c"]);
+    let tail = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert_eq!(entities(&tail), ["d"]);
+    assert!(!tail.more);
+    Ok(())
+}
+
+async fn locked_sample(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let (scope, frontier) = seed_sample(store, owner, c, "locked-sample").await?;
+    let mut held = owner.begin().await?;
+    sqlx::query("SELECT FROM rss_reconcile.targets WHERE tenant_id=$1::uuid AND reconciler=$2 AND entity IN ('a','b','c','d') FOR UPDATE")
+        .bind(TENANT).bind(scope.reconciler()).execute(&mut *held).await?;
+    let lease = Duration::from_secs(60);
+    let first = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert!(first.claims.is_empty() && first.more);
+    assert_eq!(position(owner, &scope).await?.0, frontier);
+    let second = store.claim_due(&scope, 2, 2, lease, c).await?;
+    assert_eq!(entities(&second), ["old"]);
     held.rollback().await?;
     Ok(())
 }
