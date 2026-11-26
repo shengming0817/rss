@@ -196,8 +196,8 @@ async fn publish<C: Clock>(
         .insert(&a, std::slice::from_ref(&p.row), deadline)
         .await?;
     let summary = store
-        .summary_value(&p.row.object_id, r.scope(), deadline)
-        .await?;
+        .summary_objects(r.scope(), &[&p.row.object_id], deadline)
+        .await?.value(&p.row.object_id, p.row.lo, p.row.hi, p.row.payload.len())?;
     if bytes(&summary)? != p.row.payload.as_bytes() {
         return Err(Error::Invariant);
     }

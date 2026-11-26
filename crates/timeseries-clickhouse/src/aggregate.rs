@@ -1,8 +1,11 @@
+mod objects;
+
+use std::collections::VecDeque;
 use crate::{
     Operation,
     control::{self, Fence},
     page::{Dependencies, Recheck, Request, View},
-    projection::{SummaryRow, literal},
+    projection::literal,
     read::{ReadRow, selection, visible},
     transaction::{bytes, decode, sql_error},
 };
@@ -16,12 +19,14 @@ struct SummaryRef {
     lo: i64,
     hi: i64,
     object_id: String,
+    payload_bytes: u64,
     dependency_start: i64,
 }
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for SummaryRef {
     fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
             spec_digest: row.try_get("spec_digest")?,
+            payload_bytes: row.try_get::<i64, _>("payload_bytes")?.cast_unsigned(),
             lo: row.try_get("lo")?,
             hi: row.try_get("hi")?,
             object_id: row.try_get("object_id")?,
@@ -237,37 +242,6 @@ impl<C: Clock> Operation<'_, C> {
         mask_end(&mut builder, fences, spec, window)?;
         builder.finish(self.limits.max_points.get() as usize)
     }
-    pub(crate) async fn summary_value(
-        &self,
-        id: &str,
-        scope: &Scope,
-        deadline: Deadline,
-    ) -> Result<Summary, Error> {
-        let sql = format!(
-            "SELECT tenant,namespace,object_id,lo,hi,revision,digest,payload FROM rss_ts_ch.summaries FINAL WHERE tenant={} AND namespace={} AND object_id={} LIMIT 2",
-            literal(&scope.tenant().to_string()),
-            literal(scope.namespace().as_str()),
-            literal(id)
-        );
-        let rows = self
-            .ch_query(self.reader.query_raw(&sql), deadline)?
-            .fetch_all::<SummaryRow>()
-            .await
-            .map_err(crate::projection::read_error)?;
-        if rows.len() != 1 {
-            return Err(Error::Invariant);
-        }
-        let row = rows.first().ok_or(Error::Invariant)?;
-        let value: Summary = decode(row.payload.as_bytes())?;
-        use sha2::{Digest, Sha256};
-        if crate::projection::hex(&Sha256::digest(row.payload.as_bytes())) != row.digest
-            || value.window.start().micros() != row.lo
-            || value.window.end().micros() != row.hi
-        {
-            return Err(Error::Invariant);
-        }
-        Ok(value)
-    }
     async fn references(
         &self,
         c: &mut PgConnection,
@@ -307,7 +281,7 @@ impl<C: Clock> Operation<'_, C> {
         // Fetch whole buckets in chronological order. If the reference budget runs out
         // partway through a later bucket, resume at that bucket with a fresh page budget.
         let mut rows: Vec<SummaryRef> = sqlx::query_as(
-            "SELECT spec_digest,lo,hi,object_id::text,dependency_start FROM rss_ts_ch.summaries
+            "SELECT spec_digest,lo,hi,object_id::text,dependency_start,payload_bytes FROM rss_ts_ch.summaries
             WHERE tenant_id=$1::text::uuid AND namespace=$2 AND semantics=$3 AND lo>=$4 AND hi<=$5
               AND max_input_revision<=$7 AND (dirty_from IS NULL OR dirty_from>$7) AND lo/$8::bigint=(hi-1)/$8::bigint
             ORDER BY lo,hi,object_id LIMIT $6",
@@ -341,39 +315,6 @@ impl<C: Clock> Operation<'_, C> {
             fences: view.fences.clone(),
         })
     }
-    async fn cached(
-        &self,
-        refs: &[SummaryRef],
-        attempted: &mut Vec<SummaryRef>,
-        scope: &Scope,
-        window: Interval,
-        deadline: Deadline,
-    ) -> Result<Option<Summary>, Error> {
-        let Some(path) = coverage(refs, window)? else {
-            return Ok(None);
-        };
-        let mut value: Option<Summary> = None;
-        let mut size = 0usize;
-        for row in path {
-            attempted.push(row.clone());
-            let summary = self.summary_value(&row.object_id, scope, deadline).await?;
-            if summary.window.start().micros() != row.lo || summary.window.end().micros() != row.hi
-            {
-                return Err(Error::Invariant);
-            }
-            size = size
-                .checked_add(bytes(&summary)?.len())
-                .ok_or(Error::BudgetExceeded)?;
-            if size > self.limits.max_bytes.get() as usize {
-                return Err(Error::BudgetExceeded);
-            }
-            value = Some(match value {
-                None => summary,
-                Some(old) => old.merge(summary, self.limits.max_points.get() as usize)?,
-            });
-        }
-        Ok(value)
-    }
 }
 // The bounded DAG is solved backwards before reading any object.
 fn coverage(refs: &[SummaryRef], window: Interval) -> Result<Option<Vec<&SummaryRef>>, Error> {
@@ -402,6 +343,21 @@ fn coverage(refs: &[SummaryRef], window: Interval) -> Result<Option<Vec<&Summary
         at = row.hi;
     }
     Ok(Some(chain))
+}
+// Plan only buckets with candidate metadata; long empty runs cost no extra storage.
+fn covered<'a>(q: &AggregateQuery, start: Timestamp, mut rows: &'a [SummaryRef])
+    -> Result<VecDeque<(Interval, Vec<&'a SummaryRef>)>, Error> {
+    let mut hits = VecDeque::new();
+    while let Some(first) = rows.first() {
+        let bucket = q.spec().bucket(Timestamp::new(first.lo)?)?;
+        let count = rows.partition_point(|r| r.lo >= bucket.start().micros());
+        let window = Interval::new(bucket.start().max(start), bucket.end().min(q.query().window().end()))?;
+        if let Some(path) = coverage(&rows[..count], window)? {
+            hits.push_front((window, path));
+        }
+        rows = &rows[count..];
+    }
+    Ok(hits)
 }
 fn cost(bucket: &AggregateBucket) -> usize {
     1 + match &bucket.value {
@@ -559,34 +515,23 @@ impl Request for AggregateQuery {
         let mut refreshed = None;
         let mut continuous = true;
         let published = view.published;
+        let mut hits = covered(q, at, &refs.rows)?;
+        let planned: Vec<_> = hits.iter().flat_map(|(_, path)| path.iter().copied()).collect();
+        let mut objects = objects::Reader::new(&planned);
         while view.exists
             && at.micros() < refs.end
             && used < (q.query().budget().max_points.get() as usize)
         {
             let end = q.spec().bucket(at)?.end().min(q.query().window().end());
             let window = Interval::new(at, end)?;
-            if at == q.query().window().start()
-                && let Some(path) = coverage(&refs.rows, window)?
-            {
-                refs.dependency_start = path
-                    .iter()
-                    .map(|r| r.dependency_start)
-                    .min()
-                    .unwrap_or(refs.dependency_start);
-            }
-            let cached = store
-                .cached(
-                    &refs.rows,
-                    &mut refs.attempted,
-                    q.spec().stream().scope(),
-                    window,
-                    deadline,
-                )
-                .await?;
-            let is_cached = cached.is_some();
-            let value = match cached {
-                Some(v) => v,
-                None => {
+            let is_cached = hits.front().is_some_and(|(w, _)| *w == window);
+            let value = if is_cached {
+                let (_, path) = hits.pop_front().ok_or(Error::Invariant)?;
+                if at == q.query().window().start() {
+                    refs.dependency_start = path.iter().map(|r| r.dependency_start).min().ok_or(Error::Invariant)?;
+                }
+                objects.merge(store, q.spec().stream().scope(), &path, &mut refs.attempted, deadline).await?
+            } else {
                     let mut start = refs.dependency_start;
                     let result = store
                         .raw_summary(q.spec(), window, published, &fences, deadline, &mut start)
@@ -598,7 +543,6 @@ impl Request for AggregateQuery {
                         refs.raw_budget = Some(window);
                     }
                     result?
-                }
             };
             let bucket = value.project(q.operation())?;
             if used + cost(&bucket) > q.query().budget().max_points.get() as usize {
