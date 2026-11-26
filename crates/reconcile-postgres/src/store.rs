@@ -264,7 +264,7 @@ impl<P: Send + 'static> PgOperation<'_, P> {
         lease: Duration,
         control: &Control<'_, T>,
     ) -> Result<ClaimBatch<PgClaim>, Error> {
-        if !(1..=1024).contains(&limit) || scan_budget == 0 {
+        if !(1..=rss_reconcile::MAX_CLAIM_BATCH_SIZE).contains(&limit) || scan_budget == 0 {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
         let scan_budget =
