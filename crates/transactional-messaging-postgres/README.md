@@ -577,7 +577,7 @@ its default remains 64 and it does not alter request authorization or digest ide
 A claim examines at most `max(64, min(4 * limit, 1024))` admitted candidate headers.
 Each indexed lane reads at most the remaining budget before the merged window is capped;
 the current DR plan has its separate 1024-member bound. Two generation-index range seeks skip the historical lease lane when all leases are current.
-Each sweep fixes its upper eligibility time. A full window advances the tenant/domain cursor.
+Each sweep binds its execution epoch, lineage and upper eligibility time. A new generation starts a fresh sweep. A full window advances the tenant/domain cursor.
 A capacity stop preserves the window entrance because source lock order can differ from eligibility
 order. Reaching the end clears the cursor so the next sweep can revisit skipped heads.
 Cursor contention permits opportunistic source claims with `SKIP LOCKED`. Partition order

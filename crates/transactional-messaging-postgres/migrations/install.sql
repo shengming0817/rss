@@ -169,6 +169,7 @@ CREATE TABLE rss_transactional_messaging.outbox_partitions (
 -- A committed metadata cursor bounds unsuccessful claim work across invocations.
 CREATE TABLE rss_transactional_messaging.outbox_scan (
  tenant_id uuid NOT NULL, domain text COLLATE "C" NOT NULL,
+ epoch bigint NOT NULL, lineage bytea NOT NULL,
  through_at timestamptz NOT NULL DEFAULT '-infinity',
  eligible_at timestamptz NOT NULL DEFAULT '-infinity', source_seq bigint NOT NULL DEFAULT 0,
  lane integer NOT NULL DEFAULT 0 CHECK(lane BETWEEN 0 AND 3),
@@ -742,7 +743,9 @@ BEGIN
  owns_progress:=pg_try_advisory_xact_lock(hashtextextended('rss-tmsg-claim:'||p_tenant::text||':'||p_domain,0));
  SELECT * INTO progress FROM outbox_scan s WHERE s.tenant_id=p_tenant AND s.domain=p_domain;
  resumed:=FOUND;
- IF NOT resumed THEN progress.through_at:=clock_timestamp(); progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
+ -- A prior execution generation cannot bound this generation's DR or reclaimed heads.
+ IF NOT resumed OR (progress.epoch,progress.lineage) IS DISTINCT FROM (e,l) THEN
+  progress.epoch:=e; progress.lineage:=l; progress.through_at:=clock_timestamp(); progress.eligible_at:='-infinity'; progress.source_seq:=0; progress.lane:=0; END IF;
  frontier:=progress;
  OPEN candidates;
  LOOP
@@ -796,10 +799,10 @@ BEGIN
    -- Locks are taken in source order. A capacity stop can leave earlier eligibility
    -- keys unvisited. Keep the window entrance and its frozen horizon in that case.
    IF examined=scan_limit THEN progress:=frontier; END IF;
-   INSERT INTO outbox_scan AS s(tenant_id,domain,through_at,eligible_at,source_seq,lane)
-    VALUES(p_tenant,p_domain,progress.through_at,progress.eligible_at,progress.source_seq,progress.lane)
-    ON CONFLICT ON CONSTRAINT outbox_scan_pkey DO UPDATE SET through_at=excluded.through_at,eligible_at=excluded.eligible_at,source_seq=excluded.source_seq,lane=excluded.lane
-    WHERE (s.through_at,s.eligible_at,s.source_seq,s.lane) IS DISTINCT FROM (excluded.through_at,excluded.eligible_at,excluded.source_seq,excluded.lane);
+   INSERT INTO outbox_scan AS s(tenant_id,domain,epoch,lineage,through_at,eligible_at,source_seq,lane)
+    VALUES(p_tenant,p_domain,e,l,progress.through_at,progress.eligible_at,progress.source_seq,progress.lane)
+    ON CONFLICT ON CONSTRAINT outbox_scan_pkey DO UPDATE SET epoch=excluded.epoch,lineage=excluded.lineage,through_at=excluded.through_at,eligible_at=excluded.eligible_at,source_seq=excluded.source_seq,lane=excluded.lane
+    WHERE (s.epoch,s.lineage,s.through_at,s.eligible_at,s.source_seq,s.lane) IS DISTINCT FROM (excluded.epoch,excluded.lineage,excluded.through_at,excluded.eligible_at,excluded.source_seq,excluded.lane);
   END IF;
  END IF;
 END $f$;

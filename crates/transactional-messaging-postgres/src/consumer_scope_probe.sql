@@ -57,8 +57,8 @@ SELECT EXISTS(SELECT FROM scope_table WHERE relkind='r' AND NOT relrowsecurity A
    AND pg_get_constraintdef(c.oid)='PRIMARY KEY (tenant_id, domain)')
  AND EXISTS(SELECT FROM pg_constraint WHERE conrelid=to_regclass('rss_transactional_messaging.outbox_scan')
   AND contype='c' AND convalidated AND pg_get_constraintdef(oid)='CHECK (((lane >= 0) AND (lane <= 3)))')
- AND (SELECT count(*) FROM pg_attribute WHERE attrelid=to_regclass('rss_transactional_messaging.outbox_scan') AND attnum>0 AND NOT attisdropped)=6
- AND NOT EXISTS(SELECT FROM (VALUES ('tenant_id','uuid'),('domain','text'),('through_at','timestamp with time zone'),
+ AND (SELECT count(*) FROM pg_attribute WHERE attrelid=to_regclass('rss_transactional_messaging.outbox_scan') AND attnum>0 AND NOT attisdropped)=8
+ AND NOT EXISTS(SELECT FROM (VALUES ('tenant_id','uuid'),('domain','text'),('epoch','bigint'),('lineage','bytea'),('through_at','timestamp with time zone'),
   ('eligible_at','timestamp with time zone'),('source_seq','bigint'),('lane','integer')) e(name,type)
   LEFT JOIN pg_attribute a ON a.attrelid=to_regclass('rss_transactional_messaging.outbox_scan') AND a.attname=e.name AND NOT a.attisdropped
   WHERE a.attnum IS NULL OR NOT a.attnotnull OR format_type(a.atttypid,a.atttypmod)<>e.type

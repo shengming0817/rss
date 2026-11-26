@@ -494,7 +494,28 @@ pub(super) async fn worker_continuation(f: &Fixture) -> anyhow::Result<()> {
         }
         sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published',lease_token=NULL,lease_until=NULL WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
     }
-    Ok(())
+    // The worker stopped on its first publication. The fixture then explicitly retired
+    // its remaining sources. Finish any frozen sweep before handing the domain back.
+    for _ in 0..2 {
+        let mut tx = f.raw_worker.begin().await?;
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT seq FROM rss_transactional_messaging.claim_outbox($1::uuid,'orders',32,60000)",
+        )
+        .bind(tenant().to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+        assert!(rows.is_empty());
+        let progress: String =
+            sqlx::query_scalar("SELECT current_setting('rss.outbox_scan_progress')")
+                .fetch_one(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        if progress == "complete" {
+            return Ok(());
+        }
+        assert_eq!(progress, "retry_later");
+    }
+    anyhow::bail!("retired fixture did not finish its sweep")
 }
 
 // Compare production claim bodies on identical rows/indexes. The baseline gets the
