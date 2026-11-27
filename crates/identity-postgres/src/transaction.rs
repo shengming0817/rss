@@ -2,11 +2,9 @@
 use crate::{AccountKey, Authority, AuthorityError};
 use futures::future::BoxFuture;
 
+use rss_request_context::Deadline;
+use rss_transactional_messaging::error::{MessagingError, MessagingErrorKind};
 use rss_transactional_messaging::fence::ExecutionBinding;
-use rss_transactional_messaging::{
-    error::{MessagingError, MessagingErrorKind},
-    policy::OperationDeadline,
-};
 use rss_transactional_messaging_postgres::{PgError, PgTransaction};
 use serde::Serialize;
 use uuid::Uuid;
@@ -132,7 +130,7 @@ impl Authority {
     pub(crate) async fn read<T: Send, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         operation: F,
     ) -> Result<T, AuthorityError>
     where
@@ -146,7 +144,7 @@ impl Authority {
     pub(crate) async fn read_bundle<T: Send, F>(
         bundle: std::sync::Arc<crate::runtime::RuntimeBundle>,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         verify_instance: bool,
         operation: F,
     ) -> Result<T, AuthorityError>
@@ -156,14 +154,16 @@ impl Authority {
             + 'static,
     {
         let instance = bundle.instance;
-        if deadline.timeout().is_zero() {
+        if deadline.is_expired(rss_request_context::Clock::now(
+            bundle.runtime.execution_timer(),
+        )) {
             return Err(AuthorityError::NotStarted(
                 crate::StorageFailure::DeadlineElapsed,
             ));
         }
         bundle
             .runtime
-            .local_tx(binding, deadline, move |tx| {
+            .local_tx_until(binding, deadline, move |tx| {
                 Box::pin(async move {
                     if verify_instance {
                         let actual =
@@ -195,7 +195,7 @@ impl Authority {
     pub(crate) async fn read_sql<T: Send + 'static, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         work: F,
     ) -> Result<T, AuthorityError>
     where
@@ -219,7 +219,7 @@ impl Authority {
     pub(crate) async fn write_sql<T: Send + 'static, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         work: F,
     ) -> Result<T, AuthorityError>
     where
@@ -238,7 +238,7 @@ impl Authority {
     pub(crate) async fn mutate<T: Send, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         operation: F,
     ) -> Result<T, AuthorityError>
     where
@@ -259,7 +259,7 @@ impl Authority {
     pub(crate) async fn mutate_events<T: Send, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         operation: F,
     ) -> Result<T, AuthorityError>
     where
@@ -276,7 +276,7 @@ impl Authority {
     pub(crate) async fn conditional_write_sql<T: Send + 'static, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         work: F,
     ) -> Result<T, AuthorityError>
     where
@@ -298,7 +298,7 @@ impl Authority {
     async fn settle_events<T: Send, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         operation: F,
         require_event: bool,
     ) -> Result<T, AuthorityError>

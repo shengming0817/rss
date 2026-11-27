@@ -22,7 +22,7 @@ impl Authority {
         binding: ExecutionBinding,
         login: &LoginKey,
         source: &AttemptSource,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<PasswordClaim, AuthorityError> {
         let tenant = binding.tenant();
         let digest = Sha256::digest(login.as_str().as_bytes()).to_vec();
@@ -59,7 +59,7 @@ impl Authority {
         &self,
         claim: PasswordClaim,
         outcome: Result<AuthenticationCandidate, AuthorityError>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<AuthenticationCandidate, AuthorityError> {
         let policy = self.authentication;
         self.read(claim.binding, deadline, move |tx| Box::pin(async move {

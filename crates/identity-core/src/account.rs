@@ -244,10 +244,7 @@ impl PasswordKdf {
 mod tests {
     use super::*;
     #[tokio::test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     async fn closing_kdf_waits_for_actual_work_and_rejects_new_work() {
         let kdf = Arc::new(
             PasswordKdf::new(
@@ -287,11 +284,7 @@ mod tests {
             .unwrap();
     }
     #[tokio::test]
-    #[allow(
-        clippy::panic,
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::panic, clippy::unwrap_used, reason = "test fixture")]
     async fn cancelled_waiter_does_not_release_running_work() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (end_tx, end_rx) = std::sync::mpsc::channel();

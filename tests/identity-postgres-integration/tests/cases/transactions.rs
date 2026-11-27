@@ -58,6 +58,10 @@ async fn marker_count(f: &Fixture) -> anyhow::Result<i64> {
     )
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "test fixture and ordered assertions"
+)]
 pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
     marker_table(f).await?;
     // Admission wins. The real public revoke operation must wait for either host outcome.

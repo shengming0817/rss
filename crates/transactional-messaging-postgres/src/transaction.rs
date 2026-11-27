@@ -3,7 +3,7 @@ use crate::PgConfig;
 use futures::future::BoxFuture;
 use rss_redact::RedactedSource;
 use rss_request_context::TenantId;
-use rss_request_context::{Clock, Deadline, ExecutionTimer};
+use rss_request_context::{Clock, Deadline, ExecutionTimer, SharedExecutionTimer};
 use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
 use rss_transactional_messaging::{
     error::{MessagingError, MessagingErrorKind},
@@ -238,34 +238,9 @@ impl From<MessagingError> for PgError {
     }
 }
 
-// Internal type erasure keeps clock injection independent of public store/effect type parameters.
-trait Timer: Send + Sync {
-    fn observe(&self) -> std::time::Instant;
-    fn sleep(&self, deadline: Deadline) -> BoxFuture<'_, ()>;
-}
-impl<C: ExecutionTimer> Timer for C {
-    fn observe(&self) -> std::time::Instant {
-        Clock::now(self)
-    }
-    fn sleep(&self, deadline: Deadline) -> BoxFuture<'_, ()> {
-        Box::pin(self.sleep_until(deadline))
-    }
-}
-pub(crate) struct PgTimer(Arc<dyn Timer>);
-impl Clock for PgTimer {
-    fn now(&self) -> std::time::Instant {
-        self.0.observe()
-    }
-}
-impl ExecutionTimer for PgTimer {
-    fn sleep_until(&self, deadline: Deadline) -> impl Future<Output = ()> + Send {
-        self.0.sleep(deadline)
-    }
-}
-
 /// One private I/O watchdog and redacted phase diagnostic shared by all transaction owners.
 pub(crate) async fn stage<T: Send, F>(
-    timer: &PgTimer,
+    timer: &SharedExecutionTimer,
     cutoff: Deadline,
     phase: LocalTxDeadlineStage,
     future: F,
@@ -288,7 +263,7 @@ pub struct PgRuntime {
     ordinary_slots: Arc<Semaphore>,
     pub(crate) pool: PgPool,
     pub(crate) storage: StorageIdentity,
-    pub(crate) timer: PgTimer,
+    pub(crate) timer: SharedExecutionTimer,
     #[cfg(feature = "recovery")]
     pub(crate) projection_slots: tokio::sync::Semaphore,
     #[cfg(feature = "integration")]
@@ -324,6 +299,33 @@ pub(crate) enum Profile {
 }
 
 impl PgRuntime {
+    /// The timer supplied by the host when opening this runtime.
+    pub fn execution_timer(&self) -> &SharedExecutionTimer {
+        &self.timer
+    }
+
+    /// Execute a fenced operation with the caller's original absolute cutoff.
+    pub async fn local_tx_until<T: Send, F>(
+        &self,
+        binding: ExecutionBinding,
+        cutoff: Deadline,
+        operation: F,
+    ) -> LocalTxAttempt<T, PgError>
+    where
+        F: for<'a> FnOnce(&'a mut PgTransaction<'_>) -> BoxFuture<'a, Result<T, PgError>> + Send,
+    {
+        self.transaction_until(
+            binding,
+            cutoff,
+            (),
+            true,
+            #[cfg(feature = "integration")]
+            None,
+            move |_, tx| operation(tx),
+        )
+        .await
+    }
+
     /// Verify that a borrowed transaction is live and belongs to this exact runtime instance.
     /// No connection, pool, or transferable admission token is exposed.
     pub fn validate_transaction(&self, tx: &PgTransaction<'_>) -> Result<(), PgError> {
@@ -416,7 +418,7 @@ impl PgRuntime {
         profile: Profile,
     ) -> Result<Self, PgError> {
         config.validate()?;
-        let timer = PgTimer(Arc::new(timer));
+        let timer = SharedExecutionTimer::new(timer);
         let cutoff = Deadline::from_timeout(&timer, config.acquire_timeout)
             .map_err(|_| PgError::invariant())?;
         let pool = within(&timer, cutoff, |_| async {
@@ -926,7 +928,7 @@ pub struct PgTransaction<'tx> {
     scope_restored: bool,
     binding: ExecutionBinding,
     cutoff: Deadline,
-    pub(crate) timer: &'tx PgTimer,
+    pub(crate) timer: &'tx SharedExecutionTimer,
     owner: &'tx PgRuntime,
 }
 impl PgTransaction<'_> {
@@ -1192,7 +1194,7 @@ mod tests {
             ordinary_slots: Arc::new(Semaphore::new(1)),
             storage: StorageIdentity::new([1; 16], [2; 16])?,
             pool,
-            timer: PgTimer(Arc::new(Frozen)),
+            timer: SharedExecutionTimer::new(Frozen),
             #[cfg(feature = "recovery")]
             projection_slots: tokio::sync::Semaphore::new(1),
             #[cfg(feature = "integration")]

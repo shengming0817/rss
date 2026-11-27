@@ -4,6 +4,7 @@ use rss_identity_core::{
     facts::{FactSource, FactUnavailableReason},
     groups::Groups,
 };
+use rss_request_context::Clock;
 use rss_transactional_messaging_postgres::PgError;
 use std::time::Instant;
 
@@ -31,14 +32,12 @@ impl GroupFacts {
         };
         Ok(Self { facts, expires })
     }
-    pub(crate) fn view(&self, proof: Instant) -> Result<VerifiedGroups<'_>, GroupAccessError> {
-        self.view_at(proof, Instant::now())
-    }
-    fn view_at(
+    pub(crate) fn view(
         &self,
         proof: Instant,
-        now: Instant,
+        clock: &rss_request_context::SharedExecutionTimer,
     ) -> Result<VerifiedGroups<'_>, GroupAccessError> {
+        let now = clock.now();
         if now >= proof {
             return Err(GroupAccessError::ProofExpired);
         }
@@ -55,6 +54,7 @@ impl GroupFacts {
                 values,
                 ..
             } => VerifiedGroups::Available(TrustedGroups {
+                clock: clock.clone(),
                 source,
                 snapshot_id: *snapshot_id,
                 provider_config_version: *provider_config_version,
@@ -81,6 +81,7 @@ pub enum VerifiedGroups<'a> {
 /// let groups: rss_identity_postgres::TrustedGroups<'_> = serde_json::from_str("{}").unwrap();
 /// ```
 pub struct TrustedGroups<'a> {
+    clock: rss_request_context::SharedExecutionTimer,
     source: &'a FactSource,
     snapshot_id: uuid::Uuid,
     provider_config_version: i64,
@@ -107,7 +108,7 @@ impl TrustedGroups<'_> {
         self.expires_at
     }
     pub fn values(&self) -> Result<&[String], GroupAccessError> {
-        self.values_at(Instant::now())
+        self.values_at(self.clock.now())
     }
     fn values_at(&self, now: Instant) -> Result<&[String], GroupAccessError> {
         if now >= self.proof {
@@ -129,7 +130,7 @@ mod tests {
         clippy::disallowed_methods,
         clippy::panic,
         clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        reason = "test fixture"
     )]
     fn retained_values_check_exact_deadlines_and_proof_wins() {
         let start = Instant::now();
@@ -149,7 +150,9 @@ mod tests {
                 },
                 expires: snapshot,
             };
-            let VerifiedGroups::Available(groups) = facts.view_at(proof, start).unwrap() else {
+            let VerifiedGroups::Available(groups) =
+                facts.view(proof, &crate::test_time::at(start)).unwrap()
+            else {
                 panic!("fresh")
             };
             assert_eq!(
@@ -162,22 +165,26 @@ mod tests {
             );
             assert_eq!(groups.values_at(proof), Err(GroupAccessError::ProofExpired));
             assert!(matches!(
-                facts.view_at(proof, snapshot),
+                facts.view(proof, &crate::test_time::at(snapshot)),
                 Ok(VerifiedGroups::Expired)
             ));
             assert!(matches!(
-                facts.view_at(proof, proof),
+                facts.view(proof, &crate::test_time::at(proof)),
                 Err(GroupAccessError::ProofExpired)
             ));
             let earlier = start + Duration::from_millis(500);
-            let VerifiedGroups::Available(early) = facts.view_at(earlier, start).unwrap() else {
+            let VerifiedGroups::Available(early) =
+                facts.view(earlier, &crate::test_time::at(start)).unwrap()
+            else {
                 panic!("fresh")
             };
             assert_eq!(
                 early.values_at(earlier),
                 Err(GroupAccessError::ProofExpired)
             );
-            let VerifiedGroups::Available(short) = facts.view_at(snapshot, start).unwrap() else {
+            let VerifiedGroups::Available(short) =
+                facts.view(snapshot, &crate::test_time::at(start)).unwrap()
+            else {
                 panic!("fresh")
             };
             assert_eq!(
@@ -187,10 +194,7 @@ mod tests {
         }
     }
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::disallowed_methods, reason = "test fixture")]
     fn unavailable_is_not_promoted_and_still_requires_live_proof() {
         let start = Instant::now();
         let proof = start + Duration::from_secs(10);
@@ -205,10 +209,10 @@ mod tests {
                 expires: start,
             };
             assert!(
-                matches!(facts.view_at(proof, proof - Duration::from_nanos(1)), Ok(VerifiedGroups::Unavailable(r)) if r == reason)
+                matches!(facts.view(proof, &crate::test_time::at(proof - Duration::from_nanos(1))), Ok(VerifiedGroups::Unavailable(r)) if r == reason)
             );
             assert!(matches!(
-                facts.view_at(proof, proof),
+                facts.view(proof, &crate::test_time::at(proof)),
                 Err(GroupAccessError::ProofExpired)
             ));
         }

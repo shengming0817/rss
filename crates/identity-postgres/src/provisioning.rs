@@ -1,7 +1,7 @@
 //! Host-authorized account provisioning inside a caller-owned target transaction.
 //! ref: sqlx sqlx-core/src/transaction.rs@v0.9.0 (borrowed transaction ownership).
 use crate::{
-    AuthenticatedSession, Authority, AuthorityConfig, AuthorityError, AuthorityProfile, Budget,
+    AuthenticatedSession, Authority, AuthorityConfig, AuthorityError, AuthorityProfile,
     ExecutionBinding, ManagementOperation, ManagementPolicy,
     storage::{account_state_locked, authority_id, insert_account},
     transaction::{self, MutationError, SecurityEvent},
@@ -10,8 +10,8 @@ use rss_identity_core::{
     PrincipalId,
     account::{AccountKey, AccountState, LoginKey, Password, PasswordEncoding, PasswordKdf},
 };
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging_postgres::{PgError, PgRuntime, PgTransaction};
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ impl AccountProvisioner {
         probe: ExecutionBinding,
         source: TenantId,
         policy: Arc<dyn ManagementPolicy>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Self, AuthorityError> {
         Ok(Self {
             authority: Authority::connect(
@@ -83,9 +83,9 @@ impl AccountProvisioner {
         &self,
         login: LoginKey,
         password: Password,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<PreparedLocalAccount, AuthorityError> {
-        let budget = Budget::new(deadline)?;
+        let budget = self.authority.budget(deadline)?;
         let hash = budget.password(self.authority.kdf.hash(password)).await?;
         Ok(PreparedLocalAccount { login, hash })
     }
@@ -106,7 +106,7 @@ impl AccountProvisioner {
         let target = tx.tenant_id();
         if actor.key.tenant != self.source
             || target == self.source
-            || actor.authority != self.authority.instance.as_uuid()
+            || actor.authority.as_uuid() != self.authority.instance.as_uuid()
         {
             return Err(ProvisioningError::Rejected);
         }

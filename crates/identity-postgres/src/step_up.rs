@@ -172,7 +172,7 @@ impl Authority {
         &self,
         actor: AuthenticatedSession,
         handle: String,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         self.require_runtime()?;
         if handle.len() != 43 {

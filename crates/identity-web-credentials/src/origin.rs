@@ -1,7 +1,7 @@
 use crate::{CredentialError, unique};
 use http::HeaderMap;
 use rss_identity_core::session::SessionSecret;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 #[derive(Clone)]
 pub struct HttpConfig {
     origin: String,
@@ -20,7 +20,7 @@ impl HttpConfig {
             || url.host_str().is_none()
             || url.origin().ascii_serialization() != origin
             || timeout.is_zero()
-            || Instant::now().checked_add(timeout).is_none()
+            || timeout == Duration::MAX
         {
             return Err(HttpConfigError);
         }

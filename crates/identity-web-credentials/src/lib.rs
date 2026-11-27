@@ -69,10 +69,7 @@ mod tests {
         }
     }
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn session_cookie_and_csrf_are_strict() {
         let secret = rss_identity_core::session::SessionSecret::generate().unwrap();
         let mut headers = http::HeaderMap::new();

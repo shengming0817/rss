@@ -50,10 +50,7 @@ mod tests {
     use rss_identity_core::assurance::{Assurance, AuthenticationMode};
 
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn only_the_deployment_approved_acr_and_time_establish_mfa() {
         let facts = normalize(Some(100), Some("2"), vec![], true).unwrap();
         assert_eq!(facts.acr().as_str(), "mfa");
@@ -89,10 +86,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn refresh_or_callback_time_does_not_refresh_authentication() {
         for time in [None, Some(69), Some(132)] {
             let facts = normalize(time, Some("2"), vec![], true).unwrap();
@@ -118,10 +112,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn persisted_facts_are_closed_and_methods_are_bounded() {
         for input in [
             r#"{"auth_time":100,"acr":"unknown","amr":[]}"#,

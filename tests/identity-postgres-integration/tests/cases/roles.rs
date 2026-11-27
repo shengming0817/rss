@@ -2,10 +2,7 @@ use crate::support::*;
 use rss_identity_core::account::AccountKey;
 use rss_request_context::TenantId;
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub async fn roles(f: &Fixture) -> anyhow::Result<()> {
     let other = AccountKey {
         tenant: TenantId::parse(B)?,

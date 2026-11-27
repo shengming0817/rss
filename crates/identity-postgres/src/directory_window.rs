@@ -8,6 +8,7 @@ use rss_identity_core::{
     InstanceId,
     directory::{AccountQuery, Field},
 };
+use rss_request_context::Clock;
 use rss_request_context::TenantId;
 use sqlx::PgConnection;
 use std::time::Instant;
@@ -105,9 +106,10 @@ impl<'a> ReadDependencies<'a> {
         tenant: TenantId,
         deadline: Instant,
         actor_until: Option<i64>,
+        timer: &rss_request_context::SharedExecutionTimer,
     ) -> Result<ReadWindow, MutationError> {
         let tenant_id = tenant.to_string();
-        let sampled = Instant::now();
+        let sampled = timer.now();
         // ANY selects each persisted key once, including keys shared by several fields.
         let (generation, micros): (i64, i64) =
             sqlx::query_as(include_str!("directory-generation.sql"))

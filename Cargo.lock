@@ -798,7 +798,6 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
- "form_urlencoded",
  "futures-util",
  "http 1.4.2",
  "http-body 1.0.1",
@@ -814,13 +813,11 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
- "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -839,7 +836,6 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -4281,7 +4277,6 @@ name = "rss-identity-oidc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "base64 0.22.1",
  "futures-util",
  "http 1.4.2",
@@ -4338,6 +4333,7 @@ dependencies = [
  "http 1.4.2",
  "rss-identity-core",
  "rss-identity-postgres",
+ "rss-request-context",
  "rss-transactional-messaging",
  "thiserror 2.0.18",
  "url",

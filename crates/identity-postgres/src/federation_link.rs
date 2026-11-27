@@ -8,8 +8,8 @@ use crate::{
 };
 use rss_identity_core::assurance::AuthenticationMode;
 use rss_identity_core::{PrincipalId, SessionId, account::LoginKey, federation::*};
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
 use sqlx::Row;
 use uuid::Uuid;
 pub(crate) struct Intent {
@@ -69,7 +69,7 @@ impl Federation {
     pub async fn begin_link(
         &self,
         request: LinkRequest,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<FederatedRedirect, AuthorityError> {
         let LinkRequest {
             actor,
@@ -86,11 +86,11 @@ impl Federation {
         check_browser(&browser)?;
         let binding = actor.binding;
         let tenant = binding.tenant();
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
+        let mut budget = self.authority.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
         let return_url = self.target(&target)?;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
-        let (actor,account,source_identity,login)=self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
+        let (actor,account,source_identity,login)=self.authority.read_sql(binding,budget.cutoff,move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck_collection(c, &actor).await?;
                     let login: Option<String> = sqlx::query_scalar(concat!(
                         "SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::u",
@@ -110,7 +110,7 @@ impl Federation {
                     LoginKey::parse(&login).map_err(|_| AuthorityError::Rejected)?,
                     password.ok_or(AuthorityError::Rejected)?,
                     source,
-                    budget.remaining(),
+                    budget.cutoff,
                 )
                 .await?;
             if candidate.state.key() != account.key() {
@@ -126,18 +126,13 @@ impl Federation {
                     binding,
                     format!("link:{}", actor.key.principal.as_uuid()),
                     &source,
-                    budget.remaining(),
+                    budget.cutoff,
                 )
                 .await?;
             None
         };
-        let target = db::read_provider(
-            &self.authority,
-            binding,
-            target_provider,
-            budget.remaining(),
-        )
-        .await?;
+        let target =
+            db::read_provider(&self.authority, binding, target_provider, budget.cutoff).await?;
         if !target.enabled {
             return Err(AuthorityError::Rejected);
         }
@@ -147,12 +142,12 @@ impl Federation {
             let identity = source_identity.ok_or(AuthorityError::Rejected)?;
             let id = self
                 .authority
-                .read_sql(binding, budget.remaining(), move |c| {
+                .read_sql(binding, budget.cutoff, move |c| {
                     Box::pin(async move { Ok(db::identity(c, tenant, identity).await?.0) })
                 })
                 .await?;
             (
-                db::read_provider(&self.authority, binding, id, budget.remaining()).await?,
+                db::read_provider(&self.authority, binding, id, budget.cutoff).await?,
                 Purpose::Reauthenticate,
             )
         };
@@ -163,7 +158,7 @@ impl Federation {
         let material = ProtocolMaterial::new(state)?;
         self.check_assurance_profile(tenant, &provider)?;
         let installed = self
-            .installed_provider(binding, &provider, budget.remaining())
+            .installed_provider(binding, &provider, budget.cutoff)
             .await?;
         let url = self
             .upstream(
@@ -176,11 +171,11 @@ impl Federation {
                     } else {
                         AuthenticationMode::Login
                     },
-                    budget.0,
+                    budget.cutoff,
                 ),
             )
             .await?;
-        self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
+        self.authority.read_sql(binding,budget.cutoff,move |c| { Box::pin(async move {
                     let loaded = session_storage::recheck_collection(c, &actor).await?;
                     if !loaded.state.matches_verification(account) {
                         return Err(reject().into());
@@ -260,7 +255,7 @@ impl Federation {
         let intent_id = old.link.ok_or(AuthorityError::Rejected)?;
         let target = self
             .authority
-            .read_sql(binding, budget.remaining(), move |c| {
+            .read_sql(binding, budget.cutoff, move |c| {
                 Box::pin(async move {
                     let i = intent(c, tenant, intent_id).await?;
                     let target = db::provider(c, tenant, i.target).await?;
@@ -276,28 +271,34 @@ impl Federation {
         let material = ProtocolMaterial::new(new_state)?;
         self.check_assurance_profile(tenant, &target)?;
         let installed = self
-            .installed_provider(binding, &target, budget.remaining())
+            .installed_provider(binding, &target, budget.cutoff)
             .await?;
         let url = self
             .upstream(
                 budget,
-                self.oidc
-                    .prepare(installed, &material, AuthenticationMode::Login, budget.0),
+                self.oidc.prepare(
+                    installed,
+                    &material,
+                    AuthenticationMode::Login,
+                    budget.cutoff,
+                ),
             )
             .await?;
         let group_policy = self.group_policy;
         let future_skew_seconds = self.authority.future_skew_seconds;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
         let instance = self.authority.instance.as_uuid();
+        let session_checks = self.authority.session_checks.clone();
         self.authority
-            .write_sql(binding, budget.remaining(), move |c| {
+            .write_sql(binding, budget.cutoff, move |c| {
                 Box::pin(async move {
                     lock_tenant_collection(c, tenant).await?;
                     let (attempt, _) = db::attempt(c, &locator, &state, &browser, true).await?;
                     let current_source = db::provider(c, tenant, source.id).await?;
                     db::exact(&current_source, source.version)?;
                     let (_, checked_intent) =
-                        check_actor(c, tenant, instance, &attempt, session).await?;
+                        check_actor(c, tenant, instance, &attempt, session, &session_checks)
+                            .await?;
                     let i = checked_intent.ok_or_else(reject)?;
                     let origin = i.origin.as_ref().ok_or_else(reject)?;
                     db::check_origin(

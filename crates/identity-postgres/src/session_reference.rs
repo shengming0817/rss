@@ -5,12 +5,11 @@ use crate::{
     sessions::checked_expiry,
     storage::lock_tenant_collection,
     transaction::{connection, reject},
-    types::Budget,
 };
 use rss_identity_core::{InstanceId, PrincipalId, SessionId};
-use rss_request_context::TenantId;
+use rss_request_context::Clock;
+use rss_request_context::Deadline;
 use rss_transactional_messaging::fence::ExecutionBinding;
-use rss_transactional_messaging::policy::OperationDeadline;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use uuid::Uuid;
@@ -32,7 +31,7 @@ impl AuthenticatedSession {
     pub fn reference(&self) -> Result<SessionReference, AuthorityError> {
         self.assurance()?;
         Ok(SessionReference {
-            instance: self.authority,
+            instance: self.authority.as_uuid(),
             tenant: Uuid::from_bytes(self.key.tenant.octets()),
             principal: self.key.principal.as_uuid(),
             session: self.view.id.as_uuid(),
@@ -44,7 +43,9 @@ impl AuthenticatedSession {
 /// Fresh, bounded identity facts for an existing host-owned operation.
 /// Deliberately cannot be used where `AuthenticatedSession` is required.
 pub struct RevalidatedSession {
-    reference: SessionReference,
+    timer: rss_request_context::SharedExecutionTimer,
+    instance: InstanceId,
+    account: AccountKey,
     identity: SessionIdentity,
     view: SessionView,
     expires: Instant,
@@ -54,21 +55,17 @@ pub struct RevalidatedSession {
 }
 impl RevalidatedSession {
     pub fn check_live(&self) -> Result<(), AuthorityError> {
-        if Instant::now() >= self.expires {
+        if self.timer.now() >= self.expires {
             Err(AuthorityError::Rejected)
         } else {
             Ok(())
         }
     }
     pub fn instance(&self) -> InstanceId {
-        InstanceId::parse(&self.reference.instance.to_string()).expect("validated instance")
+        self.instance
     }
     pub fn account(&self) -> AccountKey {
-        AccountKey {
-            tenant: TenantId::parse(&self.reference.tenant.to_string()).expect("validated tenant"),
-            principal: PrincipalId::parse(&self.reference.principal.to_string())
-                .expect("validated principal"),
-        }
+        self.account
     }
     pub fn identity(&self) -> &SessionIdentity {
         &self.identity
@@ -81,13 +78,13 @@ impl RevalidatedSession {
         Ok(&self.assurance)
     }
     pub fn groups(&self) -> Result<VerifiedGroups<'_>, crate::GroupAccessError> {
-        self.groups.view(self.expires)
+        self.groups.view(self.expires, &self.timer)
     }
     pub fn department_snapshot(
         &self,
     ) -> Result<VerifiedDepartmentSnapshot<'_>, crate::DepartmentAccessError> {
         self.department
-            .view(self.instance(), self.account(), self.expires)
+            .view(self.instance(), self.account(), self.expires, &self.timer)
     }
 }
 impl std::fmt::Debug for RevalidatedSession {
@@ -103,7 +100,7 @@ impl Authority {
         &self,
         binding: ExecutionBinding,
         reference: &SessionReference,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<RevalidatedSession, AuthorityError> {
         let tenant = binding.tenant();
         self.require_runtime()?;
@@ -114,8 +111,9 @@ impl Authority {
         {
             return Err(AuthorityError::Rejected);
         }
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let reference = reference.clone();
+        let instance = self.instance;
         let key = AccountKey {
             tenant,
             principal: PrincipalId::parse(&reference.principal.to_string())
@@ -124,7 +122,7 @@ impl Authority {
         let session = SessionId::parse(&reference.session.to_string())
             .map_err(|_| AuthorityError::Rejected)?;
         let session_checks = self.session_checks.clone();
-        self.read(binding, budget.remaining(), move |tx| {
+        self.read(binding, budget.cutoff, move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
@@ -145,9 +143,11 @@ impl Authority {
                             &session_checks,
                         )
                         .await?;
-                        let expires = checked_expiry(&loaded, budget.0.instant())?;
+                        let expires = checked_expiry(&loaded, budget.cutoff.instant())?;
                         Ok(RevalidatedSession {
-                            reference,
+                            timer: loaded.timer.clone(),
+                            account: key,
+                            instance,
                             identity: SessionIdentity::from_state(loaded.state),
                             view: loaded.view,
                             expires,
@@ -174,7 +174,7 @@ impl Authority {
     pub async fn with_session_references_read<T: Send + 'static, F>(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         query: F,
     ) -> Result<T, AuthorityError>
     where
@@ -186,7 +186,7 @@ impl Authority {
     {
         let tenant = binding.tenant();
         self.require_runtime()?;
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let instance = self.instance;
         let platform = self
             .session_checks
@@ -196,14 +196,14 @@ impl Authority {
         let failure = std::sync::Arc::new(std::sync::OnceLock::new());
         let capture = failure.clone();
         let result = self
-            .read_sql(binding, budget.remaining(), move |c| {
+            .read_sql(binding, budget.cutoff, move |c| {
                 Box::pin(async move {
                     lock_tenant_collection(c, tenant).await?;
                     let window = crate::directory_window::ReadDependencies::references(
                         instance,
                         platform.as_deref(),
                     )
-                    .window(c, tenant, budget.0.instant(), None)
+                    .window(c, tenant, budget.cutoff.instant(), None, &budget.timer)
                     .await?;
                     let expires = window.expires;
                     let relation = crate::personnel::session_relation(
@@ -216,10 +216,13 @@ impl Authority {
                         .execute(&mut *c)
                         .await?;
                     let result = query(crate::PersonnelRead::session_references(
-                        c, relation, window,
+                        c,
+                        relation,
+                        window,
+                        budget.timer.clone(),
                     ))
                     .await;
-                    if Instant::now() >= expires {
+                    if budget.timer.now() >= expires {
                         return Err(reject().into());
                     }
                     result.map_err(|error| {

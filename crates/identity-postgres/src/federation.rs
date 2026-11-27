@@ -7,8 +7,9 @@ use crate::{
 };
 use rss_identity_core::federation::MAX_PROVIDERS;
 use rss_identity_core::federation::*;
+use rss_request_context::Clock;
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
@@ -153,7 +154,8 @@ impl Federation {
         budget: &Budget,
         future: UpstreamFuture<'_, T>,
     ) -> Result<T, AuthorityError> {
-        tokio::time::timeout_at(budget.0.instant().into(), future)
+        budget
+            .wait(budget.cutoff, future)
             .await
             .map_err(|_| AuthorityError::Federation(FederationError::Unavailable))?
             .map_err(Into::into)
@@ -167,11 +169,11 @@ impl Federation {
         settings: ProviderSettings,
         credentials: ProviderCredentials,
         profile: [u8; 32],
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_runtime()?;
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
+        let mut budget = self.authority.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
         let keys = self.credential_keys.clone();
         let capacity = self.authority.provider_capacity;
         let operation = ManagementOperation::CreateProvider;
@@ -179,14 +181,14 @@ impl Federation {
         let instance = self.authority.instance;
         let binding = actor.binding;
         let tenant = binding.tenant();
-        self.authority.write_sql(binding,budget.remaining(),move|c|Box::pin(async move {
+        self.authority.write_sql(binding,budget.cutoff,move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck_collection(c,&actor).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.providers WHERE tenant_id=$1::uuid").bind(tenant.to_string()).fetch_one(&mut *c).await?;
             if count>=i64::from(capacity.get()){return Err(FederationError::ProviderLimitReached.into());}
             let view=ProviderView{id:ProviderId::generate(),version:1,enabled:false,revocation_epoch:1,settings,assurance_profile:profile,credential_version:1};
             sqlx::query("INSERT INTO identity_authority.providers(tenant_id,provider_id,config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version) VALUES($1::uuid,$2::uuid,1,1,false,$3,$4,1)").bind(tenant.to_string()).bind(view.id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(profile.as_slice()).execute(&mut *c).await?;
             crate::credentials::write_credentials(c,&keys,tenant,view.id,1,&credentials).await?;
-            if std::time::Instant::now()>=loaded.expires {return Err(reject().into());}
+            if loaded.timer.now()>=loaded.expires {return Err(reject().into());}
             let audit=event(tenant,Action::ProviderCreated,&view,Some(actor.key.principal));
             Ok((view,vec![audit]))
         })).await
@@ -197,7 +199,7 @@ impl Federation {
         id: ProviderId,
         expected: i64,
         enabled: bool,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.edit_provider(actor, id, expected, None, Some(enabled), deadline)
             .await
@@ -209,11 +211,11 @@ impl Federation {
         expected: i64,
         settings: Option<(ProviderSettings, ProviderCredentials, [u8; 32])>,
         enabled: Option<bool>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_runtime()?;
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
+        let mut budget = self.authority.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
         let operation = enabled
             .map(|value| ManagementOperation::SetProviderEnabled(id, value))
             .unwrap_or(ManagementOperation::UpdateProvider(id));
@@ -227,7 +229,7 @@ impl Federation {
         let binding = actor.binding;
         let tenant = binding.tenant();
         let oidc = self.oidc.clone();
-        self.authority.write_sql(binding,budget.remaining(),move|c|Box::pin(async move {
+        self.authority.write_sql(binding,budget.cutoff,move|c|Box::pin(async move {
             let loaded=crate::session_storage::recheck_for(c,&actor,crate::session_storage::SessionAccess::Provider(id)).await?;crate::management::authorize(policy.as_ref(),instance,&loaded,operation,None, c).await?;
             let mut view=db::provider(c,tenant,id).await?;
             if view.version!=expected{return Err(FederationError::StaleConfiguration.into());}
@@ -246,7 +248,7 @@ impl Federation {
             }else{return Err(reject().into());};
             view.version=view.version.checked_add(1).ok_or(FederationError::Rejected)?;
             sqlx::query("UPDATE identity_authority.providers SET settings=$3,config_version=$4,enabled=$5,revocation_epoch=$6,assurance_profile=$7,credential_version=$8 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid").bind(tenant.to_string()).bind(id.to_string()).bind(serde_json::to_value(&view.settings).map_err(|_|transaction::corrupt())?).bind(view.version).bind(view.enabled).bind(view.revocation_epoch).bind(view.assurance_profile.as_slice()).bind(view.credential_version).execute(c).await?;
-            if std::time::Instant::now()>=loaded.expires {return Err(reject().into());}
+            if loaded.timer.now()>=loaded.expires {return Err(reject().into());}
             oidc.revisions().retire(previous);
             let audit=event(tenant,action,&view,Some(actor.key.principal));Ok((view,vec![audit]))
         })).await
@@ -254,16 +256,16 @@ impl Federation {
     pub(crate) async fn persist_list_providers(
         &self,
         actor: AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Vec<ProviderView>, AuthorityError> {
         self.authority.require_runtime()?;
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
         let binding = actor.binding;
         let tenant = binding.tenant();
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
-        self.authority.read_sql(binding,budget.remaining(),move |c| { Box::pin(async move {
+        let mut budget = self.authority.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
+        self.authority.read_sql(binding,budget.cutoff,move |c| { Box::pin(async move {
                     lock_tenant_collection(c, tenant).await?;
                     let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None, c).await?;
@@ -295,19 +297,19 @@ impl Federation {
         &self,
         actor: AuthenticatedSession,
         id: ProviderId,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ConnectionReport, AuthorityError> {
         self.authority.require_runtime()?;
         let policy = self.authority.policy.clone();
         let instance = self.authority.instance;
         let binding = actor.binding;
         let tenant = binding.tenant();
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
+        let mut budget = self.authority.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
         let read_policy = policy.clone();
         let (actor, view) = self
             .authority
-            .read_sql(binding, budget.remaining(), move |c| {
+            .read_sql(binding, budget.cutoff, move |c| {
                 Box::pin(async move {
                     lock_tenant_collection(c, tenant).await?;
                     let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
@@ -327,24 +329,25 @@ impl Federation {
         // Cancel upstream work before the shared deadline: permission/version checks and
         // the security event must settle before any report is released.
         let installed = self
-            .installed_provider(binding, &view, budget.remaining())
+            .installed_provider(binding, &view, budget.cutoff)
             .await?;
-        let remaining = budget.remaining().timeout();
+        let remaining = budget.time_left();
         let reserve = (remaining / 4).min(std::time::Duration::from_secs(1));
-        let upstream_deadline = budget.0.instant() - reserve;
-        let result = tokio::time::timeout_at(
-            upstream_deadline.into(),
-            self.oidc.test(
-                installed,
+        let upstream_deadline = budget.cutoff.instant() - reserve;
+        let result = budget
+            .wait(
                 rss_request_context::Deadline::at(upstream_deadline),
-            ),
-        )
-        .await
-        .unwrap_or(Err(FederationError::Unavailable));
+                self.oidc.test(
+                    installed,
+                    rss_request_context::Deadline::at(upstream_deadline),
+                ),
+            )
+            .await
+            .unwrap_or(Err(FederationError::Unavailable));
         let diagnostic = result.as_ref().err().map(|e| e.diagnostic());
         let passed = result.is_ok();
         self.authority
-            .write_sql(binding, budget.remaining(), move |c| {
+            .write_sql(binding, budget.cutoff, move |c| {
                 Box::pin(async move {
                     lock_tenant_collection(c, tenant).await?;
                     let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
@@ -387,7 +390,7 @@ impl Federation {
         actor: AuthenticatedSession,
         settings: ProviderSettings,
         credentials: ProviderCredentials,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_runtime()?;
         if settings.redirect_uri() != self.callback {
@@ -409,7 +412,7 @@ impl Federation {
         expected_version: i64,
         settings: ProviderSettings,
         credentials: ProviderCredentials,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.authority.require_runtime()?;
         if settings.redirect_uri() != self.callback {
@@ -437,7 +440,7 @@ impl Federation {
         id: ProviderId,
         expected_version: i64,
         enabled: bool,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProviderView, AuthorityError> {
         self.persist_enable_provider(actor, id, expected_version, enabled, deadline)
             .await
@@ -445,14 +448,14 @@ impl Federation {
     pub async fn list_providers(
         &self,
         actor: AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Vec<ProviderView>, AuthorityError> {
         self.persist_list_providers(actor, deadline).await
     }
     pub async fn login_options(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Vec<LoginOption>, AuthorityError> {
         let tenant = binding.tenant();
         self.authority.read_sql(binding,deadline,move |c|Box::pin(async move {
@@ -476,7 +479,7 @@ impl Federation {
     pub async fn current_session_security(
         &self,
         actor: AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<SessionSecurity, AuthorityError> {
         let oidc = self.oidc.clone();
         self.authority.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
@@ -536,14 +539,14 @@ impl Federation {
     pub async fn reconcile_assurance_profiles(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         let tenant = binding.tenant();
-        let budget = Budget::new(deadline)?;
+        let budget = self.authority.budget(deadline)?;
         let instance = self.authority.instance();
         loop {
             let oidc = self.oidc.clone();
-            let more = self.authority.conditional_write_sql(binding, budget.remaining(), move |c| Box::pin(async move {
+            let more = self.authority.conditional_write_sql(binding, budget.cutoff, move |c| Box::pin(async move {
             let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2")
                 .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut *c).await?;
             if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
@@ -657,10 +660,7 @@ impl FederationConfig {
 mod contract_tests {
     use super::*;
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn callback_configuration_accepts_the_host_route_and_requires_a_safe_https_url() {
         let mut config = FederationConfig {
             callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
@@ -685,10 +685,7 @@ mod contract_tests {
         }
     }
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn action_vocabulary_and_payload_match_schema() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("federation-security-event-v2.json")).unwrap();

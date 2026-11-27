@@ -77,9 +77,9 @@ impl StateSigner {
         })
     }
 
-    fn mac(&self, instance: InstanceId, payload: &[u8]) -> Hmac<Sha256> {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(self.key.as_ref()).expect("HMAC accepts 32-byte keys");
+    fn mac(&self, instance: InstanceId, payload: &[u8]) -> Result<Hmac<Sha256>, FederationError> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_ref())
+            .map_err(|_| FederationError::Configuration)?;
 
         mac.update(b"rss-identity.oidc.state.v2\0");
 
@@ -90,7 +90,7 @@ impl StateSigner {
         mac.update(instance.as_uuid().as_bytes());
         mac.update(payload);
 
-        mac
+        Ok(mac)
     }
 
     pub(crate) fn issue(
@@ -117,7 +117,7 @@ impl StateSigner {
 
         payload.extend_from_slice(&id);
 
-        let tag = self.mac(instance, &payload).finalize().into_bytes();
+        let tag = self.mac(instance, &payload)?.finalize().into_bytes();
 
         payload.extend_from_slice(&tag);
 
@@ -139,7 +139,7 @@ impl StateSigner {
             return Err(FederationError::Rejected);
         }
 
-        self.mac(instance, &bytes[..90])
+        self.mac(instance, &bytes[..90])?
             .verify_slice(&bytes[90..])
             .map_err(|_| FederationError::Rejected)?;
 
@@ -180,10 +180,7 @@ impl StateSigner {
 #[cfg(test)]
 mod tests {
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn state_authentication_precedes_tenant_use_and_separates_purpose() {
         use super::*;
         let tenant =

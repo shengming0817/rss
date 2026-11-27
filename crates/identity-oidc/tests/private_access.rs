@@ -1,21 +1,18 @@
+#[path = "../../../tests/fixtures/oidc_clock.rs"]
+mod fixture_clock;
 #[path = "support/policy.rs"]
 mod policy;
+
 use rss_identity_core::federation::*;
 use rss_identity_oidc::ReusePolicy;
 use rss_identity_oidc::{HttpOidc, PrivateProviderAccess};
 use rss_request_context::TenantId;
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn tenant() -> TenantId {
     TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn grant(issuer: &str, cidrs: &[&str]) -> PrivateProviderAccess {
     PrivateProviderAccess {
         tenant: tenant(),
@@ -24,10 +21,7 @@ fn grant(issuer: &str, cidrs: &[&str]) -> PrivateProviderAccess {
         cidrs: cidrs.iter().map(|value| value.parse().unwrap()).collect(),
     }
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn settings(issuer: &str, client: &str) -> ProviderSettings {
     ProviderSettingsInput {
         issuer: issuer.into(),
@@ -46,13 +40,11 @@ fn settings(issuer: &str, client: &str) -> ProviderSettings {
     .unwrap()
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn private_grants_are_exact_and_do_not_grant_mfa() {
     let issuer = "https://10.42.0.9:8443/realms/reference";
     let adapter = HttpOidc::new(
+        fixture_clock::clock(),
         vec![],
         vec![grant(issuer, &["10.42.0.9/32"])],
         transport_policy(),
@@ -102,6 +94,7 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
     ] {
         assert!(
             HttpOidc::new(
+                fixture_clock::clock(),
                 vec![],
                 vec![grant("https://idp.example.test/realm", &cidrs)],
                 transport_policy(),
@@ -114,6 +107,7 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
     for cidr in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fd00::/8"] {
         assert!(
             HttpOidc::new(
+                fixture_clock::clock(),
                 vec![],
                 vec![grant("https://idp.example.test/realm", &[cidr])],
                 transport_policy(),
@@ -125,6 +119,7 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
     let duplicate = || grant("https://idp.example.test/realm", &["10.0.0.0/8"]);
     assert!(
         HttpOidc::new(
+            fixture_clock::clock(),
             vec![],
             vec![duplicate(), duplicate()],
             transport_policy(),
@@ -134,6 +129,7 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
     );
     assert!(
         HttpOidc::new(
+            fixture_clock::clock(),
             vec![],
             (0..1025)
                 .map(|i| grant(&format!("https://idp{i}.example.test"), &["10.0.0.0/8"]))
@@ -145,6 +141,7 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
     );
     assert!(
         HttpOidc::new(
+            fixture_clock::clock(),
             vec![],
             vec![grant("http://idp.example.test", &["10.0.0.0/8"])],
             transport_policy(),
@@ -154,10 +151,7 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
     );
 }
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn transport_policy() -> rss_identity_oidc::TransportPolicy {
     rss_identity_oidc::TransportPolicy::new(
         std::time::Duration::from_secs(5),

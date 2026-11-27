@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -33,11 +33,10 @@ impl JwksCachePolicy {
         max_tenants: std::num::NonZeroUsize,
         refresh_cooldown: Duration,
     ) -> Result<Self, FederationError> {
-        let now = Instant::now();
         if ttl.is_zero()
             || refresh_cooldown.is_zero()
-            || now.checked_add(ttl).is_none()
-            || now.checked_add(refresh_cooldown).is_none()
+            || ttl == Duration::MAX
+            || refresh_cooldown == Duration::MAX
         {
             return Err(FederationError::Configuration);
         }
@@ -54,6 +53,7 @@ struct Cached {
 }
 /// Vetted Microsoft transport and a bounded, short-lived public-key cache.
 pub struct HttpEntra {
+    clock: crate::ProviderClock,
     policy: crate::TransportPolicy,
     cache: JwksCachePolicy,
     max_token_bytes: usize,
@@ -65,13 +65,15 @@ pub struct HttpEntra {
 impl HttpEntra {
     /// Construct the production Microsoft-only verifier; no private-network bypass.
     pub fn new(
+        clock: crate::ProviderClock,
         policy: crate::TransportPolicy,
         max_token_bytes: usize,
         cache: JwksCachePolicy,
     ) -> Result<Self, FederationError> {
-        Self::build(false, policy, max_token_bytes, cache)
+        Self::build(clock, false, policy, max_token_bytes, cache)
     }
     fn build(
+        clock: crate::ProviderClock,
         loopback: bool,
         policy: crate::TransportPolicy,
         max_token_bytes: usize,
@@ -81,6 +83,7 @@ impl HttpEntra {
             return Err(FederationError::Configuration);
         }
         Ok(Self {
+            clock,
             policy,
             cache,
             max_token_bytes,
@@ -103,6 +106,7 @@ impl HttpEntra {
     /// Explicit loopback JWKS fixture. Production configuration cannot select this transport.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_loopback_test(
+        clock: crate::ProviderClock,
         jwks: String,
         policy: crate::TransportPolicy,
         max_token_bytes: usize,
@@ -121,7 +125,7 @@ impl HttpEntra {
         {
             return Err(FederationError::Configuration);
         }
-        let mut verifier = Self::build(true, policy, max_token_bytes, cache)?;
+        let mut verifier = Self::build(clock, true, policy, max_token_bytes, cache)?;
         verifier.fixture = Some(jwks);
         Ok(verifier)
     }
@@ -133,30 +137,16 @@ impl HttpEntra {
     ) -> Result<DecodingKey, FederationError> {
         let entry = {
             let mut entries = self.keys.lock().await;
-            entries.retain(|_, entry| {
-                Arc::strong_count(entry) > 1
-                    || entry.try_lock().map_or(true, |entry| {
-                        let now = Instant::now();
-                        entry.next_fetch_at > now
-                            || entry.cached.as_ref().is_some_and(|v| v.until > now)
-                    })
-            });
-            if !entries.contains_key(&p.tenant) && entries.len() >= self.cache.max_tenants.get() {
-                return Err(FederationError::Unavailable);
-            }
-            entries
-                .entry(p.tenant)
-                .or_insert_with(|| {
-                    Arc::new(tokio::sync::Mutex::new(Entry {
-                        cached: None,
-                        next_fetch_at: Instant::now(),
-                    }))
-                })
-                .clone()
+            select_tenant(
+                &mut entries,
+                p.tenant,
+                self.clock.now(),
+                self.cache.max_tenants,
+            )?
         };
         // Coalesce only this tenant's misses; no network awaits under the shared map lock.
         let mut entry = entry.lock().await;
-        let now = Instant::now();
+        let now = self.clock.now();
         if let Some(cached) = &entry.cached
             && cached.until > now
             && let Some(key) = select_key(&cached.keys, p, kid)?
@@ -180,7 +170,7 @@ impl HttpEntra {
             let mut response = self
                 .http
                 .get(endpoint)
-                .timeout(crate::remaining(deadline)?.min(self.policy.request_timeout))
+                .timeout(crate::remaining(&self.clock, deadline)?.min(self.policy.request_timeout))
                 .send()
                 .await
                 .map_err(|_| FederationError::Unavailable)?;
@@ -209,7 +199,9 @@ impl HttpEntra {
             }
             let selected = select_key(keys, p, kid)?;
             entry.cached = Some(Cached {
-                until: Instant::now()
+                until: self
+                    .clock
+                    .now()
                     .checked_add(self.cache.ttl)
                     .ok_or(FederationError::Configuration)?,
                 keys: keys.clone(),
@@ -277,78 +269,119 @@ impl EntraTokenVerifier for HttpEntra {
         deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, EntraTokenClaims> {
         Box::pin(async move {
-            crate::remaining(deadline)?;
-            tokio::time::timeout_at(deadline.instant().into(), async move {
-                p.validate()?;
-                if token.is_empty() || token.len() > self.max_token_bytes {
-                    return Err(FederationError::Claims);
-                }
-                let header = decode_header(&token).map_err(|_| FederationError::Claims)?;
-                if header.alg != Algorithm::RS256 {
-                    return Err(FederationError::Claims);
-                }
-                let kid = header
-                    .kid
-                    .filter(|s| !s.is_empty() && s.len() <= 256)
-                    .ok_or(FederationError::Claims)?;
-                let key = self.key(p, &kid, deadline).await?;
-                let mut validation = Validation::new(Algorithm::RS256);
-                validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud"]);
-                validation.set_audience(&[p.app_id.to_string()]);
-                validation.set_issuer(&[p.issuer()]);
-                validation.validate_nbf = true;
-                validation.leeway = 0;
-                let c = decode::<Claims>(&token, &key, &validation)
-                    .map_err(|_| FederationError::Claims)?
-                    .claims;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| FederationError::Unavailable)?
-                    .as_secs() as i64;
-                if c.ver != "2.0"
-                    || c.idtyp != "user"
-                    || c.tid != p.tenant
-                    || c.aud != p.app_id
-                    || c.oid.is_nil()
-                    || !p.authorized_clients.contains(&c.azp)
-                    || c.iat > now
-                    || c.nbf > now
-                    || c.exp <= now
-                {
-                    return Err(FederationError::Claims);
-                }
-                let scopes: Vec<_> = c
-                    .scp
-                    .as_deref()
-                    .unwrap_or("")
-                    .split_ascii_whitespace()
-                    .collect();
-                if p.required_scopes
-                    .iter()
-                    .any(|s| !scopes.contains(&s.as_str()))
-                {
-                    return Err(FederationError::Claims);
-                }
-                let device = match c.extra.get(&p.device_claim) {
-                    None => None,
-                    Some(serde_json::Value::String(v)) => {
-                        Some(Uuid::parse_str(v).map_err(|_| FederationError::Claims)?)
+            crate::remaining(&self.clock, deadline)?;
+            self.clock
+                .until(deadline, async move {
+                    p.validate()?;
+                    if token.is_empty() || token.len() > self.max_token_bytes {
+                        return Err(FederationError::Claims);
                     }
-                    _ => return Err(FederationError::Claims),
-                };
-                let result = EntraTokenClaims {
-                    tenant: c.tid,
-                    user: c.oid,
-                    device,
-                    issued_at: c.iat,
-                    expires_at: c.exp,
-                };
-                result.validate(p)?;
-                crate::remaining(deadline)?;
-                Ok(result)
-            })
-            .await
-            .map_err(|_| FederationError::Unavailable)?
+                    let header = decode_header(&token).map_err(|_| FederationError::Claims)?;
+                    if header.alg != Algorithm::RS256 {
+                        return Err(FederationError::Claims);
+                    }
+                    let kid = header
+                        .kid
+                        .filter(|s| !s.is_empty() && s.len() <= 256)
+                        .ok_or(FederationError::Claims)?;
+                    let key = self.key(p, &kid, deadline).await?;
+                    let result = verify_signed_claims(p, &token, &key, (self.clock.wall)())?;
+                    crate::remaining(&self.clock, deadline)?;
+                    Ok(result)
+                })
+                .await
+                .map_err(|_| FederationError::Unavailable)?
         })
     }
 }
+
+fn verify_signed_claims(
+    p: &EntraTokenProfile,
+    token: &str,
+    key: &DecodingKey,
+    observed: std::time::SystemTime,
+) -> Result<EntraTokenClaims, FederationError> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud"]);
+    validation.set_audience(&[p.app_id.to_string()]);
+    validation.set_issuer(&[p.issuer()]);
+    validation.validate_nbf = true;
+    validation.leeway = 0;
+    let c = decode::<Claims>(token, key, &validation)
+        .map_err(|_| FederationError::Claims)?
+        .claims;
+    let now = observed
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| FederationError::Unavailable)?
+        .as_secs() as i64;
+    if c.ver != "2.0"
+        || c.idtyp != "user"
+        || c.tid != p.tenant
+        || c.aud != p.app_id
+        || c.oid.is_nil()
+        || !p.authorized_clients.contains(&c.azp)
+        || c.iat > now
+        || c.nbf > now
+        || c.exp <= now
+    {
+        return Err(FederationError::Claims);
+    }
+    let scopes: Vec<_> = c
+        .scp
+        .as_deref()
+        .unwrap_or("")
+        .split_ascii_whitespace()
+        .collect();
+    if p.required_scopes
+        .iter()
+        .any(|s| !scopes.contains(&s.as_str()))
+    {
+        return Err(FederationError::Claims);
+    }
+    let device = match c.extra.get(&p.device_claim) {
+        None => None,
+        Some(serde_json::Value::String(v)) => {
+            Some(Uuid::parse_str(v).map_err(|_| FederationError::Claims)?)
+        }
+        _ => return Err(FederationError::Claims),
+    };
+    let result = EntraTokenClaims {
+        tenant: c.tid,
+        user: c.oid,
+        device,
+        issued_at: c.iat,
+        expires_at: c.exp,
+    };
+    result.validate(p)?;
+
+    Ok(result)
+}
+
+fn select_tenant(
+    entries: &mut BTreeMap<Uuid, TenantKeys>,
+    tenant: Uuid,
+    now: Instant,
+    max_tenants: std::num::NonZeroUsize,
+) -> Result<TenantKeys, FederationError> {
+    entries.retain(|_, entry| {
+        Arc::strong_count(entry) > 1
+            || entry.try_lock().map_or(true, |entry| {
+                entry.next_fetch_at > now || entry.cached.as_ref().is_some_and(|v| v.until > now)
+            })
+    });
+    if !entries.contains_key(&tenant) && entries.len() >= max_tenants.get() {
+        return Err(FederationError::Unavailable);
+    }
+    Ok(entries
+        .entry(tenant)
+        .or_insert_with(|| {
+            Arc::new(tokio::sync::Mutex::new(Entry {
+                cached: None,
+                next_fetch_at: now,
+            }))
+        })
+        .clone())
+}
+
+#[cfg(test)]
+mod tests;

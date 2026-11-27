@@ -229,7 +229,7 @@ impl Document {
         let stage = kind.stage();
         self.check()?;
         t.channel.check()?;
-        super::left(t.deadline, stage)?;
+        super::left(&t.channel.clock, t.deadline, stage)?;
         let flight = {
             let mut state = self
                 .state
@@ -284,12 +284,15 @@ impl Document {
                 work
             }
         };
-        let result = tokio::time::timeout_at(t.deadline.instant().into(), flight)
+        let result = t
+            .channel
+            .clock
+            .until(t.deadline, flight)
             .await
             .map_err(|_| failure(stage, ProviderReason::Timeout))??;
         self.check()?;
         t.channel.check()?;
-        super::left(t.deadline, stage)?;
+        super::left(&t.channel.clock, t.deadline, stage)?;
         let Some(result) = result else {
             return Ok(None);
         };
@@ -305,12 +308,12 @@ impl Document {
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
-            let own = tokio::time::timeout_at(
-                t.deadline.instant().into(),
-                private.fetch(resources, &t.channel, kind),
-            )
-            .await
-            .map_err(|_| failure(stage, ProviderReason::Timeout))??;
+            let own = t
+                .channel
+                .clock
+                .until(t.deadline, private.fetch(resources, &t.channel, kind))
+                .await
+                .map_err(|_| failure(stage, ProviderReason::Timeout))??;
             self.check()?;
             t.channel.check()?;
             return Ok(own.map(|r| (r.value.clone(), false)));
@@ -341,7 +344,7 @@ impl Document {
             }
         }
         self.check()?;
-        let started = Instant::now();
+        let started = channel.clock.now();
         let cutoff = started
             .checked_add(channel.policy.request_timeout)
             .ok_or(FederationError::Configuration)?;
@@ -440,8 +443,8 @@ impl Document {
         let ttl = freshness.remaining(
             &parts.headers,
             cap,
-            started.elapsed(),
-            std::time::SystemTime::now(),
+            channel.clock.now().saturating_duration_since(started),
+            (channel.clock.wall)(),
         );
         if let Some(old) = &state.cached {
             retire_changed_keys(&old.value, value.keys.as_ref());

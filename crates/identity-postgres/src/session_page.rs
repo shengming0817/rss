@@ -6,13 +6,11 @@ use crate::{
     transaction::corrupt,
 };
 use rss_identity_core::{SessionId, facts::FactSource};
+use rss_request_context::Clock;
 use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row, postgres::PgRow};
-use std::{
-    collections::{HashMap, HashSet},
-    time::Instant,
-};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 struct CurrentOrigin {
@@ -84,7 +82,7 @@ async fn current_platform(
 ) -> Result<bool, PgError> {
     let stored: PlatformAuthentication =
         serde_json::from_value(row.try_get("platform_authentication")?).map_err(|_| corrupt())?;
-    let verifier = stored.verifier(actor.key, actor.authority, &actor.session_checks)?;
+    let verifier = stored.verifier(actor.key, actor.authority.as_uuid(), &actor.session_checks)?;
     let valid = match checked.entry(stored.binding.clone()) {
         std::collections::hash_map::Entry::Occupied(hit) => *hit.get(),
         std::collections::hash_map::Entry::Vacant(slot) => {
@@ -132,7 +130,7 @@ pub(crate) async fn read(
         scanned = Some(id);
         let lifetime = session_storage::lifetime(&row)?;
         let expires = loaded.sample.deadline(lifetime.idle_expires_at())?;
-        if Instant::now() >= expires {
+        if actor.session_checks.timer.now() >= expires {
             continue;
         }
         let valid = match row.try_get::<&str, _>("authentication_source")? {
@@ -152,7 +150,7 @@ pub(crate) async fn read(
         }
     }
     // A later verifier may have waited on an authoritative host lock.
-    let finished = Instant::now();
+    let finished = actor.session_checks.timer.now();
     let sessions = accepted
         .into_iter()
         .filter_map(|(view, expires)| (finished < expires).then_some(view))

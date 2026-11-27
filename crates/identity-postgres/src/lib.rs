@@ -7,13 +7,11 @@ mod department;
 mod entra;
 mod password_attempts;
 pub use entra::{EntraAuthority, RevalidatedAccount, VerifiedExternalSubject};
-mod session_checks;
-#[cfg(feature = "test-support")]
-pub use session_checks::ControlledFactTime;
 mod account_directory;
 mod directory_window;
 mod federation;
 mod federation_state;
+mod session_checks;
 pub use federation_state::StateSigner;
 pub(crate) use federation_state::{Purpose, StateLocator};
 mod federation_link;
@@ -62,8 +60,9 @@ use rss_identity_core::{
     account::{AccountChange, AccountKey, AccountState},
     session::SessionPolicy,
 };
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
-use rss_transactional_messaging::{fence::ExecutionBinding, policy::OperationDeadline};
+use rss_transactional_messaging::fence::ExecutionBinding;
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
     MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_VERSION, grant_personnel_fact_read,
@@ -199,7 +198,7 @@ impl Authority {
         config: AuthorityConfig,
         probe: ExecutionBinding,
         policy: Arc<dyn ManagementPolicy>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Self, AuthorityError> {
         Self::connect(
             runtime,
@@ -217,7 +216,7 @@ impl Authority {
         kdf: Arc<rss_identity_core::account::PasswordKdf>,
         config: AuthorityConfig,
         probe: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Self, AuthorityError> {
         Self::connect(
             runtime,
@@ -237,15 +236,15 @@ impl Authority {
         probe: ExecutionBinding,
         profile: AuthorityProfile,
         policy: Arc<dyn ManagementPolicy>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Self, AuthorityError> {
-        let budget = Budget::new(deadline)?;
+        let budget = Budget::new(deadline, runtime.execution_timer())?;
         let instance = config.instance;
         let authority = Self {
             enterprise: config.enterprise,
             session_checks: session_checks::SessionChecks {
                 platform: config.platform,
-                ..Default::default()
+                timer: runtime.execution_timer().clone(),
             },
             kdf,
             runtime: Arc::new(runtime::RuntimeBundle {
@@ -270,7 +269,7 @@ impl Authority {
         let valid = Self::read_bundle(
             authority.runtime.clone(),
             probe,
-            budget.remaining(),
+            budget.cutoff,
             false,
             move |tx| {
                 Box::pin(async move {
@@ -287,6 +286,13 @@ impl Authority {
         .await;
         check_probe(valid)?;
         Ok(authority)
+    }
+    /// Observe the host timer used by the fenced PG runtime.
+    pub fn execution_timer(&self) -> &rss_request_context::SharedExecutionTimer {
+        self.runtime.runtime.execution_timer()
+    }
+    fn budget(&self, deadline: rss_request_context::Deadline) -> Result<Budget, AuthorityError> {
+        Budget::new(deadline, self.execution_timer())
     }
     pub fn instance(&self) -> InstanceId {
         self.instance
@@ -319,10 +325,7 @@ fn check_probe(result: Result<Option<String>, AuthorityError>) -> Result<(), Aut
 mod tests {
     use super::*;
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn probe_preserves_settlement_and_retry_class() {
         for reason in [
             StorageFailure::Transient,
@@ -383,3 +386,6 @@ pub use webauthn::{
     RegistrationAuthorization, RpGeneration, WebauthnAuthority, WebauthnChallenge,
     WebauthnCredentialView, activate_webauthn_rp_on, webauthn_management_context,
 };
+
+#[cfg(test)]
+mod test_time;

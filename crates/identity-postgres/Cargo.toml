@@ -4,8 +4,6 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
-[features]
-test-support = []
 [dependencies]
 hmac = "0.12"
 base64 = "0.22"

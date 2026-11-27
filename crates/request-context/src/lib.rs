@@ -128,6 +128,42 @@ pub trait ExecutionTimer: Clock {
     fn sleep_until(&self, deadline: Deadline) -> impl Future<Output = ()> + Send;
 }
 
+/// Cloneable handle to the host timer. Clones observe and wait in the same time domain.
+#[derive(Clone)]
+pub struct SharedExecutionTimer(std::sync::Arc<dyn TimerHandle>);
+trait TimerHandle: Send + Sync {
+    fn observe(&self) -> Instant;
+    fn wait(&self, deadline: Deadline) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+impl<T: ExecutionTimer> TimerHandle for T {
+    fn observe(&self) -> Instant {
+        Clock::now(self)
+    }
+    fn wait(&self, deadline: Deadline) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(self.sleep_until(deadline))
+    }
+}
+impl SharedExecutionTimer {
+    pub fn new(timer: impl ExecutionTimer + 'static) -> Self {
+        Self(std::sync::Arc::new(timer))
+    }
+}
+impl Clock for SharedExecutionTimer {
+    fn now(&self) -> Instant {
+        self.0.observe()
+    }
+}
+impl ExecutionTimer for SharedExecutionTimer {
+    fn sleep_until(&self, deadline: Deadline) -> impl Future<Output = ()> + Send {
+        self.0.wait(deadline)
+    }
+}
+impl fmt::Debug for SharedExecutionTimer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SharedExecutionTimer")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("deadline exceeds the monotonic time range")]
 pub struct DeadlineOverflow;

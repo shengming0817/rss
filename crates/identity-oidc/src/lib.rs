@@ -26,6 +26,35 @@ use std::{
     time::Duration,
 };
 use zeroize::Zeroizing;
+/// Host time sources for request execution and upstream HTTP cache age.
+#[derive(Clone)]
+pub struct ProviderClock {
+    timer: rss_request_context::SharedExecutionTimer,
+    wall: std::sync::Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>,
+}
+impl ProviderClock {
+    /// Use the same execution timer as the host. HTTP Date and Expires use civil time.
+    pub fn new(
+        timer: rss_request_context::SharedExecutionTimer,
+        wall: impl Fn() -> std::time::SystemTime + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            timer,
+            wall: std::sync::Arc::new(wall),
+        }
+    }
+    fn now(&self) -> std::time::Instant {
+        rss_request_context::Clock::now(&self.timer)
+    }
+    async fn until<F: std::future::Future>(
+        &self,
+        cutoff: rss_request_context::Deadline,
+        future: F,
+    ) -> Result<F::Output, ()> {
+        use rss_request_context::ExecutionTimer;
+        tokio::select! { biased; _=self.timer.sleep_until(cutoff)=>Err(()),result=future=>Ok(result) }
+    }
+}
 /// Host-selected finite upstream time and document budgets.
 #[derive(Clone, Copy, Debug)]
 pub struct TransportPolicy {
@@ -42,11 +71,10 @@ impl TransportPolicy {
         max_response_bytes: usize,
         max_jwks_keys: usize,
     ) -> Result<Self, FederationError> {
-        let now = std::time::Instant::now();
         if request_timeout.is_zero()
             || connect_timeout.is_zero()
-            || now.checked_add(request_timeout).is_none()
-            || now.checked_add(connect_timeout).is_none()
+            || request_timeout == Duration::MAX
+            || connect_timeout == Duration::MAX
             || max_response_bytes == 0
             || max_jwks_keys == 0
         {
@@ -60,15 +88,19 @@ impl TransportPolicy {
         })
     }
 }
-fn remaining(deadline: rss_request_context::Deadline) -> Result<Duration, FederationError> {
-    left(deadline, ProviderStage::Exchange)
+fn remaining(
+    clock: &ProviderClock,
+    deadline: rss_request_context::Deadline,
+) -> Result<Duration, FederationError> {
+    left(clock, deadline, ProviderStage::Exchange)
 }
 fn left(
+    clock: &ProviderClock,
     deadline: rss_request_context::Deadline,
     stage: ProviderStage,
 ) -> Result<Duration, FederationError> {
     deadline
-        .remaining(std::time::Instant::now())
+        .remaining(clock.now())
         .filter(|d| !d.is_zero())
         .ok_or_else(|| failure(stage, ProviderReason::Timeout))
 }
@@ -129,23 +161,26 @@ impl HttpOidc {
     /// Production uses HTTPS and vetted public or explicitly authorized private addresses.
     /// Every DNS answer is checked against the current tenant/issuer/client permission.
     pub fn new(
+        clock: ProviderClock,
         profiles: Vec<TrustedAssuranceProfile>,
         private_access: Vec<PrivateProviderAccess>,
         policy: TransportPolicy,
         reuse: ReusePolicy,
     ) -> Result<Self, FederationError> {
-        Self::build(profiles, private_access, false, policy, reuse)
+        Self::build(clock, profiles, private_access, false, policy, reuse)
     }
     /// Explicit loopback protocol fixture.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_loopback_test(
+        clock: ProviderClock,
         profiles: Vec<TrustedAssuranceProfile>,
         policy: TransportPolicy,
         reuse: ReusePolicy,
     ) -> Result<Self, FederationError> {
-        Self::build(profiles, vec![], true, policy, reuse)
+        Self::build(clock, profiles, vec![], true, policy, reuse)
     }
     fn build(
+        clock: ProviderClock,
         profiles: Vec<TrustedAssuranceProfile>,
         private_access: Vec<PrivateProviderAccess>,
         loopback: bool,
@@ -199,7 +234,7 @@ impl HttpOidc {
         }
         Ok(Self {
             bindings,
-            resources: Resources::new(reuse)?,
+            resources: Resources::new(reuse, clock)?,
             revisions: ProviderRevisions::new(
                 reuse.max_providers.saturating_add(reuse.max_refreshes),
             ),
@@ -247,7 +282,7 @@ impl HttpOidc {
         deadline: rss_request_context::Deadline,
         probe: bool,
     ) -> Result<Transport, FederationError> {
-        left(deadline, ProviderStage::Binding)?;
+        left(&self.resources.clock, deadline, ProviderStage::Binding)?;
         let c = provider.settings();
         let cidrs = self.private_for(
             provider.revision().tenant,
@@ -288,6 +323,7 @@ impl HttpOidc {
         };
         Ok(Transport {
             channel: Channel {
+                clock: self.resources.clock.clone(),
                 policy: self.policy,
                 http,
                 origin,
@@ -401,7 +437,7 @@ struct Transport {
 impl Transport {
     fn charge(&self, stage: ProviderStage) -> Result<(), FederationError> {
         self.channel.check()?;
-        left(self.deadline, stage)?;
+        left(&self.channel.clock, self.deadline, stage)?;
         // Discovery, token POST, JWKS, and one directed key refresh.
         self.requests
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -421,6 +457,7 @@ impl Transport {
 }
 #[derive(Clone)]
 struct Channel {
+    clock: ProviderClock,
     policy: TransportPolicy,
     http: Arc<ClientPool>,
     origin: String,
@@ -465,6 +502,7 @@ impl Channel {
         tokio::select! {
             biased;
             _ = self.installed.retired() => Err(FederationError::StaleConfiguration),
+            _ = rss_request_context::ExecutionTimer::sleep_until(&self.clock.timer,deadline) => Err(failure(stage,ProviderReason::Timeout)),
             result = self.execute(stage, deadline, request) => result,
         }
     }
@@ -486,7 +524,8 @@ impl Channel {
         let mut request: reqwest::Request = request
             .try_into()
             .map_err(|_| failure(stage, ProviderReason::InvalidResponse))?;
-        *request.timeout_mut() = Some(left(deadline, stage)?.min(self.policy.request_timeout));
+        *request.timeout_mut() =
+            Some(left(&self.clock, deadline, stage)?.min(self.policy.request_timeout));
         let mut response = self
             .http
             .http
@@ -602,7 +641,7 @@ impl UpstreamOidc for HttpOidc {
             }
             let url = url.into();
             transport.channel.check()?;
-            remaining(deadline)?;
+            remaining(&self.resources.clock, deadline)?;
             Ok(url)
         })
     }
@@ -651,6 +690,7 @@ impl UpstreamOidc for HttpOidc {
                 &m.nonce,
                 c.client_id().as_str(),
                 self.future_skew_seconds,
+                (self.resources.clock.wall)(),
             )?;
             let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
 
@@ -681,7 +721,7 @@ impl UpstreamOidc for HttpOidc {
             value.validate()?;
             transport.channel.check()?;
 
-            remaining(deadline)?;
+            remaining(&self.resources.clock, deadline)?;
             Ok(value)
         })
     }
@@ -713,7 +753,7 @@ impl UpstreamOidc for HttpOidc {
                     ProviderReason::IssuerResponseUnsupported,
                 ));
             }
-            remaining(deadline)?;
+            remaining(&self.resources.clock, deadline)?;
             Ok(ConnectionReport {
                 checks: vec![
                     ProviderStage::Binding,

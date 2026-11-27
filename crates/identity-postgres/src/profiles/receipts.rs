@@ -1,5 +1,6 @@
 //! Admission, replay and physical reclamation share the tenant-serialized Profile write.
 use super::*;
+use rss_request_context::Clock;
 use transaction::MutationError;
 
 const FIRST_USE_MS: i64 = 5 * 60 * 1000;
@@ -75,7 +76,7 @@ impl Authority {
         actor: AuthenticatedSession,
         target: AccountKey,
         change: ProfileChange,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProfileReceipt, AuthorityError> {
         self.require_runtime()?;
         let after = change
@@ -94,9 +95,9 @@ impl Authority {
         let capacity = i64::from(self.profile_receipt_capacity.get());
         let policy = self.policy.clone();
         let instance = self.instance;
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
-        self.conditional_write_sql(actor.binding, budget.remaining(), move |c| Box::pin(async move {
+        let mut budget = self.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
+        self.conditional_write_sql(actor.binding, budget.cutoff, move |c| Box::pin(async move {
             let loaded = crate::session_storage::recheck_for(c, &actor, crate::session_storage::SessionAccess::ProfileWrite(target)).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
@@ -104,7 +105,7 @@ impl Authority {
                 return Err(reject().into());
             }
             let clock = ReceiptClock::load(c, target.tenant).await?;
-            if Instant::now() >= loaded.expires { return Err(reject().into()); }
+            if loaded.timer.now() >= loaded.expires { return Err(reject().into()); }
             let id = change.operation_id;
             if let Some(row) = sqlx::query(
                 include_str!("replay_receipt.sql"),
@@ -147,7 +148,7 @@ impl Authority {
                          VALUES($1::uuid,$2,$3,$4,$5,$6,$7)")
                 .bind(target.tenant.to_string()).bind(id.as_uuid()).bind(target.principal.as_uuid())
                 .bind(actor.key.principal.as_uuid()).bind(digest.as_slice()).bind(revision).bind(clock.0).execute(c).await?;
-            if Instant::now() >= loaded.expires {return Err(reject().into());}
+            if loaded.timer.now() >= loaded.expires {return Err(reject().into());}
             Ok((Ok(ProfileReceipt { operation_id: id, revision }), vec![event(target, Some(actor.key),
                 "local_updated", ProfileSource::IdentityLocal, None, Some(revision), changed_fields)]))
         })).await?
@@ -158,7 +159,7 @@ impl Authority {
         actor: &AuthenticatedSession,
         target: AccountKey,
         operation: ProfileOperationId,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Option<ProfileReceipt>, AuthorityError> {
         self.require_runtime()?;
         let reader = Reader::new(actor)?;
@@ -172,7 +173,7 @@ impl Authority {
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
             let clock = ReceiptClock::load(c, target.tenant).await?;
-            if Instant::now() >= loaded.expires { return Err(reject().into()); }
+            if loaded.timer.now() >= loaded.expires { return Err(reject().into()); }
             let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM identity_authority.profile_operations
                 WHERE tenant_id=$1::uuid AND principal_id=$2 AND actor=$3 AND operation_id=$4 AND accepted_at_ms>$5")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(reader.key.principal.as_uuid())
@@ -192,10 +193,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn first_use_boundaries_and_uuid_variant_are_exact() {
         let ms = 1_800_000_000_000;
         let uuid = Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, 0));

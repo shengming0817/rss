@@ -5,6 +5,10 @@ use rss_identity_web_credentials::{
 };
 use std::time::Duration;
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "test fixture and ordered assertions"
+)]
 pub async fn run(f: &Fixture) -> anyhow::Result<()> {
     let issued = f.login().await?;
     let config = HttpConfig::new("https://host.example.test", Duration::from_secs(10))?;

@@ -1,6 +1,6 @@
 //! Native Entra personnel proofs. Never issues a browser session or device permission.
 use crate::{
-    Authority, AuthorityError, Budget,
+    Authority, AuthorityError,
     federation::{Action, event},
     federation_storage as db, storage,
     transaction::reject,
@@ -11,9 +11,10 @@ use rss_identity_core::{
     entra::{EntraTokenClaims, EntraTokenProfile, EntraTokenVerifier, SubjectMapping},
     federation::{FederationError, ProviderId, ProviderView},
 };
+use rss_request_context::Clock;
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::fence::ExecutionBinding;
-use rss_transactional_messaging::policy::OperationDeadline;
 use sqlx::Row;
 use std::{
     sync::Arc,
@@ -37,6 +38,7 @@ pub struct EntraAuthority {
 /// fn bypass() { let _ = rss_identity_postgres::VerifiedExternalSubject {}; }
 /// ```
 pub struct VerifiedExternalSubject {
+    timer: rss_request_context::SharedExecutionTimer,
     binding: ExecutionBinding,
     instance: InstanceId,
     tenant: TenantId,
@@ -53,7 +55,7 @@ impl VerifiedExternalSubject {
         Ok(&self.claims)
     }
     pub fn check_live(&self) -> Result<(), AuthorityError> {
-        if Instant::now() >= self.expires {
+        if self.timer.now() >= self.expires {
             Err(AuthorityError::Rejected)
         } else {
             Ok(())
@@ -110,18 +112,18 @@ impl EntraAuthority {
         &self,
         binding: ExecutionBinding,
         token: Zeroizing<String>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<VerifiedExternalSubject, AuthorityError> {
         if binding.tenant() != self.tenant {
             return Err(AuthorityError::Rejected);
         }
-        let budget = Budget::new(deadline)?;
+        let budget = self.authority.budget(deadline)?;
         let tenant = self.tenant;
         let provider = self.provider;
         let profile = self.profile.clone();
         let view = self
             .authority
-            .read_sql(binding, budget.remaining(), move |c| {
+            .read_sql(binding, budget.cutoff, move |c| {
                 Box::pin(async move {
                     storage::lock_tenant_collection(c, tenant).await?;
                     let view = db::provider(c, tenant, provider).await?;
@@ -130,18 +132,19 @@ impl EntraAuthority {
                 })
             })
             .await?;
-        let claims = tokio::time::timeout(
-            budget.remaining().timeout(),
-            self.verifier.verify(&self.profile, token, budget.0),
-        )
-        .await
-        .map_err(|_| AuthorityError::DeadlineElapsed)??;
+        let claims = budget
+            .wait(
+                budget.cutoff,
+                self.verifier.verify(&self.profile, token, budget.cutoff),
+            )
+            .await
+            .map_err(|_| AuthorityError::DeadlineElapsed)??;
         claims.validate(&self.profile)?;
         let tenant = self.tenant;
-        let sampled = Instant::now();
+        let sampled = self.authority.execution_timer().now();
         let now_ms: i64 = self
             .authority
-            .read_sql(binding, budget.remaining(), |c| {
+            .read_sql(binding, budget.cutoff, |c| {
                 Box::pin(async move {
                     Ok(sqlx::query_scalar(
                         "SELECT ceil(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
@@ -158,8 +161,9 @@ impl EntraAuthority {
         {
             return Err(AuthorityError::Rejected);
         }
-        let expires = proof_expiry(claims.expires_at, now_ms, sampled, budget.0.instant())?;
+        let expires = proof_expiry(claims.expires_at, now_ms, sampled, budget.cutoff.instant())?;
         let proof = VerifiedExternalSubject {
+            timer: self.authority.execution_timer().clone(),
             binding,
             instance: self.authority.instance(),
             tenant,
@@ -177,13 +181,13 @@ impl EntraAuthority {
     pub async fn resolve(
         &self,
         subject: VerifiedExternalSubject,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<RevalidatedAccount, AuthorityError> {
         self.bound(&subject)?;
         let binding = subject.binding;
-        let budget = Budget::new(deadline)?;
+        let budget = self.authority.budget(deadline)?;
         let tenant = self.tenant;
-        let result = self.authority.conditional_write_sql(binding, budget.remaining(), move |c| Box::pin(async move {
+        let result = self.authority.conditional_write_sql(binding, budget.cutoff, move |c| Box::pin(async move {
             subject.check_live().map_err(|_| reject())?;
             storage::lock_tenant_collection(c, tenant).await?;
             let view = db::provider(c, tenant, subject.provider).await?;
@@ -217,7 +221,7 @@ impl EntraAuthority {
     pub async fn recheck(
         &self,
         proof: RevalidatedAccount,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<RevalidatedAccount, AuthorityError> {
         self.bound(&proof.subject)?;
         let binding = proof.subject.binding;
@@ -289,7 +293,7 @@ mod tests {
     #[allow(
         clippy::disallowed_methods,
         clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        reason = "test fixture"
     )]
     fn proof_conversion_deducts_fractional_seconds_and_settlement_latency() {
         let sampled = Instant::now();

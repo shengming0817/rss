@@ -10,10 +10,7 @@ fn snapshot() -> Value {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn complete_tree_preserves_exact_ids_revision_and_explicit_unassigned() {
     let value = snapshot();
     let parsed: DepartmentSnapshot = serde_json::from_value(value.clone()).unwrap();
@@ -32,10 +29,7 @@ fn complete_tree_preserves_exact_ids_revision_and_explicit_unassigned() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn rejects_incomplete_ambiguous_and_unversioned_assertions() {
     let base = snapshot();
     let mut invalid = vec![json!(null), json!("engineering"), json!([])];

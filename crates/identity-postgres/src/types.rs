@@ -1,10 +1,11 @@
 use rss_identity_core::account::{AccountKey, AccountState, PasswordError};
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_request_context::Deadline;
 use std::time::Instant;
 use uuid::Uuid;
 
 /// Internal password verification evidence.
 pub(crate) struct AuthenticationCandidate {
+    pub(crate) timer: rss_request_context::SharedExecutionTimer,
     pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
     pub(crate) state: AccountState,
     pub(crate) authority: Uuid,
@@ -122,28 +123,41 @@ impl From<PasswordError> for AuthorityError {
     }
 }
 
-pub(crate) struct Budget(pub rss_request_context::Deadline);
+pub(crate) struct Budget {
+    pub cutoff: Deadline,
+    pub(crate) timer: rss_request_context::SharedExecutionTimer,
+}
 impl Budget {
-    pub fn new(deadline: OperationDeadline) -> Result<Self, AuthorityError> {
-        if deadline.timeout().is_zero() {
+    pub fn new(
+        cutoff: Deadline,
+        timer: &rss_request_context::SharedExecutionTimer,
+    ) -> Result<Self, AuthorityError> {
+        use rss_request_context::Clock;
+        if cutoff.is_expired(timer.now()) {
             return Err(AuthorityError::DeadlineElapsed);
         }
-        Instant::now()
-            .checked_add(deadline.timeout())
-            .map(|at| Self(rss_request_context::Deadline::at(at)))
-            .ok_or(AuthorityError::InvalidInput)
+        Ok(Self {
+            cutoff,
+            timer: timer.clone(),
+        })
     }
-    pub fn remaining(&self) -> OperationDeadline {
-        OperationDeadline::from_remaining(self.0.remaining(Instant::now()).unwrap_or_default())
+    pub fn time_left(&self) -> std::time::Duration {
+        use rss_request_context::Clock;
+        self.cutoff.remaining(self.timer.now()).unwrap_or_default()
+    }
+    pub async fn wait<F: std::future::Future>(
+        &self,
+        cutoff: Deadline,
+        future: F,
+    ) -> Result<F::Output, AuthorityError> {
+        use rss_request_context::ExecutionTimer;
+        tokio::select! { biased; _=self.timer.sleep_until(cutoff)=>Err(AuthorityError::DeadlineElapsed), value=future=>Ok(value) }
     }
     pub async fn password<T>(
         &self,
         future: impl std::future::Future<Output = Result<T, PasswordError>>,
     ) -> Result<T, AuthorityError> {
-        tokio::time::timeout_at(self.0.instant().into(), future)
-            .await
-            .map_err(|_| AuthorityError::DeadlineElapsed)?
-            .map_err(Into::into)
+        self.wait(self.cutoff, future).await?.map_err(Into::into)
     }
 }
 
@@ -180,10 +194,7 @@ impl From<rss_transactional_messaging::error::MessagingErrorKind> for StorageFai
 mod diagnostic_tests {
     use super::*;
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn host_configuration_input_and_deadline_are_distinct() {
         let keys = crate::CredentialKeys::new("absent".into(), vec![])
             .err()
@@ -194,10 +205,7 @@ mod diagnostic_tests {
             "invalid operation input"
         );
         assert_eq!(
-            Budget::new(OperationDeadline::from_remaining(std::time::Duration::ZERO))
-                .err()
-                .unwrap()
-                .to_string(),
+            AuthorityError::DeadlineElapsed.to_string(),
             "operation deadline elapsed"
         );
     }

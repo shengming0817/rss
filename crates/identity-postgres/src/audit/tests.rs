@@ -23,10 +23,7 @@ struct Case {
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
 const TENANT: &str = "22222222-2222-4222-8222-222222222222";
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn cases() -> [Case; 6] {
     let principal = Uuid::from_u128(3);
     let actor = Uuid::from_u128(4);
@@ -115,10 +112,7 @@ fn cases() -> [Case; 6] {
 }
 
 impl Case {
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn record(&self) -> rss_audit_core::PreparedAuditV1 {
         let instance = InstanceId::parse(INSTANCE).unwrap();
         let tenant = TenantId::parse(TENANT).unwrap();
@@ -131,10 +125,7 @@ impl Case {
 
 // The canonical records were captured with the original mapper and these fixed inputs.
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn static_contracts_match_schema_bytes_and_canonical_records_across_batches() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};

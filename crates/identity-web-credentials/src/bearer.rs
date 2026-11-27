@@ -3,7 +3,8 @@ use crate::{CredentialError, HttpConfig, session::cutoff, unique};
 use http::HeaderMap;
 use rss_identity_core::session::BearerSecret;
 use rss_identity_postgres::{AuthenticatedSession, Authority};
-use rss_transactional_messaging::{fence::ExecutionBinding, policy::OperationDeadline};
+use rss_request_context::Deadline;
+use rss_transactional_messaging::fence::ExecutionBinding;
 
 pub fn bearer_presentation(headers: &HeaderMap) -> Result<(), CredentialError> {
     if named_cookie(headers, SESSION_COOKIE_NAME)?.is_some() || headers.contains_key("x-api-key") {
@@ -27,31 +28,20 @@ pub async fn authenticate_bearer_request(
     config: &HttpConfig,
     binding: ExecutionBinding,
     headers: &HeaderMap,
-    deadline: OperationDeadline,
+    deadline: Deadline,
 ) -> Result<(AuthenticatedSession, BearerSecret), CredentialError> {
-    let end = cutoff(config, deadline)?;
+    let end = cutoff(authority, config, deadline)?;
     let retained = bearer_credential(headers)?;
     let secret =
         BearerSecret::parse(retained.expose().into()).map_err(|_| CredentialError::Invalid)?;
-    let proof = authority
-        .authenticate_bearer(
-            binding,
-            secret,
-            OperationDeadline::from_remaining(
-                end.saturating_duration_since(std::time::Instant::now()),
-            ),
-        )
-        .await?;
+    let proof = authority.authenticate_bearer(binding, secret, end).await?;
     Ok((proof, retained))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn bearer_presentation_rejects_duplicates_mixed_and_malformed_credentials() {
         let token = "a".repeat(64);
         let mut headers = HeaderMap::new();

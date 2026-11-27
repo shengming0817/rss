@@ -10,6 +10,7 @@ use rss_identity_core::{
     federation::{ProviderId, ProviderView, UpstreamClaims},
     profile::{LocalProfile, Profile},
 };
+use rss_request_context::Clock;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
 use std::time::Instant;
@@ -64,12 +65,13 @@ pub struct ProfileSourcePage {
 }
 /// Private construction and a request deadline distinguish this view from a JSON DTO.
 pub struct TrustedProfile {
+    timer: rss_request_context::SharedExecutionTimer,
     view: ProfileView,
     expires: Instant,
 }
 impl TrustedProfile {
     pub fn view(&self) -> Result<&ProfileView, AuthorityError> {
-        if Instant::now() >= self.expires {
+        if self.timer.now() >= self.expires {
             return Err(AuthorityError::Rejected);
         }
         Ok(&self.view)
@@ -314,7 +316,7 @@ impl Reader {
             digest: actor.digest,
             session: actor.view.id,
             kind: actor.view.credential_kind,
-            instance: actor.authority,
+            instance: actor.authority.as_uuid(),
             expires: actor.expires,
             checks: actor.session_checks.clone(),
         })
@@ -330,7 +332,7 @@ impl Reader {
         c: &mut PgConnection,
         access: Option<crate::session_storage::SessionAccess>,
     ) -> Result<crate::session_storage::Loaded, transaction::MutationError> {
-        if Instant::now() >= self.expires || authority_id(c).await? != self.instance {
+        if self.checks.timer.now() >= self.expires || authority_id(c).await? != self.instance {
             return Err(reject().into());
         }
         crate::transaction::check_binding(c, self.binding).await?;
@@ -350,7 +352,7 @@ impl Reader {
         )
         .await?;
         loaded.expires = loaded.expires.min(self.expires);
-        if Instant::now() >= loaded.expires
+        if loaded.timer.now() >= loaded.expires
             || loaded.view.id != self.session
             || loaded.state.key() != self.key
         {
@@ -363,7 +365,7 @@ impl Authority {
     pub async fn current_profile(
         &self,
         actor: &AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<TrustedProfile, AuthorityError> {
         self.read_profile(actor, None, deadline).await
     }
@@ -373,7 +375,7 @@ impl Authority {
         actor: &AuthenticatedSession,
         target: AccountKey,
         source: ProfileSource,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<TrustedProfile, AuthorityError> {
         self.read_profile(actor, Some((target, source)), deadline)
             .await
@@ -386,7 +388,7 @@ impl Authority {
         target: AccountKey,
         after: Option<ProfileSource>,
         limit: u16,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<ProfileSourcePage, AuthorityError> {
         self.require_runtime()?;
         if !(1..=rss_identity_core::directory::MAX_PAGE_SIZE).contains(&limit) {
@@ -414,21 +416,21 @@ impl Authority {
         &self,
         actor: &AuthenticatedSession,
         latest: Option<(AccountKey, ProfileSource)>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<TrustedProfile, AuthorityError> {
         self.require_runtime()?;
         let reader = Reader::new(actor)?;
         let instance = self.instance;
         let policy = self.policy.clone();
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let limits = self.profile_limits;
         if latest.is_some_and(|(target, _)| target.tenant != reader.key.tenant) {
             return Err(AuthorityError::Rejected);
         }
-        self.read_sql(reader.binding,budget.remaining(),move|c|Box::pin(async move {
+        self.read_sql(reader.binding,budget.cutoff,move|c|Box::pin(async move {
             let access=latest.is_none().then_some(crate::session_storage::SessionAccess::Host);
             let loaded=reader.recheck_with(c,access).await?;
-            let mut expires=crate::sessions::checked_expiry(&loaded,budget.0.instant().min(reader.expires)).map_err(transaction::MutationError::from)?;
+            let mut expires=crate::sessions::checked_expiry(&loaded,budget.cutoff.instant().min(reader.expires)).map_err(transaction::MutationError::from)?;
             let (target,source,bound)=match latest {
                 Some((target,source))=>{
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadLatestProfile,Some(target),c).await?;
@@ -444,23 +446,23 @@ impl Authority {
             };
             if !account_state_locked(c,target).await?.active(){return Err(reject().into());}
             let mut view=ProfileView {instance_id:instance.to_string(),tenant_id:target.tenant.to_string(),principal_id:target.principal.as_uuid().to_string(),source:Some(source),status:ProfileStatus::Unavailable,snapshot_id:None,provider_config_version:None,source_revision:None,observed_at:None,collected_at_micros:None,expires_at:None,profile:None};
-            if bound==Some(None){view.source=None;return Ok(TrustedProfile{view,expires});}
+            if bound==Some(None){view.source=None;return Ok(TrustedProfile{view,expires,timer:loaded.timer.clone()});}
             let row=sqlx::query("SELECT * FROM identity_authority.profile_observations WHERE tenant_id=$1::uuid AND principal_id=$2 AND source=$3")
                 .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(source.key()).fetch_optional(&mut *c).await?;
-            let Some(row)=row else {view.status=ProfileStatus::Missing;return Ok(TrustedProfile{view,expires})};
+            let Some(row)=row else {view.status=ProfileStatus::Missing;return Ok(TrustedProfile{view,expires,timer:loaded.timer.clone()})};
             let snapshot:Uuid=row.try_get("snapshot_id")?;
-            if bound.flatten().is_some_and(|id|id!=snapshot){return Ok(TrustedProfile{view,expires});}
+            if bound.flatten().is_some_and(|id|id!=snapshot){return Ok(TrustedProfile{view,expires,timer:loaded.timer.clone()});}
             if let ProfileSource::Idp{provider}=source {
                 let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.providers p JOIN identity_authority.external_identities e USING(tenant_id,provider_id)
                     WHERE p.tenant_id=$1::uuid AND e.principal_id=$2 AND p.provider_id=$3::uuid AND p.enabled AND p.config_version=$4 AND p.revocation_epoch=$5)")
                     .bind(target.tenant.to_string()).bind(target.principal.as_uuid()).bind(provider.to_string())
                     .bind(row.try_get::<Option<i64>,_>("config_version")?).bind(row.try_get::<Option<i64>,_>("source_epoch")?).fetch_one(&mut *c).await?;
-                if !current {return Ok(TrustedProfile{view,expires});}
+                if !current {return Ok(TrustedProfile{view,expires,timer:loaded.timer.clone()});}
             }
             let end:i64=row.try_get("expires_at")?;let end=end.min(loaded.view.absolute_expires_at).min(row.try_get::<i64,_>("observed_at")?.saturating_add(i64::from(limits.max_age_seconds())));
-            let sampled=Instant::now();
+            let sampled=loaded.timer.now();
             let micros:i64=sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint").fetch_one(&mut *c).await?;
-            let now=reader.checks.seconds(micros/1_000_000);
+            let now=micros/1_000_000;
             view.status=if now>=end {ProfileStatus::Expired}else{ProfileStatus::Available};
             if view.status==ProfileStatus::Available {
                 let remaining=end.saturating_mul(1_000_000).saturating_sub(micros).saturating_sub(1).max(0) as u64;
@@ -471,14 +473,14 @@ impl Authority {
             if latest.is_some() || view.status==ProfileStatus::Available {
                 let mut profile:Profile=serde_json::from_value(row.try_get("value")?).map_err(|_|corrupt())?;profile.validate().map_err(|_|corrupt())?;profile.apply_limits(limits);view.profile=Some(profile);
             }
-            Ok(TrustedProfile{view,expires})
+            Ok(TrustedProfile{view,expires,timer:loaded.timer.clone()})
         })).await
     }
     pub async fn read_local_profile(
         &self,
         actor: &AuthenticatedSession,
         target: AccountKey,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<LocalProfileView, AuthorityError> {
         self.require_runtime()?;
         let reader = Reader::new(actor)?;
@@ -553,7 +555,7 @@ impl Authority {
     pub async fn profile_sources(
         &self,
         actor: &AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Vec<ProfileSourceView>, AuthorityError> {
         self.require_runtime()?;
         let reader = Reader::new(actor)?;

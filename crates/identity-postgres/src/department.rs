@@ -6,6 +6,7 @@ use rss_identity_core::{
     department::{DepartmentSnapshot, DepartmentUnavailableReason},
     facts::FactSource,
 };
+use rss_request_context::Clock;
 use rss_transactional_messaging_postgres::PgError;
 use std::time::Instant;
 use uuid::Uuid;
@@ -72,16 +73,9 @@ impl DepartmentFacts {
         instance: InstanceId,
         account: AccountKey,
         proof: Instant,
+        clock: &rss_request_context::SharedExecutionTimer,
     ) -> Result<VerifiedDepartmentSnapshot<'_>, DepartmentAccessError> {
-        self.view_at(instance, account, proof, Instant::now())
-    }
-    fn view_at(
-        &self,
-        instance: InstanceId,
-        account: AccountKey,
-        proof: Instant,
-        now: Instant,
-    ) -> Result<VerifiedDepartmentSnapshot<'_>, DepartmentAccessError> {
+        let now = clock.now();
         if now >= proof {
             return Err(DepartmentAccessError::ProofExpired);
         }
@@ -100,6 +94,7 @@ impl DepartmentFacts {
                 snapshot,
                 expires,
             } => VerifiedDepartmentSnapshot::Available(TrustedDepartmentSnapshot {
+                clock: clock.clone(),
                 instance,
                 account,
                 source,
@@ -127,6 +122,7 @@ pub enum VerifiedDepartmentSnapshot<'a> {
 /// let fact: rss_identity_postgres::TrustedDepartmentSnapshot<'_> = serde_json::from_str("{}").unwrap();
 /// ```
 pub struct TrustedDepartmentSnapshot<'a> {
+    clock: rss_request_context::SharedExecutionTimer,
     instance: InstanceId,
     account: AccountKey,
     source: &'a FactSource,
@@ -165,7 +161,7 @@ impl TrustedDepartmentSnapshot<'_> {
     }
     /// Access always rechecks both deadlines. Empty memberships explicitly mean unassigned.
     pub fn snapshot(&self) -> Result<&DepartmentSnapshot, DepartmentAccessError> {
-        self.snapshot_at(Instant::now())
+        self.snapshot_at(self.clock.now())
     }
     fn snapshot_at(&self, now: Instant) -> Result<&DepartmentSnapshot, DepartmentAccessError> {
         if now >= self.proof {
@@ -182,10 +178,7 @@ impl TrustedDepartmentSnapshot<'_> {
 mod tests {
     use super::*;
     use std::time::Duration;
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn account() -> AccountKey {
         AccountKey {
             tenant: rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")
@@ -198,7 +191,11 @@ mod tests {
         clippy::disallowed_methods,
         clippy::panic,
         clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        reason = "test fixture"
+    )]
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "test fixture and ordered assertions"
     )]
     fn assigned_and_absent_retained_views_check_both_deadlines() {
         let start = Instant::now();
@@ -219,8 +216,9 @@ mod tests {
                 snapshot,
                 expires: expiry,
             };
-            let VerifiedDepartmentSnapshot::Available(view) =
-                facts.view_at(instance, account, proof, start).unwrap()
+            let VerifiedDepartmentSnapshot::Available(view) = facts
+                .view(instance, account, proof, &crate::test_time::at(start))
+                .unwrap()
             else {
                 panic!("available");
             };
@@ -240,12 +238,13 @@ mod tests {
                 Err(DepartmentAccessError::ProofExpired)
             );
             assert!(matches!(
-                facts.view_at(instance, account, proof, expiry),
+                facts.view(instance, account, proof, &crate::test_time::at(expiry)),
                 Ok(VerifiedDepartmentSnapshot::Expired)
             ));
             for earlier in [start + Duration::from_millis(500), expiry] {
-                let VerifiedDepartmentSnapshot::Available(view) =
-                    facts.view_at(instance, account, earlier, start).unwrap()
+                let VerifiedDepartmentSnapshot::Available(view) = facts
+                    .view(instance, account, earlier, &crate::test_time::at(start))
+                    .unwrap()
                 else {
                     panic!("available");
                 };
@@ -263,10 +262,10 @@ mod tests {
         ] {
             let facts = DepartmentFacts::Unavailable(reason);
             assert!(
-                matches!(facts.view_at(instance, account, proof, start), Ok(VerifiedDepartmentSnapshot::Unavailable(r)) if r == reason)
+                matches!(facts.view(instance, account, proof, &crate::test_time::at(start)), Ok(VerifiedDepartmentSnapshot::Unavailable(r)) if r == reason)
             );
             assert!(matches!(
-                facts.view_at(instance, account, proof, proof),
+                facts.view(instance, account, proof, &crate::test_time::at(proof)),
                 Err(DepartmentAccessError::ProofExpired)
             ));
         }

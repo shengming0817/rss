@@ -1,13 +1,13 @@
+#[path = "../../../tests/fixtures/oidc_clock.rs"]
+mod fixture_clock;
 #[path = "support/policy.rs"]
 mod policy;
+
 use rss_identity_core::federation::*;
 use rss_identity_oidc::ReusePolicy;
 use rss_identity_oidc::{HttpOidc, TrustedAssuranceProfile};
 use rss_request_context::TenantId;
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn tenant() -> TenantId {
     TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
 }
@@ -26,21 +26,21 @@ fn input() -> ProviderSettingsInput {
         jit: false,
     }
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn credentials() -> ProviderCredentials {
     ProviderCredentials::new("fixture-secret".into(), None).unwrap()
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn self_service_rejects_special_network_destinations() {
-    let adapter =
-        HttpOidc::new(vec![], vec![], transport_policy(), policy::reuse_policy()).unwrap();
+    let adapter = HttpOidc::new(
+        fixture_clock::clock(),
+        vec![],
+        vec![],
+        transport_policy(),
+        policy::reuse_policy(),
+    )
+    .unwrap();
     for issuer in ["https://idp.example.test", "https://8.8.8.8"] {
         let mut c = input();
         c.issuer = issuer.into();
@@ -86,14 +86,19 @@ fn self_service_rejects_special_network_destinations() {
     );
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn trusted_assurance_is_independent_and_exactly_scoped() {
     let c: ProviderSettings = input().try_into().unwrap();
-    let weak = HttpOidc::new(vec![], vec![], transport_policy(), policy::reuse_policy()).unwrap();
+    let weak = HttpOidc::new(
+        fixture_clock::clock(),
+        vec![],
+        vec![],
+        transport_policy(),
+        policy::reuse_policy(),
+    )
+    .unwrap();
     let trusted = HttpOidc::new(
+        fixture_clock::clock(),
         vec![TrustedAssuranceProfile {
             tenant: tenant(),
             issuer: c.issuer().as_str().into(),
@@ -134,10 +139,7 @@ fn trusted_assurance_is_independent_and_exactly_scoped() {
     assert!(trusted.validate(other, &c, &credentials()).is_ok());
 }
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn transport_policy() -> rss_identity_oidc::TransportPolicy {
     rss_identity_oidc::TransportPolicy::new(
         std::time::Duration::from_secs(5),

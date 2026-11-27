@@ -116,10 +116,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn token_response_requires_a_complete_json_object() {
         let response = |status: StatusCode, media: &str, body: &str| {
             http::Response::builder()

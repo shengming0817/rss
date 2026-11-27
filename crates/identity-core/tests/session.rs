@@ -1,10 +1,7 @@
 use rss_identity_core::session::{SessionLifetime, SessionPolicy, SessionSecret};
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn session_expiry_and_activity_are_bounded() {
     let mut ordinary =
         SessionLifetime::new(1_000, SessionPolicy::new(1800, 28800).unwrap()).unwrap();
@@ -40,10 +37,7 @@ fn session_expiry_and_activity_are_bounded() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn session_secret_is_canonical_redacted_and_csrf_is_separated() {
     let a = SessionSecret::generate().unwrap();
     let b = SessionSecret::generate().unwrap();
@@ -62,10 +56,7 @@ fn session_secret_is_canonical_redacted_and_csrf_is_separated() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn session_id_wire_boundary_rejects_nil_and_round_trips() {
     use rss_identity_core::SessionId;
     let id = SessionId::generate();
@@ -77,10 +68,7 @@ fn session_id_wire_boundary_rejects_nil_and_round_trips() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn restored_session_preserves_selected_renewal_window() {
     let mut admin = SessionLifetime::new(1_000, SessionPolicy::new(900, 14400).unwrap()).unwrap();
     admin.renew(1_800).unwrap();

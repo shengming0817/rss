@@ -36,12 +36,28 @@ pub async fn rotation(f: &Fixture) -> anyhow::Result<()> {
 async fn ledger_state(f: &Fixture) -> anyhow::Result<(i64, serde_json::Value)> {
     Ok(sqlx::query_as("SELECT (SELECT count(*) FROM rss_ledger.entries),coalesce(jsonb_agg(to_jsonb(h) ORDER BY tenant_id,chain_id),'[]') FROM rss_ledger.heads h").fetch_one(&f.owner).await?)
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "test fixture and ordered assertions"
+)]
 pub async fn audit_settlement(f: &Fixture) -> anyhow::Result<()> {
     let session = f.login().await?;
     let ledger_before = ledger_state(f).await?;
     let before = f.events().await?;
     let scope = binding(f.key.tenant);
     let old = || SessionSecret::parse(session.secret().expose().into());
+    let cancel = Default::default();
+    let end = deadline();
+    let control = rss_audit_postgres::Control::new(&Timer, end, end, &cancel);
+    let held = f.audit_budget.reserve(8, 1024 * 1024, &control).await?;
+    assert!(matches!(
+        f.store.refresh_session(scope, old()?, deadline()).await,
+        Err(AuthorityError::RolledBack(_))
+    ));
+    drop(held);
+    assert_eq!(f.events().await?, before);
+    assert_eq!(ledger_state(f).await?, ledger_before);
+    f.store.inspect_session(scope, old()?, deadline()).await?;
     sqlx::raw_sql("CREATE FUNCTION public.reject_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture audit rejection'; END $$; CREATE TRIGGER reject_event BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.reject_event()").execute(&f.owner).await?;
     assert!(matches!(
         f.store.refresh_session(scope, old()?, deadline()).await,

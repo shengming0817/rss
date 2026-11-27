@@ -5,12 +5,12 @@ use crate::{
     directory_window::{ReadDependencies, ReadWindow},
     profiles::Reader,
     transaction::{MutationError, reject},
-    types::Budget,
 };
 use futures::{TryStreamExt, future::BoxFuture};
 use rss_identity_core::{InstanceId, account::AccountRuleError};
+use rss_request_context::Clock;
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
-use rss_transactional_messaging::policy::OperationDeadline;
 use sqlx::{
     PgConnection,
     postgres::{PgArguments, PgRow},
@@ -37,6 +37,7 @@ pub enum PersonnelProfileScope {
 /// The trusted session-reference entry installs only `identity_session_references`; neither entry grants authentication.
 /// Consumers join their own authorized business relations, never private Identity tables.
 pub struct PersonnelRead<'a> {
+    timer: rss_request_context::SharedExecutionTimer,
     connection: &'a mut PgConnection,
     relation: String,
     expires: Instant,
@@ -47,8 +48,10 @@ impl<'a> PersonnelRead<'a> {
         connection: &'a mut PgConnection,
         relation: String,
         window: ReadWindow,
+        timer: rss_request_context::SharedExecutionTimer,
     ) -> Self {
         Self {
+            timer,
             connection,
             relation,
             expires: window.expires,
@@ -67,7 +70,7 @@ impl PersonnelRead<'_> {
         Ok(self.revision)
     }
     fn live(&self) -> Result<(), AuthorityError> {
-        if Instant::now() >= self.expires {
+        if self.timer.now() >= self.expires {
             Err(AuthorityError::Rejected)
         } else {
             Ok(())
@@ -115,7 +118,7 @@ impl Authority {
     pub async fn with_personnel_read<T: Send + 'static, F>(
         &self,
         actor: &AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         query: F,
     ) -> Result<T, AuthorityError>
     where
@@ -128,7 +131,7 @@ impl Authority {
         let policy = self.policy.clone();
         let instance = self.instance;
         let max_age = self.profile_limits.max_age_seconds();
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let platform = self
             .session_checks
             .platform
@@ -137,12 +140,12 @@ impl Authority {
         let failure = std::sync::Arc::new(std::sync::OnceLock::new());
         let capture = failure.clone();
         let result = self
-            .read_sql(reader.binding, budget.remaining(), move |c| {
+            .read_sql(reader.binding, budget.cutoff, move |c| {
                 Box::pin(async move {
                     let loaded = reader.recheck(c).await?;
                     let expires = crate::sessions::checked_expiry(
                         &loaded,
-                        budget.0.instant().min(reader.expires),
+                        budget.cutoff.instant().min(reader.expires),
                     )?;
                     let login = permission(
                         crate::management::authorize(
@@ -200,6 +203,7 @@ impl Authority {
                                     .idle_expires_at
                                     .min(loaded.view.absolute_expires_at),
                             ),
+                            &loaded.timer,
                         )
                         .await?;
                     let expires = window.expires;
@@ -234,6 +238,7 @@ impl Authority {
                         .execute(&mut *c)
                         .await?;
                     let result = query(PersonnelRead {
+                        timer: loaded.timer.clone(),
                         connection: c,
                         relation,
                         expires,
@@ -245,7 +250,7 @@ impl Authority {
                         },
                     })
                     .await;
-                    if Instant::now() >= expires {
+                    if loaded.timer.now() >= expires {
                         return Err(reject().into());
                     }
                     result.map_err(|error| {

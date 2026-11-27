@@ -9,6 +9,7 @@ use crate::{
 use rss_identity_core::SessionId;
 use rss_identity_core::assurance::Assurance;
 use rss_identity_core::session::{CredentialKind, SessionLifetime, SessionPolicy};
+use rss_request_context::Clock;
 use rss_request_context::TenantId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
@@ -20,8 +21,11 @@ pub(crate) struct TimeSample {
     micros: i64,
 }
 impl TimeSample {
-    async fn read(c: &mut PgConnection) -> Result<Self, PgError> {
-        let started = Instant::now();
+    async fn read(
+        c: &mut PgConnection,
+        timer: &rss_request_context::SharedExecutionTimer,
+    ) -> Result<Self, PgError> {
+        let started = timer.now();
         let micros = sqlx::query_scalar(
             "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000000)::bigint",
         )
@@ -34,13 +38,6 @@ impl TimeSample {
             return Err(corrupt());
         }
         Ok(Self { started, micros })
-    }
-    fn for_facts(&self, time: &crate::session_checks::SessionChecks) -> Self {
-        let seconds = time.seconds(self.seconds());
-        Self {
-            started: self.started,
-            micros: self.micros.max(seconds.saturating_mul(1_000_000)),
-        }
     }
     fn within_age(&self, authenticated: i64, max_age: Duration, now: Instant) -> bool {
         if max_age.is_zero() {
@@ -98,6 +95,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 }
 
 pub(crate) struct Loaded {
+    pub(crate) timer: rss_request_context::SharedExecutionTimer,
     pub source_identity: Option<uuid::Uuid>,
     /// Qualified on this transaction's connection, with the host's binding locks held.
     pub verified_platform: Option<Box<crate::platform::PlatformBinding>>,
@@ -116,7 +114,7 @@ impl Loaded {
     /// Recheck the original cutoff even when the stored idle deadline is already sufficient.
     pub(crate) fn renew_idle(&mut self) -> Result<bool, PgError> {
         self.sample
-            .renew(&mut self.lifetime, self.expires, Instant::now())?;
+            .renew(&mut self.lifetime, self.expires, self.timer.now())?;
         let idle = self.lifetime.idle_expires_at();
         if idle == self.view.idle_expires_at {
             return Ok(false);
@@ -132,7 +130,7 @@ impl Loaded {
             authenticated <= self.now
                 && self
                     .sample
-                    .within_age(authenticated, max_age, Instant::now())
+                    .within_age(authenticated, max_age, self.timer.now())
         })
     }
 }
@@ -258,17 +256,17 @@ async fn restore(
         None => None,
     };
     let lifetime = lifetime(row)?;
-    let sample = TimeSample::read(c).await?;
+    let sample = TimeSample::read(c, &session_checks.timer).await?;
     let now = sample.seconds();
     if !lifetime.valid_at(now) {
         return Err(reject());
     }
-    let fact_sample = sample.for_facts(session_checks);
+
     let source_kind: String = row.try_get("authentication_source")?;
     let source_identity = origin.as_ref().map(|(origin, _)| origin.identity);
     let mut verified_platform = None;
     let (assurance, groups, department) = match (source_kind.as_str(), origin, source) {
-        ("oidc", Some((_, facts)), Some(source)) => facts.into_views(source, &fact_sample)?,
+        ("oidc", Some((_, facts)), Some(source)) => facts.into_views(source, &sample)?,
         ("local_password", None, None) => (
             Assurance::password(row.try_get("local_authenticated_at")?).map_err(|_| corrupt())?,
             rss_identity_core::groups::Groups::unavailable(
@@ -307,11 +305,12 @@ async fn restore(
     // Signed-time skew was checked at issuance. Restoration retains frozen expiry
     // instead of applying a new deployment policy to an already accepted fact.
     Ok(Loaded {
+        timer: session_checks.timer.clone(),
         source_identity,
         verified_platform,
         source,
         assurance,
-        groups: GroupFacts::new(groups, &fact_sample)?,
+        groups: GroupFacts::new(groups, &sample)?,
         department_snapshot: Box::new(department),
         expires: sample.deadline(lifetime.idle_expires_at())?,
         sample,
@@ -341,6 +340,9 @@ pub(crate) async fn recheck_on(
     {
         return Err(reject());
     }
+    sqlx::query("SELECT rss_transactional_messaging.check_execution()")
+        .execute(&mut *c)
+        .await?;
     recheck_for(c, actor, SessionAccess::Host).await
 }
 
@@ -354,7 +356,9 @@ pub(crate) async fn recheck_collection(
 }
 
 async fn validate_proof(c: &mut PgConnection, proof: &AuthenticatedSession) -> Result<(), PgError> {
-    if std::time::Instant::now() >= proof.expires || authority_id(c).await? != proof.authority {
+    if proof.session_checks.timer.now() >= proof.expires
+        || authority_id(c).await? != proof.authority.as_uuid()
+    {
         return Err(reject());
     }
     crate::transaction::check_binding(c, proof.binding).await?;
@@ -387,14 +391,14 @@ pub(crate) async fn recheck_locked(
         proof.key.tenant,
         &proof.digest,
         proof.view.credential_kind,
-        proof.authority,
+        proof.authority.as_uuid(),
         &proof.session_checks,
     )
     .await?;
     loaded.expires = loaded.expires.min(proof.expires);
     if loaded.state.key() != proof.key
         || loaded.view.id != proof.view.id
-        || Instant::now() >= loaded.expires
+        || loaded.timer.now() >= loaded.expires
     {
         return Err(reject());
     }
@@ -466,7 +470,7 @@ mod tests {
     #[allow(
         clippy::disallowed_methods,
         clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        reason = "test fixture"
     )]
     fn idle_renewal_respects_the_original_monotonic_cutoff() {
         let start = Instant::now();
@@ -485,10 +489,7 @@ mod tests {
         assert_eq!(expired, original);
     }
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::disallowed_methods, reason = "test fixture")]
     fn policy_wait_cannot_extend_recent_authentication() {
         let start = Instant::now();
         let sample = TimeSample {
@@ -504,7 +505,7 @@ mod tests {
     #[allow(
         clippy::disallowed_methods,
         clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        reason = "test fixture"
     )]
     fn database_fraction_and_all_later_latency_consume_deadline() {
         let start = Instant::now();
@@ -547,7 +548,7 @@ mod fact_ownership_tests {
         clippy::disallowed_methods,
         clippy::panic,
         clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        reason = "test fixture"
     )]
     fn collection_and_projection_transfer_group_and_department_storage() {
         let groups = vec!["engineering".to_owned()];

@@ -153,7 +153,8 @@ impl WebauthnAuthority {
             let _permit = permit;
             work(verifier)
         });
-        tokio::time::timeout_at(budget.0.instant().into(), task)
+        budget
+            .wait(budget.cutoff, task)
             .await
             .map_err(|_| AuthorityError::DeadlineElapsed)?
             .map_err(|_| AuthorityError::Unavailable)?
@@ -162,7 +163,7 @@ impl WebauthnAuthority {
         &self,
         actor: AuthenticatedSession,
         generation: RpGeneration,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Vec<WebauthnCredentialView>, AuthorityError> {
         let this = self.clone();
         let rp = self.rp.clone();
@@ -181,7 +182,7 @@ impl WebauthnAuthority {
         label: String,
         recover: bool,
         authorization: RegistrationAuthorization,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<WebauthnChallenge<CreationChallengeResponse>, AuthorityError> {
         if matches!(
             (&authorization, recover),
@@ -299,12 +300,10 @@ impl WebauthnAuthority {
         generation: RpGeneration,
         id: Uuid,
         response: RegisterPublicKeyCredential,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<WebauthnCredentialView, AuthorityError> {
-        let budget = Budget::new(deadline)?;
-        let snapshot = self
-            .snapshot(&actor, generation, id, budget.remaining())
-            .await?;
+        let budget = self.authority.budget(deadline)?;
+        let snapshot = self.snapshot(&actor, generation, id, budget.cutoff).await?;
         let Ceremony::Register {
             state,
             label,
@@ -329,7 +328,7 @@ impl WebauthnAuthority {
             })
             .await?;
         let this = self.clone();
-        self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
+        self.authority.write_sql(actor.binding,budget.cutoff,move|c|Box::pin(async move{
             let loaded=session_storage::recheck_collection(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant,generation).await?;
             let current=read(c,&actor,id,this.config).await?;
@@ -352,7 +351,7 @@ impl WebauthnAuthority {
         actor: AuthenticatedSession,
         generation: RpGeneration,
         context: StepUpContext,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<WebauthnChallenge<RequestChallengeResponse>, AuthorityError> {
         let this = self.clone();
         self.authority
@@ -399,12 +398,10 @@ impl WebauthnAuthority {
         generation: RpGeneration,
         id: Uuid,
         response: PublicKeyCredential,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<StepUpGrant, AuthorityError> {
-        let budget = Budget::new(deadline)?;
-        let snapshot = self
-            .snapshot(&actor, generation, id, budget.remaining())
-            .await?;
+        let budget = self.authority.budget(deadline)?;
+        let snapshot = self.snapshot(&actor, generation, id, budget.cutoff).await?;
         let Ceremony::Authenticate {
             state,
             context,
@@ -439,7 +436,7 @@ impl WebauthnAuthority {
             .update_credential(&result)
             .ok_or(AuthorityError::Rejected)?;
         let this = self.clone();
-        self.authority.write_sql(actor.binding,budget.remaining(),move|c|Box::pin(async move{
+        self.authority.write_sql(actor.binding,budget.cutoff,move|c|Box::pin(async move{
             let loaded=session_storage::recheck_collection(c,&actor).await?;
             this.check_configuration(c,actor.key.tenant,generation).await?;
             let current=read(c,&actor,id,this.config).await?;
@@ -460,7 +457,7 @@ impl WebauthnAuthority {
         generation: RpGeneration,
         id: Uuid,
         grant: String,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         let this = self.clone();
         let context = webauthn_management_context(actor.key, "remove", Some(id))?;
@@ -480,7 +477,7 @@ impl WebauthnAuthority {
         actor: AuthenticatedSession,
         generation: RpGeneration,
         id: Uuid,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         let config = self.config;
         let this = self.clone();
@@ -501,14 +498,14 @@ impl WebauthnAuthority {
         actor: &AuthenticatedSession,
         generation: RpGeneration,
         id: Uuid,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<Snapshot, AuthorityError> {
         // Keep the original actor to recheck its digest again at final settlement.
         let key = actor.key;
         let session = actor.view.id;
         let checks = actor.session_checks.clone();
         let expected = actor.digest;
-        let authority = actor.authority;
+        let authority = actor.authority.as_uuid();
         let config = self.config;
         let this = self.clone();
         self.authority

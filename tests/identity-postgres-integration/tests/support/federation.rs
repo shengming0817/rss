@@ -63,7 +63,7 @@ impl UpstreamOidc for ScriptedOidc {
     #[allow(
         clippy::disallowed_methods,
         clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        reason = "test fixture"
     )]
     fn exchange<'a>(
         &'a self,
@@ -98,10 +98,7 @@ impl UpstreamOidc for ScriptedOidc {
             })
         })
     }
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn test<'a>(
         &'a self,
         _: BoundProvider,
@@ -120,10 +117,7 @@ impl UpstreamOidc for ScriptedOidc {
         })
     }
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
     Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
@@ -138,10 +132,7 @@ pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
     )
     .unwrap()
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn settings() -> ProviderSettings {
     (rss_identity_core::federation::ProviderSettingsInput {
         issuer: "https://idp.example.test".into(),
@@ -167,6 +158,7 @@ pub async fn actor(f: &Fixture) -> anyhow::Result<AuthenticatedSession> {
 pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView> {
     enabled_settings(f, s, settings()).await
 }
+#[allow(clippy::unwrap_used, reason = "test fixture and ordered assertions")]
 async fn enabled_settings(
     f: &Fixture,
     s: &Federation,
@@ -186,10 +178,7 @@ async fn enabled_settings(
             .await?,
     )
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn state(redirect: FederatedRedirect) -> String {
     url::Url::parse(&redirect.url)
         .unwrap()
@@ -231,10 +220,7 @@ pub async fn finish(
     )
     .await
 }
-#[allow(
-    clippy::panic,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::panic, reason = "test fixture")]
 pub fn issued(outcome: FederatedOutcome) -> IssuedSession {
     match outcome {
         FederatedOutcome::Session {
@@ -246,6 +232,7 @@ pub fn issued(outcome: FederatedOutcome) -> IssuedSession {
         _ => panic!("unexpected reauthentication step"),
     }
 }
+#[allow(clippy::unwrap_used, reason = "test fixture and ordered assertions")]
 pub fn secret(s: &IssuedSession) -> rss_identity_core::session::SessionSecret {
     rss_identity_core::session::SessionSecret::parse(s.secret().expose().into()).unwrap()
 }

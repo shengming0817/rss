@@ -1,10 +1,7 @@
 use rss_identity_core::groups::{GroupFactsMaxAge, UpstreamGroups};
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn group_policy_bounds_signed_observation_without_callback_extension() {
     for seconds in [0, -1] {
         assert!(GroupFactsMaxAge::new(seconds).is_err());
@@ -31,10 +28,7 @@ fn group_policy_bounds_signed_observation_without_callback_extension() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn group_values_are_exact_bounded_sets_and_missing_is_not_empty() {
     let groups = UpstreamGroups::present(vec![
         "/team/child".into(),
@@ -71,10 +65,7 @@ fn group_values_are_exact_bounded_sets_and_missing_is_not_empty() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn signed_observation_tolerates_bounded_skew_without_extending_deadline() {
     let policy = GroupFactsMaxAge::new(10).unwrap();
     for ahead in [1, 30] {

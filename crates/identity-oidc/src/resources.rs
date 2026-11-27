@@ -52,7 +52,7 @@ impl ReusePolicy {
                 self.refresh_cooldown,
             ]
             .into_iter()
-            .any(|d| d.is_zero() || Instant::now().checked_add(d).is_none())
+            .any(|d| d.is_zero() || d == Duration::MAX)
         {
             return Err(FederationError::Configuration);
         }
@@ -99,6 +99,7 @@ impl Entry {
 }
 
 pub(super) struct Resources {
+    pub clock: super::ProviderClock,
     entries: Mutex<HashMap<ProviderKey, Entry>>,
     bytes: Arc<AtomicUsize>,
     pub refreshes: Arc<Semaphore>,
@@ -106,9 +107,13 @@ pub(super) struct Resources {
     pub policy: ReusePolicy,
 }
 impl Resources {
-    pub fn new(policy: ReusePolicy) -> Result<Arc<Self>, FederationError> {
+    pub fn new(
+        policy: ReusePolicy,
+        clock: super::ProviderClock,
+    ) -> Result<Arc<Self>, FederationError> {
         let policy = policy.validate()?;
         Ok(Arc::new(Self {
+            clock,
             entries: Mutex::default(),
             bytes: Arc::default(),
             refreshes: Arc::new(Semaphore::new(policy.max_refreshes)),
@@ -118,7 +123,7 @@ impl Resources {
     }
 
     pub fn now(&self) -> Instant {
-        Instant::now()
+        self.clock.now()
     }
     pub fn bind(
         &self,
@@ -142,7 +147,7 @@ impl Resources {
                 rss_identity_core::federation::ProviderReason::Unavailable,
             ));
         }
-        let now = Instant::now();
+        let now = self.now();
         let entry = entries.entry(id).or_insert_with(|| Entry {
             version: revision.version,
             last_used: now,

@@ -5,10 +5,7 @@ use rss_identity_core::{
 };
 use rss_identity_postgres::*;
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
-use rss_transactional_messaging::{
-    fence::{Epoch, ExecutionBinding, StorageIdentity},
-    policy::OperationDeadline,
-};
+use rss_transactional_messaging::fence::{Epoch, ExecutionBinding, StorageIdentity};
 use rss_transactional_messaging_postgres::{PgConfig, PgPassword, PgRuntime};
 use sqlx::{
     PgPool,
@@ -22,43 +19,29 @@ pub const SYSTEM: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 pub const A: &str = "11111111-1111-4111-8111-111111111111";
 pub const B: &str = "22222222-2222-4222-8222-222222222222";
 pub const PASSWORD: &str = "correct horse battery staple";
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn password() -> Password {
     Password::new(PASSWORD.into()).unwrap()
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn login(s: &str) -> LoginKey {
     LoginKey::parse(s).unwrap()
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn source() -> AttemptSource {
     AttemptSource::parse("local-test").unwrap()
 }
-pub fn deadline() -> OperationDeadline {
-    OperationDeadline::from_remaining(Duration::from_secs(30))
+#[allow(clippy::expect_used, reason = "bounded fixture timeout")]
+pub fn deadline() -> Deadline {
+    Deadline::from_timeout(&Timer, Duration::from_secs(30)).expect("bounded fixture timeout")
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn credential_keys() -> Arc<CredentialKeys> {
     Arc::new(CredentialKeys::new("fixture".into(), vec![("fixture".into(), [8; 32])]).unwrap())
 }
 pub struct Timer;
 impl Clock for Timer {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::disallowed_methods, reason = "test fixture")]
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -74,10 +57,7 @@ pub struct HostPolicy {
     pub recent: RwLock<ReauthenticationRequirement>,
 }
 impl ManagementPolicy for HostPolicy {
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn authorize<'a>(
         &'a self,
         c: &'a ManagementContext<'a>,
@@ -114,6 +94,7 @@ pub struct Fixture {
     provider: testkit::PgConnParams,
     ca: String,
     config: AuthorityConfig,
+    pub audit_budget: rss_audit_postgres::WriteBudget,
     pub runtime: Arc<PgRuntime>,
     pub maintenance_runtime: Arc<PgRuntime>,
     pub store: Authority,
@@ -125,9 +106,10 @@ pub struct Fixture {
     management_cookie: tokio::sync::Mutex<Option<String>>,
 }
 impl Fixture {
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
+        clippy::cognitive_complexity,
+        reason = "test fixture and ordered assertions"
     )]
     pub async fn new(
         pg: &testkit::PgTlsFixture,
@@ -136,11 +118,12 @@ impl Fixture {
         let instance = InstanceId::generate();
         let provider = pg.params().clone();
         let ca = pg.ca_pem().to_owned();
+        let audit_budget = rss_audit_postgres::WriteBudget::new(8, 1024 * 1024, 1024 * 1024)?;
         let config = AuthorityConfig::new(
             instance,
             SessionPolicy::new(900, 14400)?,
             integrity,
-            rss_audit_postgres::WriteBudget::new(8, 1024 * 1024, 4 * 1024 * 1024)?,
+            audit_budget.clone(),
         )?;
         let options = PgConnectOptions::new()
             .host(&provider.host)
@@ -252,6 +235,7 @@ impl Fixture {
             provider,
             ca,
             config,
+            audit_budget,
             runtime,
             maintenance_runtime,
             store,
@@ -345,10 +329,7 @@ impl Fixture {
             .fetch_one(&self.owner)
             .await?)
     }
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     pub async fn close(self) {
         self.runtime.close().await;
         self.maintenance_runtime.close().await;
@@ -363,10 +344,7 @@ impl Fixture {
         self.admin.close().await;
     }
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn binding(tenant: TenantId) -> ExecutionBinding {
     ExecutionBinding::new(
         StorageIdentity::new([1; 16], [2; 16]).unwrap(),
@@ -409,9 +387,7 @@ pub async fn fence(c: &mut sqlx::PgConnection, binding: ExecutionBinding) -> any
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('rss.storage_target',$2,true),set_config('rss.storage_lineage',$3,true),set_config('rss.execution_epoch',$4,true)")
         .bind(binding.tenant().to_string()).bind(hex(binding.storage().target())).bind(hex(binding.storage().lineage())).bind(binding.epoch().get().to_string())
         .execute(&mut *c).await?;
-    sqlx::query("SELECT rss_transactional_messaging.check_execution()")
-        .execute(c)
-        .await?;
+
     Ok(())
 }
 

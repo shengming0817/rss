@@ -3,10 +3,7 @@ use rss_identity_core::federation::ProviderView;
 use rss_identity_postgres::*;
 use std::sync::atomic::Ordering;
 use zeroize::Zeroizing;
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 async fn step_begin(
     f: &Fixture,
     s: &Federation,
@@ -57,9 +54,10 @@ async fn step_finish(
     .await
 }
 
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 #[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
+    clippy::cognitive_complexity,
+    reason = "test fixture and ordered assertions"
 )]
 pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
     use rss_identity_core::assurance::Assurance;

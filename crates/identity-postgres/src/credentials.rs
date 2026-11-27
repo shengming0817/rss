@@ -10,9 +10,9 @@ use ring::{
 };
 use rss_identity_core::federation::MAX_PROVIDERS;
 use rss_identity_core::federation::{FederationError, ProviderCredentials, ProviderId};
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::fence::ExecutionBinding;
-use rss_transactional_messaging::policy::OperationDeadline;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -250,12 +250,12 @@ impl crate::Federation {
     pub async fn check_credential_keys(
         &self,
         binding: ExecutionBinding,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         let keys = self.credential_keys.clone();
-        let budget = crate::Budget::new(deadline)?;
+        let budget = self.authority.budget(deadline)?;
         let tenant = binding.tenant();
-        self.authority.read_sql(binding,budget.remaining(),move|c|Box::pin(async move {
+        self.authority.read_sql(binding,budget.cutoff,move|c|Box::pin(async move {
                 let authority=authority_id(c).await?;
                 let rows:Vec<(Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT provider_id,credential_version,sealed FROM identity_authority.provider_credentials WHERE tenant_id=$1::uuid LIMIT $2").bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
                 if rows.len() > usize::from(MAX_PROVIDERS) {return Err(corrupt().into());}
@@ -272,7 +272,7 @@ impl crate::Federation {
         &self,
         binding: ExecutionBinding,
         view: &rss_identity_core::federation::ProviderView,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<rss_identity_core::federation::BoundProvider, AuthorityError> {
         let tenant = binding.tenant();
         let revision = view.revision(self.authority.instance(), tenant);
@@ -316,10 +316,7 @@ pub(crate) async fn write_credentials(
 mod tests {
     use super::*;
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn credentials_are_authenticated_to_their_owner_and_version() {
         let keys = CredentialKeys::new("first".into(), vec![("first".into(), [1; 32])]).unwrap();
         let a = Uuid::new_v4();

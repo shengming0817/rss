@@ -9,10 +9,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn source_construction_and_restore_share_the_same_closed_validation() {
     let provider = Uuid::new_v4();
     let source = FactSource::new(provider, "https://idp.test/issuer".into()).unwrap();
@@ -48,10 +45,7 @@ fn source_construction_and_restore_share_the_same_closed_validation() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn shared_observation_contract_keeps_existing_wire_and_time_semantics() {
     for (reason, wire) in [
         (FactUnavailableReason::LocalIdentity, "local_identity"),

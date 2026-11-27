@@ -2,10 +2,7 @@ use rss_identity_core::{InstanceId, federation::*};
 use rss_request_context::TenantId;
 
 /// Bind a fixture configuration to a stable instance and provider for repeated operations.
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn fixture_provider(
     adapter: &crate::HttpOidc,
     tenant: TenantId,

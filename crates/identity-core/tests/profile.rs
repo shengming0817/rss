@@ -1,10 +1,7 @@
 use rss_identity_core::profile::*;
 use serde_json::json;
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn values_remain_typed_and_cannot_become_security_facts() {
     let settings = ProfileSettings {
         extensions_claim: Some("attributes".into()),
@@ -28,6 +25,10 @@ fn values_remain_typed_and_cannot_become_security_facts() {
     assert!(wire.get("principalId").is_none());
 }
 #[test]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "test fixture and ordered assertions"
+)]
 fn extension_budgets_and_sensitive_material_fail_closed() {
     assert!(Extensions::try_from(json!({"a":vec![0;1024]})).is_ok());
     assert!(Extensions::try_from(json!({"a":vec![0;1025]})).is_err());
@@ -77,10 +78,7 @@ fn extension_budgets_and_sensitive_material_fail_closed() {
     }
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn local_profile_has_no_verified_email_or_authority_override() {
     let local = LocalProfile {
         display_name: None,
@@ -99,10 +97,7 @@ fn local_profile_has_no_verified_email_or_authority_override() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn jsonb_unrepresentable_strings_are_invalid_at_every_depth() {
     for value in [
         json!({"note":"\u{0}"}),
@@ -123,10 +118,7 @@ fn jsonb_unrepresentable_strings_are_invalid_at_every_depth() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn expanded_members_and_arrays_round_trip_with_the_original_byte_budget() {
     let mut object = serde_json::Map::new();
     for i in 0..1023 {

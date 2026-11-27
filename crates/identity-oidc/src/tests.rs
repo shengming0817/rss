@@ -1,15 +1,16 @@
 use super::*;
 use serde_json::json;
 
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn token_metadata() -> (Metadata, discovery::Jwks) {
     let metadata = serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
     let jwks = serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap();
     (metadata, jwks)
 }
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test issuer supplies verifier wall time"
+)]
 fn verify(
     raw: &str,
     fixture: &(Metadata, discovery::Jwks),
@@ -20,12 +21,18 @@ fn verify(
 ) -> Result<profile_token::Claims, FederationError> {
     let header = profile_token::approved_header(raw, &fixture.0)?;
     let key = profile_token::signing_key(&header, Some(&fixture.1), secret)?;
-    profile_token::verify(raw, header.alg, &key, &fixture.0, nonce, client, skew)
+    profile_token::verify(
+        raw,
+        header.alg,
+        &key,
+        &fixture.0,
+        nonce,
+        client,
+        skew,
+        std::time::SystemTime::now(),
+    )
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn signed_token(claims: &serde_json::Value, valid_key: bool) -> String {
     let key = if valid_key {
         include_bytes!("../tests/fixtures/entra-a.der").as_slice()
@@ -76,10 +83,7 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn signed_group_claim_presence_and_exact_values_are_distinct() {
     use rss_identity_core::groups::UpstreamGroups;
     use serde_json::json;
@@ -148,10 +152,7 @@ fn department_mapping_withholds_missing_or_invalid_assertions() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification() {
     let metadata = token_metadata();
     for value in [json!(null), department_assertion(), json!([])] {
@@ -191,10 +192,7 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
     }
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn malformed_profile_is_independent_of_verified_security_claims() {
     let metadata = token_metadata();
     let raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","email":42,"name":false,"email_verified":"true","attributes":{"mfa":true,"number":0,"remote":false}});
@@ -238,10 +236,7 @@ fn malformed_profile_is_independent_of_verified_security_claims() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn entra_browser_requires_canonical_subject_without_fallback() {
     use rss_identity_core::entra::{ExternalSubject, SubjectMapping};
     let tenant = uuid::Uuid::new_v4();

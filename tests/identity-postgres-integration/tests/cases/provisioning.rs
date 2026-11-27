@@ -41,9 +41,10 @@ async fn host_authorization(
     })).await
 }
 
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 #[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
+    clippy::cognitive_complexity,
+    reason = "test fixture and ordered assertions"
 )]
 pub async fn provisioning(f: &Fixture) -> anyhow::Result<()> {
     // Each fixture gets its own role, avoiding shared role mutations across concurrent tests.
@@ -102,7 +103,7 @@ pub async fn provisioning(f: &Fixture) -> anyhow::Result<()> {
     let svc = service.clone();
     let who = actor.clone();
     let outcome = runtime
-        .local_tx(binding(target), deadline(), move |tx| {
+        .local_tx_until(binding(target), deadline(), move |tx| {
             Box::pin(async move {
                 host_authorization(tx).await?;
                 let account = svc
@@ -184,7 +185,7 @@ pub async fn provisioning(f: &Fixture) -> anyhow::Result<()> {
     let svc = service.clone();
     let who = actor.clone();
     let outcome = runtime
-        .local_tx(binding(target), deadline(), move |tx| {
+        .local_tx_until(binding(target), deadline(), move |tx| {
             Box::pin(async move {
                 host_authorization(tx).await?;
                 svc.create_local_account_in(tx, who, prepared)

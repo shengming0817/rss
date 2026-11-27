@@ -164,7 +164,7 @@ impl crate::HttpOidc {
         let claims = jsonwebtoken::decode::<AccessClaims>(&token.access_token, &key, &validation)
             .map_err(|_| FederationError::Claims)?
             .claims;
-        let now = std::time::SystemTime::now()
+        let now = (self.resources.clock.wall)()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| FederationError::Unavailable)?
             .as_secs() as i64;
@@ -177,7 +177,7 @@ impl crate::HttpOidc {
             return Err(FederationError::Claims);
         }
         transport.channel.check()?;
-        crate::remaining(deadline)?;
+        crate::remaining(&self.resources.clock, deadline)?;
         Ok(EnterpriseAccess {
             token: Zeroizing::new(token.access_token),
             subject: claims.sub,

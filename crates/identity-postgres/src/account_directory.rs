@@ -2,12 +2,12 @@
 //! ref: launchbadge/sqlx v0.9.0 sqlx-core/src/query_builder.rs.
 use crate::{
     transaction::{MutationError, corrupt, reject},
-    types::Budget,
     *,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::hmac;
 use rss_identity_core::directory::{AccountQuery, Expression, Field};
+use rss_request_context::Clock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -65,14 +65,19 @@ fn ordered_column(field: Field) -> &'static str {
     }
 }
 
-fn operand(sql: &mut QueryBuilder<Postgres>, field: Field, value: &str) {
+fn operand(
+    sql: &mut QueryBuilder<Postgres>,
+    field: Field,
+    value: &str,
+) -> Result<(), MutationError> {
     if field.boolean() {
         sql.push_bind(value == "true");
     } else if field == Field::PrincipalId {
-        sql.push_bind(uuid::Uuid::parse_str(value).expect("validated principal operand"));
+        sql.push_bind(uuid::Uuid::parse_str(value).map_err(|_| MutationError::InvalidInput)?);
     } else {
         sql.push_bind(value.to_owned());
     }
+    Ok(())
 }
 const ANCESTORS: &str = include_str!("department-ancestors.sql");
 
@@ -116,27 +121,35 @@ fn subtree(sql: &mut QueryBuilder<Postgres>, targets: Vec<String>, any: bool) {
     }
 }
 
-fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
+fn filter_group(
+    sql: &mut QueryBuilder<Postgres>,
+    items: &[Expression],
+    any: bool,
+) -> Result<(), MutationError> {
+    let separator = if any { " OR " } else { " AND " };
+    let mut other = Vec::new();
+    let mut departments = Vec::new();
+    collect_terms(items, any, &mut other, &mut departments);
+    for (index, item) in other.iter().enumerate() {
+        if index > 0 {
+            sql.push(separator);
+        }
+        filter(sql, item)?;
+    }
+    if !departments.is_empty() {
+        if !other.is_empty() {
+            sql.push(separator);
+        }
+        subtree(sql, departments, any);
+    }
+
+    Ok(())
+}
+fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) -> Result<(), MutationError> {
     sql.push("(");
     match expression {
         Expression::And(items) | Expression::Or(items) => {
-            let any = matches!(expression, Expression::Or(_));
-            let separator = if any { " OR " } else { " AND " };
-            let mut other = Vec::new();
-            let mut departments = Vec::new();
-            collect_terms(items, any, &mut other, &mut departments);
-            for (index, item) in other.iter().enumerate() {
-                if index > 0 {
-                    sql.push(separator);
-                }
-                filter(sql, item);
-            }
-            if !departments.is_empty() {
-                if !other.is_empty() {
-                    sql.push(separator);
-                }
-                subtree(sql, departments, any);
-            }
+            filter_group(sql, items, matches!(expression, Expression::Or(_)))?;
         }
         Expression::Compare {
             field,
@@ -174,14 +187,19 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) {
                         "=ge=" => " >= ",
                         _ => unreachable!("checked operator"),
                     });
-                    operand(sql, *field, value);
+                    operand(sql, *field, value)?;
                 }
             }
         }
     }
     sql.push(")");
+    Ok(())
 }
-fn position(sql: &mut QueryBuilder<Postgres>, field: Field, value: &Value) {
+fn position(
+    sql: &mut QueryBuilder<Postgres>,
+    field: Field,
+    value: &Value,
+) -> Result<(), MutationError> {
     if value.is_null() {
         sql.push(if field.boolean() {
             "NULL::boolean"
@@ -189,12 +207,22 @@ fn position(sql: &mut QueryBuilder<Postgres>, field: Field, value: &Value) {
             "NULL::text"
         });
     } else if field.boolean() {
-        sql.push_bind(value.as_bool().expect("checked boolean cursor"));
+        sql.push_bind(value.as_bool().ok_or(MutationError::InvalidInput)?);
     } else {
-        sql.push_bind(value.as_str().expect("checked text cursor").to_owned());
+        sql.push_bind(
+            value
+                .as_str()
+                .ok_or(MutationError::InvalidInput)?
+                .to_owned(),
+        );
     }
+    Ok(())
 }
-fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value]) {
+fn after(
+    sql: &mut QueryBuilder<Postgres>,
+    query: &AccountQuery,
+    values: &[Value],
+) -> Result<(), MutationError> {
     sql.push(" AND (");
     for (index, sort) in query.sort().iter().enumerate() {
         if index > 0 {
@@ -204,7 +232,7 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
         for (prefix, value) in values.iter().enumerate().take(index) {
             sql.push(ordered_column(query.sort()[prefix].field))
                 .push(" IS NOT DISTINCT FROM ");
-            position(sql, query.sort()[prefix].field, value);
+            position(sql, query.sort()[prefix].field, value)?;
             sql.push(" AND ");
         }
         if values[index].is_null() {
@@ -213,7 +241,7 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
             sql.push("(")
                 .push(ordered_column(sort.field))
                 .push(if sort.descending { " < " } else { " > " });
-            position(sql, sort.field, &values[index]);
+            position(sql, sort.field, &values[index])?;
             sql.push(" OR ")
                 .push(ordered_column(sort.field))
                 .push(" IS NULL)");
@@ -221,6 +249,7 @@ fn after(sql: &mut QueryBuilder<Postgres>, query: &AccountQuery, values: &[Value
         sql.push(")");
     }
     sql.push(")");
+    Ok(())
 }
 const CURSOR_DOMAIN: &[u8] = b"identity.accounts.cursor.v2\0";
 
@@ -256,22 +285,22 @@ impl Authority {
         &self,
         actor: AuthenticatedSession,
         target: AccountKey,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<AccountView, AuthorityError> {
         self.require_runtime()?;
         if target.tenant != actor.key.tenant {
             return Err(AuthorityError::Rejected);
         }
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let policy = self.policy.clone();
         let instance = self.instance;
-        self.read_sql(actor.binding,budget.remaining(),move |c|Box::pin(async move {
+        self.read_sql(actor.binding,budget.cutoff,move |c|Box::pin(async move {
             let loaded=crate::session_storage::recheck_collection(c,&actor).await?;
             crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ReadAccount,Some(target),c).await?;
-            let expires=crate::sessions::checked_expiry(&loaded,budget.0.instant())?;
+            let expires=crate::sessions::checked_expiry(&loaded,budget.cutoff.instant())?;
             let state=crate::storage::account_state_locked(c,target).await?;
             let login=sqlx::query_scalar("SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2").bind(target.tenant.to_string()).bind(target.principal.as_uuid()).fetch_optional(c).await?;
-            if std::time::Instant::now()>=expires { return Err(reject().into()); }
+            if loaded.timer.now()>=expires { return Err(reject().into()); }
             Ok(AccountView::new(state,login))
         })).await
     }
@@ -280,7 +309,7 @@ impl Authority {
         actor: AuthenticatedSession,
         query: AccountQuery,
         cursor: Option<String>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<AccountPage, AuthorityError> {
         self.require_runtime()?;
         if cursor
@@ -289,12 +318,12 @@ impl Authority {
         {
             return Err(AuthorityError::InvalidInput);
         }
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
+        let mut budget = self.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
         let policy = self.policy.clone();
         let instance = self.instance;
         let max_age = self.profile_limits.max_age_seconds();
-        self.read_sql(actor.binding, budget.remaining(), move |c| {
+        self.read_sql(actor.binding, budget.cutoff, move |c| {
             Box::pin(async move {
                 let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
                 let deps = crate::directory_window::ReadDependencies::accounts(&query, max_age)?;
@@ -313,7 +342,8 @@ impl Authority {
                     crate::management::authorize(policy.as_ref(), instance, &loaded, op, None, c)
                         .await?;
                 }
-                let actor_deadline = crate::sessions::checked_expiry(&loaded, budget.0.instant())?;
+                let actor_deadline =
+                    crate::sessions::checked_expiry(&loaded, budget.cutoff.instant())?;
                 let window = deps
                     .window(
                         c,
@@ -325,6 +355,7 @@ impl Authority {
                                 .idle_expires_at
                                 .min(loaded.view.absolute_expires_at),
                         ),
+                        &loaded.timer,
                     )
                     .await?;
                 // Persisted independently of any client credential; shared by all Authority instances.
@@ -396,12 +427,12 @@ impl Authority {
                 );
                 sql.push("SELECT to_jsonb(r) FROM account_rows r WHERE ");
                 if let Some(expression) = query.filter() {
-                    filter(&mut sql, expression);
+                    filter(&mut sql, expression)?;
                 } else {
                     sql.push("true");
                 }
                 if let Some(seek) = &seek {
-                    after(&mut sql, &query, &seek.position);
+                    after(&mut sql, &query, &seek.position)?;
                 }
                 sql.push(" ORDER BY ");
                 for (index, sort) in query.sort().iter().enumerate() {
@@ -444,7 +475,7 @@ impl Authority {
                     .map(serde_json::from_value)
                     .collect::<Result<_, _>>()
                     .map_err(|_| corrupt())?;
-                let finished = std::time::Instant::now();
+                let finished = loaded.timer.now();
                 if finished >= actor_deadline {
                     return Err(reject().into());
                 }

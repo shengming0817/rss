@@ -85,6 +85,7 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
     );
     let c = settings(&issuer)?;
     let allowed = HttpOidc::new(
+        crate::fixture_clock::clock(),
         vec![],
         vec![PrivateProviderAccess {
             tenant: tenant()?,
@@ -96,7 +97,13 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
         reuse_policy(),
     )?;
     let trusted = ProviderCredentials::new("fixture-secret".into(), Some(ca.clone()))?;
-    let denied = HttpOidc::new(vec![], vec![], policy()?, reuse_policy())?;
+    let denied = HttpOidc::new(
+        crate::fixture_clock::clock(),
+        vec![],
+        vec![],
+        policy()?,
+        reuse_policy(),
+    )?;
     anyhow::ensure!(denied.validate(tenant()?, &c, &trusted).is_err());
     anyhow::ensure!(
         denied

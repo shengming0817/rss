@@ -103,6 +103,10 @@ pub(super) fn signing_key(
     };
     Ok(key)
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bind the approved algorithm, key, claims and host clock together"
+)]
 pub(super) fn verify(
     raw: &str,
     alg: Algorithm,
@@ -111,6 +115,7 @@ pub(super) fn verify(
     nonce: &str,
     client: &str,
     future_skew_seconds: u32,
+    observed: SystemTime,
 ) -> Result<Claims, FederationError> {
     let mut validation = Validation::new(alg);
 
@@ -123,7 +128,7 @@ pub(super) fn verify(
         .map_err(|_| FederationError::Claims)?
         .claims;
     let now = i64::try_from(
-        SystemTime::now()
+        observed
             .duration_since(UNIX_EPOCH)
             .map_err(|_| FederationError::Unavailable)?
             .as_secs(),

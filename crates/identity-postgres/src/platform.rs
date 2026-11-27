@@ -229,7 +229,7 @@ impl Authority {
         purpose: PlatformPurpose,
         browser: String,
         source: AttemptSource,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<PlatformChallenge, AuthorityError> {
         let tenant = execution.tenant();
         self.require_runtime()?;
@@ -246,12 +246,12 @@ impl Authority {
         {
             return Err(AuthorityError::Configuration);
         }
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         self.reserve(
             execution,
             format!("platform:{binding}"),
             &source,
-            budget.remaining(),
+            budget.cutoff,
         )
         .await?;
         let target = match &self.enterprise {
@@ -260,7 +260,7 @@ impl Authority {
             None => return Err(AuthorityError::Configuration),
         };
         let instance = self.instance;
-        self.read_sql(execution,budget.remaining(),move|c|Box::pin(async move{
+        self.read_sql(execution,budget.cutoff,move|c|Box::pin(async move{
             lock_tenant_collection(c,tenant).await?;
             let resolved=verifier.resolve(instance,tenant,binding,c).await.map_err(failure)?;
             if !resolved.valid() || resolved.instance!=instance || resolved.account.tenant!=tenant || resolved.binding_id!=binding || !account_state_locked(c,resolved.account).await?.active(){return Err(reject().into());}
@@ -288,7 +288,7 @@ impl Authority {
         nonce: String,
         browser: String,
         evidence: Vec<u8>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<PlatformLogin, AuthorityError> {
         let tenant = execution.tenant();
         self.require_runtime()?;
@@ -296,7 +296,7 @@ impl Authority {
         if nonce.len() != 43 || evidence.is_empty() || evidence.len() > 65_536 || id.is_nil() {
             return Err(AuthorityError::InvalidInput);
         }
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let verifier = self
             .session_checks
             .platform
@@ -305,7 +305,7 @@ impl Authority {
         let expected_nonce = digest(&nonce);
         let expected_browser = digest(&browser);
         let context = self
-            .read_sql(execution, budget.remaining(), move |c| {
+            .read_sql(execution, budget.cutoff, move |c| {
                 Box::pin(async move {
                     lock_tenant_collection(c, tenant).await?;
                     let row = challenge(c, tenant, id, &expected_nonce, &expected_browser).await?;
@@ -322,18 +322,16 @@ impl Authority {
                 })
             })
             .await?;
-        let verified = tokio::time::timeout(
-            budget.remaining().timeout(),
-            verifier.verify(&context, &evidence),
-        )
-        .await
-        .map_err(|_| AuthorityError::DeadlineElapsed)?
-        .map_err(|e| match e {
-            PlatformError::Rejected => AuthorityError::Rejected,
-            PlatformError::Unavailable => AuthorityError::Unavailable,
-            PlatformError::InteractionRequired => AuthorityError::InteractionRequired,
-            PlatformError::Cancelled => AuthorityError::Cancelled,
-        })?;
+        let verified = budget
+            .wait(budget.cutoff, verifier.verify(&context, &evidence))
+            .await
+            .map_err(|_| AuthorityError::DeadlineElapsed)?
+            .map_err(|e| match e {
+                PlatformError::Rejected => AuthorityError::Rejected,
+                PlatformError::Unavailable => AuthorityError::Unavailable,
+                PlatformError::InteractionRequired => AuthorityError::InteractionRequired,
+                PlatformError::Cancelled => AuthorityError::Cancelled,
+            })?;
         if !verified.key_possession
             || verified.authenticated_at.is_some() && !verified.user_verification
         {
@@ -352,9 +350,10 @@ impl Authority {
         let instance = self.instance.as_uuid();
         let policy = self.session_policy;
         let max_auth_facts_bytes = self.max_auth_facts_bytes;
+        let timer = self.execution_timer().clone();
         let future_skew_seconds = self.future_skew_seconds;
         let limits = self.profile_limits;
-        self.write_sql(execution,budget.remaining(),move|c|Box::pin(async move{
+        self.write_sql(execution,budget.cutoff,move|c|Box::pin(async move{
             lock_tenant_collection(c,tenant).await?;
             let row=challenge(c,tenant,id,&expected_nonce,&expected_browser).await?;
             let actual:PlatformBinding=serde_json::from_value(row.try_get("binding")?).map_err(|_|corrupt())?;
@@ -390,7 +389,7 @@ impl Authority {
                     Some(crate::profiles::oidc_observation(&claims,&view,sequence))
                 }
             };
-            let (issued,event)=crate::sessions::insert(c,state,None,crate::sessions::SessionAuthentication::Platform(stored.clone()),now,policy,max_auth_facts_bytes).await?;
+            let (issued,event)=crate::sessions::insert(c,state,None,crate::sessions::SessionAuthentication::Platform(stored.clone()),now,policy,max_auth_facts_bytes,&timer).await?;
             let assertion = match target {
                 Some(target)=>Some(enterprise::issue(enterprise.as_ref().ok_or_else(reject)?,target,&stored,now,issued.view().absolute_expires_at.min(issued.view().idle_expires_at))?),
                 None=>None,

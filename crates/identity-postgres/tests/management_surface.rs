@@ -74,10 +74,7 @@ impl<'a> Visit<'a> for Aliases<'_> {
         }
     }
 }
-#[allow(
-    clippy::expect_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::expect_used, reason = "test fixture")]
 fn check(files: &[(PathBuf, String)]) -> (usize, Vec<String>) {
     let trees: Vec<_> = files
         .iter()
@@ -112,10 +109,7 @@ fn check(files: &[(PathBuf, String)]) -> (usize, Vec<String>) {
     }
     (checked, rejected)
 }
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn sources(root: &Path, path: &Path, out: &mut Vec<(PathBuf, String)>) {
     for entry in std::fs::read_dir(path).unwrap() {
         let path = entry.unwrap().path();

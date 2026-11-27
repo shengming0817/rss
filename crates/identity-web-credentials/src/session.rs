@@ -2,20 +2,20 @@ use crate::{CredentialError, HttpConfig, cookie, csrf, request_marker, same_orig
 use http::HeaderMap;
 use rss_identity_core::session::SessionSecret;
 use rss_identity_postgres::{AuthenticatedSession, Authority};
-use rss_transactional_messaging::{fence::ExecutionBinding, policy::OperationDeadline};
-use std::time::Instant;
-
+use rss_request_context::Deadline;
+use rss_transactional_messaging::fence::ExecutionBinding;
 pub(crate) fn cutoff(
+    authority: &Authority,
     config: &HttpConfig,
-    deadline: OperationDeadline,
-) -> Result<Instant, CredentialError> {
-    let remaining = deadline.timeout().min(config.timeout());
-    if remaining.is_zero() {
+    deadline: Deadline,
+) -> Result<Deadline, CredentialError> {
+    use rss_request_context::Clock;
+    let clock = authority.execution_timer();
+    let cutoff = deadline.capped(clock, config.timeout());
+    if cutoff.is_expired(clock.now()) {
         return Err(CredentialError::Deadline);
     }
-    Instant::now()
-        .checked_add(remaining)
-        .ok_or(CredentialError::Deadline)
+    Ok(cutoff)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,9 +32,9 @@ pub async fn authenticate_request(
     binding: ExecutionBinding,
     headers: &HeaderMap,
     activity: SessionActivity,
-    deadline: OperationDeadline,
+    deadline: Deadline,
 ) -> Result<(AuthenticatedSession, SessionSecret), CredentialError> {
-    let end = cutoff(config, deadline)?;
+    let end = cutoff(authority, config, deadline)?;
     authority.require_runtime()?;
     crate::cookie_presentation(headers)?;
     if activity == SessionActivity::Active {
@@ -49,19 +49,9 @@ pub async fn authenticate_request(
     }
     let retained =
         SessionSecret::parse(secret.expose().into()).map_err(|_| CredentialError::Invalid)?;
-    let remaining =
-        OperationDeadline::from_remaining(end.saturating_duration_since(Instant::now()));
     let proof = match activity {
-        SessionActivity::Passive => {
-            authority
-                .inspect_session(binding, secret, remaining)
-                .await?
-        }
-        SessionActivity::Active => {
-            authority
-                .authenticate_session(binding, secret, remaining)
-                .await?
-        }
+        SessionActivity::Passive => authority.inspect_session(binding, secret, end).await?,
+        SessionActivity::Active => authority.authenticate_session(binding, secret, end).await?,
     };
     Ok((proof, retained))
 }

@@ -6,7 +6,7 @@ use crate::{
     *,
 };
 use rss_identity_core::account::{LoginKey, Password, SecurityAction};
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_request_context::Deadline;
 
 impl Authority {
     /// Initialize an admitted tenant once using its independently held maintenance identity.
@@ -16,15 +16,15 @@ impl Authority {
         key: AccountKey,
         login: LoginKey,
         password: Password,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
         if binding.tenant() != key.tenant {
             return Err(AuthorityError::Rejected);
         }
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let hash = budget.password(self.kdf.hash(password)).await?;
-        self.mutate(binding, budget.remaining(), move |tx| {
+        self.mutate(binding, budget.cutoff, move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
@@ -49,15 +49,15 @@ impl Authority {
         binding: ExecutionBinding,
         key: AccountKey,
         password: Password,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<AccountState, AuthorityError> {
         self.require_maintenance()?;
         if binding.tenant() != key.tenant {
             return Err(AuthorityError::Rejected);
         }
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let hash = budget.password(self.kdf.hash(password)).await?;
-        self.mutate(binding, budget.remaining(), move |tx| {
+        self.mutate(binding, budget.cutoff, move |tx| {
             Box::pin(async move {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {

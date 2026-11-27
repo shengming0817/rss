@@ -3,6 +3,7 @@ use crate::{
     transaction::{corrupt, reject},
 };
 use rss_identity_core::PrincipalId;
+use rss_request_context::Clock;
 use rss_request_context::TenantId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
@@ -101,9 +102,7 @@ pub(crate) async fn current(
     c: &mut PgConnection,
     candidate: &AuthenticationCandidate,
 ) -> Result<AccountState, PgError> {
-    if candidate.expires <= std::time::Instant::now()
-        || authority_id(c).await? != candidate.authority
-    {
+    if candidate.expires <= candidate.timer.now() || authority_id(c).await? != candidate.authority {
         return Err(reject());
     }
     lock_tenant_scope(c, candidate.state.key().tenant).await?;

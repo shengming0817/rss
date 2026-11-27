@@ -3,10 +3,7 @@ use rss_identity_core::federation::{ClaimMapping, ProviderSettings, ProviderSett
 use serde_json::json;
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn department_ids_are_exact_bounded_and_never_display_name_normalized() {
     for value in ["engineering", "Engineering", "工程", "dept/a"] {
         assert_eq!(DepartmentId::new(value.into()).unwrap().as_str(), value);
@@ -28,9 +25,10 @@ fn department_ids_are_exact_bounded_and_never_display_name_normalized() {
 }
 
 #[test]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 #[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
+    clippy::cognitive_complexity,
+    reason = "test fixture and ordered assertions"
 )]
 fn department_mapping_is_complete_validated_and_has_no_default_age() {
     for seconds in [1, 300] {
@@ -82,10 +80,7 @@ fn department_mapping_is_complete_validated_and_has_no_default_age() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn department_mapping_cannot_reuse_extension_or_group_claims() {
     for (extensions_claim, groups) in [(Some("custom".into()), None), (None, Some("custom".into()))]
     {
@@ -114,10 +109,7 @@ fn department_mapping_cannot_reuse_extension_or_group_claims() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn typed_adapters_construct_validated_snapshots_without_json() {
     use rss_identity_core::department::{DepartmentNode, DepartmentSnapshot};
     let id = DepartmentId::new("root".into()).unwrap();
@@ -143,10 +135,7 @@ fn typed_adapters_construct_validated_snapshots_without_json() {
 }
 
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn department_debug_redacts_assertion_payloads() {
     use rss_identity_core::department::{
         DepartmentNode, DepartmentSnapshot, UpstreamDepartmentSnapshot,

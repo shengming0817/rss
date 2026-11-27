@@ -75,7 +75,7 @@ def main():
     result = Path(tempfile.mkdtemp(prefix="identity-consumer-", dir=parent))
     for name, extra in SCENARIOS.items():
         verify(result / name, name, extra, revision, env)
-        if name in ("oidc", "postgres"):
+        if name == "oidc":
             verify(result / (name + "-test-support"), name, extra, revision, env, ("test-support",))
 
 

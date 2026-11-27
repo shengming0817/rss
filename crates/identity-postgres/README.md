@@ -1,6 +1,6 @@
 # rss-identity-postgres
 
-宿主提供已绑定 storage lineage 与 tenant epoch 的 PgRuntime、共享 PasswordKdf、ManagementPolicy 和逐操作时限。用 AuthorityConfig::new(instance, sessions, integrity, audit_budget) 装配实例。Integrity 和 WriteBudget 来自同一 RSS revision 的 rss-audit-postgres。每个宿主容量域建立一个 WriteBudget，给所有使用它的写入者传入克隆；Identity 单次变更多至八条审计事件；配置至少需要 8 行、1,048,576 字节的批次容量，aggregate 容量至少覆盖一个完整批次。
+宿主提供已绑定 storage lineage 与 tenant epoch 的 PgRuntime、共享 PasswordKdf、ManagementPolicy 和请求入口冻结的 rss_request_context::Deadline。身份操作直接将该截止传入 PgRuntime::local_tx_until，证明有效期使用宿主给 PgRuntime 的执行时钟，持久期限以 PostgreSQL 墙钟为准。用 AuthorityConfig::new(instance, sessions, integrity, audit_budget) 装配实例。Integrity 和 WriteBudget 来自同一 RSS revision 的 rss-audit-postgres。每个宿主容量域建立一个 WriteBudget，给所有使用它的写入者传入克隆；Identity 单次变更多至八条审计事件；配置至少需要 8 行、1,048,576 字节的批次容量，aggregate 容量至少覆盖一个完整批次。
 
 ## 全新安装与权限
 

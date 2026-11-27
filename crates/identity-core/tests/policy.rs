@@ -2,10 +2,7 @@ use rss_identity_core::{
     PrincipalId,
     account::{AccountKey, AccountRuleError, AccountState, LocalChange},
 };
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn key() -> AccountKey {
     AccountKey {
         tenant: rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")
@@ -14,10 +11,7 @@ fn key() -> AccountKey {
     }
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn core_owns_role_free_transitions_and_epochs() {
     let account = AccountState::new_local(key()).unwrap();
     let (disabled, _) = account.change(LocalChange::Enabled(false)).unwrap();
@@ -31,10 +25,7 @@ fn core_owns_role_free_transitions_and_epochs() {
     assert_eq!(max.recover().unwrap_err(), AccountRuleError::EpochExhausted);
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn actions_preserve_transition_direction() {
     let account = AccountState::new_local(key()).unwrap();
     for (change, action) in [
@@ -51,10 +42,7 @@ fn actions_preserve_transition_direction() {
     }
 }
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn membership_and_local_credential_are_independent() {
     let account = AccountState::new_local(key()).unwrap();
     let (inactive, _) = account.change(LocalChange::Membership(false)).unwrap();

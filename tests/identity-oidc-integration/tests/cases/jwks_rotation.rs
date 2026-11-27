@@ -49,10 +49,7 @@ async fn exchange(
         .await?)
 }
 #[tokio::test]
-#[allow(
-    clippy::expect_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::expect_used, reason = "test fixture")]
 async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let issuer = format!("http://{}/realm", socket.local_addr()?);
@@ -89,7 +86,8 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
     let server = tokio::spawn(axum::serve(socket, routes).into_future());
     let mut reuse = reuse_policy();
     reuse.refresh_cooldown = Duration::from_secs(60);
-    let adapter = HttpOidc::for_loopback_test(vec![], policy()?, reuse)?;
+    let adapter =
+        HttpOidc::for_loopback_test(crate::fixture_clock::clock(), vec![], policy()?, reuse)?;
     let bound = fixture_provider(
         &adapter,
         tenant()?,

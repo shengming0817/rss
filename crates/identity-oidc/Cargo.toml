@@ -25,8 +25,6 @@ zeroize.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros", "sync", "time"] }
 ipnet = "2.11"
 [dev-dependencies]
-axum = "0.8"
 anyhow.workspace = true
-reqwest = { workspace = true, features = ["cookies"] }
 [lints]
 workspace = true

@@ -1,9 +1,6 @@
 use rss_identity_core::assurance::{Acr, Amr, Assurance, AuthenticationMode};
 #[test]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixed test inputs and immediate fixture assertions"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixture")]
 fn normalized_facts_enforce_time_strength_and_method_invariants() {
     let facts = Assurance::new(Some(100), Acr::Mfa, vec![Amr::Otp]).unwrap();
     assert!(

@@ -7,7 +7,8 @@ use crate::{
 };
 use rss_identity_core::SessionId;
 use rss_identity_core::session::{CredentialKind, SessionLifetime, SessionPolicy, SessionSecret};
-use rss_transactional_messaging::policy::OperationDeadline;
+use rss_request_context::Clock;
+use rss_request_context::Deadline;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -16,8 +17,9 @@ use uuid::Uuid;
 /// Call after Audit/Ledger locks and before host authorization/business locks. Tenant admission,
 /// source, account/membership, session and platform verifier locks last until host settlement.
 /// Platform source writers must honor the verifier's authoritative locks on this same connection.
-/// On any error the host MUST roll back. The host owns fencing, budgets, resource authorization
+/// On any error the host MUST roll back. The host supplies the original execution coordinates, budgets, resource authorization
 /// and commit/rollback outcomes; successful admission is not a successful business commit.
+/// The original transaction locks and checks the current lineage and tenant epoch.
 /// Does not renew the session, consume step-up, or extend the actor's original lifetime.
 /// Natural expiry still applies: do not cache this result or treat it as a transferable permit.
 pub async fn recheck_authenticated_session_on(
@@ -64,6 +66,7 @@ pub struct IssuedSession {
     secret: SessionSecret,
     view: SessionView,
     remaining: Duration,
+    timer: rss_request_context::SharedExecutionTimer,
     observed: Instant,
 }
 impl IssuedSession {
@@ -78,7 +81,7 @@ impl IssuedSession {
     }
     pub fn cookie_max_age(&self) -> u64 {
         self.remaining
-            .saturating_sub(self.observed.elapsed())
+            .saturating_sub(self.timer.now().saturating_duration_since(self.observed))
             .as_secs()
     }
     pub(crate) fn new(
@@ -86,13 +89,15 @@ impl IssuedSession {
         view: SessionView,
         now: i64,
         state: AccountState,
+        timer: &rss_request_context::SharedExecutionTimer,
     ) -> Self {
         Self {
             identity: SessionIdentity::from_state(state),
             remaining: Duration::from_secs(
                 view.absolute_expires_at.saturating_sub(now).max(0) as u64
             ),
-            observed: Instant::now(),
+            observed: timer.now(),
+            timer: timer.clone(),
             secret,
             view,
         }
@@ -107,7 +112,7 @@ pub struct AuthenticatedSession {
     pub(crate) session_checks: crate::session_checks::SessionChecks,
     pub(crate) key: AccountKey,
     pub(crate) digest: [u8; 32],
-    pub(crate) authority: Uuid,
+    pub(crate) authority: rss_identity_core::InstanceId,
     pub(crate) expires: Instant,
     pub(crate) view: SessionView,
     pub(crate) identity: SessionIdentity,
@@ -124,15 +129,14 @@ impl AuthenticatedSession {
         Ok(self.source)
     }
     pub fn instance(&self) -> rss_identity_core::InstanceId {
-        rss_identity_core::InstanceId::parse(&self.authority.to_string())
-            .expect("validated instance")
+        self.authority
     }
     pub fn assurance(&self) -> Result<&rss_identity_core::assurance::Assurance, AuthorityError> {
         self.check_live()?;
         Ok(&self.assurance)
     }
     fn check_live(&self) -> Result<(), AuthorityError> {
-        if Instant::now() >= self.expires {
+        if self.session_checks.timer.now() >= self.expires {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
@@ -140,11 +144,15 @@ impl AuthenticatedSession {
     pub fn department_snapshot(
         &self,
     ) -> Result<VerifiedDepartmentSnapshot<'_>, DepartmentAccessError> {
-        self.department_snapshot
-            .view(self.instance(), self.account(), self.expires)
+        self.department_snapshot.view(
+            self.instance(),
+            self.account(),
+            self.expires,
+            &self.session_checks.timer,
+        )
     }
     pub fn groups(&self) -> Result<VerifiedGroups<'_>, GroupAccessError> {
-        self.groups.view(self.expires)
+        self.groups.view(self.expires, &self.session_checks.timer)
     }
     pub fn identity(&self) -> &SessionIdentity {
         &self.identity
@@ -175,7 +183,7 @@ pub(crate) fn checked_expiry(
     budget: Instant,
 ) -> Result<Instant, rss_transactional_messaging_postgres::PgError> {
     let expires = budget.min(loaded.expires);
-    if Instant::now() >= expires {
+    if loaded.timer.now() >= expires {
         return Err(reject());
     }
     Ok(expires)
@@ -219,6 +227,10 @@ pub(crate) enum SessionAuthentication {
     LinkedOidc { intent: uuid::Uuid },
     Platform(crate::platform::PlatformAuthentication),
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "session issuance binds authentication, transaction, limits and the host timer"
+)]
 pub(crate) async fn insert(
     c: &mut sqlx::PgConnection,
     state: AccountState,
@@ -227,6 +239,7 @@ pub(crate) async fn insert(
     now: i64,
     policy: SessionPolicy,
     max_auth_facts_bytes: std::num::NonZeroU32,
+    timer: &rss_request_context::SharedExecutionTimer,
 ) -> Result<(IssuedSession, SecurityEvent), transaction::MutationError> {
     let key = state.key();
     let (source, local_authenticated_at, origin, intent, platform, kind) = match authentication {
@@ -319,7 +332,13 @@ pub(crate) async fn insert(
         return Err(reject().into());
     }
     Ok((
-        IssuedSession::new(secret, SessionView::new(id, lifetime, kind), now, state),
+        IssuedSession::new(
+            secret,
+            SessionView::new(id, lifetime, kind),
+            now,
+            state,
+            timer,
+        ),
         event(
             SessionAction::Created,
             state,
@@ -338,7 +357,7 @@ impl Authority {
         &self,
         candidate: AuthenticationCandidate,
         replacement: Option<AuthenticatedSession>,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<IssuedSession, AuthorityError> {
         self.create_session_for(candidate, replacement, CredentialKind::Cookie, deadline)
             .await
@@ -348,11 +367,11 @@ impl Authority {
         candidate: AuthenticationCandidate,
         replacement: Option<AuthenticatedSession>,
         kind: CredentialKind,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<IssuedSession, AuthorityError> {
         self.require_runtime()?;
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(candidate.expires);
+        let mut budget = self.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(candidate.expires);
         if let Some(old) = &replacement {
             if old.key != candidate.state.key()
                 || old.binding != candidate.binding
@@ -360,13 +379,13 @@ impl Authority {
             {
                 return Err(AuthorityError::Rejected);
             }
-            budget.0 = budget.0.shortened_to(old.expires);
+            budget.cutoff = budget.cutoff.shortened_to(old.expires);
         }
         let policy = self.session_policy;
         let max_auth_facts_bytes = self.max_auth_facts_bytes;
         let limits = self.profile_limits;
         let key = candidate.state.key();
-        self.mutate_events(candidate.binding, budget.remaining(), move |tx| {
+        self.mutate_events(candidate.binding, budget.cutoff, move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
@@ -383,7 +402,7 @@ impl Authority {
                         let sequence = crate::profiles::sequence(c, key.tenant).await?;
                         let now = db::now(c).await?;
                         // current() checks before waiting on account locks; recheck its original deadline.
-                        if Instant::now() >= candidate.expires {
+                        if candidate.timer.now() >= candidate.expires {
                             return Err(reject().into());
                         }
                         let observation =
@@ -396,6 +415,7 @@ impl Authority {
                             now,
                             policy,
                             max_auth_facts_bytes,
+                            &candidate.timer,
                         )
                         .await?;
                         let profile_event = crate::profiles::accept(
@@ -407,7 +427,7 @@ impl Authority {
                             limits,
                         )
                         .await?;
-                        if Instant::now() >= candidate.expires {
+                        if candidate.timer.now() >= candidate.expires {
                             return Err(reject().into());
                         }
                         let mut events = vec![fact];
@@ -425,7 +445,7 @@ impl Authority {
         &self,
         binding: ExecutionBinding,
         secret: SessionSecret,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.session_proof(
             binding,
@@ -443,7 +463,7 @@ impl Authority {
         &self,
         binding: ExecutionBinding,
         secret: SessionSecret,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         self.session_proof(
             binding,
@@ -459,15 +479,15 @@ impl Authority {
         binding: ExecutionBinding,
         digest: [u8; 32],
         kind: CredentialKind,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         touch: bool,
     ) -> Result<AuthenticatedSession, AuthorityError> {
         let tenant = binding.tenant();
         self.require_runtime()?;
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let session_checks = self.session_checks.clone();
-        let authority = self.instance.as_uuid();
-        self.read(binding, budget.remaining(), move |tx| {
+        let authority = self.instance;
+        self.read(binding, budget.cutoff, move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
@@ -477,13 +497,19 @@ impl Authority {
                             db::SessionAccess::Inspect
                         };
                         db::lock_session(c, Some(&digest), None, kind, access).await?;
-                        let mut loaded =
-                            db::lookup_locked(c, tenant, &digest, kind, authority, &session_checks)
-                                .await?;
+                        let mut loaded = db::lookup_locked(
+                            c,
+                            tenant,
+                            &digest,
+                            kind,
+                            authority.as_uuid(),
+                            &session_checks,
+                        )
+                        .await?;
                         if touch {
                             db::touch(c, &mut loaded).await?;
                         }
-                        let expires = checked_expiry(&loaded, budget.0.instant())?;
+                        let expires = checked_expiry(&loaded, budget.cutoff.instant())?;
                         Ok(AuthenticatedSession {
                             binding,
                             session_checks,
@@ -509,15 +535,15 @@ impl Authority {
         &self,
         binding: ExecutionBinding,
         old: SessionSecret,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<IssuedSession, AuthorityError> {
         let tenant = binding.tenant();
         self.require_runtime()?;
-        let budget = Budget::new(deadline)?;
+        let budget = self.budget(deadline)?;
         let secret = SessionSecret::generate().map_err(|_| AuthorityError::Unavailable)?;
         let session_checks = self.session_checks.clone();
         let instance = self.instance.as_uuid();
-        self.mutate(binding, budget.remaining(), move |tx| {
+        self.mutate(binding, budget.cutoff, move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
@@ -542,11 +568,11 @@ impl Authority {
                         .bind(secret.digest().as_slice())
                         .execute(c)
                         .await?;
-                        checked_expiry(&loaded, budget.0.instant())?;
+                        checked_expiry(&loaded, budget.cutoff.instant())?;
                         let fact = event(
                             SessionAction::Refreshed, loaded.state, loaded.view.id, None, loaded.source,
                         );
-                        let issued = IssuedSession::new(secret, loaded.view, loaded.now, loaded.state);
+                        let issued = IssuedSession::new(secret, loaded.view, loaded.now, loaded.state,&loaded.timer);
                         Ok((issued, fact))
                     })
                 })
@@ -558,27 +584,27 @@ impl Authority {
     pub async fn revoke_current_session(
         &self,
         actor: AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         self.revoke_session(actor, deadline, false).await
     }
     pub async fn revoke_all_sessions(
         &self,
         actor: AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         self.revoke_session(actor, deadline, true).await
     }
     async fn revoke_session(
         &self,
         actor: AuthenticatedSession,
-        deadline: OperationDeadline,
+        deadline: Deadline,
         all: bool,
     ) -> Result<(), AuthorityError> {
         self.require_runtime()?;
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
-        self.mutate(actor.binding,budget.remaining(),move|tx|Box::pin(async move {
+        let mut budget = self.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
+        self.mutate(actor.binding,budget.cutoff,move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let access = if all { db::SessionAccess::RevokeAll } else { db::SessionAccess::Revoke };
                 let loaded = db::recheck_for(c,&actor,access).await?;
@@ -600,24 +626,24 @@ impl Authority {
         actor: AuthenticatedSession,
         cursor: Option<SessionId>,
         limit: u16,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<SessionPage, AuthorityError> {
         self.require_runtime()?;
         if !(1..=rss_identity_core::directory::MAX_PAGE_SIZE).contains(&limit) {
             return Err(AuthorityError::InvalidInput);
         }
-        let mut budget = Budget::new(deadline)?;
-        budget.0 = budget.0.shortened_to(actor.expires);
-        if actor.authority != self.instance.as_uuid() {
+        let mut budget = self.budget(deadline)?;
+        budget.cutoff = budget.cutoff.shortened_to(actor.expires);
+        if actor.authority != self.instance {
             return Err(AuthorityError::Rejected);
         }
-        self.read_sql(actor.binding, budget.remaining(), move |c| {
+        self.read_sql(actor.binding, budget.cutoff, move |c| {
             Box::pin(async move {
                 // read_sql has just verified this instance and entered the actor's exact fenced binding.
                 lock_tenant_collection(c, actor.key.tenant).await?;
                 let loaded = db::recheck_locked(c, &actor).await?;
                 let page = crate::session_page::read(c, &actor, &loaded, cursor, limit).await?;
-                checked_expiry(&loaded, budget.0.instant())?;
+                checked_expiry(&loaded, budget.cutoff.instant())?;
                 Ok(page)
             })
         })
@@ -629,10 +655,7 @@ impl Authority {
 mod contract_tests {
     use super::*;
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn session_action_vocabulary_matches_declared_schema() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("session-security-event-v1.json")).unwrap();

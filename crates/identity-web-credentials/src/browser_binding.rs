@@ -51,8 +51,11 @@ impl BrowserBinding {
     }
 }
 
-pub fn operation_cookie(grant: &StepUpGrant) -> Result<HeaderValue, CredentialError> {
-    let now = SystemTime::now()
+pub fn operation_cookie(
+    grant: &StepUpGrant,
+    now: SystemTime,
+) -> Result<HeaderValue, CredentialError> {
+    let now = now
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|v| i64::try_from(v.as_secs()).ok())

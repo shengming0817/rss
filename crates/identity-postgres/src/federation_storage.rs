@@ -56,7 +56,7 @@ pub(crate) async fn read_provider(
     authority: &Authority,
     binding: ExecutionBinding,
     id: ProviderId,
-    d: rss_transactional_messaging::policy::OperationDeadline,
+    d: rss_request_context::Deadline,
 ) -> Result<ProviderView, AuthorityError> {
     let tenant = binding.tenant();
     authority

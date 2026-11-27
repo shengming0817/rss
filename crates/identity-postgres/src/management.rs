@@ -6,6 +6,7 @@ use rss_identity_core::{
     assurance::{Acr, Assurance},
     federation::ProviderId,
 };
+use rss_request_context::Clock;
 use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagementOperation {
@@ -44,6 +45,7 @@ pub enum ReauthenticationRequirement {
 pub struct ManagementDenied;
 /// Created only after the component has loaded authoritative state in this transaction.
 pub struct ManagementContext<'a> {
+    timer: &'a rss_request_context::SharedExecutionTimer,
     instance: InstanceId,
     actor: AccountKey,
     target: Option<AccountKey>,
@@ -55,7 +57,7 @@ pub struct ManagementContext<'a> {
 }
 impl ManagementContext<'_> {
     pub fn check_live(&self) -> Result<(), ManagementDenied> {
-        if Instant::now() < self.expires {
+        if self.timer.now() < self.expires {
             Ok(())
         } else {
             Err(ManagementDenied)
@@ -80,10 +82,10 @@ impl ManagementContext<'_> {
         &self,
     ) -> Result<crate::VerifiedDepartmentSnapshot<'_>, crate::DepartmentAccessError> {
         self.department_snapshot
-            .view(self.instance, self.actor, self.expires)
+            .view(self.instance, self.actor, self.expires, self.timer)
     }
     pub fn groups(&self) -> Result<VerifiedGroups<'_>, GroupAccessError> {
-        self.groups.view(self.expires)
+        self.groups.view(self.expires, self.timer)
     }
 }
 /// Transaction-bound host policy. Borrow the existing connection; do not commit,
@@ -113,7 +115,7 @@ pub(crate) async fn authorize(
     target: Option<AccountKey>,
     connection: &mut sqlx::PgConnection,
 ) -> Result<(), AccountRuleError> {
-    if Instant::now() >= loaded.expires {
+    if loaded.timer.now() >= loaded.expires {
         return Err(AccountRuleError::InsufficientPrivilege);
     }
     if target.is_some_and(|t| t.tenant != loaded.state.key().tenant)
@@ -124,6 +126,7 @@ pub(crate) async fn authorize(
     let requirement = policy
         .authorize(
             &ManagementContext {
+                timer: &loaded.timer,
                 instance,
                 actor: loaded.state.key(),
                 target,
@@ -137,7 +140,7 @@ pub(crate) async fn authorize(
         )
         .await
         .map_err(|_| AccountRuleError::InsufficientPrivilege)?;
-    if Instant::now() >= loaded.expires {
+    if loaded.timer.now() >= loaded.expires {
         return Err(AccountRuleError::InsufficientPrivilege);
     }
     let (max_age, mfa) = match requirement {

@@ -4,9 +4,9 @@ use crate::{
     AttemptSource, Authority, AuthorityError,
     storage::{lock_attempt_capacity, lock_tenant_scope},
 };
+use rss_request_context::Deadline;
 use rss_request_context::TenantId;
 use rss_transactional_messaging::fence::ExecutionBinding;
-use rss_transactional_messaging::policy::OperationDeadline;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
 /// A finite fixed window. Counts and Retry-After retain their persisted integer domains.
@@ -54,18 +54,11 @@ impl AuthenticationPolicy {
         cleanup_batch: u16,
         claim_ttl: std::time::Duration,
     ) -> Result<Self, AuthorityError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| AuthorityError::Configuration)?;
         if record_capacity == 0
             || !(1..=1024).contains(&cleanup_batch)
             || claim_ttl.is_zero()
             || !claim_ttl.subsec_nanos().is_multiple_of(1000)
-            || claim_ttl
-                .as_micros()
-                .checked_add(now.as_micros())
-                .is_none_or(|v| v > i64::MAX as u128)
-            || std::time::Instant::now().checked_add(claim_ttl).is_none()
+            || claim_ttl.as_micros() >= i64::MAX as u128
         {
             return Err(AuthorityError::Configuration);
         }
@@ -149,7 +142,7 @@ impl Authority {
         binding: ExecutionBinding,
         scope: String,
         source: &AttemptSource,
-        deadline: OperationDeadline,
+        deadline: Deadline,
     ) -> Result<(), AuthorityError> {
         let tenant = binding.tenant();
         let source = format!("s:{}", source.value());

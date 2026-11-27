@@ -108,10 +108,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     async fn mixed_empty_and_rebound_dns_fail_closed() {
         for answers in [
             vec![],
@@ -147,10 +144,7 @@ mod tests {
         );
     }
     #[test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn reserved_and_encoded_addresses_are_not_public() {
         for address in [
             "0.0.0.0",
@@ -179,10 +173,7 @@ mod tests {
         assert!(!allowed("10.0.0.1".parse().unwrap(), true, &[]));
     }
     #[tokio::test]
-    #[allow(
-        clippy::unwrap_used,
-        reason = "Fixed test inputs and immediate fixture assertions"
-    )]
+    #[allow(clippy::unwrap_used, reason = "test fixture")]
     async fn private_dns_checks_every_answer_and_preserves_vetted_addresses() {
         for (answers, accepted) in [
             (vec!["10.42.0.9:0", "[fd12::9]:0"], true),

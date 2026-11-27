@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+rss-request-context.workspace = true
 http = "1"
 rss-identity-core.workspace = true
 rss-identity-postgres.workspace = true
