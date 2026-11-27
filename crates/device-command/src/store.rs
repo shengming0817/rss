@@ -1,6 +1,6 @@
 //! Capability-owned transaction port; providers own commit and resource cleanup.
-use crate::{Command, CommandId, CommandSpec, Coordinate, DeviceReport, Outcome, Scope};
 use crate::{ClaimId, Delivery, DirectClaim};
+use crate::{Command, CommandId, CommandSpec, Coordinate, DeviceReport, Outcome, Scope};
 
 const MAX_BATCH_SIZE: u16 = 1024;
 

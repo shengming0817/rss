@@ -111,7 +111,6 @@ impl PgOutboxWriter {
             })
             .collect()
     }
-
 }
 impl OutboxWriter<Vec<u8>> for PgOutboxWriter {
     type Transaction<'tx> = PgTransaction<'tx>;
@@ -331,7 +330,9 @@ impl<R> PgOutboxStore<R> {
         self.writer.validate_transaction(tx)
     }
     /// Borrow the producer handle bound to this runtime and domain.
-    pub fn writer(&self) -> &PgOutboxWriter { &self.writer }
+    pub fn writer(&self) -> &PgOutboxWriter {
+        &self.writer
+    }
     fn valid_claim(&self, claim: &PgOutboxClaim) -> bool {
         self.writer.domain == *claim.message.envelope().metadata().domain()
             && self.writer.runtime.storage == claim.binding.storage()

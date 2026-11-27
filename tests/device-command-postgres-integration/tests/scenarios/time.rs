@@ -51,7 +51,9 @@ async fn late_queue_and_ownership(
         committed(
             restarted
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { selected.queue(tx, request, Delivery::Outbox(msg)).await })
+                    Box::pin(
+                        async move { selected.queue(tx, request, Delivery::Outbox(msg)).await },
+                    )
                 })
                 .await
         )

@@ -1,5 +1,6 @@
 mod advance;
 pub(super) mod candidates;
+pub(super) mod direct;
 pub(super) use advance::atomic_handoff;
 use rss_transactional_messaging::policy::OperationDeadline;
 mod admission;
@@ -208,7 +209,9 @@ pub(super) async fn atomicity(f: &mut Fixture) -> anyhow::Result<()> {
         committed(
             f.runtime
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.queue(tx, request, Delivery::Outbox(changed)).await })
+                    Box::pin(
+                        async move { store.queue(tx, request, Delivery::Outbox(changed)).await },
+                    )
                 })
                 .await
         )
@@ -305,7 +308,8 @@ pub(super) async fn isolation(f: &Fixture) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     outbox
-                        .writer().is_published(
+                        .writer()
+                        .is_published(
                             tx,
                             m.envelope().metadata().domain(),
                             m.envelope().id(),
@@ -324,7 +328,8 @@ pub(super) async fn isolation(f: &Fixture) -> anyhow::Result<()> {
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move {
                         outbox
-                            .writer().is_published(
+                            .writer()
+                            .is_published(
                                 tx,
                                 m.envelope().metadata().domain(),
                                 m.envelope().id(),
@@ -567,7 +572,8 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
                     .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                         Box::pin(async move {
                             outbox
-                                .writer().is_published(tx, &domain, m.envelope().id(), m.fingerprint())
+                                .writer()
+                                .is_published(tx, &domain, m.envelope().id(), m.fingerprint())
                                 .await
                         })
                     })

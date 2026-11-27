@@ -296,7 +296,11 @@ async fn handoff(
     committed(
         runtime
             .local_tx(binding, budget()?, move |tx| {
-                Box::pin(async move { selected.queue(tx, pending, Delivery::Outbox(dispatch)).await })
+                Box::pin(async move {
+                    selected
+                        .queue(tx, pending, Delivery::Outbox(dispatch))
+                        .await
+                })
             })
             .await,
     )?;
@@ -360,21 +364,51 @@ async fn report(
 }
 
 /// A lost response is recovered by the original issuance under fresh authorization.
-async fn direct_reconnect(runtime: &PgRuntime, binding: ExecutionBinding, store: Arc<PgStore>, scope: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
+async fn direct_reconnect(
+    runtime: &PgRuntime,
+    binding: ExecutionBinding,
+    store: Arc<PgStore>,
+    scope: Scope,
+    coordinate: Coordinate,
+) -> anyhow::Result<()> {
     let spec = spec("direct-example", scope, coordinate)?;
     let id = spec.id().clone();
     let selected = store.clone();
-    committed(runtime.local_tx(binding,budget()?,move |tx|Box::pin(async move {
-        selected.queue(tx,spec,Delivery::Direct { content_digest: ContentDigest::from_bytes([2;32]) }).await
-    })).await)?;
+    committed(
+        runtime
+            .local_tx(binding, budget()?, move |tx| {
+                Box::pin(async move {
+                    selected
+                        .queue(
+                            tx,
+                            spec,
+                            Delivery::Direct {
+                                content_digest: ContentDigest::from_bytes([2; 32]),
+                            },
+                        )
+                        .await
+                })
+            })
+            .await,
+    )?;
     let claim = ClaimId::parse("0d9cdad2-218d-4b7e-b095-ec6bea72aa6e")?;
     for attempt in [claim, claim] {
-        let selected=store.clone();
-        let id=id.clone();
-        let result=committed(runtime.local_tx(binding,budget()?,move |tx|Box::pin(async move {
-            selected.claim_direct(tx,scope,&id,coordinate,attempt).await
-        })).await)?;
-        anyhow::ensure!(matches!(result,DirectClaim::Eligible(ref command) if command.record().claim_id==Some(claim) && command.version()==2));
+        let selected = store.clone();
+        let id = id.clone();
+        let result = committed(
+            runtime
+                .local_tx(binding, budget()?, move |tx| {
+                    Box::pin(async move {
+                        selected
+                            .claim_direct(tx, scope, &id, coordinate, attempt)
+                            .await
+                    })
+                })
+                .await,
+        )?;
+        anyhow::ensure!(
+            matches!(result,DirectClaim::Eligible(ref command) if command.record().claim_id==Some(claim) && command.version()==2)
+        );
     }
     Ok(())
 }

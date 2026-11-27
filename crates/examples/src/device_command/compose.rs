@@ -1,6 +1,7 @@
 //! Copy these functions into an application using its configured runtime and protocol encoder.
 use rss_device_command::{
-    BatchLimit, Command, CommandId, CommandSpec, Delivery, Coordinate, DeviceReport, Outcome, Scope, Store,
+    BatchLimit, Command, CommandId, CommandSpec, Coordinate, Delivery, DeviceReport, Outcome,
+    Scope, Store,
 };
 use rss_device_command_postgres::{CallerRoles, PgStore};
 use rss_transactional_messaging::{
@@ -61,8 +62,10 @@ pub async fn enqueue(
                 )
                 .await?;
                 if let Delivery::Outbox(message) = &delivery
-                    && let Some(partition) = message.partition() {
-                    tx.prepare_outbox_partitions(std::slice::from_ref(partition)).await?;
+                    && let Some(partition) = message.partition()
+                {
+                    tx.prepare_outbox_partitions(std::slice::from_ref(partition))
+                        .await?;
                 }
                 store.queue(tx, spec, delivery).await
             })

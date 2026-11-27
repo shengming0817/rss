@@ -1,6 +1,9 @@
 //! Single lifecycle reducer. Historical source: deviceloop/command.rs@5b63e10.
 //! ref: mdeloof/statig statig/src/awaitable/state_machine.rs@3780eecdbcf4326051c38676d592c6c2b4a3bab5
-use crate::{ClaimId, Delivery, OutboxIdentity, ReportSource, CommandSpec, Coordinate, DeviceEvent, DeviceReport, Error, StateDigest};
+use crate::{
+    ClaimId, CommandSpec, Coordinate, Delivery, DeviceEvent, DeviceReport, Error, OutboxIdentity,
+    ReportSource, StateDigest,
+};
 
 /// Persisted closed lifecycle vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +63,10 @@ impl Status {
     }
     /// Terminal states absorb later observations.
     pub const fn is_terminal(self) -> bool {
-        !matches!(self, Self::Queued | Self::Published | Self::Claimed | Self::Received)
+        !matches!(
+            self,
+            Self::Queued | Self::Published | Self::Claimed | Self::Received
+        )
     }
 }
 /// Reducer inputs, including provider/control facts. These are not authentication evidence.
@@ -130,7 +136,11 @@ pub struct Record {
 pub struct Command(Record);
 impl Command {
     /// Queue at provider-authoritative time, never a client timestamp.
-    pub fn queue(spec: CommandSpec, delivery: Delivery<OutboxIdentity>, now: i64) -> Result<Self, Error> {
+    pub fn queue(
+        spec: CommandSpec,
+        delivery: Delivery<OutboxIdentity>,
+        now: i64,
+    ) -> Result<Self, Error> {
         if now >= spec.deadline() {
             return Err(Error::DeadlineElapsed);
         }
@@ -208,8 +218,11 @@ impl Command {
             return Err(Error::Fenced);
         }
         match (&self.0.delivery, event) {
-            (Delivery::Outbox(_), Event::Claim(_)) | (Delivery::Direct { .. }, Event::Published) => return Err(Error::Conflict),
-            (_, Event::Claim(id)) if self.0.claim_id.is_some_and(|original| original != id) => return Err(Error::Conflict),
+            (Delivery::Outbox(_), Event::Claim(_))
+            | (Delivery::Direct { .. }, Event::Published) => return Err(Error::Conflict),
+            (_, Event::Claim(id)) if self.0.claim_id.is_some_and(|original| original != id) => {
+                return Err(Error::Conflict);
+            }
             _ => {}
         }
         if let Event::Reported(digest) = event
@@ -231,7 +244,9 @@ impl Command {
         match status {
             Status::Published => record.dispatched_at = Some(now),
             Status::Claimed => {
-                let Event::Claim(id) = event else { return Err(Error::InvalidSnapshot); };
+                let Event::Claim(id) = event else {
+                    return Err(Error::InvalidSnapshot);
+                };
                 record.claim_id = Some(id);
                 record.dispatched_at = Some(now);
             }
@@ -295,7 +310,8 @@ fn validate(r: &Record) -> Result<(), Error> {
     let direct = matches!(r.delivery, Delivery::Direct { .. });
     if r.claim_id.is_some() != (direct && r.dispatched_at.is_some())
         || (r.status == Status::Published && direct)
-        || (r.status == Status::Claimed && !direct) {
+        || (r.status == Status::Claimed && !direct)
+    {
         return Err(Error::InvalidSnapshot);
     }
     let steps = 1

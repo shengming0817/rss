@@ -79,6 +79,7 @@ async fn paired(config: PgConfig, owner: &PgPool, names: &[&str]) -> anyhow::Res
         config.clone(),
         CommandClock::Postgres,
         CallerRoles::new(names)?,
+        BatchLimit::new(2)?,
     )
     .await?;
     Ok(Fixture {
@@ -269,7 +270,9 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
         .local_tx(
             crate::execution(scope(OTHER)?.tenant(), 1),
             budget()?,
-            move |tx| Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await }),
+            move |tx| {
+                Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
+            },
         )
         .await;
     assert!(committed(tenant).is_err());

@@ -6,7 +6,7 @@ fn outbox() -> anyhow::Result<Delivery<OutboxIdentity>> {
     Ok(Delivery::Outbox(OutboxIdentity {
         domain: MessagingDomain::parse("test")?,
         message_id: MessageId::parse("dispatch")?,
-        fingerprint: MessageFingerprint::from_bytes([1;32]),
+        fingerprint: MessageFingerprint::from_bytes([1; 32]),
     }))
 }
 fn spec(id: &str) -> Result<CommandSpec, Box<dyn std::error::Error>> {
@@ -153,7 +153,11 @@ fn complete_state_event_matrix() -> Result<(), Box<dyn std::error::Error>> {
         [L, L, L, L, L, L, D],
         [L, L, L, L, L, D, L],
     ];
-    for (index, status) in Status::ALL.into_iter().filter(|s| *s != S::Claimed).enumerate() {
+    for (index, status) in Status::ALL
+        .into_iter()
+        .filter(|s| *s != S::Claimed)
+        .enumerate()
+    {
         for (column, event) in events.into_iter().enumerate() {
             let mut command = at(status)?;
             let before = command.clone();
@@ -334,35 +338,53 @@ fn exact_command_page_validates_the_requested_identities() -> Result<(), Error> 
 fn direct_claim_is_only_a_server_fact() -> Result<(), Box<dyn std::error::Error>> {
     let id = ClaimId::parse("2e811a4e-9053-4b90-8742-3cd462d42aea")?;
     let other = ClaimId::parse("2e811a4e-9053-4b90-8742-3cd462d42aeb")?;
-    let mut c = Command::queue(spec("direct")?, Delivery::Direct { content_digest: ContentDigest::from_bytes([1;32]) }, 1)?;
+    let mut c = Command::queue(
+        spec("direct")?,
+        Delivery::Direct {
+            content_digest: ContentDigest::from_bytes([1; 32]),
+        },
+        1,
+    )?;
     let a = c.spec().coordinate();
-    let mut report = DeviceReport { scope:c.spec().scope(), command_id:c.spec().id().clone(), coordinate:a, source:ReportSource::Direct(id), event:DeviceEvent::Received };
-    assert_eq!(c.report(&report,a,2), Err(Error::Fenced));
-    assert_eq!(c.transition(Event::Published,a,2),Err(Error::Conflict));
-    assert_eq!(c.transition(Event::Claim(id),a,2)?, Outcome::Advanced);
-    assert_eq!(c.status(),Status::Claimed);
+    let mut report = DeviceReport {
+        scope: c.spec().scope(),
+        command_id: c.spec().id().clone(),
+        coordinate: a,
+        source: ReportSource::Direct(id),
+        event: DeviceEvent::Received,
+    };
+    assert_eq!(c.report(&report, a, 2), Err(Error::Fenced));
+    assert_eq!(c.transition(Event::Published, a, 2), Err(Error::Conflict));
+    assert_eq!(c.transition(Event::Claim(id), a, 2)?, Outcome::Advanced);
+    assert_eq!(c.status(), Status::Claimed);
     let issued = c.clone();
-    assert_eq!(c.transition(Event::Claim(id),a,3)?,Outcome::Duplicate);
-    assert_eq!(c.transition(Event::Claim(other),a,3),Err(Error::Conflict));
-    assert_eq!(c,issued);
+    assert_eq!(c.transition(Event::Claim(id), a, 3)?, Outcome::Duplicate);
+    assert_eq!(
+        c.transition(Event::Claim(other), a, 3),
+        Err(Error::Conflict)
+    );
+    assert_eq!(c, issued);
     for wrong in [ReportSource::Outbox, ReportSource::Direct(other)] {
         report.source = wrong;
-        assert_eq!(c.report(&report,a,4),Err(Error::Fenced));
+        assert_eq!(c.report(&report, a, 4), Err(Error::Fenced));
     }
-    report.source=ReportSource::Direct(id);
-    report.event=DeviceEvent::Reported(c.spec().expected());
-    assert_eq!(c.report(&report,a,4)?,Outcome::OutOfOrder);
-    report.event=DeviceEvent::Received;
-    assert_eq!(c.report(&report,a,4)?,Outcome::Advanced);
-    report.event=DeviceEvent::Reported(c.spec().expected());
-    assert_eq!(c.report(&report,a,5)?,Outcome::Advanced);
-    assert_eq!(c.record().claim_id,Some(id));
-    assert_eq!(Command::restore(c.record().clone())?,c);
-    let mut invalid=c.record().clone();
-    invalid.claim_id=None;
-    assert_eq!(Command::restore(invalid),Err(Error::InvalidSnapshot));
-    let mut expired=issued;
-    assert_eq!(expired.transition(Event::Claim(id),a,100)?,Outcome::Advanced);
-    assert_eq!(expired.status(),Status::TimedOut);
+    report.source = ReportSource::Direct(id);
+    report.event = DeviceEvent::Reported(c.spec().expected());
+    assert_eq!(c.report(&report, a, 4)?, Outcome::OutOfOrder);
+    report.event = DeviceEvent::Received;
+    assert_eq!(c.report(&report, a, 4)?, Outcome::Advanced);
+    report.event = DeviceEvent::Reported(c.spec().expected());
+    assert_eq!(c.report(&report, a, 5)?, Outcome::Advanced);
+    assert_eq!(c.record().claim_id, Some(id));
+    assert_eq!(Command::restore(c.record().clone())?, c);
+    let mut invalid = c.record().clone();
+    invalid.claim_id = None;
+    assert_eq!(Command::restore(invalid), Err(Error::InvalidSnapshot));
+    let mut expired = issued;
+    assert_eq!(
+        expired.transition(Event::Claim(id), a, 100)?,
+        Outcome::Advanced
+    );
+    assert_eq!(expired.status(), Status::TimedOut);
     Ok(())
 }

@@ -137,7 +137,8 @@ async fn unconfirmed(f: &Fixture, s: Scope, id: &str) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     outbox
-                        .writer().is_published(
+                        .writer()
+                        .is_published(
                             tx,
                             m.envelope().metadata().domain(),
                             m.envelope().id(),

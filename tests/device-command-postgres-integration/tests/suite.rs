@@ -5,6 +5,7 @@ use rss_request_context::{Clock, Deadline, ExecutionTimer};
 mod crash;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
+mod measure;
 mod scenarios;
 use rss_device_command::*;
 use rss_device_command_postgres::{CallerRoles, PgStore};
@@ -74,6 +75,14 @@ fn message_in_domain(
     tenant: TenantId,
     domain: &str,
 ) -> anyhow::Result<PendingMessage<Vec<u8>>> {
+    message_with_partition(name, tenant, domain, None)
+}
+fn message_with_partition(
+    name: &str,
+    tenant: TenantId,
+    domain: &str,
+    key: Option<PartitionKey>,
+) -> anyhow::Result<PendingMessage<Vec<u8>>> {
     use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
     Ok(PendingMessage::new(MessageEnvelope::new(
         MessageId::parse(&format!("dispatch.{name}"))?,
@@ -89,7 +98,7 @@ fn message_in_domain(
                     SchemaDigest::parse(&format!("sha256:{}", "a".repeat(64)))?,
                 ),
             ),
-            MessageMetadataExtensions::default(),
+            MessageMetadataExtensions::new(None, key, None, Default::default()),
         ),
         vec![1, 2, 3],
     )))
@@ -125,12 +134,19 @@ async fn stores(
     config: PgConfig,
     clock: rss_device_command_postgres::CommandClock,
 ) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore>, Arc<PgOutboxStore<()>>)> {
-    stores_for(config, clock, CallerRoles::new(&["device_runtime"])?).await
+    stores_for(
+        config,
+        clock,
+        CallerRoles::new(&["device_runtime"])?,
+        BatchLimit::new(2)?,
+    )
+    .await
 }
 async fn stores_for(
     config: PgConfig,
     clock: rss_device_command_postgres::CommandClock,
     callers: CallerRoles,
+    supersede_batch_size: BatchLimit,
 ) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore>, Arc<PgOutboxStore<()>>)> {
     let runtime =
         Arc::new(PgRuntime::connect(config, Timer::new(), fence_fixture::storage()).await?);
@@ -145,7 +161,6 @@ async fn stores_for(
         )?,
     )?);
     let selected = outbox.clone();
-    let supersede_batch_size = BatchLimit::new(2)?;
     let store = Arc::new(committed(
         runtime
             .local_tx(
@@ -153,7 +168,14 @@ async fn stores_for(
                 budget()?,
                 move |tx| {
                     Box::pin(async move {
-                        PgStore::new(tx, selected.writer().clone(), clock, &callers, supersede_batch_size).await
+                        PgStore::new(
+                            tx,
+                            selected.writer().clone(),
+                            clock,
+                            &callers,
+                            supersede_batch_size,
+                        )
+                        .await
                     })
                 },
             )
@@ -162,6 +184,12 @@ async fn stores_for(
     Ok((runtime, store, outbox))
 }
 async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
+    setup_with_page_size(fixture, BatchLimit::new(2)?).await
+}
+async fn setup_with_page_size(
+    fixture: &testkit::PgTlsFixture,
+    limit: BatchLimit,
+) -> anyhow::Result<Fixture> {
     let p = fixture.params();
     let owner = PgPoolOptions::new()
         .max_connections(5)
@@ -204,9 +232,11 @@ async fn setup(fixture: &testkit::PgTlsFixture) -> anyhow::Result<Fixture> {
         PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
     );
     fence_fixture::provision(&owner).await?;
-    let (runtime, store, outbox) = stores(
+    let (runtime, store, outbox) = stores_for(
         config.clone(),
         rss_device_command_postgres::CommandClock::Postgres,
+        CallerRoles::new(&["device_runtime"])?,
+        limit,
     )
     .await?;
     Ok(Fixture {
@@ -389,6 +419,7 @@ async fn device_command_postgres_suite() -> anyhow::Result<()> {
         )
         .await?;
         let mut fixture = setup(&postgres).await?;
+        Box::pin(scenarios::direct::run(&fixture)).await?;
         scenarios::lifecycle(&fixture).await?;
         scenarios::authority_changes(&fixture).await?;
         scenarios::atomicity(&mut fixture).await?;

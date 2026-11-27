@@ -37,7 +37,11 @@ pub(crate) async fn now(tx: &mut PgTransaction<'_>) -> Result<i64, PgError> {
     })
     .await
 }
-pub(crate) async fn authority(tx: &mut PgTransaction<'_>, s: Scope, exclusive: bool) -> Result<Coordinate, PgError> {
+pub(crate) async fn authority(
+    tx: &mut PgTransaction<'_>,
+    s: Scope,
+    exclusive: bool,
+) -> Result<Coordinate, PgError> {
     scope(tx, s)?;
     let t = s.tenant().to_string();
     let d = s.device().as_uuid().to_string();
@@ -70,24 +74,35 @@ pub(crate) fn decode(row: PgRow) -> Result<Command, PgError> {
     );
     let content: Option<Vec<u8>> = row.try_get("content_digest")?;
     let delivery = match content {
-        Some(bytes) => Delivery::Direct { content_digest: ContentDigest::from_bytes(bytes.try_into().map_err(|_| bad())?) },
+        Some(bytes) => Delivery::Direct {
+            content_digest: ContentDigest::from_bytes(bytes.try_into().map_err(|_| bad())?),
+        },
         None => Delivery::Outbox(OutboxIdentity {
             message_id: MessageId::parse(row.try_get("outbox_message_id")?).map_err(|_| bad())?,
             domain: MessagingDomain::parse(row.try_get("outbox_domain")?).map_err(|_| bad())?,
-            fingerprint: MessageFingerprint::from_bytes(row.try_get::<Vec<u8>,_>("outbox_fingerprint")?.try_into().map_err(|_|bad())?),
+            fingerprint: MessageFingerprint::from_bytes(
+                row.try_get::<Vec<u8>, _>("outbox_fingerprint")?
+                    .try_into()
+                    .map_err(|_| bad())?,
+            ),
         }),
     };
     Command::restore(Record {
-        spec, delivery,
-        claim_id: row.try_get::<Option<&str>, _>("issuance")?.map(ClaimId::parse).transpose().map_err(|_|bad())?,
+        spec,
+        delivery,
+        claim_id: row
+            .try_get::<Option<&str>, _>("issuance")?
+            .map(ClaimId::parse)
+            .transpose()
+            .map_err(|_| bad())?,
         version: row.try_get("version")?,
         status: Status::restore(row.try_get("status")?).map_err(error)?,
         queued_at: row.try_get("queued_at")?,
         dispatched_at: row.try_get("dispatched_at")?,
         received_at: row.try_get("received_at")?,
         terminal_at: row.try_get("terminal_at")?,
-    }).map_err(error)
-
+    })
+    .map_err(error)
 }
 // The tenant predicate and RLS select the tenant. Fence the device before decoding
 // command facts so even a malformed foreign snapshot yields the same ownership error.
@@ -111,12 +126,14 @@ pub(crate) async fn read(
     })).await?.map(|row| decode_for_device(row, &device)).transpose()
 }
 pub(crate) async fn locked_command(
-    tx: &mut PgTransaction<'_>, s: Scope, id: &CommandId,
+    tx: &mut PgTransaction<'_>,
+    s: Scope,
+    id: &CommandId,
 ) -> Result<Command, PgError> {
-    scope(tx,s)?;
-    let tenant=s.tenant().to_string();
-    let device=s.device().as_uuid().to_string();
-    let id=id.as_str().to_owned();
+    scope(tx, s)?;
+    let tenant = s.tenant().to_string();
+    let device = s.device().as_uuid().to_string();
+    let id = id.as_str().to_owned();
     let row=tx.with_connection(move |c| Box::pin(async move {
         sqlx::query("SELECT *,claim_id::text AS issuance,tenant_id::text AS tenant,device_id::text AS device FROM rss_device_command.lock_command($1::uuid,$2::uuid,$3)")
             .bind(tenant).bind(device).bind(id).fetch_optional(c).await
@@ -126,9 +143,12 @@ pub(crate) async fn locked_command(
 
 // A command row does not yet exist for a first create. Serialize only that tenant-local
 // identity, then read under a fresh statement snapshot before evaluating replay or expiry.
-pub(crate) async fn lock_creation(tx: &mut PgTransaction<'_>, spec: &CommandSpec) -> Result<(), PgError> {
-    let tenant=spec.scope().tenant().to_string();
-    let id=spec.id().as_str().to_owned();
+pub(crate) async fn lock_creation(
+    tx: &mut PgTransaction<'_>,
+    spec: &CommandSpec,
+) -> Result<(), PgError> {
+    let tenant = spec.scope().tenant().to_string();
+    let id = spec.id().as_str().to_owned();
     tx.with_connection(move |c| Box::pin(async move {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('rss-device-command:' || $1::text || ':' || $2::text,0))")
             .bind(tenant).bind(id).execute(c).await.map(|_|())
@@ -168,7 +188,10 @@ pub(crate) async fn exact_rows(
         })
         .collect()
 }
-pub(crate) async fn insert_command(tx: &mut PgTransaction<'_>, command: &Command) -> Result<(), PgError> {
+pub(crate) async fn insert_command(
+    tx: &mut PgTransaction<'_>,
+    command: &Command,
+) -> Result<(), PgError> {
     let record = command.record();
     let spec = &record.spec;
     let tenant = spec.scope().tenant().to_string();
@@ -179,8 +202,15 @@ pub(crate) async fn insert_command(tx: &mut PgTransaction<'_>, command: &Command
     let deadline = spec.deadline();
     let queued = record.queued_at;
     let (domain, message, fingerprint, content) = match &record.delivery {
-        Delivery::Outbox(facts) => (Some(facts.domain.as_str().to_owned()), Some(facts.message_id.as_str().to_owned()), Some(facts.fingerprint.as_bytes().to_vec()), None),
-        Delivery::Direct { content_digest } => (None,None,None,Some(content_digest.as_bytes().to_vec())),
+        Delivery::Outbox(facts) => (
+            Some(facts.domain.as_str().to_owned()),
+            Some(facts.message_id.as_str().to_owned()),
+            Some(facts.fingerprint.as_bytes().to_vec()),
+            None,
+        ),
+        Delivery::Direct { content_digest } => {
+            (None, None, None, Some(content_digest.as_bytes().to_vec()))
+        }
     };
     tx.with_connection(move |c| Box::pin(async move {
         sqlx::query("SELECT rss_device_command.enqueue($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
@@ -205,7 +235,7 @@ pub(crate) async fn save(
     let dispatched = r.dispatched_at;
     let received = r.received_at;
     let terminal = r.terminal_at;
-    let issuance = r.claim_id.map(|id|id.as_uuid().to_string());
+    let issuance = r.claim_id.map(|id| id.as_uuid().to_string());
     let changed: bool = tx
         .with_connection(move |c| {
             Box::pin(async move {
@@ -220,6 +250,7 @@ pub(crate) async fn save(
                 .bind(dispatched)
                 .bind(received)
                 .bind(terminal)
+                .bind(issuance)
                 .fetch_one(c)
                 .await
             })

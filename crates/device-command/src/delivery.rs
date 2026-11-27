@@ -10,12 +10,18 @@ use rss_transactional_messaging::{
 pub struct ContentDigest([u8; 32]);
 impl ContentDigest {
     /// Bind the product's immutable input digest.
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
     /// Canonical persisted bytes.
-    pub const fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 impl std::fmt::Debug for ContentDigest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("ContentDigest(<redacted>)") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ContentDigest(<redacted>)")
+    }
 }
 
 /// Opaque non-nil identity supplied by the caller for one command's direct issuance.
@@ -25,14 +31,20 @@ impl ClaimId {
     /// Parse the stable identity without allocating a new attempt.
     pub fn parse(raw: &str) -> Result<Self, Error> {
         let id = uuid::Uuid::parse_str(raw).map_err(|_| Error::InvalidValue)?;
-        if id.is_nil() { return Err(Error::InvalidValue); }
+        if id.is_nil() {
+            return Err(Error::InvalidValue);
+        }
         Ok(Self(id))
     }
     /// Value for protocol correlation and persistence.
-    pub const fn as_uuid(self) -> uuid::Uuid { self.0 }
+    pub const fn as_uuid(self) -> uuid::Uuid {
+        self.0
+    }
 }
 impl std::fmt::Debug for ClaimId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("ClaimId(<redacted>)") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClaimId(<redacted>)")
+    }
 }
 
 /// The immutable dispatch evidence retained for an Outbox command.
@@ -66,7 +78,9 @@ impl Delivery {
                 message_id: message.envelope().id().clone(),
                 fingerprint: message.fingerprint(),
             }),
-            Self::Direct { content_digest } => Delivery::Direct { content_digest: *content_digest },
+            Self::Direct { content_digest } => Delivery::Direct {
+                content_digest: *content_digest,
+            },
         }
     }
 }
