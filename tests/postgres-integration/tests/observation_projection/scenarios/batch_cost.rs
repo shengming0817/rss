@@ -41,24 +41,7 @@ async fn observation_batch_sql_cost() -> anyhow::Result<()> {
         sqlx::query_scalar("SELECT sum(octet_length(raw))::bigint FROM rss_observation.batches")
             .fetch_one(&f.admin)
             .await?;
-    if std::env::var_os("RSS_PG_WORK_PROFILE").is_some() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("sqlx::postgres::notice=info")
-            .with_ansi(false)
-            .try_init();
-        sqlx::raw_sql(
-            "ALTER ROLE handoff_runtime SET session_preload_libraries='auto_explain';
-            ALTER ROLE handoff_runtime SET auto_explain.log_min_duration=0;
-            ALTER ROLE handoff_runtime SET auto_explain.log_nested_statements=on;
-            ALTER ROLE handoff_runtime SET auto_explain.log_analyze=on;
-            ALTER ROLE handoff_runtime SET auto_explain.log_buffers=on;
-            ALTER ROLE handoff_runtime SET auto_explain.log_timing=off;
-            ALTER ROLE handoff_runtime SET auto_explain.log_format=json;
-            ALTER ROLE handoff_runtime SET auto_explain.log_level=notice",
-        )
-        .execute(&f.admin)
-        .await?;
-    }
+    f.enable_query_plans().await?;
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(f.options.clone())

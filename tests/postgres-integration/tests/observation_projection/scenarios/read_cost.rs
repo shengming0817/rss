@@ -66,14 +66,6 @@ pub(super) async fn seed_page(f: &Fixture, shape: &str) -> anyhow::Result<Vec<u3
     Ok(sizes)
 }
 
-fn rss_kib() -> anyhow::Result<u64> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()?;
-    anyhow::ensure!(output.status.success());
-    Ok(std::str::from_utf8(&output.stdout)?.trim().parse()?)
-}
-
 async fn measure_references(shape: &str) -> anyhow::Result<()> {
     let f = Fixture::new().await?;
     let sizes = seed_page(&f, shape).await?;

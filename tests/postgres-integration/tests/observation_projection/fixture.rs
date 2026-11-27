@@ -237,6 +237,36 @@ impl Fixture {
         )
         .await?)
     }
+
+    pub async fn enable_query_plans(&self) -> anyhow::Result<()> {
+        if std::env::var_os("RSS_PG_WORK_PROFILE").is_some() {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter("sqlx::postgres::notice=info")
+                .with_ansi(false)
+                .try_init();
+            sqlx::raw_sql(
+                "ALTER ROLE handoff_runtime SET session_preload_libraries='auto_explain';
+                ALTER ROLE handoff_runtime SET auto_explain.log_min_duration=0;
+                ALTER ROLE handoff_runtime SET auto_explain.log_nested_statements=on;
+                ALTER ROLE handoff_runtime SET auto_explain.log_analyze=on;
+                ALTER ROLE handoff_runtime SET auto_explain.log_buffers=on;
+                ALTER ROLE handoff_runtime SET auto_explain.log_timing=off;
+                ALTER ROLE handoff_runtime SET auto_explain.log_format=json;
+                ALTER ROLE handoff_runtime SET auto_explain.log_level=notice",
+            )
+            .execute(&self.admin)
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn rss_kib() -> anyhow::Result<u64> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()?;
+    anyhow::ensure!(output.status.success());
+    Ok(std::str::from_utf8(&output.stdout)?.trim().parse()?)
 }
 
 pub fn assert_same_record(actual: &Record, expected: &Record) {
