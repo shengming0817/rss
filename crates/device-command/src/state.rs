@@ -1,6 +1,6 @@
 //! Single lifecycle reducer. Historical source: deviceloop/command.rs@5b63e10.
 //! ref: mdeloof/statig statig/src/awaitable/state_machine.rs@3780eecdbcf4326051c38676d592c6c2b4a3bab5
-use crate::{CommandSpec, Coordinate, DeviceEvent, DeviceReport, Error, StateDigest};
+use crate::{ClaimId, Delivery, OutboxIdentity, ReportSource, CommandSpec, Coordinate, DeviceEvent, DeviceReport, Error, StateDigest};
 
 /// Persisted closed lifecycle vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,6 +9,8 @@ pub enum Status {
     Queued,
     /// Durable broker confirmation observed.
     Published,
+    /// Server registered the original direct issuance.
+    Claimed,
     /// Receipt acknowledged by the device.
     Received,
     /// Matching actual state observed after receipt.
@@ -24,7 +26,7 @@ pub enum Status {
 }
 impl Status {
     /// All states for exhaustive conformance.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Queued,
         Self::Published,
         Self::Received,
@@ -33,12 +35,14 @@ impl Status {
         Self::TimedOut,
         Self::Superseded,
         Self::Cancelled,
+        Self::Claimed,
     ];
     /// Stable storage/diagnostic label.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Published => "published",
+            Self::Claimed => "claimed",
             Self::Received => "received",
             Self::Applied => "applied",
             Self::Rejected => "rejected",
@@ -56,7 +60,7 @@ impl Status {
     }
     /// Terminal states absorb later observations.
     pub const fn is_terminal(self) -> bool {
-        !matches!(self, Self::Queued | Self::Published | Self::Received)
+        !matches!(self, Self::Queued | Self::Published | Self::Claimed | Self::Received)
     }
 }
 /// Reducer inputs, including provider/control facts. These are not authentication evidence.
@@ -64,6 +68,8 @@ impl Status {
 pub enum Event {
     /// The provider observed durable publication of the exact dispatch message.
     Published,
+    /// Server registered a direct issuance.
+    Claim(ClaimId),
     /// Device receipt.
     Received,
     /// Actual state report.
@@ -102,14 +108,18 @@ pub enum Outcome {
 pub struct Record {
     /// Immutable facts.
     pub spec: CommandSpec,
+    /// Original delivery intent.
+    pub delivery: Delivery<OutboxIdentity>,
+    /// Exact direct issuance, retained after receipt or termination.
+    pub claim_id: Option<ClaimId>,
     /// Positive optimistic version.
     pub version: i64,
     /// Closed state.
     pub status: Status,
     /// Server queue time.
     pub queued_at: i64,
-    /// Server time durable publication was observed.
-    pub published_at: Option<i64>,
+    /// Server time publication was observed or a direct claim was registered.
+    pub dispatched_at: Option<i64>,
     /// Server receipt time.
     pub received_at: Option<i64>,
     /// Server terminal decision time.
@@ -120,16 +130,18 @@ pub struct Record {
 pub struct Command(Record);
 impl Command {
     /// Queue at provider-authoritative time, never a client timestamp.
-    pub fn queue(spec: CommandSpec, now: i64) -> Result<Self, Error> {
+    pub fn queue(spec: CommandSpec, delivery: Delivery<OutboxIdentity>, now: i64) -> Result<Self, Error> {
         if now >= spec.deadline() {
             return Err(Error::DeadlineElapsed);
         }
         Self::restore(Record {
             spec,
+            delivery,
+            claim_id: None,
             version: 1,
             status: Status::Queued,
             queued_at: now,
-            published_at: None,
+            dispatched_at: None,
             received_at: None,
             terminal_at: None,
         })
@@ -168,6 +180,11 @@ impl Command {
         {
             return Err(Error::Fenced);
         }
+        match (&self.0.delivery, input.source) {
+            (Delivery::Outbox(_), ReportSource::Outbox) => {}
+            (Delivery::Direct { .. }, ReportSource::Direct(id)) if self.0.claim_id == Some(id) => {}
+            _ => return Err(Error::Fenced),
+        }
         let event = match input.event {
             DeviceEvent::Received => Event::Received,
             DeviceEvent::Rejected => Event::Rejected,
@@ -190,6 +207,11 @@ impl Command {
         if !authorized {
             return Err(Error::Fenced);
         }
+        match (&self.0.delivery, event) {
+            (Delivery::Outbox(_), Event::Claim(_)) | (Delivery::Direct { .. }, Event::Published) => return Err(Error::Conflict),
+            (_, Event::Claim(id)) if self.0.claim_id.is_some_and(|original| original != id) => return Err(Error::Conflict),
+            _ => {}
+        }
         if let Event::Reported(digest) = event
             && digest != self.spec().expected()
         {
@@ -207,7 +229,12 @@ impl Command {
             .ok_or(Error::VersionOverflow)?;
         record.status = status;
         match status {
-            Status::Published => record.published_at = Some(now),
+            Status::Published => record.dispatched_at = Some(now),
+            Status::Claimed => {
+                let Event::Claim(id) = event else { return Err(Error::InvalidSnapshot); };
+                record.claim_id = Some(id);
+                record.dispatched_at = Some(now);
+            }
             Status::Received => record.received_at = Some(now),
             _ => record.terminal_at = Some(now),
         }
@@ -237,7 +264,7 @@ fn decision(status: Status, event: Event, expired: bool) -> Result<Status, Outco
         E::Cancel => return Ok(S::Cancelled),
         E::Supersede => return Ok(S::Superseded),
         E::Rejected => {
-            return if matches!(status, S::Published | S::Received) {
+            return if matches!(status, S::Published | S::Claimed | S::Received) {
                 Ok(S::Rejected)
             } else {
                 Err(Outcome::OutOfOrder)
@@ -253,25 +280,33 @@ fn decision(status: Status, event: Event, expired: bool) -> Result<Status, Outco
         (_, E::Supersede) => Ok(S::Superseded),
         (_, E::Expire) => Err(Outcome::Duplicate),
         (S::Queued, E::Published) => Ok(S::Published),
-        (S::Published, E::Received) => Ok(S::Received),
+        (S::Queued, E::Claim(_)) => Ok(S::Claimed),
+        (S::Claimed | S::Received, E::Claim(_)) => Err(Outcome::Duplicate),
+        (S::Published | S::Claimed, E::Received) => Ok(S::Received),
         (S::Received, E::Reported(_)) => Ok(S::Applied),
-        (S::Published | S::Received, E::Rejected) => Ok(S::Rejected),
-        (S::Published | S::Received, E::Published) | (S::Received, E::Received) => {
+        (S::Published | S::Claimed | S::Received, E::Rejected) => Ok(S::Rejected),
+        (S::Published | S::Claimed | S::Received, E::Published) | (S::Received, E::Received) => {
             Err(Outcome::Duplicate)
         }
         _ => Err(Outcome::OutOfOrder),
     }
 }
 fn validate(r: &Record) -> Result<(), Error> {
+    let direct = matches!(r.delivery, Delivery::Direct { .. });
+    if r.claim_id.is_some() != (direct && r.dispatched_at.is_some())
+        || (r.status == Status::Published && direct)
+        || (r.status == Status::Claimed && !direct) {
+        return Err(Error::InvalidSnapshot);
+    }
     let steps = 1
-        + i64::from(r.published_at.is_some())
+        + i64::from(r.dispatched_at.is_some())
         + i64::from(r.received_at.is_some())
         + i64::from(r.terminal_at.is_some());
     if r.version != steps || r.queued_at >= r.spec.deadline() {
         return Err(Error::InvalidSnapshot);
     }
     let mut previous = r.queued_at;
-    for time in [r.published_at, r.received_at, r.terminal_at]
+    for time in [r.dispatched_at, r.received_at, r.terminal_at]
         .into_iter()
         .flatten()
     {
@@ -280,25 +315,25 @@ fn validate(r: &Record) -> Result<(), Error> {
         }
         previous = time;
     }
-    if r.received_at.is_some() && r.published_at.is_none() {
+    if r.received_at.is_some() && r.dispatched_at.is_none() {
         return Err(Error::InvalidSnapshot);
     }
     let shape = match r.status {
         Status::Queued => {
-            r.published_at.is_none() && r.received_at.is_none() && r.terminal_at.is_none()
+            r.dispatched_at.is_none() && r.received_at.is_none() && r.terminal_at.is_none()
         }
-        Status::Published => {
-            r.published_at.is_some() && r.received_at.is_none() && r.terminal_at.is_none()
+        Status::Published | Status::Claimed => {
+            r.dispatched_at.is_some() && r.received_at.is_none() && r.terminal_at.is_none()
         }
         Status::Received => {
-            r.published_at.is_some() && r.received_at.is_some() && r.terminal_at.is_none()
+            r.dispatched_at.is_some() && r.received_at.is_some() && r.terminal_at.is_none()
         }
         Status::Applied => r.received_at.is_some() && r.terminal_at.is_some(),
-        Status::Rejected => r.published_at.is_some() && r.terminal_at.is_some(),
+        Status::Rejected => r.dispatched_at.is_some() && r.terminal_at.is_some(),
         _ => r.terminal_at.is_some(),
     };
     if !shape
-        || r.published_at.is_some_and(|t| t >= r.spec.deadline())
+        || r.dispatched_at.is_some_and(|t| t >= r.spec.deadline())
         || r.received_at.is_some_and(|t| t >= r.spec.deadline())
     {
         return Err(Error::InvalidSnapshot);
