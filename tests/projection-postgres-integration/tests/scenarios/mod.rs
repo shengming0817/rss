@@ -226,12 +226,20 @@ pub(super) async fn ordered_append(
     let (a, b) = tokio::join!(first, second);
     assert_eq!(a?.get(), 0);
     assert_eq!(b?.get(), 1);
+    let page = store
+        .read(
+            s.source(),
+            None,
+            PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?,
+            control,
+        )
+        .await?;
     assert_eq!(
-        store
-            .read(s.source(), None, BatchLimit::new(10)?, control)
-            .await?
-            .len(),
-        2
+        page,
+        ReadPage::Events(vec![
+            event(&s, 0, "first", b"1")?,
+            event(&s, 1, "second", b"2")?
+        ])
     );
     assert_eq!(append(store, &s, "first", b"1", control).await?.get(), 0);
     assert_eq!(
@@ -282,7 +290,7 @@ pub(super) async fn replay(
         .await?;
     let projection = store.projection(store.takeover(&s, &DEFINITION, control).await?, Counter)?;
     append(store, &s, "later", b"3", control).await?;
-    let limit = RunLimit::new(BatchLimit::new(10)?, 1)?;
+    let limit = RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 1)?;
     let work = run(store, &projection, control, limit);
     let observation = work.observation();
     assert_eq!(observation.scope(), &s);
@@ -307,7 +315,7 @@ async fn replay_resume(
         store,
         &next,
         control,
-        RunLimit::new(BatchLimit::new(10)?, 10)?,
+        RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
     )
     .await;
     assert_eq!(report.applied, 1);
@@ -354,7 +362,7 @@ async fn replay_new_generation(
         store,
         &new,
         control,
-        RunLimit::new(BatchLimit::new(10)?, 10)?,
+        RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 10)?,
     )
     .await;
     assert_eq!(report.applied, 1);
@@ -568,7 +576,7 @@ pub(super) async fn filtered_receipts(
         store,
         &execution,
         control,
-        RunLimit::new(BatchLimit::new(1)?, 1)?,
+        RunLimit::new(PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?, 1)?,
     )
     .await
     .into_result()?;
@@ -615,3 +623,5 @@ async fn filtered_duplicate(
 }
 
 pub(crate) mod budget;
+
+pub(super) mod journal_page;

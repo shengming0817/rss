@@ -1,24 +1,24 @@
 //! ref: baseline 5b63e10 crates/eventexec/src/projection.rs; ordered resume algorithm only.
 use crate::observation::Publisher;
 use crate::{
-    ApplyOutcome, BatchExecution, BatchLimit, Checkpoint, Control, Error, ErrorKind, Event,
-    Execution, Position, ReplayBound, RunObservation, Source, Timer,
+    ApplyOutcome, BatchExecution, Checkpoint, Control, Error, ErrorKind, Event, Execution,
+    PageBudget, Position, ReadPage, ReplayBound, RunObservation, Source, Timer,
 };
 use std::future::{Future, IntoFuture};
 
 /// Bound work independently of elapsed time.
 #[derive(Debug, Clone, Copy)]
 pub struct RunLimit {
-    batch: BatchLimit,
+    page: PageBudget,
     events: u64,
 }
 impl RunLimit {
     /// Non-zero total events; every examined event consumes the budget, including duplicates.
-    pub const fn new(batch: BatchLimit, events: u64) -> Result<Self, Error> {
+    pub const fn new(page: PageBudget, events: u64) -> Result<Self, Error> {
         if events == 0 {
             Err(Error::new(ErrorKind::InvalidInput))
         } else {
-            Ok(Self { batch, events })
+            Ok(Self { page, events })
         }
     }
 }
@@ -29,6 +29,13 @@ pub enum Stop {
     CaughtUp,
     /// Total event allowance consumed.
     EventLimit,
+    /// The next event exceeds the per-page byte budget. Resume with a larger page.
+    PayloadBudget {
+        /// Position of the pending event. The acknowledged cursor precedes it.
+        position: Position,
+        /// Exact encoded payload bytes needed for this event.
+        required_bytes: u32,
+    },
     /// Execution stopped; durable progress must be reloaded before retry.
     Failed(Error),
 }
@@ -72,12 +79,13 @@ fn validate_batch(
     events: &[impl AsRef<Event>],
     execution: &impl Execution,
     after: Option<Position>,
-    limit: BatchLimit,
+    limit: PageBudget,
 ) -> Result<(), Error> {
-    if events.len() > limit.get() as usize {
+    if events.len() > limit.rows() as usize {
         return Err(Error::new(ErrorKind::SourceContract));
     }
     let mut previous = after;
+    let mut bytes_left = limit.payload_bytes() as usize;
     for item in events {
         let event = item.as_ref();
         if event.source() != execution.scope().source() {
@@ -86,6 +94,9 @@ fn validate_batch(
         if previous.is_some_and(|p| event.position() <= p) {
             return Err(Error::new(ErrorKind::OutOfOrder));
         }
+        bytes_left = bytes_left
+            .checked_sub(event.payload().len())
+            .ok_or(Error::new(ErrorKind::SourceContract))?;
         previous = Some(event.position());
     }
     Ok(())
@@ -192,20 +203,37 @@ async fn drive<S: Source<Item = E::Item>, E: Execution, T: Timer, M: Settlement<
         if replay_done(checkpoint) {
             return Ok(Stop::CaughtUp);
         }
-        let batch = BatchLimit::new(
-            u32::try_from(remaining.min(u64::from(limit.batch.get())))
-                .map_err(|_| Error::new(ErrorKind::InvalidInput))?,
-        )?;
-        let events = source
+        let rows = remaining.min(u64::from(limit.page.rows())) as u32;
+        let page = PageBudget::new(rows, limit.page.payload_bytes())?;
+        let read = source
             .read(
                 execution.scope().source(),
                 checkpoint.position,
-                batch,
+                page,
                 control,
             )
             .await?;
-        validate_batch(&events, execution, checkpoint.position, batch)?;
         control.check()?;
+        let events = match read {
+            ReadPage::Events(events) => events,
+            ReadPage::Blocked {
+                position,
+                required_bytes,
+            } => {
+                if checkpoint.position.is_some_and(|p| position <= p)
+                    || matches!(checkpoint.bound, ReplayBound::Through(Some(end)) if position > end)
+                    || required_bytes <= page.payload_bytes()
+                    || required_bytes > Event::MAX_PAYLOAD_BYTES
+                {
+                    return Err(Error::new(ErrorKind::SourceContract));
+                }
+                return Ok(Stop::PayloadBudget {
+                    position,
+                    required_bytes,
+                });
+            }
+        };
+        validate_batch(&events, execution, checkpoint.position, page)?;
         if events.is_empty() {
             return empty_stop(checkpoint);
         }

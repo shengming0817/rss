@@ -307,7 +307,7 @@ pub struct PgTransaction<'a> {
     pub(crate) connection: &'a mut PgConnection,
     tenant: TenantId,
     statement_snapshots: bool,
-    check: &'a (dyn Fn() -> Result<(), Error> + Sync),
+    pub(crate) check: &'a (dyn Fn() -> Result<(), Error> + Sync),
 }
 impl PgTransaction<'_> {
     pub(crate) fn check(&self) -> Result<(), Error> {

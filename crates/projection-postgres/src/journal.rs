@@ -2,8 +2,9 @@ use crate::{
     PgOperationError, PgStore, PgTransaction,
     transaction::{map_sql, watchdog},
 };
+use futures::TryStreamExt;
 use rss_projection::{
-    BatchLimit, Control, Error, ErrorKind, Event, Position, Source, SourceScope, Timer,
+    Control, Error, ErrorKind, Event, PageBudget, Position, ReadPage, Source, SourceScope, Timer,
 };
 use sqlx::Row;
 
@@ -92,23 +93,46 @@ impl Source for PgStore {
         &self,
         source: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        budget: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, Error> {
+    ) -> Result<ReadPage<Event>, Error> {
         let scope = source.clone();
-        self.controlled_read(source, control, move |tx| Box::pin(async move {
-            let rows = sqlx::query("SELECT position,event_id,payload FROM rss_projection.events WHERE tenant_id=$1::uuid AND source_id=$2 AND ($3::bigint IS NULL OR position>$3) ORDER BY position LIMIT $4")
-                .bind(scope.tenant().to_string()).bind(scope.source()).bind(encode_position(after)).bind(i64::from(limit.get()))
-                .fetch_all(&mut *tx.connection).await.map_err(map_sql)?;
-            let mut events = Vec::with_capacity(rows.len());
-            for row in rows {
-                tx.check()?;
-                events.push(Event::new(scope.clone(), decode_position(row.try_get("position").map_err(map_sql)?)?, row.try_get::<String,_>("event_id").map_err(map_sql)?, row.try_get("payload").map_err(map_sql)?)?);
-                tx.check()?;
-                tokio::task::yield_now().await;
-            }
-            Ok(events)
-        })).await
+        self.controlled_read(source, control, move |tx| {
+            Box::pin(async move {
+                let check = tx.check;
+                let mut rows = sqlx::query(include_str!("journal_page.sql"))
+                    .bind(scope.tenant().to_string())
+                    .bind(scope.source())
+                    .bind(encode_position(after).unwrap_or(-1))
+                    .bind(i64::from(budget.rows()))
+                    .bind(i64::from(budget.payload_bytes()))
+                    .fetch(&mut *tx.connection);
+                let mut events = Vec::new();
+                while let Some(row) = rows.try_next().await.map_err(map_sql)? {
+                    check()?;
+                    let position = decode_position(row.try_get("position").map_err(map_sql)?)?;
+                    let size: i32 = row.try_get("size").map_err(map_sql)?;
+                    let required_bytes =
+                        u32::try_from(size).map_err(|_| Error::new(ErrorKind::StorageContract))?;
+                    if required_bytes > budget.payload_bytes() {
+                        return Ok(ReadPage::Blocked {
+                            position,
+                            required_bytes,
+                        });
+                    }
+                    events.push(Event::new(
+                        scope.clone(),
+                        position,
+                        row.try_get::<String, _>("event_id").map_err(map_sql)?,
+                        row.try_get("payload").map_err(map_sql)?,
+                    )?);
+                    check()?;
+                    tokio::task::yield_now().await;
+                }
+                Ok(ReadPage::Events(events))
+            })
+        })
+        .await
     }
 }
 pub(crate) fn encode_position(position: Option<Position>) -> Option<i64> {

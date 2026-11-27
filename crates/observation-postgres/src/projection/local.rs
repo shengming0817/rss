@@ -24,7 +24,8 @@ pub struct VerifiedObservation {
 }
 
 impl<C: Clock> PgSource<C> {
-    /// Select typed same-database handoff using this source's canonical-byte budget.
+    /// Select typed same-database handoff using this source's canonical report byte budget.
+    /// Each read also applies [`PageBudget`] to row count and encoded reference payload bytes.
     pub fn into_local(self) -> PgSource<C, LocalPages> {
         PgSource {
             store: self.store,
@@ -50,26 +51,19 @@ impl<C: Clock> Source for PgSource<C, LocalPages> {
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Self::Item>, rss_projection::Error> {
+    ) -> Result<ReadPage<Self::Item>, rss_projection::Error> {
         self.read_page(
             scope,
             after,
             limit,
             control,
-            |source, pos, record, fingerprint| {
-                let reference = reference_event(
-                    source,
-                    pos,
-                    record.record().scope(),
-                    record.record().batch().id(),
-                    fingerprint,
-                )?;
-                Ok(reference.with_data(VerifiedObservation {
+            |event, record, fingerprint| {
+                event.with_data(VerifiedObservation {
                     fingerprint,
                     record: Arc::new(record),
-                }))
+                })
             },
         )
         .await

@@ -248,7 +248,7 @@ async fn comparison(store: &PgStore, owner: &PgPool, c: &Control<'_, Clock>) -> 
     for i in 0..N {
         append(store, &s, &format!("fact-{i}"), b"work", c).await?;
     }
-    let limits = RunLimit::new(BatchLimit::new(B)?, N as u64 + 1)?;
+    let limits = RunLimit::new(PageBudget::new(B, Event::MAX_PAYLOAD_BYTES)?, N as u64 + 1)?;
     let clock = Clock::new();
     let mut samples = [Vec::new(), Vec::new()];
     let measure = std::env::var_os("RSS_PROJECTION_MEASURE").is_some();
@@ -318,7 +318,7 @@ async fn verify_recovery(
     proxy: &Proxy,
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    let limits = RunLimit::new(BatchLimit::new(2)?, 10)?;
+    let limits = RunLimit::new(PageBudget::new(2, Event::MAX_PAYLOAD_BYTES)?, 10)?;
     let run = run_batched(store, exec, c, limits);
     let observation = run.observation();
     let report = run.await;
@@ -363,7 +363,7 @@ async fn interrupted_page(
     }
     let recorder = Arc::new(Recorder::default());
     let exec = worker(store, &s, ReplayBound::Live, recorder.clone(), c).await?;
-    let limits = RunLimit::new(BatchLimit::new(2)?, 8)?;
+    let limits = RunLimit::new(PageBudget::new(2, Event::MAX_PAYLOAD_BYTES)?, 8)?;
     let clock = Clock::new();
     let stop = CancellationToken::new();
     let interrupted = Control::new(&clock, Duration::from_secs(10), &stop);

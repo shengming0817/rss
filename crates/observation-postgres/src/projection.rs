@@ -7,7 +7,9 @@ use crate::{
 };
 use futures::TryStreamExt;
 use rss_observation::{ApplicableRecord, Clock, Error, ErrorKind, Id, JournalReadGrant, Scope};
-use rss_projection::{BatchLimit, Control, Event, Phase, Position, Source, SourceScope, Timer};
+use rss_projection::{
+    Control, Event, PageBudget, Phase, Position, ReadPage, Source, SourceScope, Timer,
+};
 #[cfg(feature = "projection-postgres")]
 mod local;
 #[cfg(feature = "projection-postgres")]
@@ -40,7 +42,8 @@ impl<C: Clock> PgSource<C> {
     /// Bind the admitted journal to explicit tenant authority and caller-declared source lineage.
     /// Reuse this source on restart; use a new source after rebuilding the input journal.
     /// This declaration does not authenticate the caller or prove the database's provenance.
-    /// The page budget counts canonical report bytes and must fit one maximum legal report.
+    /// `page_bytes` limits canonical report bytes and must fit one maximum legal report.
+    /// The caller also supplies a [`PageBudget`] for rows and encoded reference bytes on each read.
     pub fn new(
         store: Arc<PgStore<C>>,
         grant: JournalReadGrant,
@@ -185,30 +188,22 @@ impl<C: Clock> Source for PgSource<C> {
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, rss_projection::Error> {
-        self.read_page(scope, after, limit, control, |source, pos, record, fp| {
-            reference_event(
-                source,
-                pos,
-                record.record().scope(),
-                record.record().batch().id(),
-                fp,
-            )
-        })
-        .await
+    ) -> Result<ReadPage<Event>, rss_projection::Error> {
+        self.read_page(scope, after, limit, control, |event, _, _| event)
+            .await
     }
 }
 impl<C: Clock, M: Send + Sync> PgSource<C, M> {
-    async fn read_page<T: Timer, I: Send + 'static>(
+    async fn read_page<T: Timer, I: rss_projection::EventInput + 'static>(
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
-        item: fn(&SourceScope, Position, ApplicableRecord, [u8; 32]) -> Result<I, Error>,
-    ) -> Result<Vec<I>, rss_projection::Error> {
+        item: fn(Event, ApplicableRecord, [u8; 32]) -> I,
+    ) -> Result<ReadPage<I>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
@@ -218,10 +213,11 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                 let mut rows = sqlx::query(READ)
                     .bind(tenant.to_string())
                     .bind(after.map_or(0, |p| p.get() as i64))
-                    .bind(i64::from(limit.get()))
+                    .bind(i64::from(limit.rows()))
                     .bind(bytes)
                     .fetch(connection);
                 let mut events = Vec::new();
+                let mut remaining = limit.payload_bytes() as usize;
                 while let Some(row) = rows.try_next().await.map_err(sql_error)? {
                     budget()?;
                     #[cfg(feature = "integration")]
@@ -230,21 +226,38 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                     if after.map_or(0, |p| p.get() as i64) < floor {
                         return Err(expired(position(floor)?));
                     }
-                    if row
+                    let Some(raw_position) = row
                         .try_get::<Option<i64>, _>("log_position")
                         .map_err(sql_error)?
-                        .is_none()
-                    {
+                    else {
                         continue;
-                    }
-                    let (pos, record, fp) = restore_row(row)?;
-                    events.push(
-                        item(&scope, pos, record, fp).map_err(|e| restore_error(Some(pos), e))?,
-                    );
+                    };
+                    let pos = position(raw_position).map_err(|e| restore_error(None, e))?;
+                    let metadata =
+                        ReferenceMetadata::read(&row).map_err(|e| restore_error(Some(pos), e))?;
+                    let event = metadata
+                        .event(&scope, pos)
+                        .map_err(|e| restore_error(Some(pos), e))?;
                     budget()?;
+                    let size = event.payload().len();
+                    if size > remaining {
+                        if events.is_empty() {
+                            return Ok(ReadPage::Blocked {
+                                position: pos,
+                                required_bytes: size as u32,
+                            });
+                        }
+                        break;
+                    }
+                    remaining -= size;
+                    let (record, fingerprint) = metadata
+                        .restore(row)
+                        .map_err(|e| restore_error(Some(pos), e))?;
+                    budget()?;
+                    events.push(item(event, record, fingerprint));
                     tokio::task::yield_now().await;
                 }
-                Ok(events)
+                Ok(ReadPage::Events(events))
             })
         });
         #[cfg(feature = "integration")]
@@ -274,27 +287,40 @@ fn position(value: i64) -> Result<Position, Error> {
     }
     Position::new(value as u64).map_err(projection_error)
 }
-fn restore_row(row: PgRow) -> Result<(Position, ApplicableRecord, [u8; 32]), BridgeError> {
-    let pos = row
-        .try_get("log_position")
-        .map_err(sql_error)
-        .and_then(position)
-        .map_err(|e| restore_error(None, e))?;
-    let (record, fp) = (|| {
+// The immutable reference can be sized from receipt metadata. Admitted items must
+// still verify the canonical report and its fingerprint in the same snapshot.
+struct ReferenceMetadata {
+    scope: Scope,
+    batch_id: Id,
+    fingerprint: [u8; 32],
+}
+impl ReferenceMetadata {
+    fn read(row: &PgRow) -> Result<Self, Error> {
         let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)
             .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
-        let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)
+        let batch_id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)
             .map_err(|e| Error::provider(ErrorKind::Invariant, e))?;
-        let (record, fp) = restore(row, &scope, &id)?;
-        Ok::<_, Error>((
+        let fingerprint: &[u8] = row.try_get("fingerprint").map_err(sql_error)?;
+        Ok(Self {
+            scope,
+            batch_id,
+            fingerprint: fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?,
+        })
+    }
+
+    fn event(&self, source: &SourceScope, pos: Position) -> Result<Event, Error> {
+        reference_event(source, pos, &self.scope, &self.batch_id, self.fingerprint)
+    }
+
+    fn restore(&self, row: PgRow) -> Result<(ApplicableRecord, [u8; 32]), Error> {
+        let (record, verified) = restore(row, &self.scope, &self.batch_id)?;
+        Ok((
             record
                 .into_applicable()
                 .map_err(|e| Error::provider(ErrorKind::Invariant, e))?,
-            fp,
+            verified,
         ))
-    })()
-    .map_err(|e| restore_error(Some(pos), e))?;
-    Ok((pos, record, fp))
+    }
 }
 fn expired(pos: Position) -> BridgeError {
     BridgeError(rss_projection::Error::provider(
@@ -308,31 +334,23 @@ fn expired(pos: Position) -> BridgeError {
 fn resolve_row(row: Option<PgRow>, event: &Event) -> Result<ApplicableRecord, BridgeError> {
     let row =
         row.ok_or_else(|| restore_error(Some(event.position()), ErrorKind::Invariant.into()))?;
-    if row.try_get("expired").map_err(sql_error)? {
-        let pos = event.position();
-        let identity = (|| -> Result<Event, Error> {
-            let scope: Scope = serde_json::from_str(row.try_get("scope").map_err(sql_error)?)?;
-            let id = Id::new(row.try_get::<String, _>("batch_id").map_err(sql_error)?)?;
-            let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(sql_error)?;
-            let fingerprint = fingerprint.try_into().map_err(|_| ErrorKind::Invariant)?;
-            reference_event(event.source(), pos, &scope, &id, fingerprint)
-        })()
+    let pos = row
+        .try_get("log_position")
+        .map_err(sql_error)
+        .and_then(position)
+        .map_err(|e| restore_error(Some(event.position()), e))?;
+    let metadata = ReferenceMetadata::read(&row).map_err(|e| restore_error(Some(pos), e))?;
+    let reference = metadata
+        .event(event.source(), pos)
         .map_err(|e| restore_error(Some(pos), e))?;
-        validate_reference(event, &identity)?;
+    if row.try_get("expired").map_err(sql_error)? {
+        validate_reference(event, &reference)?;
         return Err(expired(pos));
     }
-    let (pos, record, fp) = restore_row(row)?;
-    validate_reference(
-        event,
-        &reference_event(
-            event.source(),
-            pos,
-            record.record().scope(),
-            record.record().batch().id(),
-            fp,
-        )
-        .map_err(|e| restore_error(Some(pos), e))?,
-    )?;
+    let (record, _) = metadata
+        .restore(row)
+        .map_err(|e| restore_error(Some(pos), e))?;
+    validate_reference(event, &reference)?;
     Ok(record)
 }
 fn validate_reference(event: &Event, original: &Event) -> Result<(), BridgeError> {

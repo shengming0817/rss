@@ -246,3 +246,19 @@ pub fn assert_same_record(actual: &Record, expected: &Record) {
     assert_eq!(actual.policy(), expected.policy());
     assert_eq!(actual.decision(), expected.decision());
 }
+
+pub(super) fn page_budget(rows: u32) -> Result<rss_projection::PageBudget, rss_projection::Error> {
+    rss_projection::PageBudget::new(rows, rss_projection::Event::MAX_PAYLOAD_BYTES)
+}
+
+pub(super) fn expected_events<I>(page: rss_projection::ReadPage<I>) -> anyhow::Result<Vec<I>> {
+    match page {
+        rss_projection::ReadPage::Events(events) => Ok(events),
+        rss_projection::ReadPage::Blocked {
+            position,
+            required_bytes,
+        } => anyhow::bail!(
+            "unexpected blocked page at {position:?}, requiring {required_bytes} bytes"
+        ),
+    }
+}

@@ -107,9 +107,9 @@ impl Source for Fixture {
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        limit: PageBudget,
         control: &Control<'_, T>,
-    ) -> Result<Vec<Event>, Error> {
+    ) -> Result<ReadPage<Event>, Error> {
         control.check()?;
         if matches!(self.execution.boundary, Boundary::Read) {
             control
@@ -120,7 +120,10 @@ impl Source for Fixture {
     }
 }
 fn limit(events: u64) -> anyhow::Result<RunLimit> {
-    Ok(RunLimit::new(BatchLimit::new(3)?, events)?)
+    Ok(RunLimit::new(
+        PageBudget::new(3, Event::MAX_PAYLOAD_BYTES)?,
+        events,
+    )?)
 }
 fn first() -> anyhow::Result<ConfirmedProgress> {
     Ok(ConfirmedProgress {

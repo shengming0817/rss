@@ -7,7 +7,7 @@ use rss_observation::{
 };
 use rss_observation_postgres::{PgSource, PgStore};
 use rss_projection::{
-    BatchLimit, Control, GenerationStart, ProjectionScope, ReplayBound, RunLimit,
+    Control, Event, GenerationStart, PageBudget, ProjectionScope, ReplayBound, RunLimit,
 };
 use rss_request_context::{Deadline, TenantId};
 
@@ -105,12 +105,14 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
             source.as_ref(),
             &execution,
             &control,
-            RunLimit::new(BatchLimit::new(10)?, 100)?,
+            RunLimit::new(PageBudget::new(10, Event::MAX_PAYLOAD_BYTES)?, 100)?,
         )
         .await
         .into_result()?;
         anyhow::ensure!(
-            report.applied == expected && report.position.is_some(),
+            report.stop == rss_projection::Stop::CaughtUp
+                && report.applied == expected
+                && report.position.is_some(),
             "handoff progress mismatch: expected {expected}, got {} at {:?}",
             report.applied,
             report.position

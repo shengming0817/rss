@@ -7,8 +7,8 @@ use rss_observation::{
     Body, Change, Id, LookupOutcome, ObservationStore, ReadGrant, ReceiveOutcome,
 };
 use rss_projection::{
-    BatchLimit, Control, Event, Execution, GenerationStart, Position, ProjectionScope, ReplayBound,
-    RunLimit, Source,
+    Control, Event, Execution, GenerationStart, Position, ProjectionScope, ReplayBound, RunLimit,
+    Source,
 };
 use rss_projection_postgres::PgFault;
 use std::time::Duration;
@@ -111,6 +111,14 @@ pub async fn composition(f: &Fixture) -> anyhow::Result<()> {
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(60), &cancel);
+    let scope = input.source.scope();
+    let reference = f.reference_source(
+        input.store.clone(),
+        TENANT,
+        rss_observation::Batch::MAX_ENCODED_BYTES,
+    )?;
+    reference_budget(&reference, scope, &control).await?;
+    reference_budget(input.source.as_ref(), scope, &control).await?;
     let projection = f.projection(&control).await?;
     let scope = ProjectionScope::new(input.source.scope().clone(), "facts", "live")?;
     let execution = session(&projection, &scope, &input.source, &control).await?;
@@ -125,6 +133,29 @@ pub async fn composition(f: &Fixture) -> anyhow::Result<()> {
     resumed_projection(f, &input, &execution, &scope, &control).await?;
     Ok(())
 }
+async fn reference_budget(
+    source: &impl Source,
+    scope: &rss_projection::SourceScope,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    use rss_projection::{PageBudget, ReadPage};
+    let events = expected_events(source.read(scope, None, page_budget(2)?, control).await?)?;
+    assert_eq!(events.len(), 2);
+    let first = events[0].as_ref();
+    let bytes = u32::try_from(first.payload().len())?;
+    assert!(matches!(
+        source.read(scope, None, PageBudget::new(2, bytes - 1)?, control).await?,
+        ReadPage::Blocked {position, required_bytes} if position == first.position() && required_bytes == bytes
+    ));
+    let prefix = expected_events(
+        source
+            .read(scope, None, PageBudget::new(2, bytes)?, control)
+            .await?,
+    )?;
+    assert_eq!(prefix.len(), 1);
+    assert_eq!(prefix[0].as_ref(), first);
+    Ok(())
+}
 async fn initial_projection(
     f: &Fixture,
     source: &Arc<ObsSource>,
@@ -137,7 +168,7 @@ async fn initial_projection(
         source.as_ref(),
         execution,
         control,
-        RunLimit::new(BatchLimit::new(2)?, 50)?,
+        RunLimit::new(page_budget(2)?, 50)?,
     )
     .await
     .into_result()?;
@@ -201,10 +232,12 @@ async fn reject_incomplete(input: &Inputs) -> anyhow::Result<()> {
         .await?;
     assert_eq!(source.high_water(source.scope(), &control).await?, cursor);
     assert!(
-        source
-            .read(source.scope(), cursor, BatchLimit::new(10)?, &control)
-            .await?
-            .is_empty()
+        expected_events(
+            source
+                .read(source.scope(), cursor, page_budget(10)?, &control)
+                .await?
+        )?
+        .is_empty()
     );
     Ok(())
 }
@@ -246,7 +279,7 @@ async fn recovered_projection(
         source.as_ref(),
         execution,
         control,
-        RunLimit::new(BatchLimit::new(2)?, 50)?,
+        RunLimit::new(page_budget(2)?, 50)?,
     )
     .await
     .into_result()?;
@@ -281,9 +314,11 @@ async fn fail_and_commit(
 ) -> anyhow::Result<()> {
     let control = Control::new(clock, Duration::from_secs(30), cancel);
     let checkpoint = execution.checkpoint(&control).await?.position;
-    let next = source
-        .read(source.scope(), checkpoint, BatchLimit::new(1)?, &control)
-        .await?;
+    let next = expected_events(
+        source
+            .read(source.scope(), checkpoint, page_budget(1)?, &control)
+            .await?,
+    )?;
     projection.inject_next_fault(PgFault::CommitPending);
     let short = Control::new(
         clock,
@@ -331,7 +366,7 @@ async fn resumed_projection(
         source.as_ref(),
         &resumed,
         control,
-        RunLimit::new(BatchLimit::new(10)?, 50)?,
+        RunLimit::new(page_budget(10)?, 50)?,
     )
     .await
     .into_result()?;
@@ -388,10 +423,12 @@ async fn concurrent_pair(
         f.wait_for_blocked(pid, 1).await?;
         assert_eq!(source.high_water(source.scope(), control).await?, before);
         assert!(
-            source
-                .read(source.scope(), before, BatchLimit::new(10)?, control)
-                .await?
-                .is_empty()
+            expected_events(
+                source
+                    .read(source.scope(), before, page_budget(10)?, control)
+                    .await?
+            )?
+            .is_empty()
         );
         project_to(source, execution, before, control).await?;
         if rollback {
@@ -414,9 +451,11 @@ async fn concurrent_pair(
         (first, rollback),
         (LookupOutcome::NotFound, true) | (LookupOutcome::Found(_), false)
     ));
-    let events = source
-        .read(source.scope(), before, BatchLimit::new(10)?, control)
-        .await?;
+    let events = expected_events(
+        source
+            .read(source.scope(), before, page_budget(10)?, control)
+            .await?,
+    )?;
     assert_eq!(events.len(), if rollback { 1 } else { 2 });
     assert_positions(&events, before);
     project_to(
@@ -438,7 +477,7 @@ async fn project_to(
         source,
         execution,
         control,
-        RunLimit::new(BatchLimit::new(10)?, 50)?,
+        RunLimit::new(page_budget(10)?, 50)?,
     )
     .await
     .into_result()?;
@@ -490,9 +529,11 @@ async fn seed_large(f: &Fixture) -> anyhow::Result<Large> {
     let input = batch(&stream, &"批".repeat(80), 0, "all", Body::Snapshot(changes))?;
     assert!(input.batch().encode().len() > 3_000_000);
     let receipt = store.receive(&input, deadline()).await?;
-    let events = source
-        .read(source.scope(), None, BatchLimit::new(1000)?, &control)
-        .await?;
+    let events = expected_events(
+        source
+            .read(source.scope(), None, page_budget(1000)?, &control)
+            .await?,
+    )?;
     assert_eq!(events.len(), 1);
     let event = events[0].as_ref().clone();
     Ok(Large {
@@ -523,9 +564,11 @@ async fn validate_large(large: &Large) -> anyhow::Result<()> {
     let resolved = source.resolve(event, &control).await?;
     assert_eq!(resolved.record().batch(), receipt.record().batch());
     assert_eq!(
-        source
-            .read(source.scope(), None, BatchLimit::new(1)?, &control)
-            .await?[0]
+        expected_events(
+            source
+                .read(source.scope(), None, page_budget(1)?, &control)
+                .await?
+        )?[0]
             .as_ref(),
         event
     );
@@ -548,7 +591,7 @@ async fn reject_changed(f: &Fixture, large: &Large) -> anyhow::Result<()> {
     let wrong = f.source(store.clone(), TENANT)?;
     assert!(
         source
-            .read(wrong.scope(), None, BatchLimit::new(1)?, &control)
+            .read(wrong.scope(), None, page_budget(1)?, &control)
             .await
             .is_err()
     );
@@ -622,9 +665,11 @@ async fn lifecycle_records(large: &Large) -> anyhow::Result<()> {
         };
         assert_same_record(&current, accepted.record());
     }
-    let all = source
-        .read(source.scope(), None, BatchLimit::new(10)?, &control)
-        .await?;
+    let all = expected_events(
+        source
+            .read(source.scope(), None, page_budget(10)?, &control)
+            .await?,
+    )?;
     let ids = all
         .iter()
         .map(|e| e.as_ref().id())
@@ -684,7 +729,7 @@ async fn isolated_effects(f: &Fixture, source: &Arc<ObsSource>) -> anyhow::Resul
         source.as_ref(),
         &execution,
         &control,
-        RunLimit::new(BatchLimit::new(10)?, 20)?,
+        RunLimit::new(page_budget(10)?, 20)?,
     )
     .await
     .into_result()?;
@@ -744,13 +789,17 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
         rss_projection::SourceScope::new(tenant, "rebuilt")?,
         32 * 1024 * 1024,
     )?;
-    let original = input
-        .source
-        .read(input.source.scope(), None, BatchLimit::new(1)?, &control)
-        .await?;
-    let new = rebuilt
-        .read(rebuilt.scope(), None, BatchLimit::new(1)?, &control)
-        .await?;
+    let original = expected_events(
+        input
+            .source
+            .read(input.source.scope(), None, page_budget(1)?, &control)
+            .await?,
+    )?;
+    let new = expected_events(
+        rebuilt
+            .read(rebuilt.scope(), None, page_budget(1)?, &control)
+            .await?,
+    )?;
     assert_eq!(original.len(), 1);
     assert_eq!(new.len(), 1);
     assert_eq!(original[0].as_ref().payload(), new[0].as_ref().payload());
@@ -802,10 +851,12 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(30), &cancel);
 
-    let events = input
-        .source
-        .read(input.source.scope(), None, BatchLimit::new(2)?, &control)
-        .await?;
+    let events = expected_events(
+        input
+            .source
+            .read(input.source.scope(), None, page_budget(2)?, &control)
+            .await?,
+    )?;
     assert_eq!(events.len(), 2);
     let bad = &events[1];
     let projection = f.projection(&control).await?;
@@ -820,9 +871,60 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.admin)
     .await?;
     assert_eq!(changed.rows_affected(), 1);
+    let reference = f.reference_source(
+        input.store.clone(),
+        TENANT,
+        rss_observation::Batch::MAX_ENCODED_BYTES,
+    )?;
+    assert_prefix_before_corrupt_body(
+        &reference,
+        input.source.scope(),
+        events[0].as_ref(),
+        bad.as_ref(),
+        &control,
+    )
+    .await?;
+    assert_prefix_before_corrupt_body(
+        input.source.as_ref(),
+        input.source.scope(),
+        events[0].as_ref(),
+        bad.as_ref(),
+        &control,
+    )
+    .await?;
     assert_source_failures(f, &input, &execution, bad, &control).await?;
     settlement::verify(f, &input, &execution, &projection, &events).await
 }
+async fn assert_prefix_before_corrupt_body(
+    source: &impl Source,
+    scope: &rss_projection::SourceScope,
+    first: &Event,
+    damaged: &Event,
+    control: &Control<'_, ProjectionClock>,
+) -> anyhow::Result<()> {
+    use rss_projection::{PageBudget, ReadPage};
+    let budget = PageBudget::new(2, first.payload().len() as u32)?;
+    let prefix = expected_events(source.read(scope, None, budget, control).await?)?;
+    assert_eq!(prefix.len(), 1);
+    assert_eq!(prefix[0].as_ref(), first);
+    let cursor = Some(first.position());
+    let bytes = damaged.payload().len() as u32;
+    assert!(
+        matches!(source.read(scope, cursor, PageBudget::new(2, bytes - 1)?, control).await?,
+        ReadPage::Blocked { position, required_bytes } if position == damaged.position() && required_bytes == bytes)
+    );
+    let error = source
+        .read(scope, cursor, PageBudget::new(2, bytes)?, control)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("admitted damaged report"))?;
+    assert_restore_error(
+        &error,
+        rss_projection::ErrorKind::StorageContract,
+        damaged.position(),
+    )
+}
+
 async fn assert_source_failures(
     f: &Fixture,
     input: &Inputs,
@@ -835,7 +937,7 @@ async fn assert_source_failures(
         input.source.as_ref(),
         execution,
         control,
-        RunLimit::new(BatchLimit::new(2)?, 2)?,
+        RunLimit::new(page_budget(2)?, 2)?,
     )
     .await
     .into_result()

@@ -127,9 +127,11 @@ an earlier cursor gets HistoryExpired, including an empty page. Exact references
 so a retained active record below the floor can still resolve. Initialize a new generation with `GenerationStart::after`, a host-prepared read model and
 complete deduplication receipts at or beyond the floor. The old generation keeps its original start.
 
-Both modes select an ordered prefix using the runner's count limit and the host's canonical-report byte budget.
-The constructor requires at least `Batch::MAX_ENCODED_BYTES` so a legal first report always fits.
-The allowance covers report bodies transferred to the reader. Decoded facts, references and driver buffers consume additional memory.
+Both modes use the constructor's `page_bytes` to bound canonical report bodies retrieved by PostgreSQL.
+It must allow at least `Batch::MAX_ENCODED_BYTES` so one legal report fits. Each read also applies
+the caller's `PageBudget` to the row count and total encoded reference payload bytes. If the first
+reference exceeds that budget, the source returns its position and required bytes. Decoded facts
+and driver buffers consume additional memory.
 
 `read` validates rows one at a time and emits bounded immutable version-1 references containing
 Scope, batch ID and the full Observation fingerprint. Event IDs are ASCII hex fingerprints. No

@@ -90,7 +90,7 @@ async fn measure_references(shape: &str) -> anyhow::Result<()> {
     let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
     let stop = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(180), &stop);
-    let limit = BatchLimit::new(8)?;
+    let limit = page_budget(8)?;
     let mut start = 0;
     let mut after = None;
     while start < sizes.len() {
@@ -103,7 +103,7 @@ async fn measure_references(shape: &str) -> anyhow::Result<()> {
         let count = (end - start) as u64;
         assert!(count > 0);
         let work = async {
-            let page = source.read(source.scope(), after, limit, &control).await?;
+            let page = expected_events(source.read(source.scope(), after, limit, &control).await?)?;
             assert_eq!(page.len() as u64, count);
             for (index, event) in page.iter().enumerate() {
                 assert_eq!(event.position().get(), (start + index + 1) as u64);
@@ -128,10 +128,7 @@ async fn measure_references(shape: &str) -> anyhow::Result<()> {
         start = end;
     }
     assert!(
-        source
-            .read(source.scope(), after, limit, &control)
-            .await?
-            .is_empty()
+        expected_events(source.read(source.scope(), after, limit, &control).await?)?.is_empty()
     );
     Ok(())
 }
@@ -159,7 +156,7 @@ async fn measure(shape: &str) -> anyhow::Result<()> {
     let scope = ProjectionScope::new(source.scope().clone(), "read-cost", shape)?;
     let exec = session(&pg, &scope, &source, &control).await?;
     let before = batch_cost::counters(&pool).await?;
-    let limit = RunLimit::new(BatchLimit::new(8)?, 8)?;
+    let limit = RunLimit::new(page_budget(8)?, 8)?;
     let run = rss_projection::run_batched(&*source, &exec, &control, limit);
     let (report, profile) = profiled(shape, std::future::IntoFuture::into_future(run)).await?;
     assert_eq!(report.into_result()?.applied, 8);

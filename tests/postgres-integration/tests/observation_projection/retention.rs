@@ -5,9 +5,7 @@ use rss_observation::{
     ObservationMaintenance, ObservationStore, Policy, ReadGrant, ScanWindow, Scope,
 };
 use rss_observation_postgres::{Fault, PgMaintenance, PgStore};
-use rss_projection::{
-    BatchLimit, Control, Execution, GenerationStart, ProjectionScope, ReplayBound, Source,
-};
+use rss_projection::{Control, Execution, GenerationStart, ProjectionScope, ReplayBound, Source};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 
@@ -211,9 +209,11 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     f.stage(&partial).await?.0.commit().await?;
     let b_read = ReadGrant::verify(&Trusted, b.clone())?;
     let source = f.source(store.clone(), TENANT)?;
-    let all = source
-        .read(source.scope(), None, BatchLimit::new(4)?, &control)
-        .await?;
+    let all = expected_events(
+        source
+            .read(source.scope(), None, page_budget(4)?, &control)
+            .await?,
+    )?;
     let [first, second, third] = all.as_slice() else {
         anyhow::bail!("expected three journal positions")
     };
@@ -353,7 +353,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
             .fetch_one(&mut *staged)
             .await?;
     assert_eq!(staged_count, 1);
-    let read_limit = BatchLimit::new(4)?;
+    let read_limit = page_budget(4)?;
     let (replay, resolved, page) = tokio::join!(
         store.receive(&old, deadline()),
         source.resolve(second.as_ref(), &control),
@@ -366,7 +366,10 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     );
     assert_same_record(replay?.record(), resolved?.record());
     assert_eq!(
-        page?.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+        expected_events(page?)?
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>(),
         [second.as_ref(), third.as_ref()]
     );
     staged.rollback().await?;
@@ -406,7 +409,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
     for after in [None, Some(first.as_ref().position())] {
         assert_eq!(
             source
-                .read(source.scope(), after, BatchLimit::new(4)?, &control)
+                .read(source.scope(), after, page_budget(4)?, &control)
                 .await
                 .err()
                 .context("expected operation to fail")?
@@ -415,17 +418,19 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
         );
     }
     assert_eq!(
-        source
-            .read(
-                source.scope(),
-                Some(second.as_ref().position()),
-                BatchLimit::new(4)?,
-                &control
-            )
-            .await?
-            .iter()
-            .map(AsRef::as_ref)
-            .collect::<Vec<_>>(),
+        expected_events(
+            source
+                .read(
+                    source.scope(),
+                    Some(second.as_ref().position()),
+                    page_budget(4)?,
+                    &control
+                )
+                .await?
+        )?
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>(),
         [third.as_ref()]
     );
     assert_same_record(
@@ -473,7 +478,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
         &*source,
         &execution,
         &control,
-        rss_projection::RunLimit::new(BatchLimit::new(4)?, 4)?,
+        rss_projection::RunLimit::new(page_budget(4)?, 4)?,
     )
     .await;
     assert_eq!(
@@ -562,7 +567,7 @@ async fn retired_receipts_and_interleaved_journal() -> anyhow::Result<()> {
             .await?,
         model::Facts::new(source.clone()),
     )?;
-    let limits = rss_projection::RunLimit::new(BatchLimit::new(3)?, 3)?;
+    let limits = rss_projection::RunLimit::new(page_budget(3)?, 3)?;
     let done = rss_projection::run(&*source, &rebuilt, &control, limits)
         .await
         .into_result()?;
@@ -671,15 +676,12 @@ async fn settlement_and_competing_pages() -> anyhow::Result<()> {
     assert_eq!(bounds.high_water, bounds.expired_through);
     assert_eq!(bounds.high_water.map(|p| p.get()), Some(1));
     assert!(
-        source
-            .read(
-                source.scope(),
-                bounds.high_water,
-                BatchLimit::new(1)?,
-                &control
-            )
-            .await?
-            .is_empty()
+        expected_events(
+            source
+                .read(source.scope(), bounds.high_water, page_budget(1)?, &control)
+                .await?
+        )?
+        .is_empty()
     );
     Ok(())
 }

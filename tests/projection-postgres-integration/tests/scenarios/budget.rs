@@ -82,7 +82,7 @@ async fn read(
             .read(
                 projection.scope().source(),
                 None,
-                BatchLimit::new(1)?,
+                PageBudget::new(1, Event::MAX_PAYLOAD_BYTES)?,
                 control,
             )
             .await

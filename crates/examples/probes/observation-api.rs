@@ -36,9 +36,14 @@ fn main() {}
 pub async fn read_source<C: Clock,T: rss_projection::Timer>(
     source: &rss_observation_postgres::PgSource<C>, control: &rss_projection::Control<'_,T>,
 ) -> Result<(),rss_projection::Error> {
-    use rss_projection::Source;
+    use rss_projection::{Event, PageBudget, ReadPage, Source};
     source.high_water(source.scope(),control).await?;
-    for event in source.read(source.scope(),None,rss_projection::BatchLimit::new(1)?,control).await? {
+    let page = source.read(source.scope(),None,PageBudget::new(1,Event::MAX_PAYLOAD_BYTES)?,control).await?;
+    let ReadPage::Events(events) = page else {
+        // A budget large enough for any legal single reference must admit the first.
+        return Err(rss_projection::ErrorKind::SourceContract.into());
+    };
+    for event in events {
         source.resolve(&event,control).await?;
     }
     Ok(())

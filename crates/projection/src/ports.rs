@@ -1,6 +1,6 @@
 use crate::{
-    ApplyOutcome, BatchLimit, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event,
-    Position, ProjectionScope, SourceScope, Timer,
+    ApplyOutcome, Checkpoint, Control, DefinitionIdentity, Error, ErrorKind, Event, PageBudget,
+    Position, ProjectionScope, ReadPage, SourceScope, Timer,
 };
 use std::future::Future;
 
@@ -17,15 +17,17 @@ pub trait Source: Send + Sync {
         scope: &SourceScope,
         control: &Control<'_, T>,
     ) -> impl Future<Output = Result<Option<Position>, Error>> + Send;
-    /// Read strictly increasing positions after the cursor, at most limit records.
+    /// Read a continuous prefix after the cursor within both page limits. Return a nonempty
+    /// prefix even if the next event does not fit. Return Blocked only when the first event
+    /// alone exceeds the byte budget. An empty Events page means the source is exhausted.
     /// Return HistoryExpired if the retained suffix cannot cover this cursor, even on an empty page.
     fn read<T: Timer>(
         &self,
         scope: &SourceScope,
         after: Option<Position>,
-        limit: BatchLimit,
+        budget: PageBudget,
         control: &Control<'_, T>,
-    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send;
+    ) -> impl Future<Output = Result<ReadPage<Self::Item>, Error>> + Send;
 }
 /// Execution session bound by a provider to write authority for a single generation.
 /// A PostgreSQL implementation settles effect, receipt and checkpoint in one transaction.
