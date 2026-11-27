@@ -1,0 +1,32 @@
+[package]
+name = "rss-identity-oidc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+[features]
+test-support = []
+[dependencies]
+futures-util = "0.3"
+url = { version = "2.5", features = ["serde"] }
+base64 = "0.22"
+http = "1"
+httpdate = "1"
+uuid = { workspace = true, features = ["serde", "v4"] }
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+reqwest.workspace = true
+thiserror.workspace = true
+rss-identity-core.workspace = true
+rss-request-context.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros", "sync", "time"] }
+ipnet = "2.11"
+[dev-dependencies]
+axum = "0.8"
+anyhow.workspace = true
+reqwest = { workspace = true, features = ["cookies"] }
+[lints]
+workspace = true

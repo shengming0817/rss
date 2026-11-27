@@ -1,0 +1,20 @@
+GRANT USAGE ON SCHEMA identity_authority TO {role};
+GRANT SELECT ON identity_authority.schema_version TO {role};
+GRANT SELECT ON identity_authority.deployment TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.tenants TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.tenant_state TO {role};
+GRANT SELECT,INSERT ON identity_authority.accounts TO {role};
+GRANT SELECT,INSERT ON identity_authority.memberships TO {role};
+GRANT SELECT,INSERT ON identity_authority.local_credentials TO {role};
+GRANT SELECT ON identity_authority.sessions TO {role};
+GRANT SELECT ON identity_authority.providers TO {role};
+GRANT SELECT ON identity_authority.external_identities TO {role};
+GRANT USAGE ON SCHEMA rss_transactional_messaging TO {role};
+GRANT SELECT ON rss_transactional_messaging.policy TO {role};
+GRANT SELECT ON rss_transactional_messaging.outbox TO {role};
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb), rss_transactional_messaging.append_outbox(bytea,jsonb) TO {role};
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO {role};
+
+GRANT USAGE ON SCHEMA rss_audit TO {role};
+GRANT SELECT ON rss_audit.records TO {role};
+GRANT EXECUTE ON FUNCTION rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[]) TO {role};

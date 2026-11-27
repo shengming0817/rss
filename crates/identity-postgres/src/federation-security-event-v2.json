@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant",
+    "action",
+    "provider_id",
+    "config_version",
+    "principal"
+  ],
+  "properties": {
+    "tenant": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "provider_created",
+        "provider_updated",
+        "provider_enabled",
+        "provider_disabled",
+        "provider_tested",
+        "provider_test_failed",
+        "jit_created",
+        "logged_in",
+        "linked",
+        "already_linked",
+        "reauthenticated",
+        "stepped_up"
+      ]
+    },
+    "provider_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "config_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "principal": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "reason"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "enum": [
+            "binding",
+            "discovery",
+            "jwks",
+            "exchange",
+            "claims"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "unapproved_binding",
+            "missing_secret",
+            "invalid_trust_anchor",
+            "egress_denied",
+            "tls_rejected",
+            "unavailable",
+            "timeout",
+            "invalid_response",
+            "issuer_mismatch",
+            "issuer_response_unsupported",
+            "code_rejected",
+            "invalid_token"
+          ]
+        }
+      }
+    }
+  }
+}

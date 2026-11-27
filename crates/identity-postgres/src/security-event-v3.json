@@ -1,0 +1,66 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "tenant",
+    "principal",
+    "actor",
+    "epoch",
+    "state"
+  ],
+  "properties": {
+    "action": {
+      "enum": [
+        "initialized",
+        "account_created",
+        "account_enabled",
+        "account_disabled",
+        "membership_enabled",
+        "membership_disabled",
+        "password_changed",
+        "password_recovered"
+      ]
+    },
+    "tenant": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "principal": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "actor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "member_active",
+        "membership_epoch"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "member_active": {
+          "type": "boolean"
+        },
+        "membership_epoch": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}
