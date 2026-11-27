@@ -1,10 +1,12 @@
 use super::*;
 mod budget;
+mod structure;
 pub(super) async fn run(
     pool: &PgPool,
     admin: &PgPool,
     control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
+    structure::run(admin).await?;
     budget::run(pool).await?;
     writer_roles(pool, admin, control).await?;
     borrowed(pool, admin, control).await?;
@@ -16,6 +18,14 @@ pub(super) async fn run(
             .await
             .is_err()
     );
+    runtime_drift(pool, admin, control).await
+}
+
+async fn runtime_drift(
+    pool: &PgPool,
+    admin: &PgPool,
+    control: &Control<'_, TestClock>,
+) -> anyhow::Result<()> {
     for (change, restore) in [
         (
             "GRANT UPDATE ON rss_audit.records TO audit_runtime",
@@ -120,12 +130,31 @@ async fn foreign_role(
 ) -> anyhow::Result<()> {
     let plain = PgAudit::new(pool.clone(), Integrity::Plain, write_budget()?, control).await?;
     let mut foreign = admin.acquire().await?;
+    rss_audit_postgres::validate_structure(&mut foreign).await?;
     assert!(matches!(
         plain.validate_connection(&mut foreign, control).await,
         Err(Error::Admission(_))
     ));
-    let mut actual = pool.acquire().await?;
+    let ledger = PgAudit::new(
+        pool.clone(),
+        Integrity::Ledger(auth()?),
+        write_budget()?,
+        control,
+    )
+    .await?;
+    let mut actual = pool.begin().await?;
+    sqlx::raw_sql(
+        "SET LOCAL search_path=public,pg_temp,pg_catalog; SET LOCAL quote_all_identifiers=on",
+    )
+    .execute(&mut *actual)
+    .await?;
     plain.validate_connection(&mut actual, control).await?;
+    ledger.validate_connection(&mut actual, control).await?;
+    let quoted: String = sqlx::query_scalar("SHOW quote_all_identifiers")
+        .fetch_one(&mut *actual)
+        .await?;
+    assert_eq!(quoted, "on");
+    actual.rollback().await?;
     Ok(())
 }
 

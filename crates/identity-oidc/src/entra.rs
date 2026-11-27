@@ -96,6 +96,7 @@ impl HttpEntra {
                 .dns_resolver(Arc::new(crate::egress::VettedResolver::new(
                     loopback,
                     vec![],
+                    Arc::new(crate::egress::SystemResolver),
                 )))
                 .timeout(policy.request_timeout)
                 .connect_timeout(policy.connect_timeout)

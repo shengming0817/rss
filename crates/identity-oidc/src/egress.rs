@@ -58,7 +58,7 @@ pub(crate) fn allowed(ip: IpAddr, loopback: bool, cidrs: &[IpNet]) -> bool {
         .any(|net| net.parse::<IpNet>().map_or(true, |net| net.contains(&ip)))
 }
 
-struct SystemResolver;
+pub(super) struct SystemResolver;
 impl Resolve for SystemResolver {
     fn resolve(&self, name: Name) -> Resolving {
         Box::pin(async move {
@@ -73,9 +73,9 @@ pub(crate) struct VettedResolver {
     cidrs: Vec<IpNet>,
 }
 impl VettedResolver {
-    pub(crate) fn new(loopback: bool, cidrs: Vec<IpNet>) -> Self {
+    pub(super) fn new(loopback: bool, cidrs: Vec<IpNet>, lookup: Arc<dyn Resolve>) -> Self {
         Self {
-            lookup: Arc::new(SystemResolver),
+            lookup,
             loopback,
             cidrs,
         }

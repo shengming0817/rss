@@ -16,13 +16,14 @@ pub struct KeycloakFixture {
 pub async fn keycloak_tls(
     host: Ipv4Addr,
     explicit_host: bool,
+    dns_name: &str,
     realm_json: &[u8],
 ) -> Result<KeycloakFixture> {
     anyhow::ensure!(
         host.is_private(),
         "Keycloak publish address must be RFC1918"
     );
-    let tls = rcgen::generate_simple_self_signed(vec![host.to_string()])?;
+    let tls = rcgen::generate_simple_self_signed(vec![host.to_string(), dns_name.to_owned()])?;
     let ca = tls.cert.pem();
     let request = GenericImage::new(
         "quay.io/keycloak/keycloak",

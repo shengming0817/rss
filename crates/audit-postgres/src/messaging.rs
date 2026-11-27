@@ -7,8 +7,34 @@ use rss_transactional_messaging_postgres::{PgError, PgTransaction};
 
 /// Validate the actual borrowed writer connection at startup; never acquires or settles.
 pub async fn validate_in(tx: &mut PgTransaction<'_>, integrity: &Integrity) -> Result<(), Error> {
-    tx.with_connection(|c| Box::pin(async move { Ok(crate::probe::validate(c).await) }))
-        .await??;
+    // The fenced transaction owns this connection across both component checks.
+    // On timeout its owner rolls back or isolates the connection.
+    tx.with_connection(|c| {
+        Box::pin(async move {
+            sqlx::raw_sql(crate::probe::SAVE).execute(c).await?;
+            Ok(())
+        })
+    })
+    .await?;
+    let result = inspect_in(tx, integrity).await;
+    tx.with_connection(|c| {
+        Box::pin(async move {
+            sqlx::raw_sql(crate::probe::RESTORE).execute(c).await?;
+            Ok(())
+        })
+    })
+    .await?;
+    result
+}
+
+async fn inspect_in(tx: &mut PgTransaction<'_>, integrity: &Integrity) -> Result<(), Error> {
+    tx.with_connection(|c| {
+        Box::pin(async move {
+            sqlx::raw_sql(crate::probe::PIN).execute(&mut *c).await?;
+            Ok(crate::probe::validate(c).await)
+        })
+    })
+    .await??;
     #[cfg(feature = "ledger")]
     if matches!(integrity, Integrity::Ledger(_)) {
         rss_ledger_postgres::validate_in(tx).await?;
