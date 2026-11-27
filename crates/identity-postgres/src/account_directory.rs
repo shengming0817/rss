@@ -108,7 +108,7 @@ fn collect_terms<'a>(
 }
 
 fn subtree(sql: &mut QueryBuilder<Postgres>, targets: Vec<String>, any: bool) {
-    sql.push("\"departmentStatus\"='available' AND ");
+    sql.push("CASE WHEN \"departmentStatus\"='available' THEN ");
     if any || targets.len() == 1 {
         sql.push("EXISTS (")
             .push(ANCESTORS)
@@ -121,6 +121,7 @@ fn subtree(sql: &mut QueryBuilder<Postgres>, targets: Vec<String>, any: bool) {
             .push(ANCESTORS)
             .push("SELECT id FROM ancestors)");
     }
+    sql.push(" ELSE false END");
 }
 
 fn filter_group(

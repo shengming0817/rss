@@ -150,7 +150,13 @@ pub async fn run(f: &Fixture) -> Result<()> {
     assert_eq!(rows[0].department_snapshot, None);
     let match_leaf = AccountQuery::parse(Some("department==leaf"), None, None, Some(&source), 8)?;
     assert_eq!(read(f, &match_leaf, None).await?.accounts.len(), 1);
-    deadline_during_page(f, reader.principal.as_uuid(), &source).await
+    deadline_during_page(
+        f,
+        reader.principal.as_uuid(),
+        &source,
+        accepted[1].view().id.as_uuid(),
+    )
+    .await
 }
 
 async fn profile_projection(f: &Fixture) -> Result<()> {
@@ -338,7 +344,12 @@ async fn off_page_window(f: &Fixture, source: &str, session: uuid::Uuid) -> Resu
     Ok(())
 }
 
-async fn deadline_during_page(f: &Fixture, target: uuid::Uuid, source: &str) -> Result<()> {
+async fn deadline_during_page(
+    f: &Fixture,
+    target: uuid::Uuid,
+    source: &str,
+    off_page: uuid::Uuid,
+) -> Result<()> {
     let session = f.login().await?;
     let end:i64=sqlx::query_scalar("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+5 WHERE session_id=$1 RETURNING idle_expires_at")
         .bind(session.view().id.as_uuid()).fetch_one(&f.owner).await?;
@@ -365,18 +376,33 @@ async fn deadline_during_page(f: &Fixture, target: uuid::Uuid, source: &str) -> 
         .authenticate_session(binding, oidc::secret(&session), deadline())
         .await?;
     ensure!(renewed.view().idle_expires_at > end);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION public.wait_page() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(3374); RETURN true; END $$;
+        CREATE POLICY wait_page ON identity_authority.local_credentials AS RESTRICTIVE FOR SELECT USING (CASE WHEN principal_id='{target}'::uuid THEN public.wait_page() ELSE true END)"))).execute(&f.owner).await?;
+    cross_page_boundary(f, renewed, q.clone(), Some(cursor), end).await?;
+
+    // The filtered-out Bob is the only clock transition. Force a fresh, unsigned
+    // first page to cross it after authorization and the database time sample.
+    let end:i64=sqlx::query_scalar("UPDATE identity_authority.sessions SET auth_facts=jsonb_set(auth_facts,'{department_snapshot,expires_at}',to_jsonb(floor(extract(epoch FROM clock_timestamp()))::bigint+5)) WHERE session_id=$1 RETURNING (auth_facts #>> '{department_snapshot,expires_at}')::bigint")
+        .bind(off_page).fetch_one(&f.owner).await?;
+    let cursor = first(f, &q).await?;
+    cross_page_boundary(f, f.actor().await?, q.clone(), None, end).await?;
+    rejects(f, f.actor().await?, &q, &cursor).await
+}
+
+async fn cross_page_boundary(
+    f: &Fixture,
+    actor: AuthenticatedSession,
+    q: AccountQuery,
+    cursor: Option<String>,
+    end: i64,
+) -> Result<()> {
     let mut gate = f.owner.begin().await?;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(3374)")
         .fetch_one(&mut *gate)
         .await?;
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION public.wait_page() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock_shared(3374); RETURN true; END $$;
-        CREATE POLICY wait_page ON identity_authority.local_credentials AS RESTRICTIVE FOR SELECT USING (CASE WHEN principal_id='{target}'::uuid THEN public.wait_page() ELSE true END)"))).execute(&f.owner).await?;
     let store = f.store.clone();
-    let continued = tokio::spawn(async move {
-        store
-            .list_accounts(renewed, q, Some(cursor), deadline())
-            .await
-    });
+    let continued =
+        tokio::spawn(async move { store.list_accounts(actor, q, cursor, deadline()).await });
     wait_for_blocked_backend(f, pid).await?;
     sqlx::query("SELECT pg_sleep(greatest(0,$1::bigint-extract(epoch FROM clock_timestamp()))::double precision)").bind(end).execute(&f.owner).await?;
     gate.commit().await?;
