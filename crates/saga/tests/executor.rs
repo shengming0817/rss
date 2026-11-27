@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Default, Clone)]
 struct Memory(
-    Arc<Mutex<HashMap<Scope, (Snapshot, Lease)>>>,
+    Arc<Mutex<HashMap<Scope, (Snapshot, Lease, bool)>>>,
     Arc<std::sync::atomic::AtomicBool>,
     Arc<std::sync::atomic::AtomicU8>,
     Arc<std::sync::atomic::AtomicUsize>,
@@ -34,7 +34,7 @@ impl Store for Memory {
             .0
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
-        if let Some((snapshot, _)) = data.get(&scope) {
+        if let Some((snapshot, _, _)) = data.get(&scope) {
             if snapshot.definition() != d || snapshot.head().capacity() != capacity {
                 return Err(Error::new(rss_saga::ErrorKind::Conflict));
             }
@@ -44,6 +44,7 @@ impl Store for Memory {
                 (
                     Snapshot::empty(d.clone(), capacity, read_budget()?)?,
                     Lease::from_provider(scope, uuid::Uuid::new_v4(), 1)?,
+                    false,
                 ),
             );
         }
@@ -59,11 +60,12 @@ impl Store for Memory {
             .0
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
-        let (_, lease) = data
+        let (_, lease, active) = data
             .get_mut(&scope)
             .ok_or(Error::new(rss_saga::ErrorKind::Store))?;
         // Deterministic test-only takeover substitutes for explicitly expired database leases.
         *lease = Lease::from_provider(scope, uuid::Uuid::new_v4(), lease.epoch() + 1)?;
+        *active = true;
         Ok(lease.clone())
     }
     async fn renew<T: Timer>(
@@ -87,7 +89,16 @@ impl Store for Memory {
         }
         Ok(())
     }
-    async fn release<T: Timer>(&self, _: &Lease, _: &Control<'_, T>) -> Result<(), Error> {
+    async fn release<T: Timer>(&self, lease: &Lease, _: &Control<'_, T>) -> Result<(), Error> {
+        if self.2.load(Ordering::SeqCst) == 3 {
+            return Err(ErrorKind::Store.into());
+        }
+        let mut data = self.0.lock().map_err(|_| ErrorKind::Store)?;
+        let (_, held, active) = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
+        if held.token() != lease.token() {
+            return Err(ErrorKind::Fenced.into());
+        }
+        *active = false;
         self.3.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -97,7 +108,7 @@ impl Store for Memory {
         _: &Control<'_, T>,
     ) -> Result<HistoryHead, Error> {
         let data = self.0.lock().map_err(|_| Error::new(ErrorKind::Store))?;
-        let (snapshot, held) = data.get(&lease.scope()).ok_or(ErrorKind::Store)?;
+        let (snapshot, held, _) = data.get(&lease.scope()).ok_or(ErrorKind::Store)?;
         if held.token() != lease.token() {
             return Err(ErrorKind::Fenced.into());
         }
@@ -112,7 +123,7 @@ impl Store for Memory {
         _: &Control<'_, T>,
     ) -> Result<(), Error> {
         let mut data = self.0.lock().map_err(|_| Error::new(ErrorKind::Store))?;
-        let (snapshot, held) = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
+        let (snapshot, held, _) = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
         if held.token() != lease.token() {
             return Err(ErrorKind::Fenced.into());
         }
@@ -138,7 +149,7 @@ impl Store for Memory {
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?
             .get(&l.scope())
-            .map(|(s, _)| s.clone())
+            .map(|(s, _, _)| s.clone())
             .ok_or(Error::new(rss_saga::ErrorKind::Store))?
             .with_read_budget(read)
     }
@@ -152,6 +163,9 @@ impl Store for Memory {
             std::future::pending::<()>().await;
         }
         let applied = m.event().kind == EventKind::ForwardApplied;
+        if applied && m.event().step == 1 && self.2.load(Ordering::SeqCst) == 5 {
+            std::future::pending::<()>().await;
+        }
         if applied && self.4.point.load(Ordering::SeqCst) == 1 {
             self.4.entered.notify_one();
             std::future::pending::<()>().await;
@@ -161,13 +175,16 @@ impl Store for Memory {
                 .0
                 .lock()
                 .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
-            let (s, lease) = data
+            let (s, lease, _) = data
                 .get_mut(&l.scope())
                 .ok_or(Error::new(rss_saga::ErrorKind::Store))?;
             if lease.token() != l.token() {
                 return Err(Error::new(rss_saga::ErrorKind::Fenced));
             }
             s.apply(m.event().clone())?;
+            if applied && m.event().step == 1 && self.2.load(Ordering::SeqCst) == 4 {
+                return Err(ErrorKind::CommitUnknown.into());
+            }
             if m.event().kind == EventKind::ForwardIntent && self.1.swap(false, Ordering::SeqCst) {
                 return Err(Error::new(ErrorKind::CommitUnknown));
             }
@@ -188,8 +205,9 @@ impl Store for Memory {
     ) -> Result<Vec<Scope>, Error> {
         let data = self.0.lock().map_err(|_| ErrorKind::Store)?;
         let mut scopes = Vec::new();
-        for (scope, (snapshot, _)) in data.iter() {
-            if scope.tenant() == t
+        for (scope, (snapshot, _, active)) in data.iter() {
+            if !active
+                && scope.tenant() == t
                 && after.is_none_or(|id| scope.id() > id)
                 && snapshot.candidate_filter()? == Some(filter)
             {
@@ -551,6 +569,64 @@ async fn sweep_cursor_and_total_budget_prevent_unknown_instance_starvation() -> 
     );
     Ok(())
 }
+#[tokio::test]
+async fn sweep_failure_distinguishes_verified_head_from_completed_advances() -> anyhow::Result<()> {
+    let d = definition(&["one", "two"])?;
+    for (fault, kind, revision, advances, stop) in [
+        (2, ErrorKind::Store, None, 0, SweepStop::PageComplete),
+        (3, ErrorKind::Store, Some(4), 2, SweepStop::PageComplete),
+        (
+            4,
+            ErrorKind::CommitUnknown,
+            Some(3),
+            1,
+            SweepStop::PageComplete,
+        ),
+        (5, ErrorKind::CommitUnknown, Some(3), 1, SweepStop::Deadline),
+    ] {
+        let memory = Memory::default();
+        let effects = Arc::new(Effects::default());
+        let executor = Executor::new(
+            memory.clone(),
+            protection()?,
+            registry(d.clone(), effects.clone(), false)?,
+            read_budget()?,
+        );
+        let s = scope()?;
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let c = Control::new(&clock, Duration::from_secs(1), &cancel);
+        executor.register(s, &d, history_capacity()?, &c).await?;
+        memory.2.store(fault, Ordering::SeqCst);
+        let page = executor
+            .run_once(s.tenant(), None, SweepBudget::new(2, 4)?, &c)
+            .await?;
+        assert_eq!(page.next_cursor, Some(s));
+        assert_eq!(page.stop, stop);
+        let failure = page.items[0]
+            .result
+            .as_ref()
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected instance failure"))?;
+        assert_eq!(failure.error.kind(), kind);
+        assert_eq!(failure.advances, advances);
+        assert_eq!(failure.head().map(HistoryHead::revision), revision);
+
+        memory.2.store(0, Ordering::SeqCst);
+        let fresh = Control::new(&clock, Duration::from_secs(10), &cancel);
+        assert_eq!(
+            executor.run(s, 4, &fresh).await?.head().status(),
+            Status::Succeeded
+        );
+        let calls = effects.calls.lock().map_err(|_| ErrorKind::Store)?;
+        assert_eq!(calls.iter().filter(|x| *x == "execute:two").count(), 1);
+        assert_eq!(
+            calls.iter().filter(|x| *x == "probe:two").count(),
+            usize::from(fault == 5)
+        );
+    }
+    Ok(())
+}
 #[cfg(feature = "rss-runtime")]
 struct PendingStep(Arc<tokio::sync::Notify>);
 #[cfg(feature = "rss-runtime")]
@@ -814,11 +890,20 @@ async fn caller_cancellation_preserves_pending_applied_commit() -> anyhow::Resul
             memory.4.entered.notified().await;
             cancel.cancel();
         };
-        let (result, ()) = tokio::join!(executor.run(s, 10, &control), interrupt);
-        assert_eq!(
-            result.err().map(|e| e.kind()),
-            Some(ErrorKind::CommitUnknown)
+        let (result, ()) = tokio::join!(
+            executor.run_once(s.tenant(), None, SweepBudget::new(1, 10)?, &control),
+            interrupt
         );
+        let sweep = result?;
+        assert_eq!(sweep.stop, SweepStop::Cancelled);
+        let failure = sweep.items[0]
+            .result
+            .as_ref()
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected interrupted commit"))?;
+        assert_eq!(failure.error.kind(), ErrorKind::CommitUnknown);
+        assert_eq!(failure.head().map(HistoryHead::revision), Some(1));
+        assert_eq!(failure.advances, 0);
         assert_eq!(memory.3.load(Ordering::SeqCst), 0);
         memory.4.point.store(0, Ordering::SeqCst);
         let fresh_cancel = CancellationToken::new();
