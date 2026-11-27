@@ -74,6 +74,7 @@ pub async fn run(f: &Fixture) -> Result<()> {
             .await?,
         ));
     }
+    profile_projection(f).await?;
     projection(f, &source, &tree).await?;
     off_page_window(f, &source, accepted[0].view().id.as_uuid()).await?;
     let queries = [
@@ -149,7 +150,46 @@ pub async fn run(f: &Fixture) -> Result<()> {
     assert_eq!(rows[0].department_snapshot, None);
     let match_leaf = AccountQuery::parse(Some("department==leaf"), None, None, Some(&source), 8)?;
     assert_eq!(read(f, &match_leaf, None).await?.accounts.len(), 1);
-    deadline_during_page(f, reader.principal.as_uuid()).await
+    deadline_during_page(f, reader.principal.as_uuid(), &source).await
+}
+
+async fn profile_projection(f: &Fixture) -> Result<()> {
+    use rss_identity_core::profile::{Extensions, LocalProfile};
+    use rss_identity_postgres::{ProfileChange, ProfileOperationId};
+    f.store
+        .update_local_profile(
+            f.actor().await?,
+            f.key,
+            ProfileChange {
+                operation_id: ProfileOperationId::now(),
+                expected_revision: 0,
+                value: Some(LocalProfile {
+                    display_name: Some("Alice 林".into()),
+                    username: None,
+                    email: Some("alice@example.test".into()),
+                    extensions: Extensions::try_from(serde_json::json!({}))?,
+                    max_age_seconds: 3600,
+                }),
+            },
+            deadline(),
+        )
+        .await?;
+    f.login().await?;
+    let q = AccountQuery::parse(
+        Some("email=icontains=EXAMPLE"),
+        Some("-displayName"),
+        Some("displayName,email,profileStatus,enabled,memberActive,hasLocalPassword"),
+        Some("local"),
+        1,
+    )?;
+    let page = read(f, &q, None).await?;
+    let row = page.accounts.first().context("local profile")?;
+    assert_eq!(row.principal_id, f.key.principal.as_uuid().to_string());
+    assert_eq!(row.display_name.as_deref(), Some("Alice 林"));
+    assert_eq!(row.email.as_deref(), Some("alice@example.test"));
+    assert_eq!(row.profile_status, "available");
+    assert!(row.enabled && row.member_active && row.has_local_password);
+    Ok(())
 }
 
 async fn projection(f: &Fixture, source: &str, tree: &DepartmentSnapshot) -> Result<()> {
@@ -298,7 +338,7 @@ async fn off_page_window(f: &Fixture, source: &str, session: uuid::Uuid) -> Resu
     Ok(())
 }
 
-async fn deadline_during_page(f: &Fixture, target: uuid::Uuid) -> Result<()> {
+async fn deadline_during_page(f: &Fixture, target: uuid::Uuid, source: &str) -> Result<()> {
     let session = f.login().await?;
     let end:i64=sqlx::query_scalar("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+5 WHERE session_id=$1 RETURNING idle_expires_at")
         .bind(session.view().id.as_uuid()).fetch_one(&f.owner).await?;
@@ -310,8 +350,8 @@ async fn deadline_during_page(f: &Fixture, target: uuid::Uuid) -> Result<()> {
     let q = AccountQuery::parse(
         Some("login=isnotnull=true"),
         Some("login"),
-        Some("principalId"),
-        None,
+        Some("principalId,departmentStatus"),
+        Some(source),
         1,
     )?;
     let cursor = f
