@@ -18,4 +18,4 @@ pub use store::PgStore;
 #[cfg(feature = "integration")]
 pub use transaction::Fault;
 /// Fresh-install definition; only an external owner/migrator executes it.
-pub const MIGRATION_SQL: &str = include_str!("../migrations/0004_create_observation.sql");
+pub const MIGRATION_SQL: &str = include_str!("../migrations/0005_create_observation.sql");

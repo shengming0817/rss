@@ -2,7 +2,7 @@
 -- Runtime role provisioning and grants are consumer-owned.
 -- ref: postgres/postgres doc/src/sgml/mvcc.sgml@c13dd7d50f21268dc64b4b3edbce31993985ab12
 CREATE SCHEMA rss_observation;
-COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:4';
+COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:5';
 CREATE TABLE rss_observation.objects (
  tenant_id uuid NOT NULL, object_id text NOT NULL,
  registration_id text, revision numeric(20,0) NOT NULL CHECK (revision BETWEEN 0 AND 18446744073709551615),
@@ -164,7 +164,7 @@ BEGIN
  IF t IS DISTINCT FROM nullif(current_setting('rss.tenant_id',true),'')::uuid THEN
   RAISE EXCEPTION USING ERRCODE='OB007',MESSAGE='maintenance scope mismatch';
  END IF;
- IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 64 OR p_cutoff IS NULL OR p_cutoff NOT BETWEEN 0 AND floor(extract(epoch FROM clock_timestamp()))
+ IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1024 OR p_cutoff IS NULL OR p_cutoff NOT BETWEEN 0 AND floor(extract(epoch FROM clock_timestamp()))
     OR p_through IS NULL OR p_through<0 OR p_after NOT BETWEEN 0 AND 18446744073709551615 OR p_after<>trunc(p_after) THEN
   RAISE EXCEPTION USING ERRCODE='OB005',MESSAGE='invalid maintenance window';
  END IF;

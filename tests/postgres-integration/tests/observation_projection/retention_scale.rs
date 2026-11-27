@@ -92,6 +92,166 @@ async fn bounded_candidate_scan() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn retention_window_cost() -> anyhow::Result<()> {
+    use rss_observation::{Id, LookupOutcome, ObservationStore, ReadGrant};
+    use rss_projection::Timer as _;
+    let clock = ProjectionClock(rss_observation::Clock::now(&Clock));
+
+    let f = Fixture::new().await?;
+    let store = f.store().await?;
+    let pool = maintenance_role(&f).await?;
+    let maint = PgMaintenance::new(pool.clone(), Clock, deadline()).await?;
+    let retired = scope(TENANT, "window", "r", "s", "old")?;
+    activate(&store, &retired, None).await?;
+    let mut sizes = Vec::new();
+    for seq in 0..1155 {
+        let input = batch(
+            &retired,
+            &seq.to_string(),
+            seq,
+            "all",
+            Body::Snapshot(vec![]),
+        )?;
+        f.stage(&input).await?.0.commit().await?;
+        sizes.push(input.batch().encode().len() as u64);
+    }
+    let active = scope(TENANT, "window", "r", "s", "new")?;
+    activate(&store, &active, Some(1)).await?;
+
+    for invalid in [0, 1025] {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(TENANT)
+            .execute(&mut *tx)
+            .await?;
+        let error = sqlx::query("SELECT * FROM rss_observation.reclaim($1,$2,1155,NULL,$3)")
+            .bind(retired.encode()?)
+            .bind(EXPIRY)
+            .bind(invalid)
+            .execute(&mut *tx)
+            .await
+            .err()
+            .context("maintenance accepted an invalid SQL window")?;
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("OB005")
+        );
+        tx.rollback().await?;
+    }
+
+    let grant = || MaintenanceGrant::verify(&Trusted, retired.clone(), EXPIRY, 1155);
+    let read = ReadGrant::verify(&Trusted, retired.clone())?;
+    let mut cursor = None;
+    let mut start = 0;
+    for limit in [1, 64, 65, 1024, 1024] {
+        let window = ScanWindow::new(cursor, limit)?;
+        let end = (start + usize::from(limit)).min(sizes.len());
+        let count = u32::try_from(end - start)?;
+        if count == 1024 {
+            // Compare the same foreground lookup with and without an outstanding
+            // full maintenance transaction. Roll back so the API times its own work.
+            let id = Id::new(start.to_string())?;
+            let lookup = || async {
+                let started = clock.now();
+                let outcome = store.lookup(&read, &id, deadline()).await?;
+                assert!(matches!(outcome, LookupOutcome::Found(_)));
+                Ok::<_, anyhow::Error>((clock.now() - started).as_micros())
+            };
+            let receive = async |seq: u64| -> anyhow::Result<u128> {
+                let input = batch(
+                    &active,
+                    &seq.to_string(),
+                    seq,
+                    "all",
+                    Body::Snapshot(vec![]),
+                )?;
+                let started = clock.now();
+                let outcome = store.receive(&input, deadline()).await?;
+                assert!(outcome.record().decision().outcome().is_applicable());
+                Ok((clock.now() - started).as_micros())
+            };
+            let baseline = lookup().await?;
+            let write_baseline = receive(start as u64).await?;
+            let mut tx = pool.begin().await?;
+            let (blocker, _): (i32, String) =
+                sqlx::query_as("SELECT pg_backend_pid(), set_config('rss.tenant_id',$1,true)")
+                    .bind(TENANT)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let staged: i32 = sqlx::query_scalar("SELECT reclaimed FROM rss_observation.reclaim($1,$2,1155,$3::bigint::numeric,1024)")
+                .bind(retired.encode()?).bind(EXPIRY).bind(i64::try_from(start)? - 1)
+                .fetch_one(&mut *tx).await?;
+            assert_eq!(staged, 1024);
+            let concurrent = lookup().await?;
+            let (write_concurrent, ()) = tokio::try_join!(receive(start as u64 + 1), async {
+                f.wait_for_blocked(blocker, 1).await?;
+                tx.rollback().await?;
+                Ok(())
+            })?;
+            println!(
+                "retention_foreground operation=receive candidates={count} baseline_us={write_baseline} held_transaction_us={write_concurrent} journal_wait_observed=true"
+            );
+            println!(
+                "retention_foreground operation=lookup candidates={count} baseline_us={baseline} concurrent_us={concurrent}"
+            );
+        }
+        let sweep = async {
+            let started = clock.now();
+            let page = maint.reclaim(grant()?, window, deadline()).await?;
+            Ok::<_, anyhow::Error>((page, started, clock.now()))
+        };
+        // Run an independent runtime receive against the ordinary committing API.
+        // Capture both call intervals separately from the deliberately held-lock probe.
+        let foreground = async {
+            if count != 64 && count != 1024 {
+                return Ok(None);
+            }
+            let input = batch(
+                &active,
+                &end.to_string(),
+                end as u64,
+                "all",
+                Body::Snapshot(vec![]),
+            )?;
+            let started = clock.now();
+            let outcome = store.receive(&input, deadline()).await?;
+            assert!(outcome.record().decision().outcome().is_applicable());
+            Ok(Some((started, clock.now())))
+        };
+        let ((page, sweep_start, sweep_end), receive) = tokio::try_join!(sweep, foreground)?;
+        let transaction_us = (sweep_end - sweep_start).as_micros();
+        println!("retention_cost limit={limit} page={page:?} transaction_us={transaction_us}");
+        if let Some((write_start, write_end)) = receive {
+            let overlap = sweep_end
+                .min(write_end)
+                .saturating_sub(sweep_start.max(write_start));
+            assert!(!overlap.is_zero());
+            println!(
+                "retention_live limit={limit} transaction_us={transaction_us} receive_us={} overlap_us={}",
+                (write_end - write_start).as_micros(),
+                overlap.as_micros()
+            );
+        }
+        assert_eq!((page.scanned, page.reclaimed), (count, count));
+        assert_eq!(page.released_bytes, sizes[start..end].iter().sum::<u64>());
+        assert_eq!(page.last_examined, Some(u64::try_from(end - 1)?));
+        assert_eq!(page.finished, count < u32::from(limit));
+        if count == 1024 {
+            let repeat = maint.reclaim(grant()?, window, deadline()).await?;
+            assert_eq!(
+                (repeat.scanned, repeat.reclaimed, repeat.released_bytes),
+                (1024, 0, 0)
+            );
+            assert_eq!(repeat.last_examined, page.last_examined);
+        }
+        cursor = page.last_examined;
+        start = end;
+    }
+    assert_eq!(start, sizes.len());
+    Ok(())
+}
+
 async fn reclaim_plans(
     f: &Fixture,
     scope: &Scope,
@@ -150,7 +310,7 @@ async fn reclaim_plans(
         .collect()
 }
 
-fn examined(node: &Value, table: &str) -> u64 {
+pub(super) fn examined(node: &Value, table: &str) -> u64 {
     let rows = if node["Relation Name"] == table {
         [
             "Actual Rows",

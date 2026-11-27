@@ -296,8 +296,9 @@ async fn bounded_prefix_releases_records_and_resumes_at_exact_position() -> anyh
             store,
             rss_observation::JournalReadGrant::verify(&Trusted, tenant)?,
             rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
+            rss_observation::Batch::MAX_ENCODED_BYTES,
         )?
-        .into_local(rss_observation::Batch::MAX_ENCODED_BYTES)?,
+        .into_local(),
     );
     let pg = f.projection(&control).await?;
     let s = ProjectionScope::new(source.scope().clone(), "facts", "tight")?;
