@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) struct Run<'a> {
     spec: &'a SummarySpec,
-    fences: &'a [Fence],
     published: i64,
     seeded: bool,
     prior: Option<Sample>,
@@ -12,15 +11,9 @@ pub(super) struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
-    pub(super) fn new(
-        spec: &'a SummarySpec,
-        fences: &'a [Fence],
-        published: i64,
-        start: Timestamp,
-    ) -> Self {
+    pub(super) fn new(spec: &'a SummarySpec, published: i64, start: Timestamp) -> Self {
         Self {
             spec,
-            fences,
             published,
             seeded: false,
             prior: None,
@@ -36,6 +29,7 @@ impl<'a> Run<'a> {
         start: Timestamp,
         end: Timestamp,
         cutoff: Deadline,
+        visibility: &str,
     ) -> Result<Vec<ReadRow>, ReadFailure> {
         let condition = format!(
             "{} AND revision<={} AND observed_at>={} AND observed_at<{}{}",
@@ -43,7 +37,7 @@ impl<'a> Run<'a> {
             self.published,
             start.micros(),
             end.micros(),
-            visible(self.fences)?
+            visibility
         );
         store
             .raw_rows(
@@ -60,6 +54,7 @@ impl<'a> Run<'a> {
         store: &Operation<'_, C>,
         window: Interval,
         bounds: Lookahead,
+        visibility: &str,
         budget: &mut ReadBudget,
     ) -> Result<(), Error> {
         let width = self.spec.resolution_micros().get();
@@ -75,7 +70,7 @@ impl<'a> Run<'a> {
             } else {
                 budget.deadline
             };
-            let read = self.fetch(store, window.start(), end, cutoff);
+            let read = self.fetch(store, window.start(), end, cutoff, visibility);
             match budget
                 .group(store, cutoff, speculative, count > 1, false, read)
                 .await?
@@ -108,15 +103,11 @@ impl<'a> Run<'a> {
         store: &Operation<'_, C>,
         window: Interval,
         bounds: Lookahead,
+        boundaries: &Boundaries,
         budget: &mut ReadBudget,
         dependency: &mut i64,
     ) -> Result<Summary, Error> {
-        if self.fences.iter().any(|f| {
-            f.kind == "pruned"
-                && control::overlaps(&f.selection, &self.spec.selection())
-                && f.window.start() < window.end()
-                && f.window.end() > window.start()
-        }) {
+        if boundaries.pruned(window.start().micros(), window.end().micros()) {
             return Err(Error::HistoryExpired);
         }
         if !self.seeded {
@@ -125,7 +116,7 @@ impl<'a> Run<'a> {
                     self.spec,
                     window.start(),
                     self.published,
-                    self.fences,
+                    &boundaries.visible,
                     budget.deadline,
                 )
                 .await?
@@ -134,30 +125,26 @@ impl<'a> Run<'a> {
         }
         let limit = store.limits.max_points.get() as usize;
         let (mut builder, start) =
-            seeded_builder(self.spec, window, self.fences, self.prior.as_ref(), limit)?;
+            seeded_builder(self.spec, window, boundaries, self.prior.as_ref(), limit)?;
         *dependency = start;
         if self.complete_until < window.end() {
-            self.refill(store, window, bounds, budget).await?;
+            self.refill(store, window, bounds, &boundaries.visible, budget)
+                .await?;
         }
+        let mut cuts = boundaries.cuts(&builder, window);
         while self
             .rows
             .front()
             .is_some_and(|r| r.sample.input().observed_at < window.end())
         {
             let sample = self.rows.pop_front().ok_or(Error::Invariant)?.sample;
-            mask(
-                &mut builder,
-                self.fences,
-                self.spec,
-                window,
-                sample.input().observed_at,
-            )?;
+            cuts.apply(&mut builder, sample.input().observed_at)?;
             if needs_prior(self.spec) {
                 self.prior = Some(sample.clone());
             }
             builder.push(sample, limit)?;
         }
-        mask_end(&mut builder, self.fences, self.spec, window)?;
+        cuts.finish(&mut builder, window)?;
         builder.finish(limit)
     }
 }

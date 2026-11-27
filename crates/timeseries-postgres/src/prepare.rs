@@ -13,13 +13,24 @@ use std::{
 use tokio::sync::oneshot;
 use weights::Weights;
 
-/// Two bounded JSON arenas and their SQLx copy. All selected definitions occur inside
-/// distinct samples, so their combined JSON fits one input length. Per item cover
-/// three digest arrays, two offset arrays, one definition binding (three words),
-/// and binary bytea[] elements (76/sample and 40/definition). Fixed space covers
-/// scalar identity strings, argument/array headers and fixed preparation state.
+/// Charge the largest live phase, including simultaneous old/new hash tables on growth.
+/// With at most count entries, each hashbrown table has fewer than 4*count buckets
+/// (small tables and SIMD control padding fit in the fixed allowance). A bucket
+/// holds its key/value and one control byte. Both indexes are gone before SQLx binding.
 pub(crate) const fn charge(json: usize, count: usize) -> u32 {
-    (4 * json + count * (116 + 96 + 5 * size_of::<usize>()) + 4096) as u32
+    let word = size_of::<usize>();
+    let series_bucket = 2 * word + 1;
+    let binding_bucket = size_of::<((&rss_timeseries::Id, u64), usize)>() + 1;
+    let indexing = json + count * (64 + word + 4 * (series_bucket + 2 * binding_bucket));
+    // When definitions are encoded, only their index remains. Its 4*binding_bucket
+    // bytes per sample fit in the 116 bytes/item wire allowance below.
+    let binding = 4 * json + count * (116 + 96 + 2 * word);
+    let peak = if indexing > binding {
+        indexing
+    } else {
+        binding
+    };
+    (peak + 4096) as u32
 }
 #[derive(Clone)]
 pub(crate) struct Capacity(Arc<Mutex<State>>);

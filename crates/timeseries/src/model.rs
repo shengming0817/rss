@@ -33,7 +33,7 @@ impl Stream {
 
 /// A series pins a full immutable definition snapshot. Snapshots are values,
 /// not a second registry; adapters may normalize storage using the definition digest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "SeriesDto")]
 pub struct Series {
     definition: Definition,

@@ -151,9 +151,10 @@ impl Request for Query {
         Ok(Dependencies {
             fences: control::visible_fences(
                 c,
-                self,
-                self.window().start().micros(),
-                store.limits,
+                self.selection(),
+                self.window(),
+                store.limits.max_fences.get(),
+                Some(store.limits.max_bytes.get() as usize),
                 false,
             )
             .await?,

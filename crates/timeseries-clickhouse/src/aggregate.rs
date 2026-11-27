@@ -1,3 +1,5 @@
+mod boundaries;
+pub(crate) use boundaries::Boundaries;
 mod objects;
 mod raw;
 
@@ -6,7 +8,7 @@ use crate::{
     control::{self, Fence},
     page::{Dependencies, ReadBudget, Recheck, Request, View},
     projection::{ReadFailure, literal},
-    read::{ReadRow, selection, visible},
+    read::{ReadRow, selection},
     transaction::{bytes, decode, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
@@ -88,64 +90,17 @@ fn dependency_tag<C: Clock>(
         &(fences, lifecycle),
     )
 }
-pub(crate) fn mask(
-    builder: &mut SummaryBuilder,
-    fences: &[Fence],
-    spec: &SummarySpec,
-    window: Interval,
-    at: Timestamp,
-) -> Result<(), Error> {
-    for f in fences {
-        if f.kind == "delete"
-            && !f.restored
-            && control::overlaps(&f.selection, &spec.selection())
-            && f.window.start() <= at
-            && builder
-                .last_observed_at()
-                .map_or(f.window.end() > window.start(), |last| {
-                    f.window.end() > last && f.window.start() >= last
-                })
-        {
-            builder.interrupt(f.window.start())?;
-        }
-    }
-    Ok(())
-}
-pub(crate) fn mask_end(
-    builder: &mut SummaryBuilder,
-    fences: &[Fence],
-    spec: &SummarySpec,
-    window: Interval,
-) -> Result<(), Error> {
-    mask(
-        builder,
-        fences,
-        spec,
-        window,
-        Timestamp::new(window.end().micros() - 1)?,
-    )
-}
 fn seeded_builder(
     spec: &SummarySpec,
     window: Interval,
-    fences: &[Fence],
+    bounds: &Boundaries,
     prior: Option<&Sample>,
     limit: usize,
 ) -> Result<(SummaryBuilder, i64), Error> {
     let earliest = dependency_start(spec, window.start());
     let prior = prior.filter(|p| p.input().observed_at.micros() >= earliest);
     let dependency_start = prior.map_or(earliest, |p| p.input().observed_at.micros());
-    if needs_prior(spec)
-        && fences.iter().any(|f| {
-            f.kind == "pruned"
-                && control::overlaps(&f.selection, &spec.selection())
-                && f.window.start() < window.start()
-                && f.window.end().micros() > dependency_start
-                && prior
-                    .as_ref()
-                    .is_none_or(|p| p.input().observed_at < f.window.end())
-        })
-    {
+    if needs_prior(spec) && bounds.pruned(dependency_start, window.start().micros()) {
         return Err(Error::HistoryExpired);
     }
     let mut builder = SummaryBuilder::new(spec.clone(), window)?;
@@ -160,7 +115,7 @@ impl<C: Clock> Operation<'_, C> {
         spec: &SummarySpec,
         at: Timestamp,
         boundary: i64,
-        fences: &[Fence],
+        visibility: &str,
         deadline: Deadline,
     ) -> Result<Option<ReadRow>, Error> {
         if !needs_prior(spec) {
@@ -171,7 +126,7 @@ impl<C: Clock> Operation<'_, C> {
             selection(&spec.selection())?,
             dependency_start(spec, at),
             at.micros(),
-            visible(fences)?
+            visibility
         );
         let rows = self
             .raw_rows(
@@ -188,17 +143,17 @@ impl<C: Clock> Operation<'_, C> {
         spec: &SummarySpec,
         window: Interval,
         boundary: i64,
-        fences: &[Fence],
+        bounds: &Boundaries,
         deadline: Deadline,
     ) -> Result<(SummaryBuilder, i64, i64), Error> {
         let prior = self
-            .predecessor(spec, window.start(), boundary, fences, deadline)
+            .predecessor(spec, window.start(), boundary, &bounds.visible, deadline)
             .await?;
         let revision = prior.as_ref().map_or(0, |r| r.revision);
         let (builder, start) = seeded_builder(
             spec,
             window,
-            fences,
+            bounds,
             prior.as_ref().map(|r| &r.sample),
             self.limits.max_points.get() as usize,
         )?;
@@ -460,7 +415,16 @@ impl Request for AggregateQuery {
             dependency_start(self.spec(), self.query().window().start()),
             |p| p.dependency_start,
         );
-        let fences = control::visible_fences(c, self.query(), start, store.limits, true).await?;
+        let window = Interval::new(Timestamp::new(start)?, self.query().window().end())?;
+        let fences = control::visible_fences(
+            c,
+            self.query().selection(),
+            window,
+            store.limits.max_fences.get(),
+            Some(store.limits.max_bytes.get() as usize),
+            true,
+        )
+        .await?;
         let tag = store.material.key.page_state(
             Self::DOMAIN,
             self.binding()?,
@@ -584,6 +548,7 @@ impl Request for AggregateQuery {
             .collect();
         let mut objects = objects::Reader::new(&planned);
         let mut raw = None;
+        let mut boundaries = None;
         let mut observed_cost = 0;
         while view.exists
             && at.micros() < refs.end
@@ -628,10 +593,10 @@ impl Request for AggregateQuery {
                 let raw_bounds = hits
                     .front()
                     .map_or(bounds, |(w, _)| bounds.capped(w.start()));
-                let run =
-                    raw.get_or_insert_with(|| raw::Run::new(q.spec(), &fences, published, at));
+                let bounds = boundaries.get_or_insert_with(|| Boundaries::new(&fences));
+                let run = raw.get_or_insert_with(|| raw::Run::new(q.spec(), published, at));
                 let result = run
-                    .summary(store, window, raw_bounds, budget, &mut start)
+                    .summary(store, window, raw_bounds, bounds, budget, &mut start)
                     .await;
                 if at == q.query().window().start() {
                     refs.dependency_start = start;

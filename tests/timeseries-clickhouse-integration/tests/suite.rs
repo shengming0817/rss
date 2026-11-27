@@ -376,13 +376,22 @@ impl Fixture {
         name: &str,
         action: MaintenanceAction,
     ) -> anyhow::Result<MaintenanceProgress> {
+        self.maintain_rows(name, action, 2).await
+    }
+
+    async fn maintain_rows(
+        &self,
+        name: &str,
+        action: MaintenanceAction,
+        rows: u32,
+    ) -> anyhow::Result<MaintenanceProgress> {
         let r = Authorized::<MaintenanceRequest>::verify(
             &authority(TENANT)?,
             MaintenanceRequest::new(
                 id(name)?,
                 action,
                 MaintenanceBudget {
-                    rows: NonZeroU32::new(2).ok_or(Error::InvalidInput)?,
+                    rows: NonZeroU32::new(rows).ok_or(Error::InvalidInput)?,
                     buckets: NonZeroU32::new(1).ok_or(Error::InvalidInput)?,
                 },
             )?,

@@ -2,8 +2,72 @@ use super::*;
 use crate::{
     aggregate,
     projection::{self, SummaryRow},
-    read::{selection, visible},
+    read::selection,
 };
+use std::sync::{Arc, Mutex};
+
+/// Per admitted tenant material. Each entry is bounded by max_fences, and only
+/// four windows (including empty ones) can be retained. Hits move to the tail.
+const MAX_WINDOWS: usize = 4;
+#[derive(Default)]
+pub(crate) struct BoundaryCache(Mutex<Vec<Cached>>);
+
+#[derive(PartialEq, Eq)]
+struct WindowKey {
+    stream: Stream,
+    series: Digest,
+    scan: Interval,
+    revision: i64,
+}
+struct Cached {
+    key: WindowKey,
+    bounds: Arc<aggregate::Boundaries>,
+}
+impl BoundaryCache {
+    async fn for_step<C: Clock>(
+        &self,
+        store: &Operation<'_, C>,
+        c: &mut PgConnection,
+        spec: &SummarySpec,
+        window: Interval,
+        revision: i64,
+    ) -> Result<Arc<aggregate::Boundaries>, Error> {
+        // Match the actual query, including the predecessor halo and the namespace.
+        let start = Timestamp::new(aggregate::dependency_start(spec, window.start()))?;
+        let key = WindowKey {
+            stream: spec.stream().clone(),
+            series: spec.series().digest()?,
+            scan: Interval::new(start, window.end())?,
+            revision,
+        };
+        {
+            let mut entries = self.0.lock().map_err(|_| Error::Invariant)?;
+            if let Some(i) = entries.iter().position(|e| e.key == key) {
+                let hit = entries[i].bounds.clone();
+                entries[i..].rotate_left(1);
+                return Ok(hit);
+            }
+        }
+        let max = store.limits.max_fences.get();
+        let fences = if control::namespace_has_fences(c, key.stream.scope(), max).await? {
+            control::visible_fences(c, &spec.selection(), key.scan, max, None, false).await?
+        } else {
+            Vec::new()
+        };
+        let bounds = Arc::new(aggregate::Boundaries::new(&fences));
+        let mut entries = self.0.lock().map_err(|_| Error::Invariant)?;
+        entries
+            .retain(|e| e.key.revision == revision || e.key.stream.scope() != key.stream.scope());
+        if entries.len() == MAX_WINDOWS {
+            entries.remove(0);
+        }
+        entries.push(Cached {
+            key,
+            bounds: bounds.clone(),
+        });
+        Ok(bounds)
+    }
+}
 #[derive(Serialize, Deserialize)]
 pub(super) struct Fold {
     at: Timestamp,
@@ -60,13 +124,13 @@ pub(super) async fn step<C: Clock>(
     if state.publish.is_some() {
         return publish(store, c, r, state, revision, deadline).await;
     }
-    let fences = control::fences(c, r.scope(), store.limits.max_fences.get()).await?;
-    if fences.iter().any(|f| {
-        f.kind == "pruned"
-            && control::overlaps(&f.selection, &spec.selection())
-            && f.window.start() < window.end()
-            && f.window.end() > window.start()
-    }) {
+    let bounds = store
+        .material
+        .boundaries
+        .for_step(store, c, spec, window, revision)
+        .await?;
+    // Plans can share a scan while checking different requested prune windows.
+    if bounds.pruned(window.start().micros(), window.end().micros()) {
         return Err(Error::HistoryExpired);
     }
     if state.fold.as_ref().is_none_or(|f| f.revision != revision) {
@@ -85,7 +149,7 @@ pub(super) async fn step<C: Clock>(
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
         let (builder, max_input_revision, dependency_start) = store
-            .builder(spec, bucket, boundary, &fences, deadline)
+            .builder(spec, bucket, boundary, &bounds, deadline)
             .await?;
         fold.builder = Some(builder);
         fold.max_input_revision = max_input_revision;
@@ -102,7 +166,7 @@ pub(super) async fn step<C: Clock>(
         selection(&spec.selection())?,
         bucket.start().micros(),
         bucket.end().micros(),
-        visible(&fences)?,
+        bounds.visible,
         last
     );
     let rows = store
@@ -114,6 +178,8 @@ pub(super) async fn step<C: Clock>(
         )
         .await?;
     let more = rows.len() > r.budget().rows.get() as usize;
+    let builder = fold.builder.as_mut().ok_or(Error::Invariant)?;
+    let mut cuts = bounds.cuts(builder, bucket);
     let mut processed = 0;
     for row in rows.into_iter().take(r.budget().rows.get() as usize) {
         fold.max_input_revision = fold.max_input_revision.max(row.revision);
@@ -124,14 +190,13 @@ pub(super) async fn step<C: Clock>(
             input.sequence,
             input.id.as_str().to_owned(),
         ));
-        let builder = fold.builder.as_mut().ok_or(Error::Invariant)?;
-        aggregate::mask(builder, &fences, spec, bucket, sample.input().observed_at)?;
+        cuts.apply(builder, input.observed_at)?;
         builder.push(sample, store.limits.max_points.get() as usize)?;
         processed += 1;
     }
     if !more {
         let mut builder = fold.builder.take().ok_or(Error::Invariant)?;
-        aggregate::mask_end(&mut builder, &fences, spec, bucket)?;
+        cuts.finish(&mut builder, bucket)?;
         let summary = builder.finish(store.limits.max_points.get() as usize)?;
         let payload = bytes(&summary)?;
         if payload.len() > store.limits.max_bytes.get() as usize {

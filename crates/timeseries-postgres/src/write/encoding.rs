@@ -1,6 +1,8 @@
 //! Pack typed JSON contiguously and bind binary arrays before checking out a connection.
 use super::*;
+use hashbrown::{HashMap, hash_map::Entry};
 use sqlx::{Arguments, postgres::PgBindIterExt};
+use std::hash::RandomState;
 
 struct Payloads {
     raw: Vec<u8>,
@@ -34,19 +36,6 @@ impl Payloads {
     }
 }
 
-// Keep the last sample for each key/version, exactly as the SQL admission contract requires.
-struct Binding<'a> {
-    definition: &'a Definition,
-    index: usize,
-    sample_bytes: usize,
-}
-impl Binding<'_> {
-    fn key(&self) -> (&Id, u64) {
-        let spec = self.definition.spec();
-        (&spec.key, spec.version)
-    }
-}
-
 pub(super) async fn prepare(
     batch: &Batch,
     store: &PgStore<impl Clock>,
@@ -66,47 +55,56 @@ pub(super) async fn prepare(
     let count = batch.samples().len();
     let mut samples = Payloads::new(count, batch.encoded_len());
     let mut series_digests = Vec::with_capacity(count);
-    let mut bindings: Vec<Binding<'_>> = Vec::with_capacity(count);
-    let mut previous: Option<(&Series, Digest)> = None;
+    let mut series_index = HashMap::with_hasher(RandomState::new());
+    let mut bindings = HashMap::with_hasher(RandomState::new());
     #[cfg(feature = "integration")]
     let buffers = measurement::Buffers::default();
     for (index, sample) in batch.samples().iter().enumerate() {
         checkpoint(index, clock, budget).await?;
         let series = &sample.input().series;
-        let digest = series_digest(series, &mut previous)?;
-        series_digests.push(*digest.as_bytes());
-        let offset = samples.raw.len();
+        #[cfg(feature = "integration")]
+        let old = (series_index.allocation_size(), bindings.allocation_size());
+        push_series(&mut series_index, &mut series_digests, series)?;
         let digest = sample.append_canonical(&mut samples.raw)?;
         samples.finish(digest);
-        let binding = Binding {
-            definition: series.definition(),
-            index,
-            sample_bytes: samples.raw.len() - offset,
-        };
-        if let Some(last) = bindings.last_mut()
-            && last.key() == binding.key()
-        {
-            *last = binding;
-        } else {
-            bindings.push(binding);
-        }
+        // SQL orders locks and definition errors by key/version. Only the last
+        // snapshot per key is bound; sample ordinality remains authoritative.
+        let spec = series.definition().spec();
+        bindings.insert((&spec.key, spec.version), index);
         #[cfg(feature = "integration")]
-        if index == 0 {
-            store.phases[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            buffers.set(samples.capacity() + series_digests.capacity() * 32);
+        {
+            if index == 0 {
+                store.phases[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let new = (series_index.allocation_size(), bindings.allocation_size());
+            buffers.index_growth(
+                old,
+                new,
+                samples.capacity() + series_digests.capacity() * 32,
+            );
         }
     }
-    bindings.sort_unstable_by(|a, b| a.key().cmp(&b.key()).then_with(|| b.index.cmp(&a.index)));
-    bindings.dedup_by(|a, b| a.key() == b.key());
-    // Every selected definition occurs inside a different canonical sample. This bound
-    // avoids a sizing pass and keeps the definition arena small for a repeated series.
-    let max_definition_bytes = bindings.iter().map(|b| b.sample_bytes).sum();
+    drop(series_index);
+    #[cfg(feature = "integration")]
+    rss_timeseries::measurement::Session::detailed()
+        .update(|r| r.definition_bindings += bindings.len());
+    // Each chosen definition fits in its own canonical sample.
+    let max_definition_bytes = bindings
+        .values()
+        .map(|&i| samples.ends[i] - i.checked_sub(1).map_or(0, |p| samples.ends[p]))
+        .sum();
     let mut definitions = Payloads::new(bindings.len(), max_definition_bytes);
     #[cfg(feature = "integration")]
-    buffers.set(samples.capacity() + series_digests.capacity() * 32 + definitions.capacity());
-    for (index, binding) in bindings.into_iter().enumerate() {
+    buffers.set(
+        samples.capacity()
+            + series_digests.capacity() * 32
+            + definitions.capacity()
+            + bindings.allocation_size(),
+    );
+    for (index, sample_index) in bindings.into_values().enumerate() {
         checkpoint(index, clock, budget).await?;
-        let digest = binding.definition.append_canonical(&mut definitions.raw)?;
+        let definition = batch.samples()[sample_index].input().series.definition();
+        let digest = definition.append_canonical(&mut definitions.raw)?;
         definitions.finish(digest);
     }
     budget.remaining(clock)?;
@@ -176,18 +174,21 @@ pub(super) async fn prepare(
         _buffers: buffers,
     })
 }
-fn series_digest<'a>(
+fn push_series<'a>(
+    index: &mut HashMap<&'a Series, usize, RandomState>,
+    digests: &mut Vec<[u8; 32]>,
     series: &'a Series,
-    previous: &mut Option<(&'a Series, Digest)>,
-) -> Result<Digest, Error> {
-    if let Some((last, digest)) = *previous
-        && last == series
-    {
-        return Ok(digest);
-    }
-    let digest = series.digest()?;
-    *previous = Some((series, digest));
-    Ok(digest)
+) -> Result<(), Error> {
+    let value = match index.entry(series) {
+        Entry::Occupied(entry) => digests[*entry.get()],
+        Entry::Vacant(entry) => {
+            let digest = series.digest()?;
+            entry.insert(digests.len());
+            *digest.as_bytes()
+        }
+    };
+    digests.push(value);
+    Ok(())
 }
 
 async fn checkpoint(index: usize, clock: &impl Clock, budget: Budget) -> Result<(), Error> {
@@ -198,30 +199,5 @@ async fn checkpoint(index: usize, clock: &impl Clock, budget: Budget) -> Result<
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reuse_checks_the_full_definition_snapshot() -> anyhow::Result<()> {
-        let spec: DefinitionSpec = serde_json::from_str(
-            r#"{"scope":{"tenant":"11111111-1111-4111-8111-111111111111","namespace":"metrics"},"key":"pressure","version":1,"unit":"Pa","metric":{"kind":"gauge","number":"u64"},"dimensions":{"allowed":[],"required":[],"maxCount":0,"maxValueBytes":1,"maxTotalBytes":1}}"#,
-        )?;
-        let build = |spec| {
-            Series::new(
-                Definition::new(spec)?,
-                Id::new("host")?,
-                Id::new("disk")?,
-                Default::default(),
-            )
-        };
-        let first = build(spec.clone())?;
-        let mut second = spec;
-        second.unit = Id::new("kPa")?;
-        let second = build(second)?;
-        let mut cache = None;
-        assert_eq!(series_digest(&first, &mut cache)?, first.digest()?);
-        assert_eq!(series_digest(&second, &mut cache)?, second.digest()?);
-        assert_ne!(first.digest()?, second.digest()?);
-        Ok(())
-    }
-}
+#[path = "order_measure.rs"]
+mod order_measure;

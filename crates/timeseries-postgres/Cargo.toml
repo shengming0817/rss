@@ -9,6 +9,7 @@ readme = "README.md"
 description = "Atomic PostgreSQL time series storage and bounded queries"
 publish = ["crates-io"]
 [dependencies]
+hashbrown = { version = "0.17.1", default-features = false }
 rss-timeseries.workspace = true
 rss-request-context.workspace = true
 rss-contract.workspace = true
@@ -27,6 +28,7 @@ default = []
 integration = ["rss-timeseries/integration"]
 timescaledb = []
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
 anyhow.workspace = true
 [lints]
 workspace = true

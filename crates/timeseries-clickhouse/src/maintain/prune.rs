@@ -61,7 +61,13 @@ async fn safe_limit<C: Clock>(
         );
         if crate::aggregate::needs_prior(&spec)
             && let Some(prior) = store
-                .predecessor(&spec, raw_before, boundary, &fences, deadline)
+                .predecessor(
+                    &spec,
+                    raw_before,
+                    boundary,
+                    &crate::read::visible(&fences)?,
+                    deadline,
+                )
                 .await?
         {
             limit = limit.min(prior.sample.input().observed_at.micros());
