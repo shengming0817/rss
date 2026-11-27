@@ -151,7 +151,7 @@ async fn scenario(
         compose::bootstrap(
             runtime,
             binding,
-            outbox.clone(),
+            outbox.writer().clone(),
             s,
             coordinate,
             budget()?,
@@ -163,9 +163,9 @@ async fn scenario(
         compose::enqueue(
             runtime,
             binding,
-            outbox.clone(),
+            outbox.writer().clone(),
             spec("example", s, coordinate)?,
-            message("example", s.tenant())?,
+            Delivery::Outbox(message("example", s.tenant())?),
             budget()?,
             callers.clone(),
         )
@@ -182,7 +182,7 @@ async fn scenario(
                 Box::pin(async move {
                     PgStore::new(
                         tx,
-                        selected,
+                        selected.writer().clone(),
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
                         BatchLimit::default(),
@@ -193,6 +193,7 @@ async fn scenario(
             .await,
     )?;
     let store = Arc::new(store);
+    direct_reconnect(runtime, binding, store.clone(), s, coordinate).await?;
     // A bounded fixture publisher records broker acceptance; this is not proof of device execution.
     let claims = outbox
         .claim_partition_heads(binding, std::num::NonZeroUsize::MIN, budget()?)
@@ -254,7 +255,7 @@ async fn scenario(
 async fn recover_candidates(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     s: Scope,
 ) -> anyhow::Result<()> {
     // The product owns the candidate order and decides how to handle a missing slot.
@@ -285,7 +286,7 @@ async fn recover_candidates(
 async fn handoff(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     s: Scope,
     coordinate: Coordinate,
 ) -> anyhow::Result<()> {
@@ -295,7 +296,11 @@ async fn handoff(
     committed(
         runtime
             .local_tx(binding, budget()?, move |tx| {
-                Box::pin(async move { selected.queue(tx, pending, dispatch).await })
+                Box::pin(async move {
+                    selected
+                        .queue(tx, pending, Delivery::Outbox(dispatch))
+                        .await
+                })
             })
             .await,
     )?;
@@ -320,7 +325,7 @@ async fn handoff(
 async fn load(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     s: Scope,
     name: &str,
 ) -> anyhow::Result<Command> {
@@ -337,12 +342,13 @@ async fn load(
 async fn report(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     scope: Scope,
     coordinate: Coordinate,
     event: DeviceEvent,
 ) -> anyhow::Result<Transition> {
     let report = DeviceReport {
+        source: ReportSource::Outbox,
         scope,
         command_id: CommandId::parse("example")?,
         coordinate,
@@ -355,4 +361,143 @@ async fn report(
             })
             .await,
     )
+}
+
+/// A lost response is recovered by the original issuance under fresh authorization.
+async fn direct_reconnect(
+    runtime: &PgRuntime,
+    binding: ExecutionBinding,
+    store: Arc<PgStore>,
+    scope: Scope,
+    coordinate: Coordinate,
+) -> anyhow::Result<()> {
+    let spec = spec("direct-example", scope, coordinate)?;
+    let id = spec.id().clone();
+    let selected = store.clone();
+    committed(
+        runtime
+            .local_tx(binding, budget()?, move |tx| {
+                Box::pin(async move {
+                    selected
+                        .queue(
+                            tx,
+                            spec,
+                            Delivery::Direct {
+                                content_digest: ContentDigest::from_bytes([2; 32]),
+                            },
+                        )
+                        .await
+                })
+            })
+            .await,
+    )?;
+    let claim = ClaimId::parse("0d9cdad2-218d-4b7e-b095-ec6bea72aa6e")?;
+    let first = issue(
+        runtime,
+        binding,
+        store.clone(),
+        scope,
+        &id,
+        coordinate,
+        claim,
+    )
+    .await?;
+    // Even confirmed issuance can lose its network response. On reconnect read durable
+    // evidence first. Unconfirmed settlement also takes this path, without sending anything.
+    match first {
+        Issuance::Committed(candidate) if matches!(*candidate, DirectClaim::Unavailable(_)) => {
+            return Ok(());
+        }
+        Issuance::Committed(_) | Issuance::CommitUnknown(_) | Issuance::RollbackFailed(_) => {}
+    }
+    let stored = load(runtime, binding, store.clone(), scope, id.as_str()).await?;
+    let original = stored
+        .record()
+        .claim_id
+        .ok_or_else(|| anyhow::anyhow!("no durable issuance; withhold response"))?;
+    anyhow::ensure!(
+        original == claim && stored.spec().coordinate() == coordinate,
+        "different issuance"
+    );
+    // The fixture authorizes this exact command and coordinate. Applications repeat their
+    // current policy and protocol resend checks for every authenticated request.
+    let candidate = match issue(
+        runtime,
+        binding,
+        store.clone(),
+        scope,
+        &id,
+        coordinate,
+        original,
+    )
+    .await?
+    {
+        Issuance::Committed(value) => value,
+        Issuance::CommitUnknown(e) => {
+            return Err(anyhow::Error::new(e)
+                .context("replay commit unknown; withhold response and read back"));
+        }
+        Issuance::RollbackFailed(e) => {
+            return Err(anyhow::Error::new(e)
+                .context("replay rollback unconfirmed; withhold response and read back"));
+        }
+    };
+    // Capture monotonic time before sampling the server so elapsed commit/readback time
+    // can only shorten the remaining send window.
+    let timer = Timer::new();
+    let start = timer.now();
+    let (current, observed) = committed(
+        runtime
+            .local_tx(binding, budget()?, move |tx| {
+                Box::pin(async move {
+                    let current = store
+                        .load(tx, scope, &id)
+                        .await?
+                        .ok_or(sqlx::Error::RowNotFound)?;
+                    Ok((current, store.now(tx).await?))
+                })
+            })
+            .await,
+    )?;
+    let elapsed = i64::try_from(timer.now().saturating_duration_since(start).as_micros())?;
+    let now = observed
+        .checked_add(elapsed)
+        .ok_or_else(|| anyhow::anyhow!("invalid handoff time"))?;
+    anyhow::ensure!(
+        current.spec().scope() == scope
+            && current.spec().coordinate() == coordinate
+            && candidate.dispatch_id_at(&current, now) == Some(original),
+        "withhold stale offer"
+    );
+    Ok(())
+}
+
+enum Issuance {
+    Committed(Box<DirectClaim>),
+    CommitUnknown(PgError),
+    RollbackFailed(PgError),
+}
+async fn issue(
+    runtime: &PgRuntime,
+    binding: ExecutionBinding,
+    store: Arc<PgStore>,
+    scope: Scope,
+    id: &CommandId,
+    coordinate: Coordinate,
+    claim: ClaimId,
+) -> anyhow::Result<Issuance> {
+    let id = id.clone();
+    let attempt = runtime
+        .local_tx(binding, budget()?, move |tx| {
+            Box::pin(async move { store.claim_direct(tx, scope, &id, coordinate, claim).await })
+        })
+        .await;
+    Ok(attempt.fold(
+        |v| Ok(Issuance::Committed(Box::new(v))),
+        Err,
+        Err,
+        |e| Ok(Issuance::RollbackFailed(e)),
+        |e| Ok(Issuance::CommitUnknown(e)),
+        Err,
+    )?)
 }

@@ -32,7 +32,7 @@ pub(crate) async fn controlled_time(f: &Fixture) -> anyhow::Result<()> {
 async fn late_queue_and_ownership(
     f: &Fixture,
     restarted: &PgRuntime,
-    recovered: &Arc<PgStore<()>>,
+    recovered: &Arc<PgStore>,
     clock: &IntegrationClock,
     s: Scope,
     c: Coordinate,
@@ -51,7 +51,9 @@ async fn late_queue_and_ownership(
         committed(
             restarted
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { selected.queue(tx, request, msg).await })
+                    Box::pin(
+                        async move { selected.queue(tx, request, Delivery::Outbox(msg)).await },
+                    )
                 })
                 .await
         )
@@ -96,7 +98,7 @@ async fn postgres_time(f: &Fixture) -> anyhow::Result<()> {
 
 async fn recover(
     runtime: &PgRuntime,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     scope: Scope,
 ) -> anyhow::Result<RecoveryPage> {
     let limit = BatchLimit::new(10)?;
@@ -111,7 +113,7 @@ async fn recover(
 
 async fn queue(
     runtime: &PgRuntime,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     s: Scope,
     c: Coordinate,
 ) -> anyhow::Result<Command> {
@@ -127,7 +129,7 @@ async fn queue(
     committed(
         runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { queued.queue(tx, request, msg).await })
+                Box::pin(async move { queued.queue(tx, request, Delivery::Outbox(msg)).await })
             })
             .await,
     )
@@ -135,7 +137,7 @@ async fn queue(
 
 async fn before_deadline(
     runtime: &PgRuntime,
-    store: &Arc<PgStore<()>>,
+    store: &Arc<PgStore>,
     clock: &IntegrationClock,
     s: Scope,
     c: Coordinate,

@@ -57,7 +57,7 @@ pub(crate) async fn diagnostic_classes(f: &Fixture) -> anyhow::Result<()> {
     for (change, restore, expected) in [
         (
             "COMMENT ON SCHEMA rss_device_command IS 'incorrect'",
-            "COMMENT ON SCHEMA rss_device_command IS 'rss-device-command-postgres:1'",
+            "COMMENT ON SCHEMA rss_device_command IS 'rss-device-command-postgres:2'",
             "revision",
         ),
         (
@@ -137,6 +137,7 @@ async fn unconfirmed(f: &Fixture, s: Scope, id: &str) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     outbox
+                        .writer()
                         .is_published(
                             tx,
                             m.envelope().metadata().domain(),
@@ -171,7 +172,7 @@ pub(crate) async fn authority_pages(f: &Fixture) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     for (request, message) in requests {
-                        store.queue(tx, request, message).await?;
+                        store.queue(tx, request, Delivery::Outbox(message)).await?;
                     }
                     Ok(())
                 })
@@ -235,7 +236,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
                 Box::pin(async move {
                     PgStore::new(
                         tx,
-                        other_outbox,
+                        other_outbox.writer().clone(),
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
                         BatchLimit::default(),
@@ -292,7 +293,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
                 Box::pin(async move {
                     PgStore::new(
                         tx,
-                        selected,
+                        selected.writer().clone(),
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
                         BatchLimit::default(),
@@ -308,7 +309,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
     committed(
         f.runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { other.queue(tx, request, msg).await })
+                Box::pin(async move { other.queue(tx, request, Delivery::Outbox(msg)).await })
             })
             .await,
     )?;

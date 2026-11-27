@@ -1,5 +1,6 @@
 mod advance;
 pub(super) mod candidates;
+pub(super) mod direct;
 pub(super) use advance::atomic_handoff;
 use rss_transactional_messaging::policy::OperationDeadline;
 mod admission;
@@ -178,7 +179,7 @@ pub(super) async fn atomicity(f: &mut Fixture) -> anyhow::Result<()> {
         .runtime
         .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
-                store.queue(tx, request, msg).await?;
+                store.queue(tx, request, Delivery::Outbox(msg)).await?;
                 Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
             })
         })
@@ -208,7 +209,9 @@ pub(super) async fn atomicity(f: &mut Fixture) -> anyhow::Result<()> {
         committed(
             f.runtime
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.queue(tx, request, changed).await })
+                    Box::pin(
+                        async move { store.queue(tx, request, Delivery::Outbox(changed)).await },
+                    )
                 })
                 .await
         )
@@ -229,7 +232,7 @@ pub(super) async fn uncertainty(f: &mut Fixture) -> anyhow::Result<()> {
         status(
             f.runtime
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.queue(tx, request, msg).await })
+                    Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
                 })
                 .await
         ),
@@ -305,6 +308,7 @@ pub(super) async fn isolation(f: &Fixture) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     outbox
+                        .writer()
                         .is_published(
                             tx,
                             m.envelope().metadata().domain(),
@@ -324,6 +328,7 @@ pub(super) async fn isolation(f: &Fixture) -> anyhow::Result<()> {
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                     Box::pin(async move {
                         outbox
+                            .writer()
                             .is_published(
                                 tx,
                                 m.envelope().metadata().domain(),
@@ -427,6 +432,7 @@ pub(super) async fn inbox(f: &Fixture) -> anyhow::Result<()> {
             decoder: Decoder {
                 fingerprint: m.fingerprint(),
                 report: DeviceReport {
+                    source: ReportSource::Outbox,
                     scope: s,
                     command_id: CommandId::parse("early")?,
                     coordinate: c,
@@ -489,7 +495,7 @@ pub(super) async fn bounds(f: &Fixture) -> anyhow::Result<()> {
     committed(
         f.runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.queue(tx, request, msg).await })
+                Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
             })
             .await,
     )?;
@@ -566,6 +572,7 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
                     .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                         Box::pin(async move {
                             outbox
+                                .writer()
                                 .is_published(tx, &domain, m.envelope().id(), m.fingerprint())
                                 .await
                         })
@@ -575,8 +582,9 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
             .is_err()
         );
     }
+    // Keep the capacity fixture outside the tenant whose later relay tests drain all pending dispatches.
     let s = Scope::new(
-        s.tenant(),
+        TenantId::parse(OTHER)?,
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440099")?,
     );
     let c = Coordinate::new(1, 1)?;
@@ -707,7 +715,7 @@ pub(super) async fn settlement_failures(f: &Fixture) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), deadline, move |tx| {
                 Box::pin(async move {
                     called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    store.queue(tx, request, msg).await?;
+                    store.queue(tx, request, Delivery::Outbox(msg)).await?;
                     if reject {
                         return Err(sqlx::Error::PoolTimedOut.into());
                     }

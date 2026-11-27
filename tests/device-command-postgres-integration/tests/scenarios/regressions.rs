@@ -38,7 +38,7 @@ pub(crate) async fn immutable_facts(f: &Fixture) -> anyhow::Result<()> {
         let attempt = f
             .runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.queue(tx, request, msg).await })
+                Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
             })
             .await;
         let rejected = attempt.fold(
@@ -78,14 +78,21 @@ async fn concurrent_conflict(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Re
     let (a, b) = tokio::join!(
         f.runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { a.queue(tx, left, ma).await })
+                Box::pin(async move { a.queue(tx, left, Delivery::Outbox(ma)).await })
             }),
         f.runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { b.queue(tx, right, mb).await })
+                Box::pin(async move { b.queue(tx, right, Delivery::Outbox(mb)).await })
             })
     );
-    assert_ne!(committed(a).is_ok(), committed(b).is_ok());
+    let loser = match (committed(a), committed(b)) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => error.downcast::<PgError>()?,
+        _ => anyhow::bail!("expected one winning create and one conflict"),
+    };
+    assert_eq!(
+        loser.kind(),
+        rss_transactional_messaging::error::MessagingErrorKind::Conflict
+    );
     assert_eq!(f.count("commands", "racing-facts").await?, 1);
     assert_eq!(f.count("outbox", "dispatch.racing-facts").await?, 1);
     Ok(())
@@ -174,7 +181,7 @@ async fn queue_expiring_controls(
         committed(
             f.runtime
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.queue(tx, request, msg).await })
+                    Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
                 })
                 .await,
         )?;
@@ -209,8 +216,8 @@ async fn assert_late_supersede(
         received.record().received_at
     );
     assert_eq!(
-        superseded.record().published_at,
-        received.record().published_at
+        superseded.record().dispatched_at,
+        received.record().dispatched_at
     );
     assert_eq!(superseded.record().terminal_at, Some(expires));
     Ok(())
@@ -322,7 +329,7 @@ pub(super) async fn queue_expiring(
     committed(
         f.runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.queue(tx, request, msg).await })
+                Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
             })
             .await,
     )?;
@@ -425,7 +432,7 @@ async fn compose_replay_case(
         compose::bootstrap(
             &f.runtime,
             crate::execution(s.tenant(), 1),
-            f.outbox.clone(),
+            f.outbox.writer().clone(),
             s,
             c,
             budget()?,
@@ -440,9 +447,9 @@ async fn compose_replay_case(
     let attempt = compose::enqueue(
         &f.runtime,
         crate::execution(s.tenant(), 1),
-        f.outbox.clone(),
+        f.outbox.writer().clone(),
         spec(name, s, c)?,
-        message(name, s.tenant())?,
+        Delivery::Outbox(message(name, s.tenant())?),
         budget()?,
         CallerRoles::new(&["device_runtime"])?,
     )
@@ -488,9 +495,9 @@ async fn assert_compose_replay(
         compose::enqueue(
             &f.runtime,
             crate::execution(s.tenant(), 1),
-            f.outbox.clone(),
+            f.outbox.writer().clone(),
             spec(name, s, c)?,
-            message(name, s.tenant())?,
+            Delivery::Outbox(message(name, s.tenant())?),
             budget()?,
             CallerRoles::new(&["device_runtime"])?,
         )
@@ -503,9 +510,9 @@ async fn assert_compose_replay(
     let denied = compose::enqueue(
         &f.runtime,
         crate::execution(s.tenant(), 1),
-        f.outbox.clone(),
+        f.outbox.writer().clone(),
         spec(&fresh, s, c)?,
-        message(&fresh, s.tenant())?,
+        Delivery::Outbox(message(&fresh, s.tenant())?),
         budget()?,
         CallerRoles::new(&["device_runtime"])?,
     )

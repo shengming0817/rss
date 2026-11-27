@@ -1,16 +1,16 @@
 //! Copy these functions into an application using its configured runtime and protocol encoder.
 use rss_device_command::{
-    BatchLimit, Command, CommandId, CommandSpec, Coordinate, DeviceReport, Outcome, Scope, Store,
+    BatchLimit, Command, CommandId, CommandSpec, Coordinate, Delivery, DeviceReport, Outcome,
+    Scope, Store,
 };
 use rss_device_command_postgres::{CallerRoles, PgStore};
 use rss_transactional_messaging::{
     fence::ExecutionBinding,
-    outbox::PendingMessage,
     policy::OperationDeadline,
     transaction::{LocalTxAttempt, TerminalDisposition},
 };
 use rss_transactional_messaging_postgres::{
-    PgConsumerEffect, PgConsumerEffectFailure, PgError, PgOutboxStore, PgRuntime, PgTransaction,
+    PgConsumerEffect, PgConsumerEffectFailure, PgError, PgOutboxWriter, PgRuntime, PgTransaction,
 };
 use std::sync::Arc;
 /// Initialize device authority once at the application's bootstrap boundary.
@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub async fn bootstrap(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    outbox: Arc<PgOutboxStore<()>>,
+    outbox: PgOutboxWriter,
     scope: Scope,
     coordinate: Coordinate,
     deadline: OperationDeadline,
@@ -44,9 +44,9 @@ pub async fn bootstrap(
 pub async fn enqueue(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    outbox: Arc<PgOutboxStore<()>>,
+    outbox: PgOutboxWriter,
     spec: CommandSpec,
-    message: PendingMessage<Vec<u8>>,
+    delivery: Delivery,
     deadline: OperationDeadline,
     callers: CallerRoles,
 ) -> LocalTxAttempt<Command, PgError> {
@@ -61,7 +61,13 @@ pub async fn enqueue(
                     BatchLimit::default(),
                 )
                 .await?;
-                store.queue(tx, spec, message).await
+                if let Delivery::Outbox(message) = &delivery
+                    && let Some(partition) = message.partition()
+                {
+                    tx.prepare_outbox_partitions(std::slice::from_ref(partition))
+                        .await?;
+                }
+                store.queue(tx, spec, delivery).await
             })
         })
         .await
@@ -70,7 +76,7 @@ pub async fn enqueue(
 pub async fn recover(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     scope: Scope,
     limit: BatchLimit,
     after: Option<CommandId>,
@@ -93,7 +99,7 @@ pub trait ReportDecoder: Send + Sync {
 /// Reusable consumer always decodes its current message before touching command state.
 pub struct ReportEffect<D> {
     /// Validated command repository.
-    pub store: Arc<PgStore<()>>,
+    pub store: Arc<PgStore>,
     /// Required product decoder; protocol and authentication remain outside the library.
     pub decoder: D,
 }
@@ -138,7 +144,7 @@ impl<D: ReportDecoder> PgConsumerEffect<Vec<u8>> for ReportEffect<D> {
 pub async fn takeover(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     scope: Scope,
     old: Coordinate,
     next: Coordinate,

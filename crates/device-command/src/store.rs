@@ -1,6 +1,6 @@
 //! Capability-owned transaction port; providers own commit and resource cleanup.
+use crate::{ClaimId, Delivery, DirectClaim};
 use crate::{Command, CommandId, CommandSpec, Coordinate, DeviceReport, Outcome, Scope};
-use rss_transactional_messaging::outbox::PendingMessage;
 
 const MAX_BATCH_SIZE: u16 = 1024;
 
@@ -95,13 +95,24 @@ pub trait Store: Send + Sync {
         expected: Coordinate,
         next: Coordinate,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-    /// Queue immutable command facts and exactly one dispatch in the same transaction.
+    /// Persist immutable intent, appending the dispatch only for Outbox delivery.
     fn queue(
         &self,
         tx: &mut Self::Transaction<'_>,
         spec: CommandSpec,
-        message: PendingMessage<Vec<u8>>,
+        delivery: Delivery,
     ) -> impl Future<Output = Result<Command, Self::Error>> + Send;
+    /// Register or replay an exact direct issuance after checking current eligibility.
+    /// Perform this check after all other eligibility-changing writes in the transaction.
+    /// After confirmed commit validate the candidate at the protocol response boundary.
+    fn claim_direct(
+        &self,
+        tx: &mut Self::Transaction<'_>,
+        scope: Scope,
+        id: &CommandId,
+        coordinate: Coordinate,
+        claim: ClaimId,
+    ) -> impl Future<Output = Result<DirectClaim, Self::Error>> + Send;
     /// Read one exact scope/identity; another device must not be treated as the target.
     fn load(
         &self,

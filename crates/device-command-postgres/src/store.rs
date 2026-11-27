@@ -1,24 +1,23 @@
 //! Same-transaction companion to transactional messaging; caller owns settlement.
 use crate::persistence::*;
 use rss_device_command::*;
-use rss_transactional_messaging::outbox::{OutboxWriter, PendingMessage};
-use rss_transactional_messaging_postgres::{PgError, PgOutboxStore, PgTransaction};
-use std::sync::Arc;
+use rss_transactional_messaging::outbox::OutboxWriter;
+use rss_transactional_messaging_postgres::{PgError, PgOutboxWriter, PgTransaction};
 
 /// Device commands sharing the supplied transaction with the existing message adapter.
-pub struct PgStore<R> {
-    outbox: Arc<PgOutboxStore<R>>,
+pub struct PgStore {
+    outbox: PgOutboxWriter,
     clock: crate::CommandClock,
     supersede_batch_size: BatchLimit,
 }
-impl<R: Send> PgStore<R> {
+impl PgStore {
     /// Validate component storage/role on the caller's configured transaction.
     /// All later transactions must use this same database and runtime role.
     /// `supersede_batch_size` bounds each page within one atomic authority transaction.
     /// `callers` declares the complete component caller set, including this runtime's login.
     pub async fn new(
         tx: &mut PgTransaction<'_>,
-        outbox: Arc<PgOutboxStore<R>>,
+        outbox: PgOutboxWriter,
         clock: crate::CommandClock,
         callers: &crate::CallerRoles,
         supersede_batch_size: BatchLimit,
@@ -42,22 +41,28 @@ impl<R: Send> PgStore<R> {
         tx: &mut PgTransaction<'_>,
         scope: Scope,
         current: Coordinate,
-        rows: impl Iterator<Item = &'a mut Stored>,
+        rows: impl Iterator<Item = &'a mut Command>,
     ) -> Result<(), PgError> {
-        let active: Vec<_> = rows.filter(|r| !r.command.status().is_terminal()).collect();
+        let active: Vec<_> = rows.filter(|r| !r.status().is_terminal()).collect();
         if active.is_empty() {
             return Ok(());
         }
         let observed = self.now(tx).await?;
-        let needs_confirmation = |row: &Stored| {
-            row.command.status() == Status::Queued
-                && row.command.spec().coordinate() == current
-                && observed < row.command.spec().deadline()
+        let needs_confirmation = |cmd: &Command| {
+            cmd.status() == Status::Queued
+                && cmd.spec().coordinate() == current
+                && observed < cmd.spec().deadline()
+                && matches!(cmd.record().delivery, Delivery::Outbox(_))
         };
         let requested: Vec<_> = active
             .iter()
-            .filter(|row| needs_confirmation(row))
-            .map(|row| (&row.domain, &row.message_id, row.fingerprint))
+            .filter(|cmd| needs_confirmation(cmd))
+            .filter_map(|cmd| match &cmd.record().delivery {
+                Delivery::Outbox(facts) => {
+                    Some((&facts.domain, &facts.message_id, facts.fingerprint))
+                }
+                Delivery::Direct { .. } => None,
+            })
             .collect();
         let mut facts = self
             .outbox
@@ -79,12 +84,12 @@ impl<R: Send> PgStore<R> {
                 } else {
                     Event::Expire
                 }
-            } else if current != row.command.spec().coordinate() {
+            } else if current != row.spec().coordinate() {
                 Event::Supersede
             } else {
                 Event::Expire
             };
-            let command = &mut row.command;
+            let command = row;
             let previous = command.version();
             let outcome = command
                 .transition(event, current, confirmed_at)
@@ -105,24 +110,20 @@ impl<R: Send> PgStore<R> {
         coordinate: Coordinate,
     ) -> Result<Transition, PgError> {
         self.outbox.validate_transaction(tx)?;
-        let current = authority(tx, s).await?;
+        let current = authority(tx, s, false).await?;
         if coordinate != current {
             return Err(error(Error::Fenced));
         }
-        let mut stored = read(tx, s, id).await?.ok_or_else(|| error(Error::Fenced))?;
-        let previous = stored.command.version();
-        let outcome = stored
-            .command
+        let mut command = locked_command(tx, s, id).await?;
+        let previous = command.version();
+        let outcome = command
             .transition(event, current, self.now(tx).await?)
             .map_err(error)?;
-        save(tx, &stored.command, previous).await?;
-        Ok(Transition {
-            outcome,
-            command: stored.command,
-        })
+        save(tx, &command, previous).await?;
+        Ok(Transition { outcome, command })
     }
 }
-impl<R: Send> Store for PgStore<R> {
+impl Store for PgStore {
     type Transaction<'a> = PgTransaction<'a>;
     type Error = PgError;
     async fn initialize(
@@ -148,7 +149,7 @@ impl<R: Send> Store for PgStore<R> {
             })
         })
         .await?;
-        if authority(tx, s).await? != coordinate {
+        if authority(tx, s, false).await? != coordinate {
             return Err(error(Error::Conflict));
         }
         Ok(())
@@ -164,7 +165,7 @@ impl<R: Send> Store for PgStore<R> {
             return Err(error(Error::InvalidValue));
         }
         self.outbox.validate_transaction(tx)?;
-        let current = authority(tx, s).await?;
+        let current = authority(tx, s, true).await?;
         if current == next {
             return Ok(());
         } // reason: exact authority update replay cannot produce more effects.
@@ -199,76 +200,68 @@ impl<R: Send> Store for PgStore<R> {
         &self,
         tx: &mut Self::Transaction<'_>,
         spec: CommandSpec,
-        message: PendingMessage<Vec<u8>>,
+        delivery: Delivery,
     ) -> Result<Command, PgError> {
         self.outbox.validate_transaction(tx)?;
-        let current = authority(tx, spec.scope()).await?;
-        let envelope = message.envelope();
-        if envelope.metadata().tenant_id() != spec.scope().tenant() {
+        let current = authority(tx, spec.scope(), false).await?;
+        if let Delivery::Outbox(message) = &delivery
+            && message.envelope().metadata().tenant_id() != spec.scope().tenant()
+        {
             return Err(error(Error::Fenced));
         }
-        if let Some(existing) = read(tx, spec.scope(), spec.id()).await? {
-            if existing.command.spec() != &spec
-                || existing.message_id != *envelope.id()
-                || existing.fingerprint != message.fingerprint()
-                || existing.domain != *envelope.metadata().domain()
-            {
+        let existing = match read(tx, spec.scope(), spec.id()).await? {
+            Some(command) => Some(command),
+            None => {
+                lock_creation(tx, &spec).await?;
+                read(tx, spec.scope(), spec.id()).await?
+            }
+        };
+        let identity = delivery.identity();
+        if let Some(existing) = existing {
+            if existing.spec() != &spec || existing.record().delivery != identity {
                 return Err(error(Error::Conflict));
             }
-            // Verify the exact original dispatch even when authority has since advanced.
-            self.outbox
-                .is_published(
-                    tx,
-                    &existing.domain,
-                    &existing.message_id,
-                    existing.fingerprint,
-                )
-                .await?;
-            return Ok(existing.command);
+            if let Delivery::Outbox(original) = &identity {
+                self.outbox
+                    .is_published(
+                        tx,
+                        &original.domain,
+                        &original.message_id,
+                        original.fingerprint,
+                    )
+                    .await?;
+            }
+            return Ok(existing);
         }
         if current != spec.coordinate() {
             return Err(error(Error::Fenced));
         }
-        let command = Command::queue(spec, self.now(tx).await?).map_err(error)?;
-        let r = command.record();
-        let s = r.spec.scope();
-        let t = s.tenant().to_string();
-        let d = s.device().as_uuid().to_string();
-        let id = r.spec.id().as_str().to_owned();
-        let coord = r.spec.coordinate();
-        let digest = r.spec.expected().as_bytes().to_vec();
-        let deadline = r.spec.deadline();
-        let queued = r.queued_at;
-        let message_id = envelope.id().as_str().to_owned();
-        let domain = envelope.metadata().domain().as_str().to_owned();
-        let fingerprint = message.fingerprint().as_bytes().to_vec();
-        tx.with_connection(move |c| {
-            Box::pin(async move {
-                sqlx::query(
-                    "SELECT rss_device_command.enqueue($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-                )
-                .bind(t)
-                .bind(d)
-                .bind(id)
-                .bind(coord.generation())
-                .bind(coord.epoch())
-                .bind(digest)
-                .bind(deadline)
-                .bind(queued)
-                .bind(message_id)
-                .bind(fingerprint)
-                .bind(domain)
-                .execute(c)
+        let command = Command::queue(spec, identity, self.now(tx).await?).map_err(error)?;
+        insert_command(tx, &command).await?;
+        if let Delivery::Outbox(message) = delivery {
+            self.outbox
+                .append(tx, message)
                 .await
-                .map(|_| ())
-            })
-        })
-        .await?;
-        self.outbox
-            .append(tx, message)
-            .await
-            .map_err(PgError::from)?;
+                .map_err(PgError::from)?;
+        }
         Ok(command)
+    }
+    async fn claim_direct(
+        &self,
+        tx: &mut Self::Transaction<'_>,
+        s: Scope,
+        id: &CommandId,
+        coordinate: Coordinate,
+        claim: ClaimId,
+    ) -> Result<DirectClaim, PgError> {
+        let transition = self
+            .mutate(tx, s, id, Event::Claim(claim), coordinate)
+            .await?;
+        if transition.command.status() == Status::Claimed {
+            Ok(DirectClaim::Eligible(transition.command))
+        } else {
+            Ok(DirectClaim::Unavailable(transition.command))
+        }
     }
     async fn load(
         &self,
@@ -277,7 +270,7 @@ impl<R: Send> Store for PgStore<R> {
         id: &CommandId,
     ) -> Result<Option<Command>, PgError> {
         self.outbox.validate_transaction(tx)?;
-        Ok(read(tx, s, id).await?.map(|r| r.command))
+        read(tx, s, id).await
     }
     async fn report(
         &self,
@@ -285,20 +278,14 @@ impl<R: Send> Store for PgStore<R> {
         input: &DeviceReport,
     ) -> Result<Transition, PgError> {
         self.outbox.validate_transaction(tx)?;
-        let current = authority(tx, input.scope).await?;
-        let mut row = read(tx, input.scope, &input.command_id)
-            .await?
-            .ok_or_else(|| error(Error::Fenced))?;
-        let previous = row.command.version();
-        let outcome = row
-            .command
+        let current = authority(tx, input.scope, false).await?;
+        let mut command = locked_command(tx, input.scope, &input.command_id).await?;
+        let previous = command.version();
+        let outcome = command
             .report(input, current, self.now(tx).await?)
             .map_err(error)?;
-        save(tx, &row.command, previous).await?;
-        Ok(Transition {
-            outcome,
-            command: row.command,
-        })
+        save(tx, &command, previous).await?;
+        Ok(Transition { outcome, command })
     }
     async fn cancel(
         &self,
@@ -317,14 +304,14 @@ impl<R: Send> Store for PgStore<R> {
         after: Option<&CommandId>,
     ) -> Result<RecoveryPage, PgError> {
         self.outbox.validate_transaction(tx)?;
-        let current = authority(tx, s).await?;
+        let current = authority(tx, s, false).await?;
         let mut rows = active_rows(tx, s, after.map(CommandId::as_str), limit, false)
             .await?
             .into_iter()
             .map(decode)
             .collect::<Result<Vec<_>, _>>()?;
         self.recover_rows(tx, s, current, rows.iter_mut()).await?;
-        let commands: Vec<_> = rows.into_iter().map(|row| row.command).collect();
+        let commands = rows;
         let after = commands.last().map(|c| c.spec().id().clone());
         Ok(RecoveryPage { commands, after })
     }
@@ -335,10 +322,10 @@ impl<R: Send> Store for PgStore<R> {
         ids: ExactCommandIds<'_>,
     ) -> Result<Vec<Option<Command>>, PgError> {
         self.outbox.validate_transaction(tx)?;
-        let current = authority(tx, s).await?;
+        let current = authority(tx, s, false).await?;
         let mut rows = exact_rows(tx, s, ids).await?;
         self.recover_rows(tx, s, current, rows.iter_mut().flatten())
             .await?;
-        Ok(rows.into_iter().map(|row| row.map(|r| r.command)).collect())
+        Ok(rows)
     }
 }

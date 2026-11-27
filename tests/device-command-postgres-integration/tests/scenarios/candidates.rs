@@ -19,7 +19,7 @@ async fn calls(tx: &mut PgTransaction<'_>) -> Result<([i64; 5], i64), PgError> {
     Ok(([authority, commands, publication, save, clock], total))
 }
 
-async fn measured(
+pub(super) async fn measured(
     f: &Fixture,
     s: Scope,
     ids: &[CommandId],

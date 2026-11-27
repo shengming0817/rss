@@ -1496,6 +1496,7 @@ async fn compensated(
                 |(store, fact), tx| {
                     Box::pin(async move {
                         store
+                            .writer()
                             .is_published(
                                 tx,
                                 fact.metadata().domain(),

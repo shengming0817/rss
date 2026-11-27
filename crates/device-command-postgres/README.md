@@ -28,12 +28,12 @@ Restore the version-matched definitions before retrying; no compatibility bypass
 Trusted administrator DDL after construction remains outside the admission guarantee. The owner must
 not be reachable through SET ROLE. Products provision roles and execute migrations.
 
-The batch function `save_page` requires EXECUTE for each declared caller. It raises a fencing error
-when any version fails the scalar CAS, rolling back the page in the caller’s transaction.
+The batch function `save_page` requires EXECUTE for each declared caller. A missed version raises a serialization failure and rolls back the entire transaction.
+Retry the page from the last committed cursor after checking the transaction outcome.
 
 Install the separately versioned messaging schema with its own documented runtime grants. New
 component installations never read, modify, migrate or adopt historical `device_commands` rows.
-Future changes to this component's persisted format require append-only upgrades.
+Install the bundled schema on an empty database.
 
 Construct `CallerRoles::new(&["command_runtime", "policy_runtime"])?` from deployment intent;
 single-caller deployments use the same API with a one-element set. Names are exact catalog names,
@@ -44,7 +44,7 @@ admission proof or a runtime capability. Adding another independent caller requi
 complete declaration and provisioning its grants; it does not require a different API or a product
 role enum. Different operation profiles and live privilege reconfiguration are not provided.
 
-`PgStore::new(tx, outbox, CommandClock::Postgres, &callers, BatchLimit::default())` checks its schema revision, RLS and every
+`PgStore::new(tx, writer, CommandClock::Postgres, &callers, BatchLimit::default())` checks its schema revision, RLS and every
 declared caller's effective privileges using
 an existing tenant-bound transaction. Rejections log structured `phase="probe"` and a closed
 `reason` (`revision`, `relations`, `caller_roles`, `runtime_role`, `runtime_acl`, `rls_policy`, `functions` or fail-closed
@@ -64,17 +64,33 @@ between payload and command intent remain product responsibilities.
 - Initialize authority explicitly. Queue multiple commands using the same authority; commands
   are unique by `(tenant, command ID)`, not by device. A dispatch message can belong to only one
   command in its tenant. Same create facts replay; different facts conflict.
-- A scope's authority lock serializes mutations; core Rust determines transitions and SQL saves
-  them with version CAS. Authority advancement and supersession use the same transaction. Pages
+- Ordinary commands share their scope’s authority row. Transactions that will advance a scope call advance before other command operations on it, taking the exclusive lock first.
+  Creation serializes each tenant-local command ID, and point mutations lock the command row
+  before sampling time and applying version CAS. Batch writes acquire rows in command-ID order. Authority advancement and supersession use the same transaction. Pages
   bound memory, while the original transaction deadline bounds the entire authority change.
+- Across a multi-command transaction, visit tenant-local command IDs in ascending byte order
+  (PostgreSQL `COLLATE "C"`) for creation, locking point operations and page saves alike.
+  An exact recovery page returns request order but writes in sorted ID order. Compose it with
+  earlier or later writes only if the complete lock sequence is ordered. Run a scan with
+  unknown/overlapping IDs in a separate transaction or use one complete exact recovery page.
+  PostgreSQL can abort a transaction on a deadlock (40P01). Retry the whole callback only
+  after confirmed rollback of a transient failure, with replayable inputs, renewed authorization
+  and enough of the original deadline. Read back uncertain settlement first.
 - For ordered dispatch, the composition owner calls `tx.prepare_outbox_partitions` with the complete
   transaction partition set before command/authority mutations; repositories do not add locks incrementally.
+- Direct creation stores the frozen content digest. Claim by exact device, coordinate, command and
+  caller-supplied issuance ID. Claim after all writes that can change eligibility. Eligible describes the row and server
+  time at the claim operation. At response handoff check the committed candidate against
+  the latest command and current time with `dispatch_id_at`, revalidate product authorization,
+  and apply the protocol’s resend rule. Suppress the response on any failed check. After uncertain settlement load the command, recheck policy and retry the same
+  identity. Received and terminal commands yield no grant. Provide the original ID on direct reports.
+  Direct commands require no dispatch row or publication query. Both paths use the same transaction.
 - Outbox append and command admission commit together. Broker publish itself is outside this
   transaction and remains at-least-once. Never mint a new message ID for an ambiguous attempt.
 - `recover` and `recover_exact` share the same lifecycle implementation. The messaging adapter checks each selected dispatch's persisted domain, message ID and fingerprint using one publication query per page. A scope may contain commands
   from several messaging domains; recovery never substitutes the current relay domain. Pending,
   in-flight and dead-lettered delivery are not device rejection. Missing dispatch or changed
-  identity is an error. `published_at` is the database time this component observes durable
+  identity is an error. `dispatched_at` is the database time this component observes durable
   confirmation, not the original broker confirmation timestamp.
 - Run bounded recovery pages under `PgRuntime::local_tx`; commit before using their cursor.
   Only `Committed(page)` advances the cursor to `page.after`; all other outcomes retain the

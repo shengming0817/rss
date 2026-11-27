@@ -51,7 +51,7 @@ async fn save_page(
             #[cfg(feature = "integration")]
             CommandClock::Controlled(frozen) => frozen.now(),
         };
-        let mut command = decode(row)?.command;
+        let mut command = decode(row)?;
         let previous = command.version();
         if command
             .transition(Event::Supersede, next, now)

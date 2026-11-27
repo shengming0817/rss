@@ -67,6 +67,8 @@ Outbox 终态在同一实际 PostgreSQL 事务中结算，复用租约、fencing
 domain/group 的数据库权限归该 provider。宿主持有 effect 含义、来源真实性和 worker 生命周期，
 不引入跨数据库原子提交或通用审计平台。
 
+设备命令核心持有每条命令的投递选择、直接下发身份、设备回执和效果状态；PG adapter 持有同事务领取与换代围栏。产品认证设备、冻结载荷、选取候选、复验授权并决定协议重发。
+
 ## 产品拥有
 
 - 消息 DR 的证据 authority、恢复点和成员选择、数据库/broker restore、跨进程 pause/drain/resume 与部署准入。

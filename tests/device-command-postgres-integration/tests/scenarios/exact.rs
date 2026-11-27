@@ -36,7 +36,7 @@ async fn queued_expiry(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow:
     committed(
         f.runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.queue(tx, request, msg).await })
+                Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
             })
             .await,
     )
@@ -174,7 +174,7 @@ async fn rollback(f: &Fixture, s: Scope, coordinate: Coordinate) -> anyhow::Resu
                     assert!(
                         matches!(recovered.as_slice(), [Some(c)] if c.status() == Status::Published)
                     );
-                    store.queue(tx, marker, msg).await?;
+                    store.queue(tx, marker, Delivery::Outbox(msg)).await?;
                     Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
                 })
             },

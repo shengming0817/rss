@@ -24,13 +24,20 @@ let scope = Scope::new(
 let coordinate = Coordinate::new(1, 1)?;
 let spec = CommandSpec::new(scope, CommandId::parse("set-mode")?, coordinate,
     StateDigest::from_bytes([7; 32]), 1_000_000);
-let command = Command::queue(spec, 10)?;
+let command = Command::queue(spec, Delivery::Direct { content_digest: ContentDigest::from_bytes([1; 32]) }, 10)?;
 assert_eq!(command.status(), Status::Queued);
 # Ok(()) }
 ```
 
+Creation selects `Delivery::Outbox(message)` or `Delivery::Direct { content_digest }` per command.
+The direct digest binds the frozen input. The expected state digest binds the observed effect.
+A committed direct claim records the caller's stable issuance ID and dispatch time in Claimed.
+After response loss, load the original ID and call `claim_direct` again under current product
+authorization. Only a committed Eligible result may be considered for protocol-specific resend.
+Eligibility is sampled inside the claim transaction. At response handoff check the current command and deadline using `dispatch_id_at` and revalidate product authorization. A matching Direct report binds that ID even after termination.
+
 Only durable publication confirmation reaches Published; device ACK reaches Received; an exact
-actual-state match after Received reaches Applied. A device may reject after either Published
+actual-state match after Received reaches Applied. A device may reject after Published, Claimed
 or Received. Expiry, cancellation and supersession are terminal server decisions. They never
 prove that the device did not execute an old command. Gateway/device replay protection is a
 separate product responsibility.
@@ -50,13 +57,12 @@ The store accepts only `DeviceReport` for device-originated input.
 
 ## Transactions and recovery
 
-`Store` borrows its provider transaction. Queue binds the complete immutable command and dispatch
-fingerprint, stages one outbox entry, and never commits. No returned snapshot or `Transition`
+`Store` borrows its provider transaction. Queue binds the immutable command and delivery facts. Outbox creation stages one message and direct creation stages only the command. No returned snapshot or `Transition`
 authorizes transport ACK before the enclosing transaction's confirmed settlement. Exact create
 replay returns the existing snapshot; changed immutable facts conflict. Products own authored
 message contracts, routes and protocol payloads and must bind them to the same command intent.
 
-An early ACK or actual-state report returns OutOfOrder. The consumer must roll back/release and
+A report that has a valid delivery identity but is missing a predecessor can return OutOfOrder. A direct report must match a durable claim ID; a missing or mismatched issuance is Fenced. For an OutOfOrder result, the consumer must roll back/release and
 persistently redeliver that original ingress; it must not write a terminal Inbox receipt. This
 library does not keep another ingress journal, queue, receipt database or transport sequence.
 See the PostgreSQL package for composition with the existing Inbox transaction.

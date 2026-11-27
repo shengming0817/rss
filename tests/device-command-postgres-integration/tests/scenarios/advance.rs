@@ -86,15 +86,15 @@ async fn interrupt_last_page(
         }
         Interruption::StaleVersion => {
             publish_last(blocker, s).await?;
-            let fenced = attempt.await.fold(
-                |_| None,
-                |_| None,
-                |_| None,
+            let rolled_back = attempt.await.fold(
                 |_| None,
                 |_| None,
                 |e| Some(e.kind()),
+                |_| None,
+                |_| None,
+                |_| None,
             );
-            assert_eq!(fenced, Some(MessagingErrorKind::OwnershipLost));
+            assert_eq!(rolled_back, Some(MessagingErrorKind::Transient));
             return assert_rolled_back(f, s, old, (2, Status::Published)).await;
         }
     }
@@ -123,7 +123,7 @@ async fn publish_last(
     s: Scope,
 ) -> anyhow::Result<()> {
     let published = sqlx::query(
-        "UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1
+        "UPDATE rss_device_command.commands SET status='published',dispatched_at=queued_at,version=version+1
          WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' AND version=1",
     )
     .bind(s.tenant().to_string())
@@ -209,20 +209,53 @@ async fn partial_recovery(f: &Fixture, names: [&str; 2], exact: bool) -> anyhow:
     // Only the competing version commits. The earlier successful save in this page rolls back.
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET status='published' WHERE tenant_id=$1::uuid AND message_id=ANY($2::text[])")
         .bind(scope.tenant().to_string()).bind(names.map(|id| format!("dispatch.{id}"))).execute(&f.owner).await?;
-    let mut competing = f.owner.begin().await?;
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *competing)
-        .await?;
-    sqlx::query("UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1 WHERE tenant_id=$1::uuid AND command_id=$2 AND version=1")
-        .bind(scope.tenant().to_string()).bind(names[1]).execute(&mut *competing).await?;
-    let recover = recover_conflicted_page(f, scope, current, names, exact);
-    let release = async {
-        wait_for_blocked(f, pid).await?;
-        competing.commit().await?;
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let (finish, release) = tokio::sync::oneshot::channel();
+    let store = f.store.clone();
+    let id = CommandId::parse(names[1])?;
+    let competing = f
+        .runtime
+        .local_tx(crate::execution(scope.tenant(), 1), budget()?, move |tx| {
+            Box::pin(async move {
+                let ids = [id];
+                let page = ExactCommandIds::new(&ids).map_err(|_| sqlx::Error::RowNotFound)?;
+                store.recover_exact(tx, scope, page).await?;
+                let pid: i32 = tx
+                    .with_connection(|c| {
+                        Box::pin(async move {
+                            sqlx::query_scalar("SELECT pg_backend_pid()")
+                                .fetch_one(c)
+                                .await
+                        })
+                    })
+                    .await?;
+                ready.send(pid).map_err(|_| sqlx::Error::PoolClosed)?;
+                release.await.map_err(|_| sqlx::Error::PoolClosed)?;
+                Ok(())
+            })
+        });
+    let other = async {
+        let pid = started.await?;
+        let recover = recover_conflicted_page(f, scope, current, names, exact);
+        let release = async {
+            wait_for_blocked(f, pid).await?;
+            finish
+                .send(())
+                .map_err(|_| anyhow::anyhow!("competing recovery ended"))
+        };
+        tokio::try_join!(recover, release)?;
         anyhow::Ok(())
     };
-    tokio::try_join!(recover, release)?;
-    assert_cas_rollback(f, scope, names, first).await
+    let (winner, loser) = tokio::join!(competing, other);
+    committed(winner)?;
+    loser?;
+    assert_cas_rollback(f, scope, names, first).await?;
+    let replay = f.recover_exact(&names, scope).await?;
+    assert!(replay.iter().all(|slot| {
+        slot.as_ref()
+            .is_some_and(|cmd| cmd.status() == Status::Published && cmd.version() == 2)
+    }));
+    Ok(())
 }
 
 async fn assert_cas_rollback(
@@ -263,7 +296,7 @@ async fn recover_conflicted_page(
             page,
             move |page, tx| {
                 Box::pin(async move {
-                    store.queue(tx, marker, dispatch).await?;
+                    store.queue(tx, marker, Delivery::Outbox(dispatch)).await?;
                     if exact {
                         store.recover_exact(tx, scope, *page).await?;
                     } else {
@@ -280,12 +313,12 @@ async fn recover_conflicted_page(
         result.fold(
             |_| None,
             |_| None,
+            |e| Some(e.kind()),
             |_| None,
             |_| None,
-            |_| None,
-            |e| Some(e.kind())
+            |_| None
         ),
-        Some(MessagingErrorKind::OwnershipLost)
+        Some(MessagingErrorKind::Transient)
     );
     anyhow::Ok(())
 }

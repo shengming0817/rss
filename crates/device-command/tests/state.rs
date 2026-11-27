@@ -1,6 +1,14 @@
 use rss_device_command::*;
 use rss_request_context::TenantId;
 
+fn outbox() -> anyhow::Result<Delivery<OutboxIdentity>> {
+    use rss_transactional_messaging::message::{MessageFingerprint, MessageId, MessagingDomain};
+    Ok(Delivery::Outbox(OutboxIdentity {
+        domain: MessagingDomain::parse("test")?,
+        message_id: MessageId::parse("dispatch")?,
+        fingerprint: MessageFingerprint::from_bytes([1; 32]),
+    }))
+}
 fn spec(id: &str) -> Result<CommandSpec, Box<dyn std::error::Error>> {
     Ok(CommandSpec::new(
         Scope::new(
@@ -15,7 +23,7 @@ fn spec(id: &str) -> Result<CommandSpec, Box<dyn std::error::Error>> {
 }
 #[test]
 fn receipt_is_not_application_and_received_can_reject() -> Result<(), Box<dyn std::error::Error>> {
-    let mut command = Command::queue(spec("one")?, 1)?;
+    let mut command = Command::queue(spec("one")?, outbox()?, 1)?;
     let authority = command.spec().coordinate();
     assert_eq!(
         command.transition(Event::Received, authority, 2)?,
@@ -39,7 +47,7 @@ fn receipt_is_not_application_and_received_can_reject() -> Result<(), Box<dyn st
 }
 #[test]
 fn deadline_and_fence_reject_false_success() -> Result<(), Box<dyn std::error::Error>> {
-    let mut command = Command::queue(spec("one")?, 1)?;
+    let mut command = Command::queue(spec("one")?, outbox()?, 1)?;
     assert_eq!(
         command.transition(Event::Published, Coordinate::new(1, 2)?, 2),
         Err(Error::Fenced)
@@ -57,7 +65,7 @@ fn advance(c: &mut Command, event: Event, coordinate: Coordinate, time: i64) -> 
     Ok(())
 }
 fn at(status: Status) -> Result<Command, Box<dyn std::error::Error>> {
-    let mut c = Command::queue(spec("matrix")?, 1)?;
+    let mut c = Command::queue(spec("matrix")?, outbox()?, 1)?;
     let a = c.spec().coordinate();
     if matches!(
         status,
@@ -145,7 +153,11 @@ fn complete_state_event_matrix() -> Result<(), Box<dyn std::error::Error>> {
         [L, L, L, L, L, L, D],
         [L, L, L, L, L, D, L],
     ];
-    for (index, status) in Status::ALL.into_iter().enumerate() {
+    for (index, status) in Status::ALL
+        .into_iter()
+        .filter(|s| *s != S::Claimed)
+        .enumerate()
+    {
         for (column, event) in events.into_iter().enumerate() {
             let mut command = at(status)?;
             let before = command.clone();
@@ -179,6 +191,7 @@ fn exact_report_identity_and_snapshot_validation() -> Result<(), Box<dyn std::er
     let mut c = at(Status::Received)?;
     let original = c.clone();
     let mut input = DeviceReport {
+        source: ReportSource::Outbox,
         scope: c.spec().scope(),
         command_id: c.spec().id().clone(),
         coordinate: c.spec().coordinate(),
@@ -220,7 +233,7 @@ fn invalid_snapshots() -> Result<(), Box<dyn std::error::Error>> {
         assert!(Command::restore(raw).is_err());
     }
     let mut raw = c.record().clone();
-    raw.published_at = None;
+    raw.dispatched_at = None;
     assert!(Command::restore(raw).is_err());
     let mut raw = c.record().clone();
     raw.received_at = Some(101);
@@ -318,5 +331,71 @@ fn exact_command_page_validates_the_requested_identities() -> Result<(), Error> 
         ExactCommandIds::new(&repeated).err(),
         Some(Error::InvalidValue)
     );
+    Ok(())
+}
+
+#[test]
+fn direct_claim_is_only_a_server_fact() -> Result<(), Box<dyn std::error::Error>> {
+    let id = ClaimId::parse("2e811a4e-9053-4b90-8742-3cd462d42aea")?;
+    let other = ClaimId::parse("2e811a4e-9053-4b90-8742-3cd462d42aeb")?;
+    let mut c = Command::queue(
+        spec("direct")?,
+        Delivery::Direct {
+            content_digest: ContentDigest::from_bytes([1; 32]),
+        },
+        1,
+    )?;
+    let a = c.spec().coordinate();
+    let report = DeviceReport {
+        scope: c.spec().scope(),
+        command_id: c.spec().id().clone(),
+        coordinate: a,
+        source: ReportSource::Direct(id),
+        event: DeviceEvent::Received,
+    };
+    assert_eq!(c.report(&report, a, 2), Err(Error::Fenced));
+    assert_eq!(c.transition(Event::Published, a, 2), Err(Error::Conflict));
+    assert_eq!(c.transition(Event::Claim(id), a, 2)?, Outcome::Advanced);
+    assert_eq!(c.status(), Status::Claimed);
+    let issued = c.clone();
+    assert_eq!(c.transition(Event::Claim(id), a, 3)?, Outcome::Duplicate);
+    assert_eq!(
+        c.transition(Event::Claim(other), a, 3),
+        Err(Error::Conflict)
+    );
+    assert_eq!(c, issued);
+    check_direct_receipts(c, report, id, other)?;
+    let mut expired = issued;
+    assert_eq!(
+        expired.transition(Event::Claim(id), a, 100)?,
+        Outcome::Advanced
+    );
+    assert_eq!(expired.status(), Status::TimedOut);
+    Ok(())
+}
+
+fn check_direct_receipts(
+    mut c: Command,
+    mut report: DeviceReport,
+    id: ClaimId,
+    other: ClaimId,
+) -> Result<(), Error> {
+    let a = c.spec().coordinate();
+    for wrong in [ReportSource::Outbox, ReportSource::Direct(other)] {
+        report.source = wrong;
+        assert_eq!(c.report(&report, a, 4), Err(Error::Fenced));
+    }
+    report.source = ReportSource::Direct(id);
+    report.event = DeviceEvent::Reported(c.spec().expected());
+    assert_eq!(c.report(&report, a, 4)?, Outcome::OutOfOrder);
+    report.event = DeviceEvent::Received;
+    assert_eq!(c.report(&report, a, 4)?, Outcome::Advanced);
+    report.event = DeviceEvent::Reported(c.spec().expected());
+    assert_eq!(c.report(&report, a, 5)?, Outcome::Advanced);
+    assert_eq!(c.record().claim_id, Some(id));
+    assert_eq!(Command::restore(c.record().clone())?, c);
+    let mut invalid = c.record().clone();
+    invalid.claim_id = None;
+    assert_eq!(Command::restore(invalid), Err(Error::InvalidSnapshot));
     Ok(())
 }

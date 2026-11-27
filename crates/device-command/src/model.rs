@@ -197,6 +197,8 @@ pub enum DeviceEvent {
 /// An authenticated product must correlate every input to exactly one command.
 #[derive(Debug, Clone)]
 pub struct DeviceReport {
+    /// Authenticated delivery correlation.
+    pub source: crate::ReportSource,
     /// Expected target; the provider additionally binds its transaction tenant.
     pub scope: Scope,
     /// Exact command identity.
