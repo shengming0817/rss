@@ -521,6 +521,24 @@ class CiImpactContract(unittest.TestCase):
         self.assert_decision(decision, full=False, packages=["leaf-integration", "other", "other-integration"],
                              reason="package-change")
 
+    def test_multiline_literal_include_selects_the_shared_reader_only(self):
+        fixture = "tests/fixtures/shared.txt"
+        self.repo._write("tests/leaf-integration/src/lib.rs", '''
+pub const SHARED: &[u8] = include_bytes!(
+    "../../fixtures/shared.txt",
+);
+''')
+        self.repo._write("tests/other-integration/src/lib.rs", '''
+pub const PRIVATE: &str = include_str!(
+    "../fixtures/shared.txt"
+);
+''')
+        self.repo._write("tests/other-integration/fixtures/shared.txt", "private\n")
+        base = self.repo.change(fixture, "shared\n")
+        head = self.repo.change(fixture, "updated\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
+
     def test_inline_module_path_selects_reader_with_different_base_directory(self):
         fixture = "tests/fixtures/shared.rs"
         self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')

@@ -401,31 +401,33 @@ def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
     # references conservatively (e.g. a build script constructing a filename).
     fixture = PurePosixPath(path)
     basename = fixture.name
-    result = run(["/usr/bin/git", "grep", "-I", "-z", "-F", "-e", basename,
-                  "-e", "fixtures", revision, "--"], cwd=root)
+    tree = git(root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{tree}}").decode().strip()
+    result = run(["/usr/bin/git", "grep", "-I", "-l", "-z", "-F", "-e", basename,
+                  "-e", "fixtures", tree, "--"], cwd=root)
     if result.returncode not in (0, 1):
         raise SelectionError("diff-unavailable")
-    direct = re.compile(r'include(?:_bytes|_str)?!\s*\(\s*"([^"\\]+)"')
+    direct = re.compile(r'\binclude(?:_bytes|_str)?\s*!\s*\(\s*"([^"\\\r\n]+)"\s*,?\s*\)')
     module_path = re.compile(r'#\[\s*path\s*=\s*"([^"\\]+)"')
     directory = re.compile(r"""(?:["'/])fixtures(?:[/{"']|$)""")
     packages = set()
-    for row in result.stdout.decode().splitlines():
-        filename, line = row.split("\0", 1)
-        filename = filename.split(":", 1)[1]
+    for entry in result.stdout.decode().split("\0")[:-1]:
+        filename = entry.split(":", 1)[1]
         if is_docs(filename) or filename in SELECTOR_FILES:
             continue
+        # Read the committed source so a Rust include can span multiple lines.
+        source = git(root, "show", entry, phase="git-fixture-source").decode()
         package = owner(filename, roots)
         if package is None:
-            if basename in line or "tests/fixtures" in line:
+            if basename in source or "tests/fixtures" in source:
                 raise SelectionError("unknown-fixture-owner")
             continue
         # Only direct literal Rust includes have a known source-relative base.
         # Any remaining constructed filename or directory could read this fixture.
-        imports = direct.findall(line)
+        imports = direct.findall(source)
         # #[path] may name a module file or an inline module directory.
         # Any ancestor of the input can be that directory, including dotted names.
-        attrs = module_path.findall(line)
-        remainder = module_path.sub("", direct.sub("", line))
+        attrs = module_path.findall(source)
+        remainder = module_path.sub("", direct.sub("", source))
         if (any(posixpath.normpath(posixpath.join(posixpath.dirname(filename), value)) == path
                 for value in imports) or any(
                     PurePosixPath(value).name in (*fixture.parts, "", "..")
