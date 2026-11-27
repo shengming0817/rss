@@ -2,11 +2,12 @@
 use crate::{federation_support as oidc, support::*};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rss_identity_core::{account::AccountKey, federation::ProviderView};
 use rss_identity_core::{
     department::{DepartmentSnapshot, DepartmentSnapshotClaim, UpstreamDepartmentSnapshot},
     directory::AccountQuery,
 };
-use rss_identity_postgres::{AccountPage, AuthenticatedSession, AuthorityError};
+use rss_identity_postgres::{AccountPage, AuthenticatedSession, AuthorityError, Federation};
 
 async fn read(f: &Fixture, q: &AccountQuery, cursor: Option<&str>) -> Result<AccountPage> {
     Ok(f.store
@@ -63,48 +64,82 @@ pub async fn run(f: &Fixture) -> Result<()> {
     let selected = oidc::enabled_settings(f, &federation, settings.try_into()?).await?;
     let other = oidc::enabled(f, &federation).await?;
     let source = selected.id.to_string();
-    let mut accepted = Vec::new();
-    for subject in ["alice", "bob"] {
-        accepted.push(oidc::issued(
-            oidc::finish(
-                &federation,
-                oidc::begin(f, &federation, &selected).await?,
-                subject,
-            )
-            .await?,
-        ));
-    }
+    let alice = observe(f, &federation, &selected, "alice").await?;
+    let bob = observe(f, &federation, &selected, "bob").await?;
     profile_projection(f).await?;
     projection(f, &source, &tree).await?;
-    off_page_window(f, &source, accepted[0].view().id.as_uuid()).await?;
+    hidden_sort(f).await?;
+    off_page_window(f, &source, alice).await?;
+    replay_writes(f, reader, &federation, &selected, &other).await?;
+    deadline_during_page(f, reader.principal.as_uuid(), &source, bob).await
+}
+
+async fn observe(
+    f: &Fixture,
+    federation: &Federation,
+    provider: &ProviderView,
+    subject: &str,
+) -> Result<uuid::Uuid> {
+    let state = oidc::begin(f, federation, provider).await?;
+    Ok(
+        oidc::issued(oidc::finish(federation, state, subject).await?)
+            .view()
+            .id
+            .as_uuid(),
+    )
+}
+
+struct SavedPage {
+    query: AccountQuery,
+    cursor: String,
+    next_principal: String,
+}
+
+async fn capture_pages(f: &Fixture, source: &str) -> Result<Vec<SavedPage>> {
     let queries = [
         AccountQuery::parse(None, None, Some("principalId"), None, 1)?,
         AccountQuery::parse(
             Some("departmentSubtree==root"),
             None,
             Some("principalId"),
-            Some(&source),
+            Some(source),
             1,
         )?,
         AccountQuery::parse(
             None,
             Some("-departmentStatus"),
             Some("principalId"),
-            Some(&source),
+            Some(source),
             1,
         )?,
-        AccountQuery::parse(None, None, Some("departmentSnapshot"), Some(&source), 1)?,
+        AccountQuery::parse(None, None, Some("departmentSnapshot"), Some(source), 1)?,
     ];
     let mut pages = Vec::new();
-    for q in &queries {
-        let cursor = first(f, q).await?;
-        let id = read(f, q, Some(&cursor))
+    for q in queries {
+        let cursor = first(f, &q).await?;
+        let id = read(f, &q, Some(&cursor))
             .await?
             .accounts
             .remove(0)
             .principal_id;
-        pages.push((cursor, id));
+        pages.push(SavedPage {
+            query: q,
+            cursor,
+            next_principal: id,
+        });
     }
+    Ok(pages)
+}
+
+async fn replay_writes(
+    f: &Fixture,
+    reader: AccountKey,
+    federation: &Federation,
+    selected: &ProviderView,
+    other: &ProviderView,
+) -> Result<()> {
+    let source = selected.id.to_string();
+    let pages = capture_pages(f, &source).await?;
     federation
         .enable_provider(f.actor().await?, other.id, other.version, false, deadline())
         .await?;
@@ -112,31 +147,37 @@ pub async fn run(f: &Fixture) -> Result<()> {
     sqlx::query("UPDATE identity_authority.providers SET enabled=false WHERE tenant_id=$1::uuid AND provider_id=$2::uuid")
         .bind(A).bind(&source).execute(&mut *rollback).await?;
     rollback.rollback().await?;
-    for (q, (cursor, id)) in queries.iter().zip(&pages) {
+    for page in &pages {
         assert_eq!(
-            read(f, q, Some(cursor)).await?.accounts[0].principal_id,
-            *id
+            read(f, &page.query, Some(&page.cursor)).await?.accounts[0].principal_id,
+            page.next_principal
         );
     }
-    actor_binding(f, &queries[0], &pages[0].0, reader).await?;
+    actor_binding(f, &pages[0].query, &pages[0].cursor, reader).await?;
+    latest_missing(f, federation, selected, &pages).await
+}
+
+async fn latest_missing(
+    f: &Fixture,
+    federation: &Federation,
+    selected: &ProviderView,
+    pages: &[SavedPage],
+) -> Result<()> {
+    let source = selected.id.to_string();
     *f.oidc
         .department
         .lock()
         .map_err(|_| anyhow::anyhow!("department fixture"))? = UpstreamDepartmentSnapshot::Missing;
-    oidc::issued(
-        oidc::finish(
-            &federation,
-            oidc::begin(f, &federation, &selected).await?,
-            "alice",
-        )
-        .await?,
-    );
-    for (q, (cursor, _)) in queries[1..].iter().zip(&pages[1..]) {
-        rejects(f, f.actor().await?, q, cursor).await?;
+    observe(f, federation, selected, "alice").await?;
+    for page in &pages[1..] {
+        rejects(f, f.actor().await?, &page.query, &page.cursor).await?;
     }
     assert_eq!(
-        read(f, &queries[0], Some(&pages[0].0)).await?.accounts[0].principal_id,
-        pages[0].1
+        read(f, &pages[0].query, Some(&pages[0].cursor))
+            .await?
+            .accounts[0]
+            .principal_id,
+        pages[0].next_principal
     );
     let missing = AccountQuery::parse(
         Some("departmentStatus==claim_missing"),
@@ -150,13 +191,7 @@ pub async fn run(f: &Fixture) -> Result<()> {
     assert_eq!(rows[0].department_snapshot, None);
     let match_leaf = AccountQuery::parse(Some("department==leaf"), None, None, Some(&source), 8)?;
     assert_eq!(read(f, &match_leaf, None).await?.accounts.len(), 1);
-    deadline_during_page(
-        f,
-        reader.principal.as_uuid(),
-        &source,
-        accepted[1].view().id.as_uuid(),
-    )
-    .await
+    Ok(())
 }
 
 async fn profile_projection(f: &Fixture) -> Result<()> {
@@ -239,6 +274,10 @@ async fn projection(f: &Fixture, source: &str, tree: &DepartmentSnapshot) -> Res
     assert_eq!(second.accounts[0].department_snapshot.as_ref(), Some(tree));
     assert!(second.next_cursor.is_none());
 
+    Ok(())
+}
+
+async fn hidden_sort(f: &Fixture) -> Result<()> {
     // Hidden boolean and nullable text sort keys, including two NULL logins.
     let q = AccountQuery::parse(None, Some("-enabled,login"), Some("memberActive"), None, 1)?;
     let mut seen = Vec::new();
