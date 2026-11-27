@@ -32,7 +32,11 @@ use sqlx::{
     ConnectOptions, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex, PoisonError, Weak},
+    time::Duration,
+};
 use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -166,7 +170,7 @@ fn clock() -> ProjectionClock {
 }
 
 fn tenant(index: u32) -> String {
-    format!("00000000-0000-0000-0000-{index:012}")
+    format!("00000000-0000-0000-0000-{:012x}", index + 1)
 }
 
 async fn seed(
@@ -283,6 +287,8 @@ struct CapacityRun {
     stop: CancellationToken,
 }
 
+type RecordProbes = Arc<Mutex<Vec<Weak<ApplicableRecord>>>>;
+
 impl CapacityRun {
     async fn measure<R: Resolver>(
         &self,
@@ -303,20 +309,22 @@ impl CapacityRun {
             )
             .await?;
             let claim = pg.takeover(&scope, &DEFINITION, &control).await?;
+            let records = Arc::new(Mutex::new(Vec::with_capacity(self.reports as usize)));
             let effect = ProbeEffect {
                 source: source.clone(),
                 gate: self.gate.clone(),
                 timing: self.timing.clone(),
                 clock: self.clock.clone(),
                 stop: self.stop.clone(),
+                records: records.clone(),
             };
-            prepared.push((source, pg.projection(claim, effect)?));
+            prepared.push((source, pg.projection(claim, effect)?, records));
         }
         let before = self.io().await?;
         let baseline = metrics::Memory::sample()?;
         let sampler = metrics::Sampler::start(baseline);
         let mut workers = JoinSet::new();
-        for (source, execution) in prepared {
+        for (source, execution, records) in prepared {
             let clock = self.clock.clone();
             let stop = self.stop.clone();
             let profile = self.profile.clone();
@@ -325,7 +333,7 @@ impl CapacityRun {
             workers.spawn(async move {
                 profile
                     .run(execute_page(
-                        source, execution, &gate, &clock, &stop, reports,
+                        source, execution, &gate, &clock, &stop, reports, records,
                     ))
                     .await
             });
@@ -340,6 +348,11 @@ impl CapacityRun {
         let after = self.io().await?;
         let calls = metrics::resolver_calls(&self.read_pool, self.pages).await?
             + metrics::resolver_calls(&self.effect_pool, self.pages).await?;
+        tokio::time::timeout(TIMEOUT, async {
+            tokio::join!(self.read_pool.close(), self.effect_pool.close());
+        })
+        .await
+        .context("measured pools did not close")?;
         Ok(metrics::Sample {
             canonical_bytes: self.seeded_bytes,
             source: metrics::Work::from(&self.profile.source),
@@ -353,6 +366,7 @@ impl CapacityRun {
             held: observed.held,
             peak,
             settled,
+            pools_closed: metrics::Memory::sample()?,
             hold_max,
         })
     }
@@ -389,6 +403,7 @@ async fn execute_page<R: Resolver>(
     clock: &ProjectionClock,
     stop: &CancellationToken,
     reports: u32,
+    records: RecordProbes,
 ) -> anyhow::Result<Duration> {
     let control = Control::new(clock, TIMEOUT, stop);
     let page = expected_events(
@@ -407,6 +422,9 @@ async fn execute_page<R: Resolver>(
     let outcomes = execution.execute_batch(None, page, &control).await?;
     let owned = rss_observation::Clock::now(&Clock).duration_since(received);
     assert_eq!(outcomes, vec![ApplyOutcome::Filtered; reports as usize]);
+    let records = records.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(records.len(), reports as usize);
+    assert!(records.iter().all(|record| record.strong_count() == 0));
     Ok(owned)
 }
 
@@ -464,6 +482,7 @@ struct ProbeEffect<R> {
     timing: Arc<metrics::ResolverTime>,
     clock: Arc<ProjectionClock>,
     stop: CancellationToken,
+    records: RecordProbes,
 }
 
 impl<R: Resolver> PgEffect for ProbeEffect<R> {
@@ -486,6 +505,10 @@ impl<R: Resolver> PgEffect for ProbeEffect<R> {
             .map_err(|e| PgOperationError::rejected(Phase::Restore, None, Some(position), e))?;
         self.timing
             .record(rss_observation::Clock::now(&Clock).duration_since(started));
+        self.records
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::downgrade(&record));
         if position.get() == 1 {
             self.gate.holding.pause().await;
         }

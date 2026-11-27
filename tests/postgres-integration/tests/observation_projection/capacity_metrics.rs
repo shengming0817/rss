@@ -168,6 +168,7 @@ pub(super) struct Sample {
     pub(super) held: Memory,
     pub(super) peak: Memory,
     pub(super) settled: Memory,
+    pub(super) pools_closed: Memory,
     pub(super) hold_max: Duration,
 }
 
@@ -199,12 +200,13 @@ impl Sample {
             self.held,
             self.peak.max(self.ready).max(self.held).max(self.settled),
             self.settled,
+            self.pools_closed,
         ];
         let heap = stages.map(|sample| sample.heap);
         let rss = stages.map(|sample| sample.rss);
         // Allocations and deallocations are separate counters sampled during concurrent work.
         println!(
-            "capacity_memory stages=baseline,ready,held,sampled_peak,settled rust_live_heap_bytes_estimate={heap:?} rss_kib={rss:?} gated_page_hold_us_max={}",
+            "capacity_memory stages=baseline,ready,held,sampled_peak,settled,pools_closed rust_live_heap_bytes_estimate={heap:?} rss_kib={rss:?} gated_page_hold_us_max={}",
             self.hold_max.as_micros()
         );
         println!(
