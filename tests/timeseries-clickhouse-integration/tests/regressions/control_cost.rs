@@ -644,7 +644,7 @@ async fn interleaved_recompute_plans_share_their_actual_scan_windows() -> anyhow
         "cut",
         MaintenanceAction::Delete {
             selection: spec.selection(),
-            window: window(2, 35)?,
+            window: window(13, 34)?,
             restore_until: Timestamp::new(i64::MAX)?,
         },
     )
@@ -716,11 +716,10 @@ async fn interleaved_recompute_plans_share_their_actual_scan_windows() -> anyhow
         assert_eq!(serde_json::to_value(cached.buckets)?, raw);
     }
     // Independently published objects for the same window have identical summaries.
-    let digests: u64 =
-        f.ch.sql("SELECT countDistinct(digest) FROM rss_ts_ch.summaries WHERE lo=0")
-            .await?
-            .trim()
-            .parse()?;
-    assert_eq!(digests, 1);
+    let counts = f
+        .ch
+        .sql("SELECT uniqExact(object_id),uniqExact(digest) FROM rss_ts_ch.summaries WHERE lo=0")
+        .await?;
+    assert_eq!(counts.trim(), "2\t1");
     Ok(())
 }
