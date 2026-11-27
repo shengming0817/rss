@@ -71,7 +71,7 @@ async fn measure<T>(
     label: &str,
     n: usize,
     op: impl Future<Output = Result<T, rss_identity_postgres::AuthorityError>>,
-) -> anyhow::Result<(T, usize, usize)> {
+) -> anyhow::Result<(T, Arc<Sql>, usize)> {
     let sql = Arc::new(Sql::default());
     let before = f.oidc.checks.load(Ordering::Relaxed);
     let result = op
@@ -86,7 +86,7 @@ async fn measure<T>(
         "federation {label} candidates={candidates} n={n} statements={queries} transactions={tx} collection_locks={locked} fingerprints={calls}"
     );
     assert!(queries > 0 && tx > 0);
-    Ok((result, queries, calls))
+    Ok((result, sql, calls))
 }
 pub async fn run(f: &Fixture) -> anyhow::Result<()> {
     let s = service(f);
@@ -114,15 +114,16 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
         )
         .await?;
         assert!(security.eligible_step_up_providers.is_empty());
-        assert_eq!(
-            *list_costs.get_or_insert((list, security_cost)),
-            (list, security_cost)
+        let costs = (
+            list.statements.load(Ordering::Relaxed),
+            security_cost.statements.load(Ordering::Relaxed),
         );
+        assert_eq!(*list_costs.get_or_insert(costs), costs);
         for (label, changed) in [("unchanged", 0), ("sparse", 1), ("all", n)] {
             sqlx::query("UPDATE identity_authority.providers SET assurance_profile=$2 WHERE tenant_id=$1::uuid AND provider_id IN (SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $3)")
                 .bind(f.key.tenant.to_string()).bind([0u8;32].as_slice()).bind(i64::try_from(changed)?).execute(&f.owner).await?;
             let events = f.events().await?;
-            let (_, _, checks) = measure(
+            let (_, measured, checks) = measure(
                 f,
                 label,
                 n,
@@ -130,6 +131,12 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
             )
             .await?;
             assert_eq!(checks, n + changed);
+            assert_eq!(measured.candidates.load(Ordering::Relaxed), n);
+            assert_eq!(measured.writes.load(Ordering::Relaxed), changed.div_ceil(8));
+            assert_eq!(
+                measured.transactions.load(Ordering::Relaxed),
+                1 + n.div_ceil(64) + changed.div_ceil(8)
+            );
             assert_eq!(f.events().await? - events, i64::try_from(changed)?);
         }
     }
@@ -149,6 +156,10 @@ async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> 
     .execute(&f.owner)
     .await?;
     let count = f.events().await?;
+    let coordinates = || {
+        sqlx::query_as::<_,(i64,i64,Vec<u8>)>("SELECT config_version,revocation_epoch,assurance_profile FROM identity_authority.providers WHERE provider_id=ANY($1) ORDER BY provider_id").bind(&ids).fetch_all(&f.owner)
+    };
+    let original = coordinates().await?;
     // A failed Audit insert must roll back both generation changes.
     sqlx::raw_sql("CREATE FUNCTION fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture'; END $$; CREATE TRIGGER fail_audit BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION fail_audit()").execute(&f.owner).await?;
     assert!(
@@ -160,7 +171,7 @@ async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> 
         .execute(&f.owner)
         .await?;
     assert_eq!(f.events().await?, count);
-    let original:Vec<(i64,i64)>=sqlx::query_as("SELECT config_version,revocation_epoch FROM identity_authority.providers WHERE provider_id=ANY($1) ORDER BY provider_id").bind(&ids).fetch_all(&f.owner).await?;
+    assert_eq!(coordinates().await?, original);
     let mut editor = f.owner.begin().await?;
     sqlx::query(
         "SELECT tenant_id FROM identity_authority.tenants WHERE tenant_id=$1::uuid FOR UPDATE",
@@ -168,12 +179,17 @@ async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> 
     .bind(&tenant)
     .fetch_one(&mut *editor)
     .await?;
+    let observed = Arc::new(Sql::default());
     let sync = |federation: rss_identity_postgres::Federation| {
-        tokio::spawn(async move {
-            federation
-                .reconcile_assurance_profiles(scope, deadline())
-                .await
-        })
+        let sub = tracing_subscriber::registry().with(Observer(observed.clone()));
+        tokio::spawn(
+            async move {
+                federation
+                    .reconcile_assurance_profiles(scope, deadline())
+                    .await
+            }
+            .with_subscriber(sub),
+        )
     };
     let before = f.oidc.checks.load(Ordering::SeqCst);
     let first = sync(s.clone());
@@ -193,9 +209,16 @@ async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> 
     editor.commit().await?;
     first.await??;
     second.await??;
+    let checks = f.oidc.checks.load(Ordering::SeqCst) - before;
+    let candidates = observed.candidates.load(Ordering::Relaxed);
+    let tx = observed.transactions.load(Ordering::Relaxed);
+    let writes = observed.writes.load(Ordering::Relaxed);
     println!(
-        "federation concurrent: fingerprints={}",
-        f.oidc.checks.load(Ordering::SeqCst) - before
+        "federation concurrent candidates={candidates} transactions={tx} write_transactions={writes} fingerprints={checks}"
+    );
+    assert_eq!(
+        (candidates, tx, writes, checks),
+        (2 * 1023, 2 * (1 + 16 + 1), 2, 2 * (1023 + 2))
     );
     assert_eq!(f.events().await?, count + 1);
     let after:Vec<(i64,i64)>=sqlx::query_as("SELECT config_version,revocation_epoch FROM identity_authority.providers WHERE provider_id=ANY($1) ORDER BY provider_id").bind(&ids).fetch_all(&f.owner).await?;
@@ -203,7 +226,7 @@ async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> 
         original
             .iter()
             .zip(after)
-            .all(|((v, e), (v2, e2))| v + 1 == v2 && e + 1 == e2)
+            .all(|((v, e, _), (v2, e2))| v + 1 == v2 && e + 1 == e2)
     );
     s.reconcile_assurance_profiles(scope, deadline()).await?;
     assert_eq!(f.events().await?, count + 2);

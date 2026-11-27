@@ -18,7 +18,9 @@ use tokio::sync::Semaphore;
 pub struct ReusePolicy {
     /// Maximum resident provider bindings, each with at most one pool and two documents.
     pub max_providers: usize,
-    /// Total resident document bytes including retained HTTP validators.
+    /// Budget for parsed public metadata, prepared key material, document structures and
+    /// retained HTTP validators. A reader keeps its old representation charged until release.
+    /// Refresh admission fails when the new representation cannot fit after idle eviction.
     pub max_resident_bytes: usize,
     /// Global simultaneous public-document refreshes.
     pub max_refreshes: usize,

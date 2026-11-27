@@ -54,7 +54,13 @@ async fn run() -> anyhow::Result<()> {
                     if headers.contains_key("if-none-match") {
                         (
                             StatusCode::NOT_MODIFIED,
-                            [("cache-control", "no-store"), ("etag", "\"rev\"")],
+                            [
+                                (
+                                    "cache-control",
+                                    if n == 1 { "max-age=0" } else { "no-store" },
+                                ),
+                                ("etag", "\"rev\""),
+                            ],
                         )
                             .into_response()
                     } else {
@@ -79,7 +85,10 @@ async fn run() -> anyhow::Result<()> {
         crate::fixture_clock::clock(),
         vec![],
         policy()?,
-        reuse_policy(),
+        rss_identity_oidc::ReusePolicy {
+            max_refreshes: 1,
+            ..reuse_policy()
+        },
     )?;
     let c = settings(&issuer)?;
     let creds = ProviderCredentials::new("fixture-secret".into(), None)?;
@@ -88,6 +97,22 @@ async fn run() -> anyhow::Result<()> {
     let prepare = |bound| adapter.prepare(bound, &material, AuthenticationMode::Login, deadline());
     prepare(bound.clone()).await?;
     let cold = reuse_counts(&adapter);
+    let shared = async { tokio::try_join!(prepare(bound.clone()), prepare(bound.clone())) };
+    let release_one = async {
+        entered.acquire().await?.forget();
+        release.add_permits(1);
+        Ok::<_, anyhow::Error>(())
+    };
+    let (result, released) =
+        tokio::join!(measured("shared conditional refresh", shared), release_one);
+    released?;
+    result?;
+    assert_eq!(requests.load(SeqCst), 2);
+    assert_eq!(reuse_counts(&adapter), cold);
+    println!(
+        "OIDC shared conditional refresh: GET=1 public_decodes=0 resident_bytes={}",
+        cold.2
+    );
     let concurrent = async { tokio::try_join!(prepare(bound.clone()), prepare(bound.clone())) };
     let unblock = async {
         entered.acquire().await.map(|p| p.forget())?;
@@ -99,7 +124,7 @@ async fn run() -> anyhow::Result<()> {
     result?;
     let after = reuse_counts(&adapter);
     // One caller consumed the checked 304, the other fetched its private no-store response.
-    assert_eq!(requests.load(SeqCst), 3);
+    assert_eq!(requests.load(SeqCst), 4);
     assert_eq!((after.0, after.2), (cold.0 + 1, 0));
     println!(
         "OIDC concurrent refresh: GET=2 public_decodes=1 resident_bytes={}",
@@ -109,7 +134,9 @@ async fn run() -> anyhow::Result<()> {
     let mut pending = prepare(bound.clone());
     tokio::select! {result=&mut pending=>anyhow::bail!("unexpected early result {result:?}"), permit=entered.acquire()=>permit?.forget()}
     drop(pending);
-    release.add_permits(1);
+    release.add_permits(2);
+    prepare(bound.clone()).await?;
+    assert_eq!(requests.load(SeqCst), 6);
     adapter.revisions().retire(bound.revision());
     assert!(prepare(bound.clone()).await.is_err());
     let fresh = fixture_install(

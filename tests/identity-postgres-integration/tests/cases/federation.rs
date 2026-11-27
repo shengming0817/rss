@@ -270,10 +270,7 @@ async fn reference_visible(
     })).await?)
 }
 
-pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
-    let scope = binding(f.key.tenant);
-    let s = service(f);
-    let p = enabled(f, &s).await?;
+async fn link_fixture(f: &Fixture, p: &ProviderView, subject: &str) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO identity_authority.external_identities VALUES ($1::uuid,$2,$3,$4::uuid,$5,$6)",
     )
@@ -282,9 +279,16 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     .bind(f.key.principal.as_uuid())
     .bind(p.id.to_string())
     .bind(p.settings.issuer().as_str())
-    .bind("oidc:manager")
+    .bind(format!("oidc:{subject}"))
     .execute(&f.owner)
     .await?;
+    Ok(())
+}
+pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    let s = service(f);
+    let p = enabled(f, &s).await?;
+    link_fixture(f, &p, "manager").await?;
     let oidc = issued(finish(&s, begin(f, &s, &p).await?, "manager").await?);
     let first = uuid::Uuid::from_u128(1);
     sqlx::query("UPDATE identity_authority.sessions SET session_id=$2 WHERE session_id=$1")
@@ -340,6 +344,20 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     .bind(p.settings.issuer().as_str())
     .execute(&f.owner)
     .await?;
+    let second = issued(finish(&s, begin(f, &s, &p).await?, "manager").await?);
+    let other = enabled(f, &s).await?;
+    link_fixture(f, &other, "other-manager").await?;
+    let third = issued(finish(&s, begin(f, &s, &other).await?, "other-manager").await?);
+    let local_actor = f.actor().await?;
+    let start = f.oidc.checks.load(Ordering::SeqCst);
+    let mixed = f
+        .store
+        .list_sessions(local_actor, None, 100, deadline())
+        .await?;
+    for id in [id, second.view().id, third.view().id] {
+        assert!(mixed.sessions.iter().any(|v| v.id == id));
+    }
+    assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - start, 2);
     let withdrawn = withdrawn_authority(f).await?;
     let local = f.actor().await?;
     let local_id = local.view().id;

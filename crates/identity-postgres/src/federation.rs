@@ -525,6 +525,9 @@ impl Federation {
     }
     /// Revoke old authentication facts when the host changes ACR/AMR interpretation. This never admits or disables an IdP.
     /// Existing provider versions fence attempts; epochs fence every federated session.
+    /// Each call visits a bounded keyset up to its initial upper provider ID. Each changed batch
+    /// commits its events and generation changes together. A later error leaves earlier commits
+    /// intact. Another pass rechecks current state and includes edits/inserts behind the cursor.
     /// ref: PostgreSQL 17 explicit-locking; reuse the same tenant/provider lock order as administration.
     pub async fn reconcile_assurance_profiles(
         &self,
@@ -558,28 +561,43 @@ impl Federation {
         let Some(upper) = bound else {
             return Ok(());
         };
-        let mut after = None;
+        // The schema excludes nil provider IDs, so every page can seek the same index range.
+        let mut after = Uuid::nil();
         let mut scanned = 0;
         loop {
             let oidc = self.oidc.clone();
-            let (last, count, changed) = self.authority.read_sql(binding, cutoff, move |c| Box::pin(async move {
-                const PAGE: i64 = 64;
-                let rows = sqlx::query("SELECT * FROM identity_authority.providers WHERE tenant_id=$1::uuid
-                    AND ($2::uuid IS NULL OR provider_id>$2) AND provider_id<=$3 ORDER BY provider_id LIMIT $4")
-                    .bind(tenant.to_string()).bind(after).bind(upper).bind(PAGE).fetch_all(c).await?;
-                let count = rows.len();
-                let mut last = None;
-                let mut changed = Vec::new();
-                for row in rows {
-                    let id: Uuid = row.try_get("provider_id")?;
-                    let view = db::decode_provider(&row)?;
-                    if oidc.assurance_profile(tenant,&view.settings).fingerprint != view.assurance_profile {
-                        changed.push(id);
-                    }
-                    last = Some(id);
-                }
-                Ok((last,count,changed))
-            })).await?;
+            let (last, count, changed) = self
+                .authority
+                .read_sql(binding, cutoff, move |c| {
+                    Box::pin(async move {
+                        const PAGE: i64 = 64;
+                        let rows = sqlx::query(
+                            "SELECT * FROM identity_authority.providers WHERE tenant_id=$1::uuid
+                    AND provider_id>$2 AND provider_id<=$3 ORDER BY provider_id LIMIT $4",
+                        )
+                        .bind(tenant.to_string())
+                        .bind(after)
+                        .bind(upper)
+                        .bind(PAGE)
+                        .fetch_all(c)
+                        .await?;
+                        let count = rows.len();
+                        let mut last = None;
+                        let mut changed = Vec::new();
+                        for row in rows {
+                            let id: Uuid = row.try_get("provider_id")?;
+                            let view = db::decode_provider(&row)?;
+                            if oidc.assurance_profile(tenant, &view.settings).fingerprint
+                                != view.assurance_profile
+                            {
+                                changed.push(id);
+                            }
+                            last = Some(id);
+                        }
+                        Ok((last, count, changed))
+                    })
+                })
+                .await?;
             scanned += count;
             if scanned > usize::from(MAX_PROVIDERS) {
                 return Err(AuthorityError::Rejected);
@@ -611,7 +629,10 @@ impl Federation {
                 })).await?;
             }
             // Later insertions behind the cursor and edits to visited rows belong to the next pass.
-            if last.is_none() || last == Some(upper) {
+            let Some(last) = last else {
+                return Ok(());
+            };
+            if last == upper {
                 return Ok(());
             }
             after = last;

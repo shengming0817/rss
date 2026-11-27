@@ -109,6 +109,12 @@ fn pool_pressure() -> anyhow::Result<()> {
             assert_eq!(permit.is_err(), protected == N);
             assert!(held.iter().all(|r| Arc::strong_count(r) > 1));
         }
+        if victims >= 16 && protected < N {
+            assert!(
+                examined <= samples.len() * 3 * N,
+                "multi-item admission must bound map scans"
+            );
+        }
         samples.sort_unstable();
         println!(
             "pool pressure victims={victims} protected={protected} visits={} lock_p50_ns={} lock_p95_ns={} rejected={rejected}/41",
