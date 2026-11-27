@@ -28,8 +28,8 @@ Restore the version-matched definitions before retrying; no compatibility bypass
 Trusted administrator DDL after construction remains outside the admission guarantee. The owner must
 not be reachable through SET ROLE. Products provision roles and execute migrations.
 
-The batch function `save_page` requires EXECUTE for each declared caller. It raises a fencing error
-when any version fails the scalar CAS, rolling back the page in the caller’s transaction.
+The batch function `save_page` requires EXECUTE for each declared caller. A missed version raises a serialization failure and rolls back the entire transaction.
+Retry the page from the last committed cursor after checking the transaction outcome.
 
 Install the separately versioned messaging schema with its own documented runtime grants. New
 component installations never read, modify, migrate or adopt historical `device_commands` rows.
@@ -64,7 +64,7 @@ between payload and command intent remain product responsibilities.
 - Initialize authority explicitly. Queue multiple commands using the same authority; commands
   are unique by `(tenant, command ID)`, not by device. A dispatch message can belong to only one
   command in its tenant. Same create facts replay; different facts conflict.
-- Ordinary commands share their scope’s authority row. Advance takes the exclusive lock first.
+- Ordinary commands share their scope’s authority row. Transactions that will advance a scope call advance before other command operations on it, taking the exclusive lock first.
   Creation serializes each tenant-local command ID, and point mutations lock the command row
   before sampling time and applying version CAS. Batch writes acquire rows in command-ID order. Authority advancement and supersession use the same transaction. Pages
   bound memory, while the original transaction deadline bounds the entire authority change.

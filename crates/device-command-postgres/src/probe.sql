@@ -31,7 +31,7 @@ acl(owner,grantee,privilege_type,is_grantable) AS (
  CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
 ), checks(priority,reason,valid) AS (VALUES
  (1,'revision',
-    (SELECT obj_description(oid,'pg_namespace')='rss-device-command-postgres:1' FROM namespace)
+    (SELECT obj_description(oid,'pg_namespace')='rss-device-command-postgres:2' FROM namespace)
     AND (SELECT count(*)=2 FROM rels)),
  (2,'relations',
     (SELECT bool_and(relkind='r' AND relpersistence='p' AND relowner=(SELECT nspowner FROM namespace)) FROM rels)

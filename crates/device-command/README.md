@@ -37,7 +37,7 @@ authorization. Only a committed Eligible result may be considered for protocol-s
 A matching Direct report binds that ID even after termination.
 
 Only durable publication confirmation reaches Published; device ACK reaches Received; an exact
-actual-state match after Received reaches Applied. A device may reject after either Published
+actual-state match after Received reaches Applied. A device may reject after Published, Claimed
 or Received. Expiry, cancellation and supersession are terminal server decisions. They never
 prove that the device did not execute an old command. Gateway/device replay protection is a
 separate product responsibility.
@@ -62,7 +62,7 @@ authorizes transport ACK before the enclosing transaction's confirmed settlement
 replay returns the existing snapshot; changed immutable facts conflict. Products own authored
 message contracts, routes and protocol payloads and must bind them to the same command intent.
 
-An early ACK or actual-state report returns OutOfOrder. The consumer must roll back/release and
+A report that has a valid delivery identity but is missing a predecessor can return OutOfOrder. A direct report must match a durable claim ID; a missing or mismatched issuance is Fenced. For an OutOfOrder result, the consumer must roll back/release and
 persistently redeliver that original ingress; it must not write a terminal Inbox receipt. This
 library does not keep another ingress journal, queue, receipt database or transport sequence.
 See the PostgreSQL package for composition with the existing Inbox transaction.

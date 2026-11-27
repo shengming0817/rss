@@ -209,9 +209,15 @@ impl Store for PgStore {
         {
             return Err(error(Error::Fenced));
         }
-        lock_creation(tx, &spec).await?;
+        let existing = match read(tx, spec.scope(), spec.id()).await? {
+            Some(command) => Some(command),
+            None => {
+                lock_creation(tx, &spec).await?;
+                read(tx, spec.scope(), spec.id()).await?
+            }
+        };
         let identity = delivery.identity();
-        if let Some(existing) = read(tx, spec.scope(), spec.id()).await? {
+        if let Some(existing) = existing {
             if existing.spec() != &spec || existing.record().delivery != identity {
                 return Err(error(Error::Conflict));
             }

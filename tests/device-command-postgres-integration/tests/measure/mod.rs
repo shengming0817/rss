@@ -29,8 +29,10 @@ async fn authority_cost() -> anyhow::Result<()> {
                 f.queue(&format!("measure-{k}-{i}"), s, c).await?;
             }
             if contended {
-                let wait_us = wait_cost(&f, s, c, next).await?;
-                eprintln!("MEASURE active={count} same_device_wait_us={wait_us}");
+                let (ack_us, blocked_us, clear_us) = wait_cost(&f, s, c, next).await?;
+                eprintln!(
+                    "MEASURE active={count} release_to_peer_ack_us={ack_us} last_blocked_us={blocked_us} first_clear_us={clear_us}"
+                );
             } else {
                 let lsn: String = sqlx::query_scalar("SELECT pg_current_wal_insert_lsn()::text")
                     .fetch_one(&f.owner)
@@ -103,7 +105,12 @@ async fn session(
 }
 // Queue the exclusive handoff first and a real same-device check second. Start timing
 // only when the test gate is released, excluding the deliberate lock-queue setup.
-async fn wait_cost(f: &Fixture, s: Scope, c: Coordinate, next: Coordinate) -> anyhow::Result<u128> {
+async fn wait_cost(
+    f: &Fixture,
+    s: Scope,
+    c: Coordinate,
+    next: Coordinate,
+) -> anyhow::Result<(u128, u128, u128)> {
     let mut gate = f.owner.begin().await?;
     let gate_pid:i32=sqlx::query_scalar("SELECT pg_backend_pid() FROM rss_device_command.authorities WHERE device_id=$1::uuid FOR UPDATE").bind(s.device().as_uuid().to_string()).fetch_one(&mut *gate).await?;
     let (a_tx, a_rx) = oneshot::channel();
@@ -140,15 +147,43 @@ async fn wait_cost(f: &Fixture, s: Scope, c: Coordinate, next: Coordinate) -> an
             wait_edge(f, b_pid, a_pid).await?;
             let start = Timer::new().now();
             gate.commit().await?;
-            anyhow::Ok(start)
+            let gate_released = Timer::new().now();
+            let (last, clear) = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut last = 0;
+                loop {
+                    let sample = Timer::new().now();
+                    let waiting: bool = sqlx::query_scalar("SELECT $2=ANY(pg_blocking_pids($1))")
+                        .bind(b_pid)
+                        .bind(a_pid)
+                        .fetch_one(&f.owner)
+                        .await?;
+                    if !waiting {
+                        return anyhow::Ok((
+                            last,
+                            Timer::new()
+                                .now()
+                                .saturating_duration_since(gate_released)
+                                .as_micros(),
+                        ));
+                    }
+                    last = sample.saturating_duration_since(gate_released).as_micros();
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await??;
+            anyhow::Ok((start, last, clear))
         };
-        let (start, b) = tokio::join!(release, b);
-        let interval = Timer::new()
-            .now()
-            .saturating_duration_since(start?)
-            .as_micros();
-        committed(b)?;
-        anyhow::Ok(interval)
+        let observe_peer = async {
+            committed(b.await)?;
+            anyhow::Ok(Timer::new().now())
+        };
+        let (observed, ack) = tokio::join!(release, observe_peer);
+        let (start, last, clear) = observed?;
+        anyhow::Ok((
+            ack?.saturating_duration_since(start).as_micros(),
+            last,
+            clear,
+        ))
     };
     let (result, elapsed) = tokio::join!(a, probe);
     committed(result)?;

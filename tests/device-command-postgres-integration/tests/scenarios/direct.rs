@@ -208,6 +208,7 @@ pub(crate) async fn run(original: &Fixture) -> anyhow::Result<()> {
     assert_eq!(before, after);
     concurrent(&f, c, id).await?;
     competing_claims(&f, c, id, other).await?;
+    replay_during_claim(&f, c, id).await?;
     ordered(&f, c).await?;
     f.runtime.close().await;
     Ok(())
@@ -394,6 +395,7 @@ async fn ordered(f: &Fixture, c: Coordinate) -> anyhow::Result<()> {
             Some(PartitionKey::parse("ordered-direct")?),
         )?;
         let authored = spec("ordered-new", s, next)?;
+        let (staged, evidence) = oneshot::channel();
         let result = f
             .runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
@@ -403,6 +405,7 @@ async fn ordered(f: &Fixture, c: Coordinate) -> anyhow::Result<()> {
                         .await?;
                     store.advance(tx, s, c, next).await?;
                     store.queue(tx, authored, Delivery::Outbox(pending)).await?;
+                    staged.send(()).map_err(|_| sqlx::Error::PoolClosed)?;
                     if rollback {
                         return Err(sqlx::Error::PoolTimedOut.into());
                     }
@@ -410,6 +413,7 @@ async fn ordered(f: &Fixture, c: Coordinate) -> anyhow::Result<()> {
                 })
             })
             .await;
+        evidence.await?;
         if rollback {
             assert_eq!(status(result), "rolled-back");
             assert_eq!(
@@ -427,5 +431,52 @@ async fn ordered(f: &Fixture, c: Coordinate) -> anyhow::Result<()> {
     }
     let ordinals:Vec<i64>=sqlx::query_scalar("SELECT partition_seq FROM rss_transactional_messaging.outbox WHERE partition_key='ordered-direct'").fetch_all(&f.owner).await?;
     assert_eq!(ordinals, [1]);
+    Ok(())
+}
+
+async fn replay_during_claim(f: &Fixture, c: Coordinate, id: ClaimId) -> anyhow::Result<()> {
+    let s = device(336506)?;
+    let name = "replay-during-claim";
+    f.initialize(s, c).await?;
+    let initial = create(f, name, s, c, i64::MAX).await?;
+    let first_spec = initial.spec().clone();
+    let second_spec = first_spec.clone();
+    let (ready, started) = oneshot::channel();
+    let (resume, release) = oneshot::channel();
+    let store = f.store.clone();
+    let claimant = f
+        .runtime
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+            Box::pin(async move {
+                let _claim = store.claim_direct(tx, s, first_spec.id(), c, id).await?;
+                notify_and_hold(tx, ready, release).await?;
+                store.queue(tx, first_spec, direct()).await
+            })
+        });
+    let replay = async {
+        let blocker = started.await?;
+        let store = f.store.clone();
+        let other = f
+            .runtime
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move {
+                    let snapshot = store.queue(tx, second_spec, direct()).await?;
+                    store.claim_direct(tx, s, snapshot.spec().id(), c, id).await
+                })
+            });
+        let release = async {
+            super::advance::wait_for_blocked(f, blocker).await?;
+            resume
+                .send(())
+                .map_err(|_| anyhow::anyhow!("claim transaction ended"))
+        };
+        let (result, gate) = tokio::join!(other, release);
+        gate?;
+        committed(result)
+    };
+    let (first, second) = tokio::join!(claimant, replay);
+    let command = committed(first)?;
+    assert_eq!(command.version(), 2);
+    assert_eq!(second?, DirectClaim::Eligible(command));
     Ok(())
 }

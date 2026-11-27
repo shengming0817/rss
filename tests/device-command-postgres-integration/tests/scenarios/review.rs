@@ -57,7 +57,7 @@ pub(crate) async fn diagnostic_classes(f: &Fixture) -> anyhow::Result<()> {
     for (change, restore, expected) in [
         (
             "COMMENT ON SCHEMA rss_device_command IS 'incorrect'",
-            "COMMENT ON SCHEMA rss_device_command IS 'rss-device-command-postgres:1'",
+            "COMMENT ON SCHEMA rss_device_command IS 'rss-device-command-postgres:2'",
             "revision",
         ),
         (
