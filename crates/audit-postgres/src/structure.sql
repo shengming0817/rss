@@ -1,0 +1,51 @@
+-- Shared by installation verification and runtime admission in one statement snapshot.
+WITH relations AS MATERIALIZED (
+ SELECT c.*, n.nspowner FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname='rss_audit'
+), columns AS MATERIALIZED (
+ SELECT a.*, c.relname FROM pg_catalog.pg_attribute a JOIN relations c ON c.oid=a.attrelid
+ WHERE c.relkind='r' AND a.attnum>0
+), constraints AS MATERIALIZED (
+ SELECT k.*, c.relname FROM pg_catalog.pg_constraint k JOIN relations c ON c.oid=k.conrelid
+), functions AS MATERIALIZED (
+ SELECT p.*, n.nspowner, l.lanname FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+ JOIN pg_catalog.pg_language l ON l.oid=p.prolang WHERE n.nspname='rss_audit'
+), structure AS (
+SELECT
+(SELECT pg_catalog.count(*)=3 AND pg_catalog.bool_and(i.indisvalid AND i.indisready AND i.indislive AND i.indexprs IS NULL)
+ AND pg_catalog.count(*) FILTER (WHERE i.indpred IS NULL)=2
+ AND pg_catalog.count(*) FILTER (WHERE i.indisunique AND i.indimmediate AND am.amname='btree'
+   AND i.indnkeyatts=2 AND i.indnatts=2
+   AND pg_catalog.pg_get_indexdef(i.indexrelid,1,false)='tenant_id'
+   AND pg_catalog.pg_get_indexdef(i.indexrelid,2,false)='ledger_sequence'
+   AND (SELECT pg_catalog.array_agg(op.opcname ORDER BY k.ord)
+        FROM pg_catalog.unnest(i.indclass) WITH ORDINALITY k(oid,ord) JOIN pg_catalog.pg_opclass op ON op.oid=k.oid
+        WHERE op.opcnamespace='pg_catalog'::pg_catalog.regnamespace)=ARRAY['uuid_ops','int8_ops']::pg_catalog.name[]
+   AND pg_catalog.pg_get_expr(i.indpred,i.indrelid)='(ledger_sequence IS NOT NULL)')=1
+ FROM pg_catalog.pg_index i JOIN relations c ON c.oid=i.indrelid
+ JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid JOIN pg_catalog.pg_am am ON am.oid=idx.relam
+ WHERE c.relname='records') AS indexes,
+(SELECT count(*)=7 AND bool_and(NOT attisdropped AND NOT atthasdef AND attidentity='' AND attgenerated=''
+ AND attcollation=CASE WHEN attname IN ('source_id','event_id') THEN 'pg_catalog."C"'::regcollation::oid ELSE 0::oid END)
+ AND array_agg(relname||':'||attname||':'||format_type(atttypid,atttypmod)||':'||attnotnull::text ORDER BY relname,attnum)
+ = ARRAY['records:tenant_id:uuid:true',
+ 'records:source_id:text:true','records:event_id:text:true','records:position:bigint:true',
+ 'records:recorded_at:bigint:true','records:canonical:bytea:true','records:ledger_sequence:bigint:false']
+ FROM columns) AS columns,
+(SELECT pg_catalog.bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
+ -- append_batch addresses the conflict target by constraint name.
+ AND pg_catalog.count(*) FILTER (WHERE relname='records' AND contype='p' AND conname='records_pkey')=1
+ -- PostgreSQL 18 also catalogs column NOT NULL constraints; the column check covers their shape.
+ AND pg_catalog.array_agg(relname||':'||pg_catalog.pg_get_constraintdef(oid) ORDER BY (relname||':'||pg_catalog.pg_get_constraintdef(oid)) COLLATE pg_catalog."C")
+   FILTER (WHERE contype<>'n')=$2::pg_catalog.text[]
+ FROM constraints) AS constraints,
+(SELECT pg_catalog.count(*)=1 AND pg_catalog.bool_and(proname='append_batch' AND prosrc=$1
+ AND prosecdef AND proowner=nspowner AND proconfig=ARRAY['search_path=pg_catalog, rss_audit']
+ AND prokind='f' AND lanname='plpgsql' AND provolatile='v'
+ AND pg_catalog.pg_get_function_identity_arguments(oid)='p_tenant uuid, p_sources text[], p_events text[], p_recorded bigint[], p_canonical bytea[], p_ledger bigint[]'
+ AND prorettype='pg_catalog.record'::pg_catalog.regtype AND proallargtypes=ARRAY['pg_catalog.uuid'::pg_catalog.regtype,'pg_catalog.text[]'::pg_catalog.regtype,'pg_catalog.text[]'::pg_catalog.regtype,'pg_catalog.int8[]'::pg_catalog.regtype,'pg_catalog.bytea[]'::pg_catalog.regtype,'pg_catalog.int8[]'::pg_catalog.regtype,'pg_catalog.text'::pg_catalog.regtype,'pg_catalog.text'::pg_catalog.regtype,'pg_catalog.int8'::pg_catalog.regtype]::pg_catalog.oid[]
+ AND proargmodes=ARRAY['i','i','i','i','i','i','t','t','t']::pg_catalog."char"[]
+ AND proargnames=ARRAY['p_tenant','p_sources','p_events','p_recorded','p_canonical','p_ledger','source_id','event_id','position']
+ AND NOT proisstrict AND NOT proleakproof AND proparallel='u' AND proretset AND pronargdefaults=0)
+ FROM functions) AS functions
+)

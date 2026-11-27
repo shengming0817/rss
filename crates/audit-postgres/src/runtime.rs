@@ -47,7 +47,7 @@ pub struct PgAudit {
     fault: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 impl PgAudit {
-    /// Validate the actual schema and runtime role, without migration or session mutation.
+    /// Validate the actual schema and runtime role, restoring session settings before returning.
     pub async fn new<T: ExecutionTimer>(
         pool: PgPool,
         integrity: Integrity,
@@ -91,7 +91,7 @@ impl PgAudit {
         self.budget()?.try_admit(records)
     }
     /// Verify the actual host runtime connection before accepting work.
-    /// Does not acquire another connection, change settings or settle a transaction.
+    /// Borrows the same connection and restores settings before returning to the caller.
     /// The host bounds server execution and isolates unconfirmed connections on cancellation.
     pub async fn validate_connection<T: ExecutionTimer>(
         &self,
@@ -461,6 +461,18 @@ pub(crate) fn ledger_id(tenant: TenantId) -> Result<rss_ledger::LedgerId, Error>
 }
 
 pub(crate) async fn validate_storage<T: ExecutionTimer>(
+    connection: &mut PgConnection,
+    integrity: &Integrity,
+    control: &Control<'_, T>,
+    append: bool,
+) -> Result<(), Error> {
+    let mut scope = probe::CatalogScope::open(connection).await?;
+    let result = inspect_storage(scope.connection(), integrity, control, append).await;
+    scope.restore().await?;
+    result
+}
+
+async fn inspect_storage<T: ExecutionTimer>(
     connection: &mut PgConnection,
     integrity: &Integrity,
     control: &Control<'_, T>,

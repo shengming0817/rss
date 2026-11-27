@@ -134,12 +134,21 @@ it does not prove rollback or authorize a retry.
 
 ## Installation and startup validation
 
+`validate_structure(&mut PgConnection)` checks the Audit columns, indexes, constraints, and
+`append_batch` signature, output and implementation in one catalog query. An installer
+can call it once per verification transaction, including a read-only snapshot. The
+caller owns the connection, deadline and outer commit or rollback. Catalog probes render
+definitions under a local catalog search path with identifier quoting set to its default.
+They restore the caller’s settings before returning, including on admission failure. If a
+probe on a borrowed transaction is interrupted before cleanup is acknowledged,
+roll back that transaction or retire the connection. Role and RLS admission
+run on the actual runtime connection at startup.
+
 `PgAudit::new` validates the actual Audit pool's role, schema, RLS, ACLs and functions.
 Ledger mode validates Ledger storage on the same lease, including for a one-connection pool.
 For a different borrowed runtime, call `validate_connection(connection, control)` or
 `validate_in(message_transaction, integrity)` during startup using its **actual** credential/connection.
-The latter inherits the original message owner's budget; neither method changes settings,
-acquires a second connection, repairs permissions or owns settlement. Hosts must bound server
+The latter inherits the original message owner's budget; both restore the caller’s session settings and retain the same connection and outer transaction. Hosts must bound server
 execution and retire unconfirmed connections after cancellation.
 
 Database engines, controlled deployment roles and trusted host infrastructure are inside the

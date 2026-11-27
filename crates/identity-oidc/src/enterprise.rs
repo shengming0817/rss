@@ -214,9 +214,8 @@ mod tests {
     use serde_json::json;
     #[test]
     fn exchange_binds_the_signed_token_to_issuer_client_and_host_time() -> anyhow::Result<()> {
-        let key = jsonwebtoken::DecodingKey::from_jwk(&serde_json::from_str(include_str!(
-            "../tests/fixtures/entra-a.json"
-        ))?)?;
+        let jwk = serde_json::from_str(include_str!("../tests/fixtures/entra-a.json"))?;
+        let key = jsonwebtoken::DecodingKey::from_jwk(&jwk)?;
         let signer = EncodingKey::from_rsa_der(include_bytes!("../tests/fixtures/entra-a.der"));
         let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(100);
         let claims =
