@@ -504,6 +504,37 @@ class CiImpactContract(unittest.TestCase):
         _, decision = self.repo.select(base=base, head=head)
         self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
 
+    def test_fixture_with_literal_and_computed_readers_selects_both(self):
+        fixture = "tests/fixtures/shared.rs"
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')
+        self.repo._write("tests/other-integration/src/lib.rs",
+                         'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../", "fixtures/", "shared.rs"));\n')
+        self.repo._write("crates/other/src/lib.rs",
+                         'pub fn load(name: &str) { let _ = std::fs::read(format!("../tests/fixtures/{name}")); }\n')
+        base = self.repo.change(fixture, "pub struct Shared;\n")
+        head = self.repo.change(fixture, "pub struct Updated;\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other", "other-integration"],
+                             reason="package-change")
+
+    def test_snapshot_preserves_caller_head_index_and_files_under_git_hook_environment(self):
+        member = self.repo.root / "crates/leaf/Cargo.toml"
+        head = self.repo.change("crates/leaf/Cargo.toml", member.read_text() + "# committed\n")
+        self.repo._write("README.md", "staged\n")
+        self.repo.git("add", "README.md")
+        self.repo._write("README.md", "working copy\n")
+        def state():
+            return (self.repo.git("symbolic-ref", "HEAD").stdout, self.repo.git("rev-parse", "HEAD").stdout,
+                    self.repo.git("ls-files", "--stage").stdout, self.repo.git("diff").stdout,
+                    self.repo.git("status", "--porcelain").stdout)
+        before = state()
+        for key, file in (("GIT_DIR", ".git"), ("GIT_INDEX_FILE", ".git/index")):
+            with self.subTest(key=key):
+                _, decision = self.repo.select(head=head, environment={key: str(self.repo.root / file)})
+                self.assertEqual(state(), before)
+                self.assert_decision(decision, full=False, packages=["leaf", "leaf-integration"],
+                                     reason="package-change")
+
     def test_unattributed_fixture_fails_full(self):
         head = self.repo.change("tests/fixtures/unknown.rs", "pub struct Unknown;\n")
         _, decision = self.repo.select(head=head)

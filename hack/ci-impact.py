@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import cache
 import json
 import os
 import posixpath
@@ -59,11 +60,26 @@ def emit(full: bool, packages: set[str] | None, reasons: set[str]) -> None:
     print(json.dumps(decision, separators=(",", ":"), ensure_ascii=False))
 
 
+@cache
+def local_git_variables() -> set[str]:
+    result = subprocess.run(["/usr/bin/git", "rev-parse", "--local-env-vars"],
+                            check=True, capture_output=True, text=True)
+    return set(result.stdout.splitlines())
+
+
+def repository_env() -> dict[str, str]:
+    # Each command has an explicit repository cwd. In particular, a snapshot
+    # must never inherit the calling hook's GIT_DIR, GIT_WORK_TREE or index.
+    local = local_git_variables()
+    return {key: value for key, value in os.environ.items() if key not in local}
+
+
 def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(
             command,
             cwd=cwd,
+            env=repository_env(),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -143,6 +159,7 @@ def metadata(root: Path) -> dict:
         result = subprocess.run(
             ["cargo", "metadata", "--locked", "--all-features", "--format-version", "1"],
             cwd=root,
+            env=repository_env(),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -253,7 +270,7 @@ def checkout(root: Path, revision: str):
     with tempfile.TemporaryDirectory(prefix="rss-impact-") as directory:
         snapshot = Path(directory).resolve() / "repo"
         git(root, "clone", "--quiet", "--shared", "--no-checkout", "--", str(root), str(snapshot))
-        git(snapshot, "checkout", "--quiet", "--detach", sha)
+        git(snapshot, "-c", "core.hooksPath=" + os.devnull, "checkout", "--quiet", "--detach", sha)
         yield snapshot
 
 
@@ -338,35 +355,29 @@ def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
     # references conservatively (e.g. a build script constructing a filename).
     basename = PurePosixPath(path).name
     result = run(["/usr/bin/git", "grep", "-I", "-z", "-F", "-e", basename,
-                  "-e", "fixtures/", "-e", '/fixtures"', revision, "--"], cwd=root)
+                  "-e", "fixtures", revision, "--"], cwd=root)
     if result.returncode not in (0, 1):
         raise SelectionError("diff-unavailable")
+    direct = re.compile(r'(?:#\[\s*path\s*=|include(?:_bytes|_str)?!\s*\()\s*"([^"\\]+)"')
+    directory = re.compile(r"""(?:["'/])fixtures(?:[/{"']|$)""")
     packages = set()
     for row in result.stdout.decode().splitlines():
         filename, line = row.split("\0", 1)
         filename = filename.split(":", 1)[1]
-        if is_docs(filename):
+        if is_docs(filename) or filename in SELECTOR_FILES:
             continue
         package = owner(filename, roots)
         if package is None:
-            # Tooling may discuss the fixture directory; a reference to this
-            # particular file outside a package has no attributable consumer.
-            if basename in line:
+            if basename in line or "tests/fixtures" in line:
                 raise SelectionError("unknown-fixture-owner")
             continue
-        literals = re.findall(r"""["']([^"'\\]*)["']""", line)
-        references = [value for value in literals if "fixtures" in value or basename in value]
-        package_root = next(directory for directory, name in roots if name == package)
-        if re.search(r'(?:#\[path\s*=|include(?:_bytes|_str)?!\s*\()\s*"', line):
-            origins = (posixpath.dirname(filename),)
-        else:
-            origins = ("", posixpath.dirname(filename), str(package_root))
-        targets = {posixpath.normpath(posixpath.join(origin, value.lstrip("/")))
-                   for origin in origins for value in references}
-        if any(target == path or path.startswith(target + "/") for target in targets):
+        # Only direct literal Rust includes have a known source-relative base.
+        # Any remaining constructed filename or directory could read this fixture.
+        imports = direct.findall(line)
+        remainder = direct.sub("", line)
+        if (any(posixpath.normpath(posixpath.join(posixpath.dirname(filename), value)) == path
+                for value in imports) or basename in remainder or directory.search(remainder)):
             packages.add(package)
-        elif basename in line and not references:
-            packages.add(package)  # A nonliteral reference still names the fixture.
     if not packages:
         raise SelectionError("unknown-fixture-owner")
     return packages
@@ -418,7 +429,9 @@ def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
 def main() -> None:
     try:
         base, head = parse_args(sys.argv[1:])
-        root_result = run(["/usr/bin/git", "rev-parse", "--show-toplevel"], cwd=Path.cwd())
+        # Locate the caller first, then isolate all repository-bound children.
+        root_result = subprocess.run(["/usr/bin/git", "rev-parse", "--show-toplevel"],
+                                     capture_output=True)
         if root_result.returncode != 0:
             raise SelectionError("diff-unavailable")
         try:
