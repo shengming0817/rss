@@ -1,5 +1,6 @@
 //! Account queries execute before LIMIT under the authenticated tenant transaction.
 //! ref: launchbadge/sqlx v0.9.0 sqlx-core/src/query_builder.rs.
+mod page;
 use crate::{
     transaction::{MutationError, corrupt, reject},
     *,
@@ -11,7 +12,7 @@ use rss_request_context::Clock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{Postgres, QueryBuilder, Row};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +26,7 @@ pub struct AccountDirectoryRow {
     pub email: Option<String>,
     pub profile_status: String,
     pub department_status: String,
+    /// Available only when the query explicitly selects `departmentSnapshot`.
     pub department_snapshot: Option<rss_identity_core::department::DepartmentSnapshot>,
 }
 /// Across pages, the directory guarantees consistency for the requested projection,
@@ -346,7 +348,7 @@ impl Authority {
                 }
                 let actor_deadline =
                     crate::sessions::checked_expiry(&loaded, budget.cutoff.instant())?;
-                let window = deps
+                let mut window = deps
                     .window(
                         c,
                         actor.key.tenant,
@@ -405,78 +407,44 @@ impl Authority {
                     }
                 }
 
-                // The five prefix parameters are bound explicitly; only owner-controlled columns enter SQL.
-                let mut sql = QueryBuilder::<Postgres>::with_arguments(
-                    concat!(
-                        include_str!("department-facts.sql"),
-                        ", profile_facts AS NOT MATERIALIZED (",
-                        include_str!("profile-facts.sql"),
-                        ")",
-                        include_str!("account-directory.sql")
-                    ),
-                    {
-                        use sqlx::Arguments;
-                        let mut args = sqlx::postgres::PgArguments::default();
-                        args.add(actor.key.tenant.to_string())
-                            .map_err(|_| corrupt())?;
-                        args.add(department_source).map_err(|_| corrupt())?;
-                        args.add(window.clock.seconds()).map_err(|_| corrupt())?;
-                        args.add(query.source().filter(|_| profiles).map(str::to_owned))
-                            .map_err(|_| corrupt())?;
-                        args.add(i64::from(max_age)).map_err(|_| corrupt())?;
-                        args
-                    },
-                );
-                sql.push("SELECT to_jsonb(r) FROM account_rows r WHERE ");
-                if let Some(expression) = query.filter() {
-                    filter(&mut sql, expression)?;
-                } else {
-                    sql.push("true");
+                let mut sql = page::query(
+                    actor.key.tenant.to_string(),
+                    department_source,
+                    query.source().filter(|_| profiles),
+                    max_age,
+                    window.clock.seconds(),
+                    &query,
+                    seek.as_ref(),
+                )?;
+                let rows = sql.build().fetch_all(&mut *c).await?;
+                if let Some(next) = rows
+                    .first()
+                    .map(|r| r.try_get::<Option<i64>, _>("next_change"))
+                    .transpose()?
+                    .flatten()
+                {
+                    window.valid_until = window.valid_until.min(next);
+                    page_deadline = page_deadline.min(window.clock.deadline(window.valid_until)?);
                 }
-                if let Some(seek) = &seek {
-                    after(&mut sql, &query, &seek.position)?;
-                }
-                sql.push(" ORDER BY ");
-                for (index, sort) in query.sort().iter().enumerate() {
-                    if index > 0 {
-                        sql.push(",");
-                    }
-                    sql.push(ordered_column(sort.field))
-                        .push(if sort.descending {
-                            " DESC NULLS LAST"
-                        } else {
-                            " ASC NULLS LAST"
-                        });
-                }
-                sql.push(" LIMIT ").push_bind(i64::from(query.limit()) + 1);
-                let values: Vec<Value> = sql.build_query_scalar().fetch_all(&mut *c).await?;
-                let more = values.len() > usize::from(query.limit());
-                let values: Vec<_> = values
-                    .into_iter()
-                    .take(usize::from(query.limit()))
-                    .collect();
-                let next_cursor = if more {
-                    let last = values.last().ok_or_else(corrupt)?;
+                let limit = usize::from(query.limit());
+                let next_cursor = if rows.len() > limit {
                     Some(encode(
                         &key,
                         &Cursor {
                             binding,
                             expires: window.valid_until,
-                            position: query
-                                .sort()
-                                .iter()
-                                .map(|s| last[s.field.name()].clone())
-                                .collect(),
+                            position: page::position(&query, &rows[limit - 1])?,
                         },
                     )?)
                 } else {
                     None
                 };
-                let accounts = values
-                    .into_iter()
-                    .map(serde_json::from_value)
-                    .collect::<Result<_, _>>()
-                    .map_err(|_| corrupt())?;
+                let mut accounts = Vec::with_capacity(rows.len().min(limit));
+                for row in rows.iter().take(limit) {
+                    if let Some(id) = row.try_get("principalId")? {
+                        accounts.push(page::decode(row, id)?);
+                    }
+                }
                 let finished = loaded.timer.now();
                 if finished >= actor_deadline {
                     return Err(reject().into());

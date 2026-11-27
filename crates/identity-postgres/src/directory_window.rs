@@ -153,20 +153,6 @@ impl<'a> ReadDependencies<'a> {
                 valid_until = valid_until.min(next);
             }
         }
-        if let Some(source) = self.department {
-            let next: Option<i64> = sqlx::query_scalar(concat!(
-                include_str!("department-facts.sql"),
-                include_str!("department-expiry.sql")
-            ))
-            .bind(&tenant_id)
-            .bind(source)
-            .bind(now)
-            .fetch_one(&mut *c)
-            .await?;
-            if let Some(next) = next {
-                valid_until = valid_until.min(next);
-            }
-        }
         if let Some((instance, platform)) = self.references {
             let relation = include_str!("session_reference.sql")
                 .replace("{context}", "$1::uuid,$2::uuid,$3::bigint,$4::text")
