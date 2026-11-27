@@ -113,7 +113,7 @@ impl CursorKey {
         expires: i64,
         value: &T,
     ) -> Result<Continuation, Error> {
-        let mut payload = serde_json::to_vec(&(2u8, binding, instance, expires, value))
+        let mut payload = serde_json::to_vec(&(1u8, binding, instance, expires, value))
             .map_err(|_| Error::Invariant)?;
         let mut mac = self.mac()?;
         mac.update(domain);
@@ -146,7 +146,7 @@ impl CursorKey {
         mac.verify_slice(tag).map_err(|_| Error::InvalidCursor)?;
         let (version, b, inst, expires, value): (u8, Digest, String, i64, T) =
             serde_json::from_slice(payload).map_err(|_| Error::InvalidCursor)?;
-        if version != 2 || b != binding || inst != instance || expires <= now {
+        if version != 1 || b != binding || inst != instance || expires <= now {
             return Err(Error::InvalidCursor);
         }
         Ok((expires, value))

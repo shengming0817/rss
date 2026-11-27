@@ -387,7 +387,7 @@ impl Request for AggregateQuery {
     type Position = Position;
     type Metadata = References;
     type Page = AggregatePage;
-    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.aggregate.v3";
+    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.aggregate.v1";
     const INVALIDATED: Error = Error::SnapshotInvalidated;
     fn query(&self) -> &Query {
         self.query()

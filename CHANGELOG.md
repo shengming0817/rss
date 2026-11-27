@@ -6,6 +6,12 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### Fresh-install version baseline
+
+- Start unpublished workspace packages at 0.1.0. The 0.1.0 releases of `rss-diag-context` and `rss-trace-context` remain available on crates.io. Current source APIs may introduce breaking changes. A new publication must use a fresh SemVer version.
+- Install the current component schemas into an empty database. Hosts adopting this revision must provision a fresh store and switch participating producers and consumers together.
+- Identity account and federation audit contracts, stored authentication facts, OIDC state, field protection, message DR digests and storage cursors use their v1 identities. Restart in-flight OIDC flows and paginated queries against the new installation.
+
 ### Recoverable ClickHouse time series (#2813)
 
 - Add `rss-timeseries-clickhouse` with independent PostgreSQL admission/control and
@@ -71,8 +77,8 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Require immutable storage target/lineage and tenant epoch bindings for every PostgreSQL runtime,
   recovery operator and archive repository; remove legacy relay SQL overloads and optional
   authorization-target dispatch. Workspace consumers move directly to the new contract.
-- Add one-way migrations 0007/0008. External restore isolation, lineage installation, role grants
-  and runtime replacement are mandatory; stale claims or archive proofs cannot authorize writes.
+- Install the DR tables and functions with the fresh messaging schema. During restore, the host
+  isolates the store, provisions lineage and role grants, and replaces the runtime before admitting writes.
 
 ### rss-mqtt: canonical Outbox and transactional consumer (#2310)
 
@@ -110,7 +116,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
   resolution with atomic operation receipts. Commit uncertainty remains distinct from rollback.
 - Replace `PgConsumerTx::new` with explicit `receipt_only` / `with_recovery` static composition;
   migrate workspace consumers without aliases. Recovery-specific observations leave messaging core.
-- Add one-way component migrations 0002/0003; runtime requires the current schema. Expired resolution
+- Install the component schema on a fresh database. Expired resolution
   uses `resolved`, never claims publication, and preserves the ordered partition invariant.
 - Operator pools are private to `PgRecoveryStore::connect`; no privileged generic SQL runtime is
   exposed. Exact operation retries reuse receipts; replay identities are unique across operations.
@@ -138,7 +144,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Compensation failure pauses durably; explicit revision-checked resume preserves attempts and keys.
 - Move Saga receipt protection and integrity to the Saga owner. Remove the former consistency,
   diport, vocab, memory, secure and authorization-mint paths without aliases or compatibility flags.
-- Remove Saga-specific APIs from pre-publication `rss-data-protection`; ordinary field AAD is unchanged.
+- Use `rss-data-protection` for ordinary field AAD and keep Saga receipt AAD in `rss-saga`.
   Receipt AAD, canonical JSON, effect-key and HMAC golden vectors preserve their existing bytes.
 - PostgreSQL is a fresh component schema. No historical data adoption is required or provided.
 
@@ -219,7 +225,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Replace delivery-processing failures by reconnecting the provider session, use a distinct
   unbounded subscription backoff policy, and expose relay lease-loss observations.
 
-### rss-transactional-messaging 0.2.0
+### rss-transactional-messaging 0.1.0
 
 - Keep provider-neutral LocalTx outcomes available without producer or consumer features while
   compiling receipt, ingress, settlement, and `ConsumerTx` capabilities only for consumers.
@@ -303,10 +309,9 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Establish authority-free tenant/request values, redacted principals, deadlines, cancellation observation and closed obligation views.
 - Keep trusted mint, cancellation trigger, deadline extension and cross-tenant authority internal.
 
-### rss-platform 0.3.0
+### rss-platform 0.1.0
 
-- Replace the v0.2 crypto/lifecycle/synchronous surface with a typed asynchronous application waist and read-only host projection.
-- This is an intentional breaking cutover with no alias, shim, conversion, feature-gated fallback or dual baseline.
+- Provide the typed asynchronous application interface and read-only host projection.
 
 ### rss-diag-context 0.1.0
 
@@ -336,7 +341,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 - Add recovery-owned archive format/proofs and independently keyed encryption, atomic PG progress/cleanup, and a verified S3 Compliance Object Lock adapter.
 - Replace recovery consumer inspection with explicit HOT availability; new Replay of archived content returns Archived. Preserve original operation receipts and source identities.
-- Require one-way archive schema upgrade and recovery operator column-grant cutover. No legacy API/schema compatibility branch.
+- Install the archive tables with the component schema and grant the recovery operator column-scoped updates.
 - Add real TLS PG/MinIO failure recovery and isolated archive artifact consumption proof.
 - Enforce durable integrity faults and truthful settlement/error categories; rotate expired-generation scans fairly and validate archive format readability before HOT cleanup.
 - Derive bounded archive leases from execution budgets, enforce the complete function allowlist, compile the independent S3 construction path, and keep object-size projections tied to the recovery owner.

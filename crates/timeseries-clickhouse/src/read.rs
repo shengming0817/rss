@@ -133,7 +133,7 @@ impl Request for Query {
     type Position = Position;
     type Metadata = ();
     type Page = Page;
-    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.history.v3";
+    const DOMAIN: &'static [u8] = b"rss.timeseries.clickhouse.history.v1";
     const INVALIDATED: Error = Error::HistoryExpired;
     fn query(&self) -> &Query {
         self

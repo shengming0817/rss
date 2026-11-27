@@ -3,8 +3,8 @@ use super::*;
 use rss_transactional_messaging::message::MessageFingerprint;
 
 pub async fn seed_terminal(owner: &sqlx::PgPool) -> anyhow::Result<()> {
-    let msg = message("legacy-terminal");
-    sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint,disposition) VALUES($1::uuid,'legacy-terminal','test',$2,gen_random_uuid(),clock_timestamp()-interval '1 hour',$3,'succeeded')")
+    let msg = message("seeded-terminal");
+    sqlx::query("INSERT INTO rss_transactional_messaging.inbox(tenant_id,message_id,consumer_group,contract,lease_token,lease_until,fingerprint,disposition) VALUES($1::uuid,'seeded-terminal','test',$2,gen_random_uuid(),clock_timestamp()-interval '1 hour',$3,'succeeded')")
         .bind(tenant().to_string()).bind(serde_json::to_string(&(msg.metadata().contract().id().as_str(), msg.metadata().contract().version().to_string(), msg.metadata().contract().schema_digest().as_str()))?).bind(MessageFingerprint::of(&msg).as_bytes().as_slice()).execute(owner).await?;
     Ok(())
 }

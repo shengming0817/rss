@@ -271,5 +271,5 @@ CREATE UNIQUE INDEX saga_forward_effect ON rss_saga.journal(tenant_id,effect_key
 CREATE INDEX candidates ON rss_saga.instances(tenant_id,(progress->>'status'),expires_at,saga_id);
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_saga FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_saga FROM PUBLIC;
-COMMENT ON SCHEMA rss_saga IS 'rss-saga-postgres:4';
+COMMENT ON SCHEMA rss_saga IS 'rss-saga-postgres:1';
 COMMIT;

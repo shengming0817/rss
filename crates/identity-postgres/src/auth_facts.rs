@@ -140,7 +140,7 @@ impl AuthenticationFacts {
             },
         };
         Ok(Self {
-            format_version: 3,
+            format_version: 1,
             department_snapshot: Box::new(DepartmentObservation::collect(
                 claims.department_snapshot,
                 claims.issued_at,
@@ -161,7 +161,7 @@ impl AuthenticationFacts {
     }
 
     fn checked(self) -> Result<Self, PgError> {
-        if self.format_version != 3 || self.provider_config_version < 1 {
+        if self.format_version != 1 || self.provider_config_version < 1 {
             return Err(corrupt());
         }
         self.department_snapshot.validate()?;
@@ -274,7 +274,7 @@ mod tests {
     }
     #[test]
     #[allow(clippy::unwrap_used, reason = "test fixture")]
-    fn department_format_is_explicit_and_legacy_is_rejected() {
+    fn department_snapshot_is_required_in_stored_facts() {
         let facts = AuthenticationFacts::collect(
             claims(UpstreamGroups::NotConfigured),
             1,
@@ -285,22 +285,17 @@ mod tests {
         )
         .unwrap();
         let value = serde_json::to_value(facts).unwrap();
-        assert_eq!(value["format_version"], 3);
+        assert_eq!(value["format_version"], 1);
         assert_eq!(
             value["department_snapshot"],
             serde_json::json!({"status":"unavailable","reason":"not_configured"})
         );
-        let mut missing = value.clone();
+        let mut missing = value;
         missing
             .as_object_mut()
             .unwrap()
             .remove("department_snapshot");
         assert!(decode(missing).is_err());
-        for version in [1, 2, 4] {
-            let mut legacy = value.clone();
-            legacy["format_version"] = serde_json::json!(version);
-            assert!(decode(legacy).is_err());
-        }
     }
 
     #[test]
@@ -443,7 +438,7 @@ mod tests {
     }
     #[test]
     #[allow(clippy::unwrap_used, reason = "test fixture")]
-    fn storage_rejects_old_or_malformed_formats() {
+    fn storage_rejects_invalid_fields_and_versions() {
         let facts = AuthenticationFacts::collect(
             claims(UpstreamGroups::present(vec![]).unwrap()),
             2,
@@ -455,7 +450,7 @@ mod tests {
         .unwrap();
         let base = serde_json::to_value(facts).unwrap();
         for (key, value) in [
-            ("format_version", serde_json::json!(1)),
+            ("format_version", serde_json::json!(2)),
             ("provider_config_version", serde_json::json!(0)),
             ("mapping_version", serde_json::json!(2)),
         ] {

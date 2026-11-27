@@ -31,10 +31,8 @@ crate 划分、依赖方向及模块边界只按[架构与依赖规则](dependen
 
 - 完整 workspace 行覆盖率 ≥ 80%（`cargo-llvm-cov`）。
 
-## 数据库迁移
+## 数据库安装
 
-- 已提交 migration 只增不改；例外必须有 ADR 说明。
-- 新字段必须有默认值或允许 NULL。
-- 索引形态按阶段：pre-GA / 有序 migration 集 / 新建或空表用普通 `CREATE INDEX`（留在事务型 migration）；
-  `CONCURRENTLY` 仅用于 post-GA 给已填充、有在线流量的生产表加索引。消息专属 SQL artifact 与外部执行边界见 `crates/transactional-messaging-postgres/README.md`。
-- 文件命名：`{序号}_{动词}_{对象}.sql`。
+- 组件维护空数据库的当前安装 SQL，同次更新结构、启动检查和必要的 catalog 指纹。
+- 新建表和索引在安装事务内创建。组件提供 DDL，宿主以专用角色执行安装并配置运行权限。
+  消息组件的具体接入步骤见 [PostgreSQL adapter](../../crates/transactional-messaging-postgres/README.md)。

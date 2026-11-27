@@ -20,7 +20,7 @@ rss-redact.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tokio-util.workspace = true
 rss-transactional-messaging-postgres = { workspace = true, optional = true }
-rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.1.0", default-features = false }
 futures = { workspace = true, features = ["std"] }
 
 [features]

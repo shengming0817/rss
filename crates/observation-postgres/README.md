@@ -23,7 +23,7 @@ GRANT EXECUTE ON FUNCTION rss_observation.activate(text,numeric,text,text), rss_
 ```
 
 Install `MIGRATION_SQL` in a fresh schema as one transaction. Runtime admission verifies storage
-revision 5, its catalog definitions and effective privileges, including those on the tenant
+revision 1, its catalog definitions and effective privileges, including those on the tenant
 admission and journal tables. Both pool constructors check roles the login can assume or administer,
 including indirect membership administration grants.
 
@@ -121,7 +121,7 @@ source lineage (the example uses `rss.observation.v1`), reuses it across restart
 after rebuilding the input journal. This does not authenticate database provenance. Source lineage
 is independent of Reference v1 encoding, producer epoch and source-local positions.
 The flag controls dependencies and APIs only: every installation and every receive uses the same
-revision-5 journal. `bounds` reads the durable committed high-water and the last released position.
+revision-1 journal. `bounds` reads the durable committed high-water and the last released position.
 Each page checks this floor in the same statement snapshot. A cursor equal to the floor may continue;
 an earlier cursor gets HistoryExpired, including an empty page. Exact references use per-batch evidence,
 so a retained active record below the floor can still resolve. Initialize a new generation with `GenerationStart::after`, a host-prepared read model and

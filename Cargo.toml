@@ -67,7 +67,9 @@ members = [
 
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
-# #2315: maintainer confirmed no published or external frozen Rust API commitments.
+# #2315 records the original Rust API compatibility decisions.
+# PR #1806: rss-diag-context and rss-trace-context have immutable 0.1.0 registry
+# releases. Their current source APIs may break from those releases (uncommitted).
 compatibility-adoption = { baseline-rev = "fde9829ab01be3839465c18a7f04de10e152ab00", issue = 2315 }
 packages = [
   { package = "rss-timeseries-clickhouse", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2813 } },
@@ -95,9 +97,9 @@ packages = [
   { package = "rss-redact", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-data-protection", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
-  { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-platform", version-line = "0.1", public-api-owner = "platform-public", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
-  { package = "rss-transactional-messaging", version-line = "0.2", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
+  { package = "rss-transactional-messaging", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-transactional-messaging-runtime", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-transactional-messaging-testkit", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
   { package = "rss-transactional-messaging-amqp", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2315 } },
@@ -107,7 +109,7 @@ packages = [
 
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 repository = "https://github.com/shengming0817/rss"
@@ -147,7 +149,7 @@ bytes = "1"
 log = "0.4"
 rdkafka = { version = "=0.39.0", default-features = false, features = ["ssl-vendored"] }
 rss-transactional-messaging-kafka = { path = "crates/transactional-messaging-kafka", version = "0.1.0" }
-rss-platform = { path = "crates/platform", version = "0.3.0" }
+rss-platform = { path = "crates/platform", version = "0.1.0" }
 axum = { version = "0.8", default-features = false, features = ["json"] }
 tower = { version = "0.5", default-features = false }
 http-body = "1"
@@ -171,7 +173,7 @@ rss-projection-postgres = { path = "crates/projection-postgres", version = "0.1.
 rss-projection = { path = "crates/projection", version = "0.1.0" }
 rss-contract = { path = "crates/contract", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
-rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.2.0" }
+rss-transactional-messaging = { path = "crates/transactional-messaging", version = "0.1.0" }
 rss-transactional-messaging-runtime = { path = "crates/transactional-messaging-runtime", version = "0.1.0" }
 rss-transactional-messaging-testkit = { path = "crates/transactional-messaging-testkit", version = "0.1.0" }
 rss-transactional-messaging-amqp = { path = "crates/transactional-messaging-amqp", version = "0.1.0" }

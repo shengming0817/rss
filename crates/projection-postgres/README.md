@@ -61,7 +61,7 @@ and business-table policies. The tenant setting provides isolation within a trus
 it does not authenticate a caller that already holds database credentials.
 
 The schema contains only source allocators, events, generation/checkpoint state and fact receipts.
-It does not contain product read models or settings. Revision 5 binds each generation to one 32-byte definition and accepts
+It does not contain product read models or settings. Revision 1 binds each generation to one 32-byte definition and accepts
 source/projection names up to 255 bytes. Install as the dedicated schema owner in a database where `rss_projection` is absent.
 Run the script outside an enclosing transaction: it owns its BEGIN and COMMIT. Runtime admission verifies its identity and permissions.
 Consumers with explicit function grants must also grant EXECUTE on

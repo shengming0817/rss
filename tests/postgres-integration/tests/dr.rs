@@ -170,12 +170,12 @@ async fn run() -> anyhow::Result<()> {
         envelope.metadata().contract().clone(),
     );
     use rss_transactional_messaging::inbox::{IdempotencyDisposition, InboxStore, LeaseStatus};
-    let legacy_message = message("legacy-terminal");
-    let legacy_identity = rss_transactional_messaging::inbox::ConsumerIdentity::new(
+    let terminal_message = message("seeded-terminal");
+    let terminal_identity = rss_transactional_messaging::inbox::ConsumerIdentity::new(
         tenant(),
         rss_transactional_messaging::inbox::ConsumerGroup::parse("test")?,
-        legacy_message.id().clone(),
-        legacy_message.metadata().contract().clone(),
+        terminal_message.id().clone(),
+        terminal_message.metadata().contract().clone(),
     );
     assert!(
         matches!(
@@ -183,8 +183,8 @@ async fn run() -> anyhow::Result<()> {
                 .claim(
                     inbox
                         .reserve_claim(
-                            crate::execution(legacy_identity.tenant_id(), 1),
-                            &legacy_identity,
+                            crate::execution(terminal_identity.tenant_id(), 1),
+                            &terminal_identity,
                             deadline()
                         )?
                         .acquire()

@@ -251,7 +251,7 @@ fn after(
     sql.push(")");
     Ok(())
 }
-const CURSOR_DOMAIN: &[u8] = b"identity.accounts.cursor.v2\0";
+const CURSOR_DOMAIN: &[u8] = b"identity.accounts.cursor.v1\0";
 
 fn encode(key: &[u8], cursor: &Cursor) -> Result<String, MutationError> {
     let plain = serde_json::to_vec(cursor).map_err(|_| corrupt())?;

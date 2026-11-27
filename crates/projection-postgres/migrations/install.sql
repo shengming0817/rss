@@ -256,5 +256,5 @@ BEGIN ATOMIC
 END;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_projection FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA rss_projection FROM PUBLIC;
-COMMENT ON SCHEMA rss_projection IS 'rss-projection-postgres:5';
+COMMENT ON SCHEMA rss_projection IS 'rss-projection-postgres:1';
 COMMIT;

@@ -7,7 +7,7 @@ use crate::{
 use rss_request_context::{Clock, Deadline};
 use rss_timeseries::*;
 use sqlx::{PgConnection, Row};
-const DOMAIN: &[u8] = b"rss.timeseries.aggregate.v2";
+const DOMAIN: &[u8] = b"rss.timeseries.aggregate.v1";
 
 mod cache;
 mod page;

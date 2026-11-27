@@ -3,7 +3,7 @@ use crate::{AuthorityError, AuthorityProfile};
 use rss_identity_core::InstanceId;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{Connection, PgConnection};
-pub const SCHEMA_VERSION: i32 = 24;
+pub const SCHEMA_VERSION: i32 = 1;
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
 const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
 pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");

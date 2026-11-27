@@ -80,7 +80,7 @@ Condition names: https://www.postgresql.org/docs/16/errcodes-appendix.html .
 
 ## 资源协调
 
-v4 使用 targets、target_resources（声明和可空等待票号）、resources（原 claim 的 owner）、scans 四张租户表。队列票号使用组件 sequence；运行角色不得直接使用/更新 sequence，也不得写组件表。只扩展已有 claim 事务，不增加每资源连接、线程或第二租约。
+v1 使用 targets、target_resources（声明和可空等待票号）、resources（原 claim 的 owner）、scans 四张租户表。队列票号使用组件 sequence；运行角色不得直接使用/更新 sequence，也不得写组件表。只扩展已有 claim 事务，不增加每资源连接、线程或第二租约。
 
 每个 claim 调用的领取量由宿主选择，能力上限由 `rss_reconcile::MAX_CLAIM_BATCH_SIZE` 持有。独立的 scan_budget 为正 u32，PostgreSQL 接受到 i32::MAX。
 数据库先按有效到期时间取有界样本。样本完整时，在当前窗口内按票号领取。样本填满时，从持久游标流式读取票号，优先处理当前到期票；遇到未来票，可以用同一位置尝试窗口内更远的到期样本。普通到期票登记资源等待后，每页可从剩余预算拨出一个位置尝试远端到期样本。每个位置至多尝试锁定一个目标，游标仅推进到实际检查的位置。尚未扫描的老票可能稍后领取，已登记的资源等待者在阻塞解除后可重新参与提前领取，继续按老票优先。样本实际遇到目标或资源 NOWAIT 锁冲突时，scans 记录跨调用的退避页数。下一页可重试，持续冲突时逐步延长至每 32 页一次；同一窗口的远端样本共用该间隔，正常票流每页继续尝试到期目标。前探恢复或窗口结束后重置。

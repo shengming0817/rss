@@ -1,7 +1,7 @@
-//! AEAD v2 加解密接缝（sync，静态分发，非 DI port——ADR-004 C1）。
+//! AEAD v1 加解密接缝（sync，静态分发，非 DI port——ADR-004 C1）。
 //!
 //! 字段级数据保护边界（observe-redaction vs storage-encryption 分层、AAD 必填 envelope、deterministic
-//! opt-in、no-decrypt-in-debug）的设计单源见 **ADR-011**。本 crate 只立 v2 **基础类型 + trait 接缝**
+//! opt-in、no-decrypt-in-debug）的设计单源见 **ADR-011**。本 crate 只立 v1 **基础类型 + trait 接缝**
 //! （AAD 必填、envelope 自描述、解密产物 no-decrypt-in-debug），**不引入真实 crypto 后端**——真实
 //! 具体密码 backend 与持久化接线由直接消费方选择，本模块只持有 provider-neutral 契约。
 //!
@@ -43,7 +43,7 @@ impl std::fmt::Debug for Plaintext {
     }
 }
 
-/// AEAD v2 原语（sync）。`aad` 是**必填位置参**（非 `Option`）——缺失即编译错误
+/// AEAD v1 原语（sync）。`aad` 是**必填位置参**（非 `Option`）——缺失即编译错误
 /// （`FIELDPROT-AAD-MANDATORY-01`）。本接缝只表达**随机化**默认 AEAD；deterministic 是未来独立 trait
 /// （#1467），不在此加 bool/enum flag（`FIELDPROT-DETERMINISTIC-OPTIN-01`）。impl 落 #1466。
 pub trait Aead {

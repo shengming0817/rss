@@ -22,5 +22,5 @@ SELECT
              (SELECT array_agg(definition ORDER BY definition) FROM expected_checks)
          FROM pg_constraint WHERE conrelid='rss_reconcile.targets'::regclass AND contype='c')
     AND NOT EXISTS (SELECT FROM pg_trigger WHERE tgrelid='rss_reconcile.targets'::regclass AND NOT tgisinternal)
-    AND (SELECT obj_description(oid,'pg_namespace')='rss-reconcile-postgres:4'
+    AND (SELECT obj_description(oid,'pg_namespace')='rss-reconcile-postgres:1'
          FROM pg_namespace WHERE nspname='rss_reconcile')

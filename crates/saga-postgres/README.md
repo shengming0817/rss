@@ -7,7 +7,7 @@ cryptography; the adapter persists protected records and independently validates
 ## Installation
 
 An external migrator executes `MIGRATION_SQL` on a fresh database as a dedicated NOSUPERUSER
-NOBYPASSRLS schema owner. Runtime admission requires schema V4 and verifies its executable
+NOBYPASSRLS schema owner. Runtime admission requires schema V1 and verifies its executable
 functions against the same installation SQL.
 
 Lease TTLs use positive whole milliseconds within PostgreSQL's signed 64-bit microsecond interval

@@ -37,7 +37,7 @@ pub(crate) async fn installation(
             .await
             .map_err(sql_error)?
             .ok_or(Error::Invariant)?;
-    if version != 5 {
+    if version != 1 {
         return Err(Error::Unsupported);
     }
     // Read the allocation input with the runtime login after checking the version.

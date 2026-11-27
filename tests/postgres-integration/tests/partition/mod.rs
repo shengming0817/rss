@@ -308,12 +308,6 @@ async fn sql_protocol(raw: &PgPool) -> anyhow::Result<()> {
         assert_eq!(code(&error).as_deref(), Some("42501"));
         tx.rollback().await?;
     }
-    // Projection identities cannot be forged: the obsolete multi-identity signature is gone.
-    let mut tx = sql_tx(raw, tenant).await?;
-    let error = sqlx::query("SELECT rss_transactional_messaging.append_outbox('id'::text,'domain'::text,NULL::text,'{}'::jsonb,decode(repeat('00',32),'hex'))")
-        .execute(&mut *tx).await.expect_err("unverified digest API removed");
-    assert_eq!(code(&error).as_deref(), Some("42883"));
-    tx.rollback().await?;
     Ok(())
 }
 

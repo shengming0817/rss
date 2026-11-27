@@ -22,5 +22,5 @@ uuid.workspace = true
 anyhow.workspace = true
 futures = { workspace = true, features = ["std", "async-await", "executor"] }
 rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
-rss-transactional-messaging = { path = "../../crates/transactional-messaging", version = "0.2.0", default-features = false }
+rss-transactional-messaging = { path = "../../crates/transactional-messaging", version = "0.1.0", default-features = false }
 rss-contract.workspace = true

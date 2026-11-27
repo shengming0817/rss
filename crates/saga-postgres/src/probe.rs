@@ -22,7 +22,7 @@ SELECT current_user=session_user AND NOT o.rolsuper AND NOT o.rolbypassrls
         WHERE r.oid=n.nspowner OR has_schema_privilege(r.oid,n.oid,'CREATE'))
     AND NOT EXISTS(SELECT FROM aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a
         WHERE a.grantee=0)
-    AND obj_description(n.oid,'pg_namespace')='rss-saga-postgres:4'
+    AND obj_description(n.oid,'pg_namespace')='rss-saga-postgres:1'
 FROM pg_namespace n JOIN pg_roles o ON o.oid=n.nspowner WHERE n.nspname='rss_saga'
 "#,
     )

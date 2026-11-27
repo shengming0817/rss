@@ -40,18 +40,6 @@ map failures directly to the sole safe `ConformanceError` through its closed `fi
 operation phase without retaining provider text. Other opaque provider errors are consumed without
 requiring `Debug`, `Display`, or `source()`.
 
-## Migration from removed owners
-
-| Removed path | Replacement |
-| --- | --- |
-| `rss_conformance::localtx` | `rss_transactional_messaging_testkit::localtx` |
-| messaging helpers under `rss_conformance` | `outbox`, `inbox`, and `consumer` drivers |
-| `memory::MemPublisher` | `memory::MemoryPublisher` |
-| `memory::MemSettlement` | `memory::RecordingSettlement` |
-| memory message stores | `memory::MemoryOutboxStore` and `memory::MemoryInboxStore` |
-
-There are no aliases, re-exports, shims, or fallback paths for the removed APIs.
-
 Licensed under the MIT License.
 
 ## Transport and store proof ownership

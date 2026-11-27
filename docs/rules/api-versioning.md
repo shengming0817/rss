@@ -15,7 +15,7 @@ release catalog、schema 与 Cargo facts 派生，文档不复制。
 
 - 轴 A：Rust Release API/SemVer。
 - 轴 B：wire/contract compatibility。只要 persisted、networked 或跨版本消费，schema/manifest identity 受保护。
-- 组件持久化格式及必要升级定义由组件 owner 维护，适用本文件的兼容与退出规则；生产迁移执行由产品负责。
+- 组件 owner 维护当前持久化格式与空库安装定义，产品负责执行安装。
 - 两轴正交：internal Rust breaking 不必升 wire version；wire breaking 不能靠 Rust SemVer 掩盖。
 - internal `pub`、Markdown、同名 carrier 或历史发布不自动建立当前承诺。
 
@@ -26,7 +26,7 @@ release catalog、schema 与 Cargo facts 派生，文档不复制。
 - Release Surface 条目的 `compatibility` 是 Rust 历史兼容承诺的唯一声明：`uncommitted`、`frozen`、`published`，
   绑定决策 issue；后两者必须绑定精确基准（冻结承诺为 commit，发布承诺为版本或 release commit）。
   无承诺的实验包不运行自动历史门禁；未知身份阻断，不由 experimental/pub/publish 推断。
-- #2315 经维护者确认当前 29 项均无已发布或仓外冻结 Rust API 承诺；首次采用的历史基准精确记录于
+- #2315 记录首次采用 Rust API 兼容门禁时的维护者决策；当时的历史基准记录于
   release-surface metadata。首次发布/冻结前必须更新对应条目；保护退出或换基准须有绑定比较 base/package/issue
   的 `semver-exits`，不能仅删除条目或降级状态。
 - 受保护且尚未发布包的 intentional breaking replacement 若触发 SemVer gate，授权必须在 workspace metadata 中

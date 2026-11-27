@@ -12,7 +12,7 @@ use sqlx::{PgConnection, Row};
 mod native;
 mod prune;
 mod recompute;
-const DOMAIN: &[u8] = b"rss.timeseries.maintenance.v2";
+const DOMAIN: &[u8] = b"rss.timeseries.maintenance.v1";
 // Compare both counters across transaction boundaries. Unrelated streams may advance independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Revision {

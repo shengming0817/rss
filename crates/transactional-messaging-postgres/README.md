@@ -222,7 +222,7 @@ The example's Rust 2024 consumer declares all three direct dependencies:
 ```toml
 [dependencies]
 rss-transactional-messaging-postgres = "=0.1.0"
-rss-transactional-messaging = "=0.2.0"
+rss-transactional-messaging = "=0.1.0"
 sqlx = { version = "=0.9.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 ```
 
@@ -338,7 +338,7 @@ provisioning its privileges. Each query, mutation and receipt read supplies its 
 `ExecutionBinding`, alongside the authorized request. The store privately owns the same PG pool/transaction implementation;
 it has no runtime, pool, raw SQL, Deref or generic transaction accessor. Ordinary `PgRuntime::connect`
 continues to reject operator UPDATE rights. Provision the operator using the single
-[maintenance grant contract below](#consumer-archive-schema-and-role-cutover-2302); ordinary consumer
+[maintenance grant contract below](#consumer-archive-schema-and-roles); ordinary consumer
 roles do not receive these privileges automatically. Every operation consumes library-bound
 product authorization. RLS remains forced; runtime/maintenance logins must not own tables, bypass
 RLS or inherit the relay role. Products provision roles and decide authorization.
@@ -365,7 +365,7 @@ an uncertain commit; absence is not proof of rollback. The library never blindly
 operation cutoff, and receipt readback uses the reserved settlement cutoff from the same clock
 observation. It performs one mutation and never resets the total budget.
 
-## Consumer archive schema and role cutover (#2302)
+## Consumer archive schema and roles
 
 Fresh installation uses the single `MIGRATION_SQL` artifact. Provision fixed LOGIN scopes where
 selected and complete the execution binding and grants below before admitting traffic.
@@ -373,12 +373,11 @@ Runtime admission checks the current installation, including the canonical scope
 candidate/claim definitions. Every archive function uses
 `search_path=pg_catalog,rss_transactional_messaging,pg_temp`, preventing temporary relation/type
 shadowing. The startup probe rejects unsafe paths, including drift of the internal helper.
-Current recovery probes require nullable HOT capsule content and reject the previous broad UPDATE
-permission. External migrators must revoke UPDATE on `consumer_dead_letter` from the recovery
-operator (including inherited grants), then grant only UPDATE(recovery_version) on that table.
+Recovery probes require nullable HOT capsule content. Grant the recovery operator only
+UPDATE(recovery_version) on `consumer_dead_letter`, including through inherited roles.
 The complete additional maintenance grants are UPDATE(status,recovery_version,lease_token,lease_until,retry_after)
 on `outbox` and SELECT/INSERT on `recovery_operations`, together with base read/execute permissions.
-Table-wide Outbox UPDATE, ordering-field UPDATE, INSERT and sequence privileges are rejected. No old-schema runtime mode exists.
+Table-wide Outbox UPDATE, ordering-field UPDATE, INSERT and sequence privileges are rejected.
 
 `PgArchiveRepository` uses a separate, private pool and an archive-only role. The external migrator
 owns tables/functions and executes installation. Give the workload role schema USAGE and SELECT on

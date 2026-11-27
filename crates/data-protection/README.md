@@ -8,12 +8,10 @@ The package defines data formats and invariants but does not select key provider
 backends, storage adapters, workflows, or authorization policy. Diagnostic-output redaction is owned
 separately by `rss-redact`.
 
-`ProtectionContext::new(tenant, config_key, field, schema_version)` validates coordinate shape;
-`derive()` produces domain-separated, length-prefixed canonical AAD. This replaces the former request
-and maintenance constructors without changing encoded bytes. Neither constructor nor `DerivedAad`
-authenticates a principal, verifies authorization, or proves the provenance of supplied coordinates.
-Callers must establish these facts at their own trust boundary, including tenant/device access and
-maintenance permission where applicable.
+`ProtectionContext::new(tenant, config_key, field, schema_version)` validates the four coordinates.
+`derive()` starts the canonical AAD with the `rss-field-protection-aad-v1` domain label, then
+appends each length-prefixed coordinate in that order. Callers authenticate the principal, verify
+the coordinates and authorize tenant, device and maintenance access at their own trust boundary.
 
 A conforming AEAD implementation rejects mismatched tenant, config key, field or schema version with
 `AeadError::Open`. Possession of the correct key and coordinates is sufficient for cryptographic
