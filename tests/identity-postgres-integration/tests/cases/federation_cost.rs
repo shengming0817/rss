@@ -41,7 +41,7 @@ impl Visit for Observed {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if matches!(field.name(), "db.statement" | "summary") {
             let sql = format!("{value:?}");
-            self.scan |= sql.contains("provider_id<=$3") || sql.contains("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2");
+            self.scan |= sql.contains("provider_id<=$3");
             self.binding |= sql.contains("set_config('rss.storage_target'");
             self.write |= sql.contains("identity_authority.tenants WHERE tenant_id=")
                 && sql.contains("FOR UPDATE");
@@ -88,6 +88,10 @@ async fn measure<T>(
     assert!(queries > 0 && tx > 0);
     Ok((result, sql, calls))
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "compare the same ordered workload across provider counts and mutation densities"
+)]
 pub async fn run(f: &Fixture) -> anyhow::Result<()> {
     let s = service(f);
     let scope = binding(f.key.tenant);
@@ -144,6 +148,10 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "coordinate two transactions around one controlled failure and lock interleaving"
+)]
 async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> anyhow::Result<()> {
     let scope = binding(f.key.tenant);
     let tenant = f.key.tenant.to_string();

@@ -25,6 +25,10 @@ impl Locked {
     }
 }
 impl Drop for Locked {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "fixture records elapsed mutex hold time"
+    )]
     fn drop(&mut self) {
         HELD.set(self.0.elapsed());
     }

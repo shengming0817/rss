@@ -25,6 +25,10 @@ use tokio::sync::Semaphore;
 async fn conditional_refresh_and_generation_isolation() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(20), run()).await?
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "observe cache validation, cancellation and retirement on a single live endpoint"
+)]
 async fn run() -> anyhow::Result<()> {
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let issuer = format!("http://{}/realm", socket.local_addr()?);

@@ -284,18 +284,28 @@ async fn link_fixture(f: &Fixture, p: &ProviderView, subject: &str) -> anyhow::R
     .await?;
     Ok(())
 }
-pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
-    let scope = binding(f.key.tenant);
-    let s = service(f);
-    let p = enabled(f, &s).await?;
-    link_fixture(f, &p, "manager").await?;
-    let oidc = issued(finish(&s, begin(f, &s, &p).await?, "manager").await?);
+/// Put a real OIDC session at the start of the first candidate window.
+async fn first_oidc_session(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+) -> anyhow::Result<IssuedSession> {
+    link_fixture(f, p, "manager").await?;
+    let oidc = issued(finish(s, begin(f, s, p).await?, "manager").await?);
     let first = uuid::Uuid::from_u128(1);
     sqlx::query("UPDATE identity_authority.sessions SET session_id=$2 WHERE session_id=$1")
         .bind(oidc.view().id.as_uuid())
         .bind(first)
         .execute(&f.owner)
         .await?;
+    Ok(oidc)
+}
+
+pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    let s = service(f);
+    let p = enabled(f, &s).await?;
+    let oidc = first_oidc_session(f, &s, &p).await?;
     let oidc_actor = f
         .store
         .inspect_session(scope, secret(&oidc), deadline())
@@ -313,10 +323,23 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert!(approved.sessions.iter().any(|v| v.id == id));
     assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - checks, 1);
+    security_options(f, &s, &p, &oidc).await?;
+    damaged_origin(f, &p).await?;
+    mixed_origins(f, &s, &p, id).await?;
+    after_withdrawal(f, id, &reference).await
+}
+
+async fn security_options(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+    oidc: &IssuedSession,
+) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
     let before = f.oidc.checks.load(Ordering::SeqCst);
     let actor = f
         .store
-        .inspect_session(scope, secret(&oidc), deadline())
+        .inspect_session(scope, secret(oidc), deadline())
         .await?;
     let after_inspect = f.oidc.checks.load(Ordering::SeqCst);
     assert_eq!(after_inspect - before, 1);
@@ -330,6 +353,9 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     );
     let n = s.list_providers(f.actor().await?, deadline()).await?.len();
     assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - after_inspect, n);
+    Ok(())
+}
+async fn damaged_origin(f: &Fixture, p: &ProviderView) -> anyhow::Result<()> {
     sqlx::query("UPDATE identity_authority.external_identities SET issuer='malformed' WHERE provider_id=$1::uuid").bind(p.id.to_string()).execute(&f.owner).await?;
     assert!(matches!(
         f.store
@@ -344,10 +370,18 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     .bind(p.settings.issuer().as_str())
     .execute(&f.owner)
     .await?;
-    let second = issued(finish(&s, begin(f, &s, &p).await?, "manager").await?);
-    let other = enabled(f, &s).await?;
+    Ok(())
+}
+async fn mixed_origins(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+    id: rss_identity_core::SessionId,
+) -> anyhow::Result<()> {
+    let second = issued(finish(s, begin(f, s, p).await?, "manager").await?);
+    let other = enabled(f, s).await?;
     link_fixture(f, &other, "other-manager").await?;
-    let third = issued(finish(&s, begin(f, &s, &other).await?, "other-manager").await?);
+    let third = issued(finish(s, begin(f, s, &other).await?, "other-manager").await?);
     let local_actor = f.actor().await?;
     let start = f.oidc.checks.load(Ordering::SeqCst);
     let mixed = f
@@ -358,6 +392,18 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
         assert!(mixed.sessions.iter().any(|v| v.id == id));
     }
     assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - start, 2);
+    Ok(())
+}
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one staged trust withdrawal followed through pagination, proof and reconciliation"
+)]
+async fn after_withdrawal(
+    f: &Fixture,
+    id: rss_identity_core::SessionId,
+    reference: &SessionReference,
+) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
     let withdrawn = withdrawn_authority(f).await?;
     let local = f.actor().await?;
     let local_id = local.view().id;
@@ -378,7 +424,7 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     assert!(reference_visible(&withdrawn, f, id.as_uuid()).await?);
     assert!(matches!(
         withdrawn
-            .recheck_session_reference(scope, &reference, deadline())
+            .recheck_session_reference(scope, reference, deadline())
             .await,
         Err(AuthorityError::Rejected)
     ));
@@ -388,7 +434,7 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     assert!(!reference_visible(&withdrawn, f, id.as_uuid()).await?);
     assert!(
         withdrawn
-            .recheck_session_reference(scope, &reference, deadline())
+            .recheck_session_reference(scope, reference, deadline())
             .await
             .is_err()
     );

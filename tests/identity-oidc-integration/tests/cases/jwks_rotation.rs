@@ -68,6 +68,8 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
     let meta = json!({"issuer":issuer,"authorization_endpoint":format!("{issuer}/auth"),"token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/keys"),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],"authorization_response_iss_parameter_supported":true});
     let rotated = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let posts = Arc::new(AtomicUsize::new(0));
     let token = Arc::new(RwLock::new(String::new()));
     let cache = [("cache-control", "max-age=120")];
     let keys = {
@@ -82,7 +84,9 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
     };
     let tokens = {
         let token = token.clone();
+        let posts = posts.clone();
         move || async move {
+            posts.fetch_add(1, SeqCst);
             Json(
                 json!({"token_type":"Bearer","access_token":"fixture","id_token":token.read().await.clone()}),
             )
@@ -91,7 +95,13 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
     let routes = Router::new()
         .route(
             "/realm/.well-known/openid-configuration",
-            get(move || async move { (cache, Json(meta)) }),
+            get({
+                let discoveries = discoveries.clone();
+                move || async move {
+                    discoveries.fetch_add(1, SeqCst);
+                    (cache, Json(meta))
+                }
+            }),
         )
         .route("/realm/keys", get(keys))
         .route("/realm/token", post(tokens));
@@ -112,6 +122,14 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
         exchange(&adapter, &bound, &issuer, &token, "entra-a", KEY_A),
     )
     .await?;
+    let counts = || {
+        [
+            discoveries.load(SeqCst),
+            reads.load(SeqCst),
+            posts.load(SeqCst),
+        ]
+    };
+    assert_eq!(counts(), [1, 1, 1]);
     let cold = reuse_counts(&adapter);
     assert_eq!((cold.0, cold.1), (2, 1));
     measured(
@@ -119,6 +137,8 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
         exchange(&adapter, &bound, &issuer, &token, "entra-a", KEY_A),
     )
     .await?;
+    assert_eq!(counts(), [1, 1, 2]);
+    println!("OIDC requests (discovery GET, JWKS GET, token POST): cold=[1,1,1] warm=[0,0,1]");
     let warm = reuse_counts(&adapter);
     assert_eq!(warm, (cold.0, 2, cold.2));
     println!(
