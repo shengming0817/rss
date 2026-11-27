@@ -8,9 +8,14 @@ use std::{
 use support::*;
 use tokio_util::sync::CancellationToken;
 
+struct StoredInstance {
+    snapshot: Snapshot,
+    lease: Lease,
+    active: bool,
+}
 #[derive(Default, Clone)]
 struct Memory(
-    Arc<Mutex<HashMap<Scope, (Snapshot, Lease, bool)>>>,
+    Arc<Mutex<HashMap<Scope, StoredInstance>>>,
     Arc<std::sync::atomic::AtomicBool>,
     Arc<std::sync::atomic::AtomicU8>,
     Arc<std::sync::atomic::AtomicUsize>,
@@ -34,18 +39,19 @@ impl Store for Memory {
             .0
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
-        if let Some((snapshot, _, _)) = data.get(&scope) {
+        if let Some(instance) = data.get(&scope) {
+            let snapshot = &instance.snapshot;
             if snapshot.definition() != d || snapshot.head().capacity() != capacity {
                 return Err(Error::new(rss_saga::ErrorKind::Conflict));
             }
         } else {
             data.insert(
                 scope,
-                (
-                    Snapshot::empty(d.clone(), capacity, read_budget()?)?,
-                    Lease::from_provider(scope, uuid::Uuid::new_v4(), 1)?,
-                    false,
-                ),
+                StoredInstance {
+                    snapshot: Snapshot::empty(d.clone(), capacity, read_budget()?)?,
+                    lease: Lease::from_provider(scope, uuid::Uuid::new_v4(), 1)?,
+                    active: false,
+                },
             );
         }
         Ok(())
@@ -60,13 +66,14 @@ impl Store for Memory {
             .0
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
-        let (_, lease, active) = data
+        let instance = data
             .get_mut(&scope)
             .ok_or(Error::new(rss_saga::ErrorKind::Store))?;
         // Deterministic test-only takeover substitutes for explicitly expired database leases.
-        *lease = Lease::from_provider(scope, uuid::Uuid::new_v4(), lease.epoch() + 1)?;
-        *active = true;
-        Ok(lease.clone())
+        instance.lease =
+            Lease::from_provider(scope, uuid::Uuid::new_v4(), instance.lease.epoch() + 1)?;
+        instance.active = true;
+        Ok(instance.lease.clone())
     }
     async fn renew<T: Timer>(
         &self,
@@ -94,11 +101,11 @@ impl Store for Memory {
             return Err(ErrorKind::Store.into());
         }
         let mut data = self.0.lock().map_err(|_| ErrorKind::Store)?;
-        let (_, held, active) = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
-        if held.token() != lease.token() {
+        let instance = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
+        if instance.lease.token() != lease.token() {
             return Err(ErrorKind::Fenced.into());
         }
-        *active = false;
+        instance.active = false;
         self.3.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -108,11 +115,11 @@ impl Store for Memory {
         _: &Control<'_, T>,
     ) -> Result<HistoryHead, Error> {
         let data = self.0.lock().map_err(|_| Error::new(ErrorKind::Store))?;
-        let (snapshot, held, _) = data.get(&lease.scope()).ok_or(ErrorKind::Store)?;
-        if held.token() != lease.token() {
+        let instance = data.get(&lease.scope()).ok_or(ErrorKind::Store)?;
+        if instance.lease.token() != lease.token() {
             return Err(ErrorKind::Fenced.into());
         }
-        Ok(snapshot.head().clone())
+        Ok(instance.snapshot.head().clone())
     }
     async fn extend_history<T: Timer>(
         &self,
@@ -123,14 +130,14 @@ impl Store for Memory {
         _: &Control<'_, T>,
     ) -> Result<(), Error> {
         let mut data = self.0.lock().map_err(|_| Error::new(ErrorKind::Store))?;
-        let (snapshot, held, _) = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
-        if held.token() != lease.token() {
+        let instance = data.get_mut(&lease.scope()).ok_or(ErrorKind::Store)?;
+        if instance.lease.token() != lease.token() {
             return Err(ErrorKind::Fenced.into());
         }
-        if snapshot.revision() != expected_revision {
+        if instance.snapshot.revision() != expected_revision {
             return Err(ErrorKind::Conflict.into());
         }
-        snapshot.extend_capacity(expected, capacity)
+        instance.snapshot.extend_capacity(expected, capacity)
     }
     async fn snapshot<T: Timer>(
         &self,
@@ -149,7 +156,7 @@ impl Store for Memory {
             .lock()
             .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?
             .get(&l.scope())
-            .map(|(s, _, _)| s.clone())
+            .map(|instance| instance.snapshot.clone())
             .ok_or(Error::new(rss_saga::ErrorKind::Store))?
             .with_read_budget(read)
     }
@@ -175,13 +182,13 @@ impl Store for Memory {
                 .0
                 .lock()
                 .map_err(|_| Error::new(rss_saga::ErrorKind::Store))?;
-            let (s, lease, _) = data
+            let instance = data
                 .get_mut(&l.scope())
                 .ok_or(Error::new(rss_saga::ErrorKind::Store))?;
-            if lease.token() != l.token() {
+            if instance.lease.token() != l.token() {
                 return Err(Error::new(rss_saga::ErrorKind::Fenced));
             }
-            s.apply(m.event().clone())?;
+            instance.snapshot.apply(m.event().clone())?;
             if applied && m.event().step == 1 && self.2.load(Ordering::SeqCst) == 4 {
                 return Err(ErrorKind::CommitUnknown.into());
             }
@@ -205,11 +212,11 @@ impl Store for Memory {
     ) -> Result<Vec<Scope>, Error> {
         let data = self.0.lock().map_err(|_| ErrorKind::Store)?;
         let mut scopes = Vec::new();
-        for (scope, (snapshot, _, active)) in data.iter() {
-            if !active
+        for (scope, instance) in data.iter() {
+            if !instance.active
                 && scope.tenant() == t
                 && after.is_none_or(|id| scope.id() > id)
-                && snapshot.candidate_filter()? == Some(filter)
+                && instance.snapshot.candidate_filter()? == Some(filter)
             {
                 scopes.push(*scope);
             }
@@ -318,7 +325,7 @@ async fn failed_compensation_resumes_once_in_reverse_order() -> anyhow::Result<(
     let events = data
         .get(&s)
         .ok_or(Error::new(rss_saga::ErrorKind::Store))?
-        .0
+        .snapshot
         .events();
     assert_eq!(
         events
@@ -409,7 +416,7 @@ async fn unknown_compensation_is_probed_after_restart() -> anyhow::Result<()> {
     let events = data
         .get(&s)
         .ok_or(Error::new(rss_saga::ErrorKind::Store))?
-        .0
+        .snapshot
         .events();
     assert_eq!(
         events
@@ -453,7 +460,11 @@ async fn negative_probe_after_intent_crash_does_not_exhaust_one_attempt() -> any
         vec!["probe:one", "execute:one"]
     );
     let data = memory.0.lock().map_err(|_| Error::new(ErrorKind::Store))?;
-    let events = data.get(&s).ok_or(Error::new(ErrorKind::Store))?.0.events();
+    let events = data
+        .get(&s)
+        .ok_or(Error::new(ErrorKind::Store))?
+        .snapshot
+        .events();
     assert_eq!(
         events
             .iter()
@@ -1161,7 +1172,7 @@ async fn unknown_probes_preserve_pending_forward_and_compensation_history() -> a
             .map_err(|_| ErrorKind::Store)?
             .get(&s)
             .ok_or(ErrorKind::Store)?
-            .0
+            .snapshot
             .clone();
         let applied = effects
             .applied

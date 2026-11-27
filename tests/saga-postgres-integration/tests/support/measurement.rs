@@ -222,7 +222,16 @@ pub(super) async fn run(
     if profile == "fair-sweep" {
         return fair_measurements(store, owner, clock, c).await;
     }
-    let entries = match profile.as_str() {
+    history_profile(store, owner, clock, c, &profile).await
+}
+async fn history_profile(
+    store: &PgStore,
+    owner: &PgPool,
+    clock: &Clock,
+    c: &Control<'_, Clock>,
+    profile: &str,
+) -> anyhow::Result<()> {
+    let entries = match profile {
         "entries-100" => Some(100),
         "entries-1000" => Some(1000),
         "entries-10000" => Some(10000),
@@ -243,7 +252,7 @@ pub(super) async fn run(
         seed_entries(store, owner, s, &d, n, read, c).await?;
         registry(d.clone(), Arc::new(Effects::default()), false)?
     } else {
-        seed_bytes(store, s, &d, read, &profile, c).await?
+        seed_bytes(store, s, &d, read, profile, c).await?
     };
     let lease = store.claim(s, Duration::from_secs(30), c).await?;
     let start = clock.now();
@@ -375,42 +384,7 @@ async fn fair_measurements(
             read,
         );
         let start = clock.now();
-        let mut done = Vec::new();
-        let mut cursor = None;
-        let mut advances = 0;
-        while done.len() < instances {
-            let reports = if fair {
-                let page = executor
-                    .run_once(
-                        tenant,
-                        cursor,
-                        SweepBudget::new(instances as u32, budget)?,
-                        c,
-                    )
-                    .await?;
-                assert_eq!(page.stop, SweepStop::PageComplete);
-                cursor = page.next_cursor;
-                page.items
-                    .into_iter()
-                    .map(|item| item.result)
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                vec![executor.run(scopes[0], budget, c).await?]
-            };
-            for report in reports {
-                if instances == 2 {
-                    assert_eq!(report.advances, 1);
-                }
-                advances += report.advances;
-                if report.success.is_some() {
-                    assert_eq!(report.stop, RunStop::Completed);
-                    assert_eq!(report.head().revision(), 1064);
-                    done.push(report.success.ok_or(ErrorKind::ReceiptUnavailable)?);
-                } else {
-                    assert_eq!(report.stop, RunStop::Yielded);
-                }
-            }
-        }
+        let (done, advances) = drive_schedule(&executor, &scopes, fair, budget, c).await?;
         let ms = clock.now().saturating_sub(start).as_secs_f64() * 1000.0;
         let meter = executor.store();
         let counts = (
@@ -447,4 +421,51 @@ async fn fair_measurements(
         }
     }
     Ok(())
+}
+
+async fn drive_schedule(
+    executor: &Executor<Meter<'_>, CryptoMeter<'_>>,
+    scopes: &[Scope],
+    fair: bool,
+    budget: u32,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<(Vec<SuccessReference>, u32)> {
+    let instances = scopes.len();
+    let mut done = Vec::new();
+    let mut cursor = None;
+    let mut advances = 0;
+    while done.len() < instances {
+        let reports = if fair {
+            let page = executor
+                .run_once(
+                    scopes[0].tenant(),
+                    cursor,
+                    SweepBudget::new(instances as u32, budget)?,
+                    c,
+                )
+                .await?;
+            assert_eq!(page.stop, SweepStop::PageComplete);
+            cursor = page.next_cursor;
+            page.items
+                .into_iter()
+                .map(|item| item.result)
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            vec![executor.run(scopes[0], budget, c).await?]
+        };
+        for report in reports {
+            if instances == 2 {
+                assert_eq!(report.advances, 1);
+            }
+            advances += report.advances;
+            if report.success.is_some() {
+                assert_eq!(report.stop, RunStop::Completed);
+                assert_eq!(report.head().revision(), 1064);
+                done.push(report.success.ok_or(ErrorKind::ReceiptUnavailable)?);
+            } else {
+                assert_eq!(report.stop, RunStop::Yielded);
+            }
+        }
+    }
+    Ok((done, advances))
 }

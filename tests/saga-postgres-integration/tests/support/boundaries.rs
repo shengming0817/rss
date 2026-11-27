@@ -38,29 +38,15 @@ pub(super) async fn fair_arrival(
     let d = definition(&["one", "two", "three", "four", "five"])?;
     let entered = Arc::new(Notify::new());
     let released = Arc::new(Notify::new());
-    let effects = Arc::new(Effects::default());
-    let mut builder = DefinitionBuilder::new(d.clone())?
-        .step(Action {
-            name: "one",
-            fail: false,
-            effects: effects.clone(),
-        })?
-        .step(Gated {
-            name: "two",
-            entered: entered.clone(),
-            released: released.clone(),
-        })?;
-    for name in ["three", "four", "five"] {
-        builder = builder.step(Action {
-            name,
-            fail: false,
-            effects: effects.clone(),
-        })?;
-    }
+    let gate = Gated {
+        name: "two",
+        entered: entered.clone(),
+        released: released.clone(),
+    };
     let executor = Executor::new(
         store.clone(),
         protection()?,
-        Registry::builder().register(builder)?.finish(),
+        arrival_registry(d.clone(), gate)?,
         read_budget()?,
     );
     executor
@@ -82,7 +68,7 @@ pub(super) async fn fair_arrival(
     registered?;
     let page = page?;
     assert_eq!(page.next_cursor, Some(high));
-    assert_eq!(turns(&page)?, [(high, 2)]);
+    assert_eq!(turns(&page)?, [(high, 2, Status::Running)]);
     let end = executor
         .run_once(tenant, page.next_cursor, budget, control)
         .await?;
@@ -92,26 +78,45 @@ pub(super) async fn fair_arrival(
     let both = executor
         .run_once(tenant, end.next_cursor, budget, control)
         .await?;
-    assert_eq!(turns(&both)?, [(low, 1), (high, 1)]);
+    assert_eq!(
+        turns(&both)?,
+        [(low, 1, Status::Running), (high, 1, Status::Running)]
+    );
     released.notify_one(); // low's second effect
     assert_eq!(executor.run(low, 3, control).await?.advances, 3);
     let last = executor
         .run_once(tenant, None, SweepBudget::new(2, 3)?, control)
         .await?;
-    assert_eq!(turns(&last)?, [(low, 1), (high, 2)]);
-    for item in last.items {
-        assert_eq!(item.result?.head().status(), Status::Succeeded);
-    }
+    assert_eq!(
+        turns(&last)?,
+        [(low, 1, Status::Succeeded), (high, 2, Status::Succeeded)]
+    );
     Ok(())
 }
-fn turns(page: &SweepReport) -> anyhow::Result<Vec<(Scope, u32)>> {
+fn arrival_registry(d: Definition, gate: Gated) -> Result<Registry, Error> {
+    let effects = Arc::new(Effects::default());
+    let mut builder = DefinitionBuilder::new(d)?
+        .step(Action {
+            name: "one",
+            fail: false,
+            effects: effects.clone(),
+        })?
+        .step(gate)?;
+    for name in ["three", "four", "five"] {
+        builder = builder.step(Action {
+            name,
+            fail: false,
+            effects: effects.clone(),
+        })?;
+    }
+    Ok(Registry::builder().register(builder)?.finish())
+}
+fn turns(page: &SweepReport) -> anyhow::Result<Vec<(Scope, u32, Status)>> {
     page.items
         .iter()
         .map(|item| {
-            Ok((
-                item.scope,
-                item.result.as_ref().map_err(Clone::clone)?.advances,
-            ))
+            let report = item.result.as_ref().map_err(Clone::clone)?;
+            Ok((item.scope, report.advances, report.head().status()))
         })
         .collect()
 }
