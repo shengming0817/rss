@@ -521,6 +521,91 @@ class CiImpactContract(unittest.TestCase):
         self.assert_decision(decision, full=False, packages=["leaf-integration", "other", "other-integration"],
                              reason="package-change")
 
+    def test_multiline_literal_include_selects_the_shared_reader_only(self):
+        fixture = "tests/fixtures/shared.txt"
+        self.repo._write("tests/leaf-integration/src/lib.rs", '''
+pub const SHARED: &[u8] = include_bytes!(
+    "../../fixtures/shared.txt",
+);
+''')
+        self.repo._write("tests/other-integration/src/lib.rs", '''
+pub const PRIVATE: &str = include_str!(
+    "../fixtures/shared.txt"
+);
+''')
+        self.repo._write("tests/other-integration/fixtures/shared.txt", "private\n")
+        base = self.repo.change(fixture, "shared\n")
+        head = self.repo.change(fixture, "updated\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
+
+    def test_multiline_include_in_macro_keeps_the_expansion_site_reader(self):
+        fixture = "tests/fixtures/shared.txt"
+        self.repo._write("tests/leaf-integration/src/lib.rs",
+                         'pub const SHARED: &str = include_str!("../../fixtures/shared.txt");\n')
+        self.repo._write("tests/other-integration/src/lib.rs", '''
+#[path = "nested/reader.rs"]
+mod reader;
+pub const SHARED: &[u8; 7] = reader::read_shared!();
+''')
+        self.repo._write("tests/other-integration/src/nested/reader.rs", '''
+macro_rules! read_shared {
+    () => { include_bytes!(
+        "../../fixtures/shared.txt",
+    ) };
+}
+pub(crate) use read_shared;
+''')
+        self.repo._write("tests/other-integration/fixtures/shared.txt", "private\n")
+        base = self.repo.change(fixture, "shared\n")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        # Only the seven-byte shared file, relative to the invocation, type-checks.
+        subprocess.run(["cargo", "check", "-q", "--locked", "--target-dir", target,
+                        "-p", "other-integration"], cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "update\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other-integration"],
+                             reason="package-change")
+
+    def test_proc_macro_dependency_can_generate_a_shared_fixture_reader(self):
+        fixture = "tests/fixtures/shared.txt"
+        self.repo._package("crates/macro-input", "macro-input")
+        self.repo._write("crates/macro-input/src/lib.rs", '''
+pub const INPUT: &str = r#"include_bytes!(
+    "../../fixtures/shared.txt",
+)"#;
+''')
+        manifest = self.repo.root / "crates/other/Cargo.toml"
+        manifest.write_text(manifest.read_text() + '''
+[lib]
+proc-macro = true
+
+[dependencies]
+macro-input = { path = "../macro-input" }
+''')
+        self.repo._write("crates/other/src/lib.rs", '''
+use proc_macro::TokenStream;
+
+#[proc_macro]
+pub fn read_shared(_: TokenStream) -> TokenStream {
+    macro_input::INPUT.parse().unwrap()
+}
+''')
+        self.repo._write("tests/other-integration/src/lib.rs",
+                         'pub const SHARED: &[u8; 7] = other::read_shared!();\n')
+        self.repo._write("tests/leaf-integration/src/lib.rs",
+                         'pub const SHARED: &str = include_str!("../../fixtures/shared.txt");\n')
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=self.repo.root, check=True)
+        base = self.repo.change(fixture, "shared\n")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        subprocess.run(["cargo", "check", "-q", "--locked", "--target-dir", target,
+                        "-p", "other-integration"], cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "update\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False,
+                             packages=["leaf-integration", "macro-input", "other", "other-integration"],
+                             reason="package-change")
+
     def test_inline_module_path_selects_reader_with_different_base_directory(self):
         fixture = "tests/fixtures/shared.rs"
         self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')
@@ -699,8 +784,8 @@ pub use cases::shared::Original;
         spec = importlib.util.spec_from_file_location("impact", RSS_ROOT / "hack/ci-impact.py")
         impact = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(impact)
-        roots, _ = impact.workspace_graph(RSS_ROOT, impact.metadata(RSS_ROOT))
-        self.assertEqual(impact.fixture_owners(RSS_ROOT, "HEAD", path, roots),
+        roots, _, macro_sources = impact.workspace_graph(RSS_ROOT, impact.metadata(RSS_ROOT))
+        self.assertEqual(impact.fixture_owners(RSS_ROOT, "HEAD", path, roots, macro_sources),
                          {"archive-integration", "postgres-integration"})
 
     def test_unknown_add_and_delete_are_full(self) -> None:

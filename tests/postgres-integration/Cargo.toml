@@ -14,6 +14,7 @@ rss-runtime = ["rss-transactional-messaging-postgres/rss-runtime", "rss-examples
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+stats_alloc = "0.1.10"
 futures.workspace = true
 rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
 rss-examples = { path = "../../crates/examples", features = ["providers", "outbox-writer", "observation-handoff", "recovery-pg"] }
