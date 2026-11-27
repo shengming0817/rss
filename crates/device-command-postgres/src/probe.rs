@@ -154,7 +154,7 @@ fn definitions(sql: &str) -> Result<Vec<Definition<'_>>, ()> {
             body,
         });
     }
-    if result.len() != 6 {
+    if result.len() != 8 {
         return Err(());
     }
     Ok(result)
@@ -171,6 +171,8 @@ mod tests {
             [
                 "initialize",
                 "lock_authority",
+                "lock_authority_exclusive",
+                "lock_command",
                 "advance",
                 "enqueue",
                 "save",
