@@ -27,6 +27,7 @@ default = []
 integration = ["rss-timeseries/integration"]
 timescaledb = []
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
 anyhow.workspace = true
 [lints]
 workspace = true

@@ -99,6 +99,8 @@ pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<
     if rows.len() > max as usize {
         return Err(Error::BudgetExceeded);
     }
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| m.aggregate_fence_rows += rows.len());
     rows.into_iter().map(fence).collect()
 }
 fn fence(r: sqlx::postgres::PgRow) -> Result<Fence, Error> {
@@ -161,6 +163,8 @@ pub(crate) async fn visible_fences(
         remaining = remaining.checked_sub(size).ok_or(Error::BudgetExceeded)?;
         result.push(fence(row)?);
     }
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| m.aggregate_fence_rows += result.len());
     Ok(result)
 }
 

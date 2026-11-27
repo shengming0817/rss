@@ -96,6 +96,15 @@ pub(super) async fn prepare(
             buffers.set(samples.capacity() + series_digests.capacity() * 32);
         }
     }
+    #[cfg(feature = "integration")]
+    {
+        let index_bytes = bindings.capacity() * size_of::<Binding<'_>>();
+        rss_timeseries::measurement::Session::detailed().update(|r| {
+            r.sort_inputs += bindings.len();
+            r.index_peak_bytes = r.index_peak_bytes.max(index_bytes);
+        });
+        buffers.set(samples.capacity() + series_digests.capacity() * 32 + index_bytes);
+    }
     bindings.sort_unstable_by(|a, b| a.key().cmp(&b.key()).then_with(|| b.index.cmp(&a.index)));
     bindings.dedup_by(|a, b| a.key() == b.key());
     // Every selected definition occurs inside a different canonical sample. This bound
@@ -196,6 +205,10 @@ async fn checkpoint(index: usize, clock: &impl Clock, budget: Budget) -> Result<
     }
     budget.remaining(clock).map(|_| ())
 }
+
+#[cfg(test)]
+#[path = "order_measure.rs"]
+mod order_measure;
 
 #[cfg(test)]
 mod tests {

@@ -62,6 +62,11 @@ pub(crate) struct Budget {
     end: tokio::time::Instant,
 }
 impl Budget {
+    #[cfg(test)]
+    pub(crate) fn for_measurement(deadline: Deadline, end: tokio::time::Instant) -> Self {
+        Self { deadline, end }
+    }
+
     #[allow(clippy::disallowed_methods)] // reason: inspect the same Tokio watchdog that wakes pool and admission waits.
     pub(crate) fn remaining(self, clock: &impl Clock) -> Result<std::time::Duration, Error> {
         let logical = self

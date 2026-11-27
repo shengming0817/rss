@@ -95,6 +95,8 @@ pub(crate) fn mask(
     window: Interval,
     at: Timestamp,
 ) -> Result<(), Error> {
+    #[cfg(feature = "integration")]
+    let start = crate::measurement::cpu_start();
     for f in fences {
         if f.kind == "delete"
             && !f.restored
@@ -109,6 +111,11 @@ pub(crate) fn mask(
             builder.interrupt(f.window.start())?;
         }
     }
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| {
+        m.boundary_checks += fences.len();
+        m.match_cpu += crate::measurement::elapsed(start);
+    });
     Ok(())
 }
 pub(crate) fn mask_end(

@@ -517,3 +517,92 @@ fn maximum_node_work(plan: &serde_json::Value) -> u64 {
         .map(maximum_node_work)
         .fold(work, u64::max)
 }
+
+/// Same visible samples and two buckets in every case. Each fence lands between observations.
+#[tokio::test]
+#[ignore = "isolated release-mode aggregation and paged maintenance comparison"]
+async fn aggregate_boundaries() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-boundary-cost").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let seed = batch(
+        "seed",
+        (0..32)
+            .map(|i| sample(&d, &format!("s{i}"), 2 * i + 1, i as u64))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    )?;
+    confirmed(f.write(&seed).await?)?;
+    let end = Timestamp::new(64)?;
+    let window = Interval::new(Timestamp::new(0)?, end)?;
+    let spec = SummarySpec::new(
+        seed.stream().clone(),
+        seed.samples()[0].input().series.clone(),
+        NonZeroU64::new(32).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let q = Authorized::<AggregateQuery>::verify(
+        &authority(TENANT)?,
+        AggregateQuery::new(
+            spec.clone(),
+            window,
+            QueryBudget {
+                max_series: NonZeroU32::MIN,
+                max_points: NonZeroU32::new(2).ok_or(Error::Invariant)?,
+            },
+            AggregateOp::Count,
+        )?,
+    )?;
+    for (case, related, noise, overlap) in [
+        ("empty", 0, 0, false),
+        ("one", 1, 0, false),
+        ("related", 16, 0, false),
+        ("noise", 1, 16, false),
+        ("overlap", 16, 0, true),
+    ] {
+        frontiers(&f, &d, related, noise, false).await?;
+        if overlap {
+            sqlx::query("UPDATE rss_ts_ch.fences SET lo=0,hi=1")
+                .execute(&f.admin)
+                .await?;
+        }
+        // Force the raw path on the isolated fixture for the next matched run.
+        sqlx::query("DELETE FROM rss_ts_ch.summaries")
+            .execute(&f.admin)
+            .await?;
+        let (raw, online) = measure(thread_cpu, f.store.aggregate(&q, None, deadline()?)).await;
+        let raw = raw?;
+        assert!(raw.refreshed_through.is_none() && raw.next.is_none());
+        let (done, maintenance) = measure(
+            thread_cpu,
+            f.maintain(
+                case,
+                MaintenanceAction::Recompute {
+                    spec: spec.clone(),
+                    window,
+                },
+            ),
+        )
+        .await;
+        assert!(matches!(done?, MaintenanceProgress::Complete { .. }));
+        let cached = f.store.aggregate(&q, None, deadline()?).await?;
+        assert_eq!(cached.refreshed_through, Some(end));
+        assert_eq!(
+            serde_json::to_value(&raw.buckets)?,
+            serde_json::to_value(&cached.buckets)?
+        );
+        assert_eq!(raw.buckets.iter().map(|b| b.valid_samples).sum::<u64>(), 32);
+        let digests: Vec<String> = sqlx::query_scalar("SELECT a.digest FROM rss_ts_ch.summaries s JOIN rss_ts_ch.attempts a ON a.id=s.object_id ORDER BY s.lo").fetch_all(&f.admin).await?;
+        assert_eq!(digests.len(), 2);
+        for (path, c) in [("raw", online), ("recompute", maintenance)] {
+            println!(
+                "fences case={case} path={path} loaded={} checks={} build_cpu_ns={} match_cpu_ns={} digests={digests:?}",
+                c.aggregate_fence_rows,
+                c.boundary_checks,
+                c.build_cpu.as_nanos(),
+                c.match_cpu.as_nanos()
+            );
+        }
+    }
+    Ok(())
+}
