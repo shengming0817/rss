@@ -3,15 +3,23 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from functools import cache
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
+import re
+import signal
 import subprocess
 import sys
+import tempfile
+import tomllib
 
 
+QUERY_TIMEOUT_SECONDS = 120
+SELECTOR_FILES = {"hack/ci-impact.py", "hack/tests/test_ci_impact.py"}
 GLOBAL_FILES = {
-    "Cargo.lock",
     "Makefile",
     "clippy.toml",
     "deny.toml",
@@ -23,7 +31,6 @@ GLOBAL_PREFIXES = (
     ".github/actions/",
     ".github/scripts/",
     ".github/workflows/",
-    "tests/fixtures/",  # Shared source includes have no single Cargo package owner.
 )
 ROOT_DOCS = {
     "AGENTS.md",
@@ -55,17 +62,63 @@ def emit(full: bool, packages: set[str] | None, reasons: set[str]) -> None:
     print(json.dumps(decision, separators=(",", ":"), ensure_ascii=False))
 
 
-def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+def query(command: list[str], *, phase: str, cwd=None, env=None) -> subprocess.CompletedProcess[bytes]:
+    """Bound one selector query, including children holding its output pipes or locks."""
+    child = None
+    cancelled = None
+
+    def kill_group():
+        if child is not None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        cancelled = signum
+        kill_group()
+
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {sig: signal.signal(sig, cancel) for sig in signals}
     try:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        with subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+            # A signal during Popen is recorded before the group is available.
+            if cancelled is not None:
+                kill_group()
+            try:
+                stdout, stderr = child.communicate(timeout=QUERY_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as error:
+                kill_group()
+                raise SelectionError(f"{phase}-timeout") from error
+            return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
     except OSError as error:
-        raise SelectionError("diff-unavailable") from error
+        raise SelectionError(f"{phase}-unavailable") from error
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        if cancelled is not None:
+            raise SystemExit(128 + cancelled)
+
+
+@cache
+def local_git_variables() -> set[str]:
+    result = query(["/usr/bin/git", "rev-parse", "--local-env-vars"], phase="git-environment")
+    if result.returncode:
+        raise SelectionError("git-environment-unavailable")
+    return set(result.stdout.decode().splitlines())
+
+
+def repository_env() -> dict[str, str]:
+    # Each command has an explicit repository cwd. In particular, a snapshot
+    # must never inherit the calling hook's GIT_DIR, GIT_WORK_TREE or index.
+    local = local_git_variables()
+    return {key: value for key, value in os.environ.items() if key not in local}
+
+
+def run(command: list[str], *, cwd: Path, phase: str = "diff") -> subprocess.CompletedProcess[bytes]:
+    return query(command, phase=phase, cwd=cwd, env=repository_env())
 
 
 def parse_args(arguments: list[str]) -> tuple[str, str]:
@@ -88,9 +141,7 @@ def changed_paths(root: Path, base: str, head: str) -> list[tuple[str, str]]:
             "diff",
             "--name-status",
             "-z",
-            "--find-renames",
-            "--find-copies",
-            "--find-copies-harder",
+            "--no-renames",
             base,
             head,
             "--",
@@ -111,27 +162,18 @@ def changed_paths(root: Path, base: str, head: str) -> list[tuple[str, str]]:
     while cursor < len(fields):
         status = fields[cursor]
         cursor += 1
-        if not status or status[0] not in "ADMRC":
+        if not status or status not in ("A", "D", "M"):
             raise SelectionError("diff-invalid")
-        path_count = 2 if status[0] in "RC" else 1
-        if cursor + path_count > len(fields):
+        if cursor == len(fields) or not valid_path(fields[cursor]):
             raise SelectionError("diff-invalid")
-        paths = fields[cursor : cursor + path_count]
-        cursor += path_count
-        if not all(valid_path(path) for path in paths):
-            raise SelectionError("invalid-path")
-        if status[0] in "RC":
-            raise SelectionError("rename-or-copy")
-        changes.append((status[0], paths[0]))
+        changes.append((status, fields[cursor]))
+        cursor += 1
     return changes
 
 
 def is_global(path: str) -> bool:
     return (
         path in GLOBAL_FILES
-        or path.endswith("/Cargo.toml")
-        or path == "Cargo.toml"
-        or path == "hack/ci-impact.py"
         or any(path.startswith(prefix) for prefix in GLOBAL_PREFIXES)
     )
 
@@ -146,16 +188,8 @@ def is_docs(path: str) -> bool:
 
 
 def metadata(root: Path) -> dict:
-    try:
-        result = subprocess.run(
-            ["cargo", "metadata", "--locked", "--all-features", "--format-version", "1"],
-            cwd=root,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError as error:
-        raise SelectionError("metadata-unavailable") from error
+    result = run(["cargo", "metadata", "--locked", "--all-features", "--format-version", "1"],
+                 cwd=root, phase="metadata")
     if result.returncode != 0:
         raise SelectionError("metadata-unavailable")
     try:
@@ -241,32 +275,219 @@ def reverse_closure(seeds: set[str], reverse: dict[str, set[str]]) -> set[str]:
     return selected
 
 
+def git(root: Path, *arguments: str, phase: str = "diff") -> bytes:
+    result = run(["/usr/bin/git", *arguments], cwd=root, phase=phase)
+    if result.returncode:
+        raise SelectionError(f"{phase}-unavailable")
+    return result.stdout
+
+
+@contextmanager
+def checkout(root: Path, revision: str):
+    """Read Cargo inputs from this revision without changing the caller's checkout."""
+    sha = git(root, "rev-parse", "--verify", revision + "^{commit}").decode().strip()
+    if git(root, "rev-parse", "HEAD").decode().strip() == sha and not git(
+        root, "status", "--porcelain", "--untracked-files=normal"
+    ):
+        yield root
+        return
+    with tempfile.TemporaryDirectory(prefix="rss-impact-") as directory:
+        snapshot = Path(directory).resolve() / "repo"
+        git(root, "clone", "--quiet", "--shared", "--no-checkout", "--", str(root), str(snapshot), phase="git-clone")
+        git(snapshot, "-c", "core.hooksPath=" + os.devnull, "checkout", "--quiet", "--detach", sha, phase="git-checkout")
+        yield snapshot
+
+
+def read_toml(path: Path) -> dict:
+    with path.open("rb") as source:
+        return tomllib.load(source)
+
+
+def workspace_inputs(root: Path) -> tuple[dict, dict]:
+    manifest = read_toml(root / "Cargo.toml")
+    workspace = manifest["workspace"]
+    workspace.pop("members", None)
+    dependencies = workspace.pop("dependencies", {})
+    return manifest, dependencies
+
+
+def inherited_dependencies(manifest: dict) -> set[str]:
+    names = set()
+    for table in (manifest, *manifest.get("target", {}).values()):
+        for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
+            for name, spec in table.get(kind, {}).items():
+                if isinstance(spec, dict) and spec.get("workspace"):
+                    names.add(name)
+    return names
+
+
+def lock_packages(root: Path) -> dict:
+    return {(p["name"], p["version"], p.get("source")): p
+            for p in read_toml(root / "Cargo.lock")["package"]}
+
+
+def package_tree(root: Path, package: str) -> str:
+    # Cargo resolves features for the selected consumer. A workspace-wide union
+    # would make a new, unrelated member's provider features look like changes.
+    result = run(["cargo", "tree", "--locked", "--all-features", "--target", "all",
+                  "--package", package, "--prefix", "depth", "--format", "{p} {f}"], cwd=root,
+                 phase=f"cargo-tree-{package}")
+    if result.returncode:
+        raise SelectionError(f"cargo-tree-{package}-unavailable")
+    return result.stdout.decode().replace("(" + str(root) + "/", "(./")
+
+
+def graph_changes(before: Path, after: Path, old_roots, new_roots) -> set[str]:
+    old_config, old_deps = workspace_inputs(before)
+    new_config, new_deps = workspace_inputs(after)
+    if old_config != new_config:
+        raise SelectionError("global-input")
+    changed_deps = {key for key in old_deps.keys() | new_deps.keys()
+                    if old_deps.get(key) != new_deps.get(key)}
+    old = {name: path for path, name in old_roots}
+    new = {name: path for path, name in new_roots}
+    affected = old.keys() ^ new.keys()
+    old_lock, new_lock = lock_packages(before), lock_packages(after)
+    # Adding only new lock records cannot alter an existing resolution.
+    check_trees = any(new_lock.get(key) != data for key, data in old_lock.items())
+    # Cargo tree abbreviates Git revisions and omits registry checksums. Match
+    # complete lock identities for packages whose printed name/version collides.
+    identities = {}
+    for key in old_lock.keys() | new_lock.keys():
+        identities.setdefault(key[:2], set()).add(key[2])
+    sensitive = {key[:2] for key in old_lock.keys() | new_lock.keys()
+                 if old_lock.get(key) != new_lock.get(key) and (
+                     len(identities[key[:2]]) > 1 or
+                     (key in old_lock and key in new_lock and
+                      old_lock[key].get("checksum") != new_lock[key].get("checksum")))}
+    for name in old.keys() & new.keys():
+        if changed_deps and changed_deps & inherited_dependencies(
+            read_toml(after / new[name] / "Cargo.toml")
+        ):
+            affected.add(name)
+        elif check_trees:
+            previous = package_tree(before, name)
+            current = package_tree(after, name)
+            if previous != current or sensitive.intersection(
+                re.findall(r"^\d+([\w-]+) v(\S+)", previous + current, re.MULTILINE)
+            ):
+                affected.add(name)
+    return affected
+
+
+def check_fixture_aliases(root: Path, revision: str, fixtures: set[str]) -> None:
+    """Literal source references cannot enumerate readers through a filesystem alias."""
+    if not fixtures:
+        return
+    entries = git(root, "ls-tree", "-rz", revision, phase="git-fixture-tree").split(b"\0")
+    links = [os.fsdecode(entry.split(b"\t", 1)[1]) for entry in entries if entry.startswith(b"120000 ")]
+    if not links:
+        return
+    with checkout(root, revision) as snapshot:
+        inputs = {(snapshot / fixture).resolve(strict=True) for fixture in fixtures}
+        for link in links:
+            try:
+                target = (snapshot / link).resolve()
+            except (OSError, RuntimeError) as error:
+                raise SelectionError("unknown-fixture-owner") from error
+            # A directory or file alias can be used from another package without
+            # any occurrence of "fixtures" or the canonical filename in its source.
+            if any(target == item or target in item.parents for item in inputs):
+                raise SelectionError("shared-fixture-alias")
+
+
+def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
+    # Shared fixture imports use literal paths. Include unresolved directory
+    # references conservatively (e.g. a build script constructing a filename).
+    fixture = PurePosixPath(path)
+    basename = fixture.name
+    result = run(["/usr/bin/git", "grep", "-I", "-z", "-F", "-e", basename,
+                  "-e", "fixtures", revision, "--"], cwd=root)
+    if result.returncode not in (0, 1):
+        raise SelectionError("diff-unavailable")
+    direct = re.compile(r'include(?:_bytes|_str)?!\s*\(\s*"([^"\\]+)"')
+    module_path = re.compile(r'#\[\s*path\s*=\s*"([^"\\]+)"')
+    directory = re.compile(r"""(?:["'/])fixtures(?:[/{"']|$)""")
+    packages = set()
+    for row in result.stdout.decode().splitlines():
+        filename, line = row.split("\0", 1)
+        filename = filename.split(":", 1)[1]
+        if is_docs(filename) or filename in SELECTOR_FILES:
+            continue
+        package = owner(filename, roots)
+        if package is None:
+            if basename in line or "tests/fixtures" in line:
+                raise SelectionError("unknown-fixture-owner")
+            continue
+        # Only direct literal Rust includes have a known source-relative base.
+        # Any remaining constructed filename or directory could read this fixture.
+        imports = direct.findall(line)
+        # #[path] may name a module file or an inline module directory.
+        # Any ancestor of the input can be that directory, including dotted names.
+        attrs = module_path.findall(line)
+        remainder = module_path.sub("", direct.sub("", line))
+        if (any(posixpath.normpath(posixpath.join(posixpath.dirname(filename), value)) == path
+                for value in imports) or any(
+                    PurePosixPath(value).name in (*fixture.parts, "", "..")
+                    for value in attrs
+                ) or basename in remainder or directory.search(remainder)):
+            packages.add(package)
+    if not packages:
+        raise SelectionError("unknown-fixture-owner")
+    return packages
+
+
 def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
     changes = changed_paths(root, base, head)
     if not changes:
         return False, set(), {"no-changes"}
+    # CI's Python contract tests always run, including when no Cargo package is selected.
+    selector_changed = any(path in SELECTOR_FILES for _, path in changes)
+    changes = [(status, path) for status, path in changes if path not in SELECTOR_FILES]
     if any(is_global(path) for _, path in changes):
         return True, set(), {"global-input"}
     if all(is_docs(path) for _, path in changes):
-        return False, set(), {"docs-only"}
+        return False, set(), {"selector-only" if selector_changed else "docs-only"}
 
-    roots, reverse = workspace_graph(root, metadata(root))
-    seeds: set[str] = set()
-    for status, path in changes:
-        if is_docs(path):
-            continue
-        package = owner(path, roots)
-        if package is None:
-            reason = "unowned-deletion" if status == "D" else "unknown-path"
-            return True, set(), {reason}
-        seeds.add(package)
-    return False, reverse_closure(seeds, reverse), {"package-change"}
+    with checkout(root, head) as current:
+        roots, reverse = workspace_graph(current, metadata(current))
+        cargo_changed = any(path in ("Cargo.toml", "Cargo.lock") or path.endswith("/Cargo.toml")
+                            for _, path in changes)
+        affected = set()
+        old_roots, old_reverse = roots, reverse
+        if cargo_changed:
+            with checkout(root, base) as previous:
+                old_roots, old_reverse = workspace_graph(previous, metadata(previous))
+                affected = graph_changes(previous, current, old_roots, roots)
+
+        fixtures = [(status, path) for status, path in changes if path.startswith("tests/fixtures/")]
+        check_fixture_aliases(root, base, {path for status, path in fixtures if status != "A"})
+        check_fixture_aliases(root, head, {path for status, path in fixtures if status != "D"})
+        before, after = set(affected), set(affected)
+        for status, path in changes:
+            if is_docs(path) or path in ("Cargo.toml", "Cargo.lock"):
+                continue
+            if path.startswith("tests/fixtures/"):
+                if status != "A":
+                    before.update(fixture_owners(root, base, path, old_roots))
+                if status != "D":
+                    after.update(fixture_owners(root, head, path, roots))
+            else:
+                package = owner(path, old_roots if status == "D" else roots)
+                if package is None:
+                    reason = "unowned-deletion" if status == "D" else "unknown-path"
+                    return True, set(), {reason}
+                (before if status == "D" else after).add(package)
+        # Removed members can affect surviving callers. Only HEAD packages run.
+        surviving = reverse_closure(before, old_reverse).intersection(reverse)
+        return False, reverse_closure(after | surviving, reverse).intersection(reverse), {"package-change"}
 
 
 def main() -> None:
     try:
         base, head = parse_args(sys.argv[1:])
-        root_result = run(["/usr/bin/git", "rev-parse", "--show-toplevel"], cwd=Path.cwd())
+        # Locate the caller first, then isolate all repository-bound children.
+        root_result = query(["/usr/bin/git", "rev-parse", "--show-toplevel"], phase="diff")
         if root_result.returncode != 0:
             raise SelectionError("diff-unavailable")
         try:

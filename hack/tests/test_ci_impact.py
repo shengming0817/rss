@@ -3,16 +3,19 @@
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import re
 import os
 from pathlib import Path
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -271,7 +274,7 @@ class CiImpactContract(unittest.TestCase):
                 self.assert_decision(decision, full=True, packages=[], reason="unknown-path")
                 self.repo.git("reset", "--hard", self.repo.base)
 
-    def test_skill_rename_copy_and_mixed_unknown_remain_full(self) -> None:
+    def test_skill_moves_and_copies_are_docs_but_unknown_inputs_remain_full(self) -> None:
         for operation in ("rename", "copy", "unknown"):
             with self.subTest(operation=operation):
                 self.repo.git("reset", "--hard", self.repo.base)
@@ -283,8 +286,8 @@ class CiImpactContract(unittest.TestCase):
                 else:
                     head = getattr(self.repo, operation)(source, ".codex/skills/fix/SKILL.md")
                 _, decision = self.repo.select(base=base, head=head)
-                self.assert_decision(decision, full=True, packages=[],
-                    reason="unknown-path" if operation == "unknown" else "rename-or-copy")
+                self.assert_decision(decision, full=operation == "unknown", packages=[],
+                    reason="unknown-path" if operation == "unknown" else "docs-only")
 
     def test_documentation_is_neutral_in_package_changes(self) -> None:
         self.repo.change("README.md", "new public API\n")
@@ -392,54 +395,313 @@ class CiImpactContract(unittest.TestCase):
             reason="package-change",
         )
 
-    def test_manifest_lock_and_ci_inputs_are_full(self) -> None:
-        cases = [
-            ("Cargo.toml", None),
-            ("Cargo.lock", "# changed\n"),
-            ("Makefile", "ci:\n\ttrue\n"),
-            (".config/nextest.toml", "[profile.default]\n"),
-            (".github/workflows/ci.yml", "name: ci\n"),
-        ]
-        for relative, content in cases:
-            with self.subTest(relative=relative):
-                repo = FixtureRepo()
-                try:
-                    if content is None:
-                        current = (repo.root / relative).read_text(encoding="utf-8")
-                        content = current + "\n# changed\n"
-                    head = repo.change(relative, content)
-                    _, decision = repo.select(head=head)
-                    self.assert_decision(decision, full=True, packages=[], reason="global-input")
-                finally:
-                    repo.close()
+    def test_selector_and_its_tests_use_script_checks_and_preserve_mixed_impact(self):
+        self.repo.change("hack/ci-impact.py", "# selector change\n")
+        self.repo.change("hack/tests/test_ci_impact.py", "# contract change\n")
+        head = self.repo.change("docs/guide.md", "verification scope\n")
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=False, packages=[], reason="selector-only")
+        head = self.repo.change("crates/leaf/src/lib.rs")
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=False, packages=["leaf", "leaf-integration"], reason="package-change")
+        head = self.repo.change("Makefile")
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=True, packages=[], reason="global-input")
 
-    def test_shared_fixture_add_modify_delete_are_global(self) -> None:
-        relative = "tests/fixtures/shared.rs"
-        added = self.repo.change(relative, "pub const VALUE: u8 = 1;\n")
-        modified = self.repo.change(relative, "pub const VALUE: u8 = 2;\n")
-        deleted = self.repo.delete(relative)
-        for base, head in ((self.repo.base, added), (added, modified), (modified, deleted)):
-            with self.subTest(base=base, head=head):
-                _, decision = self.repo.select(base=base, head=head)
+    def test_ci_inputs_are_full(self) -> None:
+        for relative in ("Makefile", ".config/nextest.toml", ".github/workflows/ci.yml"):
+            with self.subTest(relative=relative):
+                head = self.repo.change(relative)
+                _, decision = self.repo.select(head=head)
                 self.assert_decision(decision, full=True, packages=[], reason="global-input")
 
-    def test_actual_archive_shared_input_selects_both_consumers(self) -> None:
-        # Use the actual include and Cargo graph, so moving a fixture back under
-        # one consumer cannot silently reintroduce the missing reverse edge.
+    def test_global_workspace_setting_is_full(self):
+        manifest = self.repo.root / "Cargo.toml"
+        head = self.repo.change("Cargo.toml", manifest.read_text() + "\n[profile.dev]\ndebug = 1\n")
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=True, packages=[], reason="global-input")
+
+    def test_member_manifest_and_lock_formatting(self):
+        path = self.repo.root / "crates/leaf/Cargo.toml"
+        head = self.repo.change("crates/leaf/Cargo.toml", path.read_text() + '# comment\n')
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=False, packages=["leaf", "leaf-integration"], reason="package-change")
+        lock = self.repo.root / "Cargo.lock"
+        end = self.repo.change("Cargo.lock", lock.read_text() + "# comment\n")
+        _, decision = self.repo.select(base=head, head=end)
+        self.assert_decision(decision, full=False, packages=[], reason="package-change")
+
+    def test_add_six_members_selects_only_import_and_removal_drops_dead_names(self):
+        libraries = ["audit-core", "audit-postgres", "ledger", "ledger-postgres"]
+        suites = ["audit-postgres-integration", "ledger-postgres-integration"]
+        workspace = self.repo.root / "Cargo.toml"
+        old_manifest = workspace.read_text()
+        paths = [f"crates/{name}" for name in libraries] + [f"tests/{name}" for name in suites]
+        for name, path in zip(libraries + suites, paths):
+            self.repo._package(path, name, dependencies={"core": "../../crates/core"})
+        workspace.write_text(old_manifest.replace("members = [", "members = [" +
+                             "".join(f'\n  "{path}",' for path in paths)) +
+                             '\n[workspace.dependencies]\naudit-core = { path = "crates/audit-core" }\n')
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=self.repo.root, check=True)
+        added = self.repo.commit("import four libraries and two integration packages")
+        _, decision = self.repo.select(head=added)
+        self.assert_decision(decision, full=False, packages=sorted(libraries + suites), reason="package-change")
+        self.repo.git("revert", "--no-edit", added)
+        _, decision = self.repo.select(base=added)
+        self.assert_decision(decision, full=False, packages=[], reason="package-change")
+
+    def test_inherited_target_dependency_selects_its_consumers(self):
+        manifest = self.repo.root / "Cargo.toml"
+        manifest.write_text(manifest.read_text() + '\n[workspace.dependencies]\ncore = { path = "crates/core" }\n')
+        leaf = self.repo.root / "crates/leaf/Cargo.toml"
+        leaf.write_text(leaf.read_text().replace('[dependencies]', """[target.'cfg(unix)'.dependencies]""")
+                        .replace('core = { path = "../core" }', "core.workspace = true"))
+        base = self.repo.commit("inherit core for one target")
+        head = self.repo.change("Cargo.toml", manifest.read_text().replace(
+            'path = "crates/core" }', 'path = "crates/core", default-features = false }'))
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf", "leaf-integration"], reason="package-change")
+
+    def test_lock_only_repin_selects_transitive_consumers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            remote = Path(temp).resolve()
+            def commit_version(value):
+                (remote / "src/lib.rs").write_text(f"pub const VALUE: u8 = {value};\n")
+                subprocess.run(["/usr/bin/git", "add", "."], cwd=remote, check=True)
+                subprocess.run(["/usr/bin/git", "-c", "user.name=CI", "-c", "user.email=ci@test.invalid",
+                                "commit", "-qm", "update"], cwd=remote, check=True)
+            subprocess.run(["/usr/bin/git", "init", "-q"], cwd=remote, check=True)
+            (remote / "Cargo.toml").write_text('[package]\nname="external"\nversion="0.1.0"\nedition="2024"\n')
+            (remote / "src").mkdir()
+            commit_version(1)
+            member = self.repo.root / "crates/leaf/Cargo.toml"
+            member.write_text(member.read_text() + f'external = {{ git = "{remote.as_uri()}" }}\n')
+            def update():
+                subprocess.run(["cargo", "update", "-q"], cwd=self.repo.root, check=True)
+            update()
+            base = self.repo.commit("pin external dependency")
+            commit_version(2)
+            update()
+            head = self.repo.commit("repin external at same version")
+            _, decision = self.repo.select(base=base, head=head)
+            self.assert_decision(decision, full=False, packages=["leaf", "leaf-integration"], reason="package-change")
+
+    def test_shared_fixture_selects_literal_readers_on_either_side(self):
+        fixture = "tests/fixtures/shared.rs"
+        reader = "tests/leaf-integration/src/lib.rs"
+        self.repo._write(reader, '#[path = "../../fixtures/shared.rs"] mod shared;\n')
+        added = self.repo.change(fixture, "pub const VALUE: u8 = 1;\n")
+        changed = self.repo.change(fixture, "pub const VALUE: u8 = 2;\n")
+        self.repo._write(reader, 'pub struct Finished;\n')
+        removed = self.repo.delete(fixture)
+        for base, head in ((self.repo.base, added), (added, changed), (changed, removed)):
+            _, decision = self.repo.select(base=base, head=head)
+            self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
+
+    def test_shared_fixture_change_ignores_homonymous_package_private_fixture(self):
+        shared = "tests/fixtures/shared.rs"
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')
+        self.repo._write("tests/other-integration/src/lib.rs", 'include!("../fixtures/shared.rs");\n')
+        self.repo._write("tests/other-integration/fixtures/shared.rs", "pub struct Private;\n")
+        base = self.repo.change(shared, "pub struct Shared;\n")
+        head = self.repo.change(shared, "pub struct Updated;\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
+
+    def test_fixture_with_literal_and_computed_readers_selects_both(self):
+        fixture = "tests/fixtures/shared.rs"
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')
+        self.repo._write("tests/other-integration/src/lib.rs",
+                         'include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../", "fixtures/", "shared.rs"));\n')
+        self.repo._write("crates/other/src/lib.rs",
+                         'pub fn load(name: &str) { let _ = std::fs::read(format!("../tests/fixtures/{name}")); }\n')
+        base = self.repo.change(fixture, "pub struct Shared;\n")
+        head = self.repo.change(fixture, "pub struct Updated;\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other", "other-integration"],
+                             reason="package-change")
+
+    def test_inline_module_path_selects_reader_with_different_base_directory(self):
+        fixture = "tests/fixtures/shared.rs"
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')
+        self.repo._write("tests/other-integration/src/inline/.keep", "")
+        self.repo._write("tests/other-integration/src/lib.rs", """
+mod inline {
+    #[path = "../../../fixtures/shared.rs"] mod shared;
+    pub use shared::Shared;
+}
+pub use inline::Shared;
+""")
+        base = self.repo.change(fixture, "pub struct Shared;\n")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        command = ["cargo", "check", "-q", "--locked", "--target-dir", target, "-p", "other-integration"]
+        subprocess.run(command, cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "pub struct Replaced;\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other-integration"],
+                             reason="package-change")
+        failure = subprocess.run(command, cwd=self.repo.root, capture_output=True, text=True)
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("unresolved import", failure.stderr)
+
+    def test_module_directory_with_dots_selects_both_fixture_readers(self):
+        fixture = "tests/fixtures/cases.v1/shared.rs"
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/cases.v1/shared.rs");\n')
+        self.repo._write("tests/other-integration/src/lib.rs", """
+#[path = "../../fixtures/cases.v1"]
+mod cases {
+    pub mod shared;
+}
+pub use cases::shared::Original;
+""")
+        base = self.repo.change(fixture, "pub struct Original;\n")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        command = ["cargo", "check", "-q", "--locked", "--target-dir", target, "-p", "other-integration"]
+        subprocess.run(command, cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "pub struct Replaced;\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other-integration"],
+                             reason="package-change")
+        result = subprocess.run(command, cwd=self.repo.root, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unresolved import", result.stderr)
+
+    def test_shared_fixture_directory_alias_uses_the_compared_revision(self):
+        fixture = "tests/fixtures/canonical/shared.rs"
+        self.repo._write(fixture, "pub struct Original;\n")
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/canonical/shared.rs");\n')
+        # This reader spells neither the canonical input name nor its directory in its path attribute.
+        self.repo._write("tests/other-integration/src/lib.rs", """
+#[path = "../support/compat"]
+mod cases { pub mod shared; }
+pub use cases::shared::Original;
+""")
+        link = self.repo.root / "tests/other-integration/support/compat"
+        link.parent.mkdir()
+        link.symlink_to("../../fixtures/canonical", target_is_directory=True)
+        (self.repo.root / "unrelated-link").symlink_to("README.md")
+        base = self.repo.commit("two readers including a committed directory alias")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        command = ["cargo", "check", "-q", "--locked", "--target-dir", target, "-p", "other-integration"]
+        subprocess.run(command, cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "pub struct Replaced;\n")
+        failure = subprocess.run(command, cwd=self.repo.root, capture_output=True, text=True)
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("unresolved import", failure.stderr)
+        link.unlink()
+        self.repo._write("tests/other-integration/src/lib.rs", "pub struct Other;\n")
+        without_alias = self.repo.commit("remove the directory alias")
+        # HEAD now has only the unrelated symlink. The older input still had the alias.
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=True, packages=[], reason="shared-fixture-alias")
+        end = self.repo.change(fixture, "pub struct ChangedAgain;\n")
+        _, decision = self.repo.select(base=without_alias, head=end)
+        self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
+
+    def test_runner_cancellation_releases_query_descendant_lock(self):
+        head = self.repo.change("crates/leaf/src/lib.rs", "pub struct Updated;\n")
+        with tempfile.TemporaryDirectory() as temp:
+            tools = Path(temp)
+            cargo = tools / "cargo"
+            waiter = tools / "waiter.py"
+            waiter.write_text("import fcntl, os, sys, time\n"
+                              "with open(sys.argv[1], 'w') as f:\n"
+                              "    fcntl.flock(f, fcntl.LOCK_EX)\n"
+                              "    f.write(str(os.getpid()))\n    f.flush()\n    time.sleep(30)\n")
+            cargo.write_text(f"#!{sys.executable}\nimport os, subprocess, sys\n"
+                             f"subprocess.run([sys.executable, {str(waiter)!r}, os.environ['TEST_LOCK']])\n")
+            cargo.chmod(0o755)
+            for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                with self.subTest(sig=sig):
+                    lock = tools / f"{sig.name}.lock"
+                    env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                               RSS_COMPILER_CACHE="off", RSS_TARGET_POOL_N="off", TEST_LOCK=str(lock))
+                    cmd = [sys.executable, str(RSS_ROOT / "hack/ci-run.py"), "--",
+                           *DEFAULT_SELECTOR, "--base", self.repo.base, "--head", head]
+                    with subprocess.Popen(cmd, cwd=self.repo.root, env=env,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as runner:
+                        try:
+                            deadline = time.monotonic() + 10
+                            while not (lock.exists() and lock.stat().st_size):
+                                if runner.poll() is not None:
+                                    self.fail(runner.communicate()[1].decode())
+                                if time.monotonic() >= deadline:
+                                    self.fail("query descendant did not acquire its lock")
+                                time.sleep(0.02)
+                            runner.send_signal(sig)
+                            self.assertEqual(runner.wait(timeout=10), 128 + sig)
+                            with lock.open() as f:
+                                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        finally:
+                            if runner.poll() is None:
+                                runner.kill()
+
+    def test_blocked_cargo_tree_returns_full_plan_and_releases_child_lock(self):
+        member = self.repo.root / "crates/leaf/Cargo.toml"
+        member.write_text(member.read_text().replace('version = "0.1.0"', 'version = "0.1.1"'))
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=self.repo.root, check=True)
+        head = self.repo.commit("change a locked member")
+        with tempfile.TemporaryDirectory() as temp:
+            tools = Path(temp)
+            lock = tools / "child.lock"
+            cargo = tools / "cargo"
+            waiter = tools / "wait.py"
+            waiter.write_text("import fcntl, sys, time\n"
+                              "with open(sys.argv[1], 'w') as f:\n"
+                              "    fcntl.flock(f, fcntl.LOCK_EX)\n    time.sleep(60)\n")
+            # The direct process and its child share the selector query's process group.
+            cargo.write_text(f"#!{sys.executable}\nimport os, subprocess, sys\n"
+                             "if sys.argv[1] == 'tree':\n"
+                             f"    subprocess.run([sys.executable, {str(waiter)!r}, {str(lock)!r}])\n"
+                             "else:\n"
+                             f"    os.execv({shutil.which('cargo')!r}, sys.argv)\n")
+            cargo.chmod(0o755)
+            wrapper = tools / "run_selector.py"
+            wrapper.write_text("import importlib.util\n"
+                               f"spec = importlib.util.spec_from_file_location('impact', {DEFAULT_SELECTOR[1]!r})\n"
+                               "impact = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(impact)\n"
+                               "impact.QUERY_TIMEOUT_SECONDS = 2\nimpact.main()\n")
+            with patch.dict(os.environ, CI_IMPACT_COMMAND=shlex.join([sys.executable, str(wrapper)])):
+                _, decision = self.repo.select(head=head, environment={"PATH": str(tools) + os.pathsep + os.environ["PATH"]})
+            self.assertTrue(decision["full"])
+            self.assertEqual(decision["packages"], [])
+            self.assertRegex(decision["reasons"][0], r"^cargo-tree-[\w-]+-timeout$")
+            with lock.open() as f:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_snapshot_preserves_caller_head_index_and_files_under_git_hook_environment(self):
+        member = self.repo.root / "crates/leaf/Cargo.toml"
+        head = self.repo.change("crates/leaf/Cargo.toml", member.read_text() + "# committed\n")
+        self.repo._write("README.md", "staged\n")
+        self.repo.git("add", "README.md")
+        self.repo._write("README.md", "working copy\n")
+        def state():
+            return (self.repo.git("symbolic-ref", "HEAD").stdout, self.repo.git("rev-parse", "HEAD").stdout,
+                    self.repo.git("ls-files", "--stage").stdout, self.repo.git("diff").stdout,
+                    self.repo.git("status", "--porcelain").stdout)
+        before = state()
+        for key, file in (("GIT_DIR", ".git"), ("GIT_INDEX_FILE", ".git/index")):
+            with self.subTest(key=key):
+                _, decision = self.repo.select(head=head, environment={key: str(self.repo.root / file)})
+                self.assertEqual(state(), before)
+                self.assert_decision(decision, full=False, packages=["leaf", "leaf-integration"],
+                                     reason="package-change")
+
+    def test_unattributed_fixture_fails_full(self):
+        head = self.repo.change("tests/fixtures/unknown.rs", "pub struct Unknown;\n")
+        _, decision = self.repo.select(head=head)
+        self.assert_decision(decision, full=True, packages=[], reason="unknown-fixture-owner")
+
+    def test_actual_archive_shared_input_selects_only_its_consumers(self):
         archive = RSS_ROOT / "tests/archive-integration/tests/archive.rs"
         include = re.search(r'#\[path = "([^"]+)"\]\s*mod support;', archive.read_text())
-        self.assertIsNotNone(include)
-        source = (archive.parent / include.group(1)).resolve()
-        self.assertTrue(source.is_file())
+        path = (archive.parent / include.group(1)).resolve().relative_to(RSS_ROOT).as_posix()
         spec = importlib.util.spec_from_file_location("impact", RSS_ROOT / "hack/ci-impact.py")
         impact = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(impact)
-        document = impact.metadata(RSS_ROOT)
-        with patch.object(impact, "changed_paths", return_value=[("M", source.relative_to(RSS_ROOT).as_posix())]), \
-             patch.object(impact, "metadata", return_value=document):
-            full, packages, _ = impact.select(RSS_ROOT, "base", "head")
-        self.assertTrue(full or {"archive-integration", "postgres-integration"} <= packages,
-                        f"shared input selected only {sorted(packages)}")
+        roots, _ = impact.workspace_graph(RSS_ROOT, impact.metadata(RSS_ROOT))
+        self.assertEqual(impact.fixture_owners(RSS_ROOT, "HEAD", path, roots),
+                         {"archive-integration", "postgres-integration"})
 
     def test_unknown_add_and_delete_are_full(self) -> None:
         head = self.repo.change("unknown/source.rs")
@@ -458,18 +720,15 @@ class CiImpactContract(unittest.TestCase):
         finally:
             repo.close()
 
-    def test_rename_and_copy_are_full(self) -> None:
-        head = self.repo.rename("crates/leaf/src/lib.rs", "crates/leaf/src/renamed.rs")
-        _, renamed = self.repo.select(head=head)
-        self.assert_decision(renamed, full=True, packages=[], reason="rename-or-copy")
-
-        repo = FixtureRepo()
-        try:
-            head = repo.copy("crates/leaf/src/lib.rs", "crates/leaf/src/copied.rs")
-            _, copied = repo.select(head=head)
-            self.assert_decision(copied, full=True, packages=[], reason="rename-or-copy")
-        finally:
-            repo.close()
+    def test_move_selects_both_owners_and_copy_only_the_destination(self):
+        source = "crates/leaf/src/obsolete.rs"
+        copied = self.repo.copy(source, "crates/other/src/copied.rs")
+        _, decision = self.repo.select(head=copied)
+        self.assert_decision(decision, full=False, packages=["other", "other-integration"], reason="package-change")
+        moved = self.repo.rename(source, "crates/other/src/moved.rs")
+        _, decision = self.repo.select(base=copied, head=moved)
+        self.assert_decision(decision, full=False, packages=["leaf", "leaf-integration", "other", "other-integration"],
+                             reason="package-change")
 
     def test_abnormal_type_change_is_full(self) -> None:
         target = self.repo.root / "crates/leaf/src/lib.rs"
