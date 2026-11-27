@@ -137,7 +137,7 @@ async fn unconfirmed(f: &Fixture, s: Scope, id: &str) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     outbox
-                        .is_published(
+                        .writer().is_published(
                             tx,
                             m.envelope().metadata().domain(),
                             m.envelope().id(),
@@ -171,7 +171,7 @@ pub(crate) async fn authority_pages(f: &Fixture) -> anyhow::Result<()> {
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
                     for (request, message) in requests {
-                        store.queue(tx, request, message).await?;
+                        store.queue(tx, request, Delivery::Outbox(message)).await?;
                     }
                     Ok(())
                 })
@@ -235,7 +235,7 @@ async fn runtime_boundaries(f: &Fixture, s: Scope) -> anyhow::Result<()> {
                 Box::pin(async move {
                     PgStore::new(
                         tx,
-                        other_outbox,
+                        other_outbox.writer().clone(),
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
                         BatchLimit::default(),
@@ -292,7 +292,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
                 Box::pin(async move {
                     PgStore::new(
                         tx,
-                        selected,
+                        selected.writer().clone(),
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
                         BatchLimit::default(),
@@ -308,7 +308,7 @@ async fn domain_recovery(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result
     committed(
         f.runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { other.queue(tx, request, msg).await })
+                Box::pin(async move { other.queue(tx, request, Delivery::Outbox(msg)).await })
             })
             .await,
     )?;

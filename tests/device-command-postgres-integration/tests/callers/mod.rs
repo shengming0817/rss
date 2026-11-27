@@ -100,7 +100,7 @@ async fn admit(f: &Fixture, callers: CallerRoles) -> anyhow::Result<bool> {
                 Box::pin(async move {
                     PgStore::new(
                         tx,
-                        outbox,
+                        outbox.writer().clone(),
                         CommandClock::Postgres,
                         &callers,
                         BatchLimit::default(),
@@ -197,7 +197,7 @@ async fn rollback(f: &Fixture, name: &str, s: Scope, c: Coordinate) -> anyhow::R
         .runtime
         .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
-                store.queue(tx, request, msg).await?;
+                store.queue(tx, request, Delivery::Outbox(msg)).await?;
                 Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
             })
         })
@@ -217,7 +217,7 @@ async fn commit_unknown(f: &Fixture, name: &str, s: Scope, c: Coordinate) -> any
     let attempt = f
         .runtime
         .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-            Box::pin(async move { store.queue(tx, request, msg).await })
+            Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
         })
         .await;
     assert_eq!(status(attempt), "unknown");
@@ -241,7 +241,7 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
             Box::pin(async move {
                 PgStore::new(
                     tx,
-                    outbox,
+                    outbox.writer().clone(),
                     CommandClock::Postgres,
                     &callers,
                     BatchLimit::default(),
@@ -257,7 +257,7 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
     let operation = other
         .runtime
         .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-            Box::pin(async move { store.queue(tx, request, msg).await })
+            Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await })
         })
         .await;
     assert!(committed(operation).is_err());
@@ -269,7 +269,7 @@ async fn foreign(owner: &Fixture, other: &Fixture) -> anyhow::Result<()> {
         .local_tx(
             crate::execution(scope(OTHER)?.tenant(), 1),
             budget()?,
-            move |tx| Box::pin(async move { store.queue(tx, request, msg).await }),
+            move |tx| Box::pin(async move { store.queue(tx, request, Delivery::Outbox(msg)).await }),
         )
         .await;
     assert!(committed(tenant).is_err());

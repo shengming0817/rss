@@ -123,7 +123,7 @@ async fn publish_last(
     s: Scope,
 ) -> anyhow::Result<()> {
     let published = sqlx::query(
-        "UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1
+        "UPDATE rss_device_command.commands SET status='published',dispatched_at=queued_at,version=version+1
          WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND command_id='handoff-z' AND version=1",
     )
     .bind(s.tenant().to_string())
@@ -213,7 +213,7 @@ async fn partial_recovery(f: &Fixture, names: [&str; 2], exact: bool) -> anyhow:
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *competing)
         .await?;
-    sqlx::query("UPDATE rss_device_command.commands SET status='published',published_at=queued_at,version=version+1 WHERE tenant_id=$1::uuid AND command_id=$2 AND version=1")
+    sqlx::query("UPDATE rss_device_command.commands SET status='published',dispatched_at=queued_at,version=version+1 WHERE tenant_id=$1::uuid AND command_id=$2 AND version=1")
         .bind(scope.tenant().to_string()).bind(names[1]).execute(&mut *competing).await?;
     let recover = recover_conflicted_page(f, scope, current, names, exact);
     let release = async {
@@ -263,7 +263,7 @@ async fn recover_conflicted_page(
             page,
             move |page, tx| {
                 Box::pin(async move {
-                    store.queue(tx, marker, dispatch).await?;
+                    store.queue(tx, marker, Delivery::Outbox(dispatch)).await?;
                     if exact {
                         store.recover_exact(tx, scope, *page).await?;
                     } else {

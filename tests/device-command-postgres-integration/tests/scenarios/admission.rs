@@ -48,12 +48,12 @@ pub(super) async fn executable_contract(f: &Fixture) -> anyhow::Result<()> {
 async fn function_attributes(f: &Fixture) -> anyhow::Result<()> {
     for (change, restore) in [
         (
-            "ALTER FUNCTION rss_device_command.save(uuid,uuid,text,bigint,text,bigint,bigint,bigint) STRICT",
-            "ALTER FUNCTION rss_device_command.save(uuid,uuid,text,bigint,text,bigint,bigint,bigint) CALLED ON NULL INPUT",
+            "ALTER FUNCTION rss_device_command.save(uuid,uuid,text,bigint,text,bigint,bigint,bigint,uuid) STRICT",
+            "ALTER FUNCTION rss_device_command.save(uuid,uuid,text,bigint,text,bigint,bigint,bigint,uuid) CALLED ON NULL INPUT",
         ),
         (
-            "ALTER FUNCTION rss_device_command.enqueue(uuid,uuid,text,bigint,bigint,bytea,bigint,bigint,text,bytea,text) STABLE",
-            "ALTER FUNCTION rss_device_command.enqueue(uuid,uuid,text,bigint,bigint,bytea,bigint,bigint,text,bytea,text) VOLATILE",
+            "ALTER FUNCTION rss_device_command.enqueue(uuid,uuid,text,bigint,bigint,bytea,bigint,bigint,text,bytea,text,bytea) STABLE",
+            "ALTER FUNCTION rss_device_command.enqueue(uuid,uuid,text,bigint,bigint,bytea,bigint,bigint,text,bytea,text,bytea) VOLATILE",
         ),
     ] {
         reject(f, change, restore, "functions").await?;

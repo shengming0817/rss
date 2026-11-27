@@ -77,7 +77,7 @@ async fn device_child() -> anyhow::Result<()> {
         runtime
             .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
                 Box::pin(async move {
-                    store.queue(tx, request, msg).await?;
+                    store.queue(tx, request, Delivery::Outbox(msg)).await?;
                     if !committed_before_kill {
                         std::fs::write(before_marker, b"staged").map_err(sqlx::Error::Io)?;
                         std::future::pending::<()>().await;

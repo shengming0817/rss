@@ -24,10 +24,17 @@ let scope = Scope::new(
 let coordinate = Coordinate::new(1, 1)?;
 let spec = CommandSpec::new(scope, CommandId::parse("set-mode")?, coordinate,
     StateDigest::from_bytes([7; 32]), 1_000_000);
-let command = Command::queue(spec, 10)?;
+let command = Command::queue(spec, Delivery::Direct { content_digest: ContentDigest::from_bytes([1; 32]) }, 10)?;
 assert_eq!(command.status(), Status::Queued);
 # Ok(()) }
 ```
+
+Creation selects `Delivery::Outbox(message)` or `Delivery::Direct { content_digest }` per command.
+The direct digest binds the frozen input. The expected state digest binds the observed effect.
+A committed direct claim records the caller's stable issuance ID and dispatch time in Claimed.
+After response loss, load the original ID and call `claim_direct` again under current product
+authorization. Only a committed Eligible result may be considered for protocol-specific resend.
+A matching Direct report binds that ID even after termination.
 
 Only durable publication confirmation reaches Published; device ACK reaches Received; an exact
 actual-state match after Received reaches Applied. A device may reject after either Published
@@ -50,8 +57,7 @@ The store accepts only `DeviceReport` for device-originated input.
 
 ## Transactions and recovery
 
-`Store` borrows its provider transaction. Queue binds the complete immutable command and dispatch
-fingerprint, stages one outbox entry, and never commits. No returned snapshot or `Transition`
+`Store` borrows its provider transaction. Queue binds the immutable command and delivery facts. Outbox creation stages one message and direct creation stages only the command. No returned snapshot or `Transition`
 authorizes transport ACK before the enclosing transaction's confirmed settlement. Exact create
 replay returns the existing snapshot; changed immutable facts conflict. Products own authored
 message contracts, routes and protocol payloads and must bind them to the same command intent.

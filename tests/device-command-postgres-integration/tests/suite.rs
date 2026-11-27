@@ -116,7 +116,7 @@ fn status<T>(attempt: LocalTxAttempt<T, PgError>) -> &'static str {
 }
 struct Fixture {
     runtime: Arc<PgRuntime>,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     outbox: Arc<PgOutboxStore<()>>,
     owner: PgPool,
     config: PgConfig,
@@ -124,14 +124,14 @@ struct Fixture {
 async fn stores(
     config: PgConfig,
     clock: rss_device_command_postgres::CommandClock,
-) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore<()>>, Arc<PgOutboxStore<()>>)> {
+) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore>, Arc<PgOutboxStore<()>>)> {
     stores_for(config, clock, CallerRoles::new(&["device_runtime"])?).await
 }
 async fn stores_for(
     config: PgConfig,
     clock: rss_device_command_postgres::CommandClock,
     callers: CallerRoles,
-) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore<()>>, Arc<PgOutboxStore<()>>)> {
+) -> anyhow::Result<(Arc<PgRuntime>, Arc<PgStore>, Arc<PgOutboxStore<()>>)> {
     let runtime =
         Arc::new(PgRuntime::connect(config, Timer::new(), fence_fixture::storage()).await?);
     let outbox = Arc::new(PgOutboxStore::new(
@@ -153,7 +153,7 @@ async fn stores_for(
                 budget()?,
                 move |tx| {
                     Box::pin(async move {
-                        PgStore::new(tx, selected, clock, &callers, supersede_batch_size).await
+                        PgStore::new(tx, selected.writer().clone(), clock, &callers, supersede_batch_size).await
                     })
                 },
             )
@@ -264,7 +264,7 @@ impl Fixture {
         committed(
             self.runtime
                 .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                    Box::pin(async move { store.queue(tx, spec, m).await })
+                    Box::pin(async move { store.queue(tx, spec, Delivery::Outbox(m)).await })
                 })
                 .await,
         )
@@ -288,6 +288,7 @@ impl Fixture {
         event: DeviceEvent,
     ) -> anyhow::Result<Transition> {
         let input = DeviceReport {
+            source: ReportSource::Outbox,
             scope: s,
             command_id: CommandId::parse(name)?,
             coordinate,

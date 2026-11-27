@@ -293,7 +293,7 @@ async fn append(runtime: &PgRuntime, store: Arc<PgOutboxStore<()>>,
 
 ## Durable publication readback
 
-Companion repositories may call `PgOutboxStore::is_published(tx, domain, message_id, fingerprint)` on
+Companion repositories may call `PgOutboxWriter::is_published(tx, domain, message_id, fingerprint)` on
 an already appended message. It uses the transaction tenant, explicit persisted domain and exact
 authored fingerprint. Readback may cross the store's relay domain; append/claim remain bound to
 the configured domain. Both append and readback require a transaction minted by this same

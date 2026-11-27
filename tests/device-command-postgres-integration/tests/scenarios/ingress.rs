@@ -57,6 +57,7 @@ enum TerminalDispositionOrRetry {
 }
 fn report(id: &str, coordinate: Coordinate, event: DeviceEvent) -> anyhow::Result<DeviceReport> {
     Ok(DeviceReport {
+        source: ReportSource::Outbox,
         scope: scope(TENANT)?,
         command_id: CommandId::parse(id)?,
         coordinate,

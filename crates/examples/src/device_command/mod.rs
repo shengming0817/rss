@@ -151,7 +151,7 @@ async fn scenario(
         compose::bootstrap(
             runtime,
             binding,
-            outbox.clone(),
+            outbox.writer().clone(),
             s,
             coordinate,
             budget()?,
@@ -163,9 +163,9 @@ async fn scenario(
         compose::enqueue(
             runtime,
             binding,
-            outbox.clone(),
+            outbox.writer().clone(),
             spec("example", s, coordinate)?,
-            message("example", s.tenant())?,
+            Delivery::Outbox(message("example", s.tenant())?),
             budget()?,
             callers.clone(),
         )
@@ -182,7 +182,7 @@ async fn scenario(
                 Box::pin(async move {
                     PgStore::new(
                         tx,
-                        selected,
+                        selected.writer().clone(),
                         rss_device_command_postgres::CommandClock::Postgres,
                         &callers,
                         BatchLimit::default(),
@@ -193,6 +193,7 @@ async fn scenario(
             .await,
     )?;
     let store = Arc::new(store);
+    direct_reconnect(runtime, binding, store.clone(), s, coordinate).await?;
     // A bounded fixture publisher records broker acceptance; this is not proof of device execution.
     let claims = outbox
         .claim_partition_heads(binding, std::num::NonZeroUsize::MIN, budget()?)
@@ -254,7 +255,7 @@ async fn scenario(
 async fn recover_candidates(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     s: Scope,
 ) -> anyhow::Result<()> {
     // The product owns the candidate order and decides how to handle a missing slot.
@@ -285,7 +286,7 @@ async fn recover_candidates(
 async fn handoff(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     s: Scope,
     coordinate: Coordinate,
 ) -> anyhow::Result<()> {
@@ -295,7 +296,7 @@ async fn handoff(
     committed(
         runtime
             .local_tx(binding, budget()?, move |tx| {
-                Box::pin(async move { selected.queue(tx, pending, dispatch).await })
+                Box::pin(async move { selected.queue(tx, pending, Delivery::Outbox(dispatch)).await })
             })
             .await,
     )?;
@@ -320,7 +321,7 @@ async fn handoff(
 async fn load(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     s: Scope,
     name: &str,
 ) -> anyhow::Result<Command> {
@@ -337,12 +338,13 @@ async fn load(
 async fn report(
     runtime: &PgRuntime,
     binding: ExecutionBinding,
-    store: Arc<PgStore<()>>,
+    store: Arc<PgStore>,
     scope: Scope,
     coordinate: Coordinate,
     event: DeviceEvent,
 ) -> anyhow::Result<Transition> {
     let report = DeviceReport {
+        source: ReportSource::Outbox,
         scope,
         command_id: CommandId::parse("example")?,
         coordinate,
@@ -355,4 +357,24 @@ async fn report(
             })
             .await,
     )
+}
+
+/// A lost response is recovered by the original issuance under fresh authorization.
+async fn direct_reconnect(runtime: &PgRuntime, binding: ExecutionBinding, store: Arc<PgStore>, scope: Scope, coordinate: Coordinate) -> anyhow::Result<()> {
+    let spec = spec("direct-example", scope, coordinate)?;
+    let id = spec.id().clone();
+    let selected = store.clone();
+    committed(runtime.local_tx(binding,budget()?,move |tx|Box::pin(async move {
+        selected.queue(tx,spec,Delivery::Direct { content_digest: ContentDigest::from_bytes([2;32]) }).await
+    })).await)?;
+    let claim = ClaimId::parse("0d9cdad2-218d-4b7e-b095-ec6bea72aa6e")?;
+    for attempt in [claim, claim] {
+        let selected=store.clone();
+        let id=id.clone();
+        let result=committed(runtime.local_tx(binding,budget()?,move |tx|Box::pin(async move {
+            selected.claim_direct(tx,scope,&id,coordinate,attempt).await
+        })).await)?;
+        anyhow::ensure!(matches!(result,DirectClaim::Eligible(ref command) if command.record().claim_id==Some(claim) && command.version()==2));
+    }
+    Ok(())
 }
