@@ -1,7 +1,7 @@
 //! Run on the candidate and on a detached worktree at the issue baseline.
 //! From the candidate checkout, apply only the measurement harness to the baseline:
 //! `git diff 15380c399 HEAD -- tests/reconcile-postgres-integration/tests/measure | git -C "$baseline" apply`.
-//! In each checkout, with Docker and Python 3 + psycopg 3:
+//! Use a separate Cargo target directory for each checkout. With Docker and Python 3 + psycopg 3:
 //! `cargo build --locked -p testkit --features containers --bin rss-test-launcher`
 //! then `RSS_TEST_RUN_ID="hot-$(uuidgen)" "${CARGO_TARGET_DIR:-target}/debug/rss-test-launcher" -- cargo test --locked -p reconcile-postgres-integration --test suite hot_scan_profile -- --ignored --nocapture`.
 //! Each run compiles that checkout's worker and embedded DDL and emits five untraced samples per layout.
@@ -108,6 +108,13 @@ impl Reconciler<PgClaim> for Measured<'_> {
 #[tokio::test]
 #[ignore = "paired PG 17.6 worker timings and separate auto_explain diagnostics"]
 async fn hot_scan_profile() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize()?;
+    let workspace = package.join("../..").canonicalize()?;
+    anyhow::ensure!(
+        cwd == package || cwd == workspace,
+        "measurement binary belongs to a different checkout; use separate Cargo target directories"
+    );
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(240), &cancel);
