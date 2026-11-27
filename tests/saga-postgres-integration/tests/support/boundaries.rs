@@ -27,13 +27,94 @@ impl Step for Gated {
         ProbeOutcome::Unknown
     }
 }
+pub(super) async fn fair_arrival(
+    store: &PgStore,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let tenant = TenantId::parse("43634363-2222-4333-8444-555555555555")?;
+    let low = Scope::new(tenant, uuid::Uuid::from_u128(1));
+    let high = Scope::new(tenant, uuid::Uuid::from_u128(2));
+    let d = definition(&["one", "two", "three", "four"])?;
+    let entered = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
+    let mut builder = DefinitionBuilder::new(d.clone())?.step(Gated {
+        entered: entered.clone(),
+        released: released.clone(),
+    })?;
+    let effects = Arc::new(Effects::default());
+    for name in ["two", "three", "four"] {
+        builder = builder.step(Action {
+            name,
+            fail: false,
+            effects: effects.clone(),
+        })?;
+    }
+    let executor = Executor::new(
+        store.clone(),
+        protection()?,
+        Registry::builder().register(builder)?.finish(),
+        read_budget()?,
+    );
+    executor
+        .register(high, &d, history_capacity()?, control)
+        .await?;
+    let arrival = async {
+        entered.notified().await;
+        let result = executor
+            .register(low, &d, history_capacity()?, control)
+            .await;
+        released.notify_one();
+        result
+    };
+    let budget = SweepBudget::new(2, 8)?;
+    let (page, registered) = tokio::join!(
+        executor.run_once(tenant, Some(low), budget, control),
+        arrival
+    );
+    registered?;
+    let page = page?;
+    assert_eq!(page.next_cursor, Some(high));
+    assert_eq!(turns(&page)?, [(high, 1)]);
+    let end = executor
+        .run_once(tenant, page.next_cursor, budget, control)
+        .await?;
+    assert_eq!(end.next_cursor, None);
+    assert!(end.items.is_empty());
+
+    released.notify_one(); // low's first effect
+    let both = executor
+        .run_once(tenant, end.next_cursor, budget, control)
+        .await?;
+    assert_eq!(turns(&both)?, [(low, 1), (high, 1)]);
+    assert_eq!(executor.run(low, 2, control).await?.advances, 2);
+    let last = executor
+        .run_once(tenant, None, SweepBudget::new(2, 3)?, control)
+        .await?;
+    assert_eq!(turns(&last)?, [(low, 1), (high, 2)]);
+    for item in last.items {
+        assert_eq!(item.result?.head().status(), Status::Succeeded);
+    }
+    Ok(())
+}
+fn turns(page: &SweepReport) -> anyhow::Result<Vec<(Scope, u32)>> {
+    page.items
+        .iter()
+        .map(|item| {
+            Ok((
+                item.scope,
+                item.result.as_ref().map_err(Clone::clone)?.advances,
+            ))
+        })
+        .collect()
+}
+
 pub(super) async fn fence_during_effect(
     store: &PgStore,
     owner: &PgPool,
     d: &Definition,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    let scope = scope(TENANT)?;
+    let scope = scope("41634163-2222-4333-8444-555555555555")?;
     let entered = Arc::new(Notify::new());
     let released = Arc::new(Notify::new());
     let effects = Arc::new(Effects::default());
@@ -69,8 +150,19 @@ pub(super) async fn fence_during_effect(
         released.notify_one();
         Ok::<_, anyhow::Error>(fresh)
     };
-    let (old, fresh) = tokio::join!(e.run(scope, 30, control), takeover);
-    assert!(matches!(old, Err(ref failure) if failure.kind()==rss_saga::ErrorKind::Fenced));
+    let (old, fresh) = tokio::join!(
+        e.run_once(scope.tenant(), None, SweepBudget::new(1, 30)?, control),
+        takeover
+    );
+    let page = old?;
+    let failure = page.items[0]
+        .result
+        .as_ref()
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("expected fenced instance"))?;
+    assert_eq!(failure.error.kind(), ErrorKind::Fenced);
+    assert_eq!(failure.head().map(HistoryHead::revision), Some(1));
+    assert_eq!(failure.advances, 0);
     let fresh = fresh?;
     let snapshot = store.snapshot(&fresh, read_budget()?, control).await?;
     assert_eq!(snapshot.revision(), 1);

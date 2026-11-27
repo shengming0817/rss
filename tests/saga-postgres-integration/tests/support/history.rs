@@ -422,3 +422,71 @@ async fn accounting_contract(owner: &PgPool) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+pub(super) async fn corrupt_between_sweeps(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let d = definition(&["one", "two"])?;
+    for (tenant, update, kind) in [
+        (
+            "44634463-2222-4333-8444-555555555555",
+            "UPDATE rss_saga.journal SET effect_key=set_byte(effect_key,0,get_byte(effect_key,0)#1) WHERE tenant_id=$1::text::uuid AND saga_id=$2 AND seq=0",
+            ErrorKind::Integrity,
+        ),
+        (
+            "45634563-2222-4333-8444-555555555555",
+            "UPDATE rss_saga.journal SET protected=jsonb_set(protected,'{aad,0}',to_jsonb((protected#>>'{aad,0}')::int # 1)) WHERE tenant_id=$1::text::uuid AND saga_id=$2 AND seq=1",
+            ErrorKind::Protection,
+        ),
+    ] {
+        let s = scope(tenant)?;
+        let effects = Arc::new(Effects::default());
+        let executor = Executor::new(
+            store.clone(),
+            protection()?,
+            registry(d.clone(), effects.clone(), false)?,
+            read_budget()?,
+        );
+        executor.register(s, &d, history_capacity()?, c).await?;
+        let first = executor
+            .run_once(s.tenant(), None, SweepBudget::new(1, 1)?, c)
+            .await?;
+        assert_eq!(
+            first.items[0]
+                .result
+                .as_ref()
+                .map_err(Clone::clone)?
+                .head()
+                .revision(),
+            2
+        );
+        assert_eq!(
+            sqlx::query(update)
+                .bind(tenant)
+                .bind(s.id())
+                .execute(owner)
+                .await?
+                .rows_affected(),
+            1
+        );
+        let next = executor
+            .run_once(s.tenant(), None, SweepBudget::new(1, 32)?, c)
+            .await?;
+        let failure = next.items[0]
+            .result
+            .as_ref()
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected rejection of corrupt history"))?;
+        assert_eq!(failure.error.kind(), kind);
+        assert!(failure.head().is_none());
+        assert_eq!(failure.advances, 0);
+        assert_eq!(executor.history_head(s, c).await?.revision(), 2);
+        assert_eq!(
+            *effects.calls.lock().map_err(|_| ErrorKind::Store)?,
+            ["execute:one"]
+        );
+    }
+    Ok(())
+}
