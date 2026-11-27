@@ -1,4 +1,5 @@
-use crate::{AdmissionViolation, Control, Error, MIGRATION_SQL, Timer, error::sql_error};
+use crate::{AdmissionViolation, Control, Error, MIGRATION_SQL, error::sql_error};
+use rss_request_context::ExecutionTimer;
 use sqlx::{PgConnection, Row};
 /// Validate the actual runtime role and Ledger schema at installation or startup.
 ///
@@ -8,7 +9,7 @@ use sqlx::{PgConnection, Row};
 /// The host must bound server statements and retire the connection if cancellation leaves
 /// execution or settlement unconfirmed. Controlled schema/role changes require draining
 /// writers and validating again before resuming; live administrator drift is not polled.
-pub async fn validate_connection<T: Timer>(
+pub async fn validate_connection<T: ExecutionTimer>(
     connection: &mut PgConnection,
     control: &Control<'_, T>,
 ) -> Result<(), Error> {
@@ -19,7 +20,7 @@ pub async fn validate_connection<T: Timer>(
 /// The role and every role it can SET must lack append-function authority; full schema,
 /// forced RLS and read privileges are verified with the same structural admission as writers.
 /// The host owns budgets, connection lifetime and re-admission after controlled changes.
-pub async fn validate_read_connection<T: Timer>(
+pub async fn validate_read_connection<T: ExecutionTimer>(
     connection: &mut PgConnection,
     control: &Control<'_, T>,
 ) -> Result<(), Error> {

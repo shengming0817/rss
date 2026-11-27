@@ -17,7 +17,7 @@ mod probe;
 pub use probe::{validate_connection, validate_read_connection};
 mod repository;
 mod transaction;
-pub use control::{Control, Timer};
+pub use control::Control;
 pub use error::{AdmissionViolation, Error};
 pub use repository::{ReadLimit, StagedAppend, Window};
 #[cfg(feature = "integration")]
