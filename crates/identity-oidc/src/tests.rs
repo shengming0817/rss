@@ -4,7 +4,15 @@ use serde_json::json;
 #[allow(clippy::unwrap_used, reason = "test fixture")]
 fn token_metadata() -> (Metadata, discovery::Jwks) {
     let metadata = serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
-    let jwks = serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap();
+    let jwks = discovery::Jwks {
+        keys: vec![
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../tests/fixtures/entra-a.json"
+            ))
+            .unwrap()
+            .into(),
+        ],
+    };
     (metadata, jwks)
 }
 #[allow(

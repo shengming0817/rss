@@ -1,6 +1,6 @@
 //! Strict ID-token security claims with separately interpreted ordinary profile values.
 //! ref: jsonwebtoken src/validation.rs@11f83ab50d796f7e3a51d8fbd203ab3d050fed1b.
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::Jwk};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use rss_identity_core::federation::FederationError;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +26,38 @@ pub(super) struct Claims {
     #[serde(flatten)]
     pub ordinary: serde_json::Map<String, serde_json::Value>,
 }
+impl Claims {
+    /// Move the verified ordinary claims into the exchange's mapping input. Project only
+    /// explicitly selected standard fields, preserving NumericDate normalization and absence.
+    pub fn mapping_fields(
+        &mut self,
+        mapping: &rss_identity_core::federation::ClaimMapping,
+    ) -> Result<serde_json::Value, FederationError> {
+        let mut fields = std::mem::take(&mut self.ordinary);
+        for name in [
+            mapping.groups.as_deref(),
+            mapping.profile.extensions_claim.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let value = match name {
+                "iat" => self.iat.into(),
+                "exp" => self.exp.into(),
+                "nbf" => match self.nbf {
+                    Some(date) => date.into(),
+                    None => continue,
+                },
+                "auth_time" => self.auth_time.into(),
+                "acr" => serde_json::to_value(&self.acr).map_err(|_| FederationError::Claims)?,
+                "amr" => serde_json::to_value(&self.amr).map_err(|_| FederationError::Claims)?,
+                _ => continue,
+            };
+            fields.insert(name.to_owned(), value);
+        }
+        Ok(serde_json::Value::Object(fields))
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub(super) enum Audiences {
@@ -49,12 +81,10 @@ pub(super) fn approved_header(
     {
         return Err(FederationError::Claims);
     }
-    let algorithm = serde_json::to_value(header.alg).map_err(|_| FederationError::Claims)?;
-    let approved = serde_json::to_value(&metadata.id_token_signing_alg_values_supported)
-        .map_err(|_| FederationError::Claims)?;
-    if !approved
-        .as_array()
-        .is_some_and(|values| values.contains(&algorithm))
+    if !metadata
+        .id_token_signing_alg_values_supported
+        .iter()
+        .any(|value| value.parse::<Algorithm>() == Ok(header.alg))
     {
         return Err(FederationError::Claims);
     }
@@ -63,51 +93,19 @@ pub(super) fn approved_header(
 pub(super) fn symmetric(alg: Algorithm) -> bool {
     matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512)
 }
-pub(super) fn signing_key(
+pub(super) fn signing_key<'a>(
     header: &jsonwebtoken::Header,
-    keys: Option<&super::discovery::Jwks>,
+    keys: Option<&'a super::discovery::Jwks>,
     client_secret: &str,
-) -> Result<DecodingKey, FederationError> {
-    let algorithm = serde_json::to_value(header.alg).map_err(|_| FederationError::Claims)?;
-    let key = if symmetric(header.alg) {
-        DecodingKey::from_secret(client_secret.as_bytes())
-    } else {
-        let keys = &keys.ok_or(FederationError::Claims)?.keys;
-        let key_type = match header.alg {
-            Algorithm::RS256
-            | Algorithm::RS384
-            | Algorithm::RS512
-            | Algorithm::PS256
-            | Algorithm::PS384
-            | Algorithm::PS512 => "RSA",
-            Algorithm::ES256 | Algorithm::ES384 => "EC",
-            Algorithm::EdDSA => "OKP",
-            _ => return Err(FederationError::Claims),
-        };
-        let candidates: Vec<_> = keys
-            .iter()
-            .filter(|v| {
-                header
-                    .kid
-                    .as_ref()
-                    .is_none_or(|kid| v.get("kid").and_then(|v| v.as_str()) == Some(kid))
-                    && v.get("kty").and_then(|v| v.as_str()) == Some(key_type)
-                    && v.get("use").is_none_or(|v| v.as_str() == Some("sig"))
-                    && v.get("alg").is_none_or(|v| v == &algorithm)
-                    && v.get("key_ops").is_none_or(|v| {
-                        v.as_array()
-                            .is_some_and(|ops| ops.iter().any(|v| v.as_str() == Some("verify")))
-                    })
-            })
-            .collect();
-        if candidates.len() != 1 {
-            return Err(FederationError::Claims);
-        }
-        let jwk: Jwk =
-            serde_json::from_value(candidates[0].clone()).map_err(|_| FederationError::Claims)?;
-        DecodingKey::from_jwk(&jwk).map_err(|_| FederationError::Claims)?
-    };
-    Ok(key)
+) -> Result<std::borrow::Cow<'a, DecodingKey>, FederationError> {
+    if symmetric(header.alg) {
+        return Ok(std::borrow::Cow::Owned(DecodingKey::from_secret(
+            client_secret.as_bytes(),
+        )));
+    }
+    keys.ok_or(FederationError::Claims)?
+        .select(header)
+        .map(std::borrow::Cow::Borrowed)
 }
 #[allow(
     clippy::too_many_arguments,

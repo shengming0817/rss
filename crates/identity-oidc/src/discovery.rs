@@ -9,8 +9,9 @@ use futures_util::{
     future::{BoxFuture, WeakShared},
 };
 use http::{HeaderMap, HeaderValue, header};
+use jsonwebtoken::{Algorithm, AlgorithmFamily, DecodingKey, DecodingKeyKind, jwk::Jwk};
 use rss_identity_core::federation::{FederationError, ProviderReason, ProviderStage};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, de::DeserializeOwned};
 use std::{
     sync::{
         Arc, Mutex,
@@ -20,10 +21,81 @@ use std::{
 };
 use url::Url;
 
-#[derive(Default, Deserialize, Serialize)]
-pub(super) struct Jwks {
-    pub keys: Vec<serde_json::Value>,
+#[derive(Deserialize)]
+struct WireKeys {
+    keys: Vec<serde_json::Value>,
 }
+
+pub(super) struct Jwks {
+    pub keys: Vec<Candidate>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(from = "serde_json::Value")]
+pub(super) struct Candidate {
+    pub kid: Option<Box<str>>,
+    family: Option<AlgorithmFamily>,
+    algorithm: Option<Algorithm>,
+    key: Option<DecodingKey>,
+}
+impl From<serde_json::Value> for Candidate {
+    fn from(value: serde_json::Value) -> Self {
+        let kid = value.get("kid").and_then(|v| v.as_str()).map(Into::into);
+        let algorithm = value
+            .get("alg")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok());
+        let usable = value.get("use").is_none_or(|v| v.as_str() == Some("sig"))
+            && value.get("key_ops").is_none_or(|v| {
+                v.as_array()
+                    .is_some_and(|ops| ops.iter().any(|op| op.as_str() == Some("verify")))
+            })
+            && (value.get("alg").is_none() || algorithm.is_some());
+        let family = match value.get("kty").and_then(|v| v.as_str()).filter(|_| usable) {
+            Some("RSA") => Some(AlgorithmFamily::Rsa),
+            Some("EC") => Some(AlgorithmFamily::Ec),
+            Some("OKP") => Some(AlgorithmFamily::Ed),
+            _ => None,
+        };
+        // A matching malformed key still counts towards ambiguous selection.
+        let key = family
+            .and_then(|_| serde_json::from_value::<Jwk>(value).ok())
+            .and_then(|jwk| DecodingKey::from_jwk(&jwk).ok());
+        Self {
+            kid,
+            family,
+            algorithm,
+            key,
+        }
+    }
+}
+impl Candidate {
+    fn heap_bytes(&self) -> usize {
+        self.kid.as_deref().map_or(0, str::len)
+            + self.key.as_ref().map_or(0, |key| match key.kind() {
+                DecodingKeyKind::SecretOrDer(bytes) => bytes.capacity(),
+                DecodingKeyKind::RsaModulusExponent { n, e } => n.capacity() + e.capacity(),
+            })
+    }
+}
+impl Jwks {
+    pub fn select(&self, header: &jsonwebtoken::Header) -> Result<&DecodingKey, FederationError> {
+        let mut matches = self.keys.iter().filter(|k| {
+            header
+                .kid
+                .as_deref()
+                .is_none_or(|id| k.kid.as_deref() == Some(id))
+                && k.family == Some(header.alg.family())
+                && k.algorithm.is_none_or(|alg| alg == header.alg)
+        });
+        let first = matches.next().ok_or(FederationError::Claims)?;
+        if matches.next().is_some() {
+            return Err(FederationError::Claims);
+        }
+        first.key.as_ref().ok_or(FederationError::Claims)
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct Metadata {
     pub issuer: String,
@@ -76,7 +148,7 @@ impl Kind {
         &self,
         t: &Transport,
         resources: &Resources,
-    ) -> Result<Vec<u8>, FederationError> {
+    ) -> Result<PublicDocument, FederationError> {
         let stage = self.stage();
         let _permit = resources
             .refreshes
@@ -91,8 +163,7 @@ impl Kind {
         if response.status() != http::StatusCode::OK || !valid_media(response.headers(), stage) {
             return Err(invalid(stage));
         }
-        self.validate(response.body(), &t.channel)?;
-        Ok(response.into_body())
+        self.validate(response.body(), &t.channel)
     }
     fn stage(&self) -> ProviderStage {
         match self {
@@ -109,15 +180,16 @@ impl Kind {
             Self::Keys { uri } => uri.to_string(),
         }
     }
-    fn validate(&self, bytes: &[u8], channel: &Channel) -> Result<Option<Url>, FederationError> {
+    fn validate(&self, bytes: &[u8], channel: &Channel) -> Result<PublicDocument, FederationError> {
         match self {
             Self::Discovery { issuer } => {
-                let metadata: Metadata = decode(bytes, self.stage())?;
+                let mut metadata: Metadata = decode(bytes, self.stage())?;
                 if metadata.issuer != *issuer {
                     return Err(failure(self.stage(), ProviderReason::IssuerMismatch));
                 }
                 let token = metadata
                     .token_endpoint
+                    .as_mut()
                     .ok_or_else(|| failure(self.stage(), ProviderReason::EgressDenied))?;
                 for url in [
                     &metadata.authorization_endpoint,
@@ -132,14 +204,20 @@ impl Kind {
                         return Err(failure(self.stage(), ProviderReason::EgressDenied));
                     }
                 }
-                Ok(Some(metadata.jwks_uri))
+                // URL normalization can shorten the input considerably. Keep compact URL clones.
+                metadata.authorization_endpoint = metadata.authorization_endpoint.clone();
+                metadata.jwks_uri = metadata.jwks_uri.clone();
+                token.url = token.url.clone();
+                Ok(PublicDocument::Metadata(metadata))
             }
             Self::Keys { .. } => {
-                let keys: Jwks = decode(bytes, self.stage())?;
+                let keys: WireKeys = decode(bytes, self.stage())?;
                 if keys.keys.len() > channel.policy.max_jwks_keys {
                     return Err(invalid(self.stage()));
                 }
-                Ok(None)
+                Ok(PublicDocument::Keys(Jwks {
+                    keys: keys.keys.into_iter().map(Into::into).collect(),
+                }))
             }
         }
     }
@@ -168,8 +246,43 @@ struct Cached {
     until: Instant,
     freshness: crate::freshness::Freshness,
 }
+pub(super) enum PublicDocument {
+    Metadata(Metadata),
+    Keys(Jwks),
+}
+impl PublicDocument {
+    pub fn metadata(&self) -> Result<&Metadata, FederationError> {
+        match self {
+            Self::Metadata(value) => Ok(value),
+            _ => Err(invalid(ProviderStage::Discovery)),
+        }
+    }
+    fn heap_bytes(&self) -> usize {
+        fn strings(values: &Vec<String>) -> usize {
+            values.capacity() * size_of::<String>()
+                + values.iter().map(String::capacity).sum::<usize>()
+        }
+        match self {
+            Self::Metadata(m) => {
+                m.issuer.capacity()
+                    + m.authorization_endpoint.as_str().len()
+                    + m.jwks_uri.as_str().len()
+                    + m.token_endpoint
+                        .as_ref()
+                        .map_or(0, |v| v.url.as_str().len() + v.advertised.capacity())
+                    + strings(&m._response_types_supported)
+                    + strings(&m._subject_types_supported)
+                    + strings(&m.id_token_signing_alg_values_supported)
+            }
+            Self::Keys(j) => {
+                j.keys.capacity() * size_of::<Candidate>()
+                    + j.keys.iter().map(Candidate::heap_bytes).sum::<usize>()
+            }
+        }
+    }
+}
 pub(super) struct Representation {
-    bytes: Box<[u8]>,
+    pub document: PublicDocument,
     etag: Option<HeaderValue>,
     modified: Option<HeaderValue>,
     keys: Option<(Url, Arc<Document>)>,
@@ -177,11 +290,11 @@ pub(super) struct Representation {
     pub identity: Arc<()>,
 }
 impl Representation {
-    pub fn metadata(&self) -> Result<Metadata, FederationError> {
-        decode(&self.bytes, ProviderStage::Discovery)
-    }
-    pub fn jwks(&self) -> Result<Jwks, FederationError> {
-        decode(&self.bytes, ProviderStage::Jwks)
+    pub fn jwks(&self) -> Result<&Jwks, FederationError> {
+        match &self.document {
+            PublicDocument::Keys(keys) => Ok(keys),
+            _ => Err(invalid(ProviderStage::Jwks)),
+        }
     }
     pub fn keys(&self) -> Result<(&Url, &Arc<Document>), FederationError> {
         self.keys
@@ -392,7 +505,13 @@ impl Document {
             if parts.status != http::StatusCode::OK || !valid_media(&parts.headers, stage) {
                 return Err(invalid(stage));
             }
-            let keys_uri = kind.validate(&bytes, channel)?;
+            #[cfg(any(test, feature = "test-support"))]
+            resources.decodes.fetch_add(1, Ordering::Relaxed);
+            let document = kind.validate(&bytes, channel)?;
+            let keys_uri = match &document {
+                PublicDocument::Metadata(m) => Some(m.jwks_uri.clone()),
+                PublicDocument::Keys(_) => None,
+            };
             let etag = parts.headers.get(header::ETAG).cloned();
             let modified = parts.headers.get(header::LAST_MODIFIED).cloned();
             let keys = keys_uri.map(|uri| {
@@ -404,10 +523,13 @@ impl Document {
                     .unwrap_or_default();
                 (uri, doc)
             });
-            // Account exact stored bytes. Parsed DTOs live only in their caller.
-            let overhead = etag.as_ref().map_or(0, |v| v.as_bytes().len())
+            // Charge the typed representation, retained HTTP validators and child-document binding.
+            let overhead = size_of::<Representation>()
+                + etag.as_ref().map_or(0, |v| v.as_bytes().len())
                 + modified.as_ref().map_or(0, |v| v.as_bytes().len())
-                + keys.as_ref().map_or(0, |(u, _)| u.as_str().len());
+                + keys
+                    .as_ref()
+                    .map_or(0, |(u, _)| u.as_str().len() + size_of::<Document>());
             // Parent and child leave the cache together even if admission of the new
             // representation fails. A later request then starts without obsolete validators.
             if let Some((old, _)) = &previous
@@ -423,15 +545,15 @@ impl Document {
                 .map(|old| &mut old.lease);
             let lease = resources
                 .reserve(
-                    bytes
-                        .len()
+                    document
+                        .heap_bytes()
                         .checked_add(overhead)
                         .ok_or(FederationError::Unavailable)?,
                     replaced,
                 )
                 .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
             Arc::new(Representation {
-                bytes: bytes.into_boxed_slice(),
+                document,
                 etag,
                 modified,
                 keys,

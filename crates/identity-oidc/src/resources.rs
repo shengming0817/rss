@@ -101,7 +101,11 @@ impl Entry {
 pub(super) struct Resources {
     pub clock: super::ProviderClock,
     entries: Mutex<HashMap<ProviderKey, Entry>>,
-    bytes: Arc<AtomicUsize>,
+    pub(super) bytes: Arc<AtomicUsize>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) decodes: AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) verifications: AtomicUsize,
     pub refreshes: Arc<Semaphore>,
     clients: Arc<Semaphore>,
     pub policy: ReusePolicy,
@@ -125,6 +129,10 @@ impl Resources {
             clock,
             entries: Mutex::default(),
             bytes: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            decodes: AtomicUsize::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            verifications: AtomicUsize::default(),
             refreshes: Arc::new(Semaphore::new(policy.max_refreshes)),
             clients: Arc::new(Semaphore::new(policy.max_providers)),
             policy,

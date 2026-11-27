@@ -362,7 +362,7 @@ impl HttpOidc {
         &self,
         provider: BoundProvider,
         deadline: rss_request_context::Deadline,
-    ) -> Result<(Metadata, Arc<discovery::Representation>, Transport), FederationError> {
+    ) -> Result<(Arc<discovery::Representation>, Transport), FederationError> {
         let t = self.transport(provider.clone(), deadline, false)?;
         let kind = discovery::Kind::Discovery {
             issuer: provider.settings().issuer().as_str().into(),
@@ -374,7 +374,7 @@ impl HttpOidc {
             .discovery
             .read(&self.resources, &t, kind, None)
             .await?;
-        Ok((doc.metadata()?, doc, t))
+        Ok((doc, t))
     }
 
     async fn signing_keys(
@@ -382,29 +382,24 @@ impl HttpOidc {
         doc: &discovery::Representation,
         t: &Transport,
         kid: Option<&str>,
-    ) -> Result<discovery::Jwks, FederationError> {
+    ) -> Result<Arc<discovery::Representation>, FederationError> {
         let (uri, slot) = doc.keys()?;
         let kind = || discovery::Kind::Keys { uri: uri.clone() };
         let (first, cached) = slot.read(&self.resources, t, kind(), None).await?;
         let keys = first.jwks()?;
         if cached
             && kid.is_some_and(|id| {
-                !id.is_empty()
-                    && !keys
-                        .keys
-                        .iter()
-                        .any(|v| v.get("kid").and_then(|v| v.as_str()) == Some(id))
+                !id.is_empty() && !keys.keys.iter().any(|v| v.kid.as_deref() == Some(id))
             })
         {
             let identity = first.identity.clone();
             drop(first);
-            return slot
+            return Ok(slot
                 .read(&self.resources, t, kind(), Some(&identity))
                 .await?
-                .0
-                .jwks();
+                .0);
         }
-        Ok(keys)
+        Ok(first)
     }
 }
 fn certificates(
@@ -629,7 +624,8 @@ impl UpstreamOidc for HttpOidc {
             {
                 return Err(FederationError::Configuration);
             }
-            let (metadata, _, transport) = self.discover(provider.clone(), deadline).await?;
+            let (doc, transport) = self.discover(provider.clone(), deadline).await?;
+            let metadata = doc.document.metadata()?;
 
             let scope = std::iter::once("openid")
                 .chain(
@@ -641,7 +637,7 @@ impl UpstreamOidc for HttpOidc {
                 .collect::<Vec<_>>()
                 .join(" ");
             let challenge = URL_SAFE_NO_PAD.encode(digest(m.verifier.as_str()));
-            let mut url = metadata.authorization_endpoint;
+            let mut url = metadata.authorization_endpoint.clone();
             {
                 let mut query = url.query_pairs_mut();
                 query
@@ -686,7 +682,8 @@ impl UpstreamOidc for HttpOidc {
                 return Err(FederationError::Rejected);
             }
 
-            let (metadata, doc, transport) = self.discover(provider.clone(), deadline).await?;
+            let (doc, transport) = self.discover(provider.clone(), deadline).await?;
+            let metadata = doc.document.metadata()?;
 
             let endpoint = metadata
                 .token_endpoint
@@ -694,7 +691,7 @@ impl UpstreamOidc for HttpOidc {
                 .ok_or(FederationError::Configuration)?;
             let id_token =
                 code::exchange(&transport, &endpoint.url, c, credentials, &m, &code).await?;
-            let header = profile_token::approved_header(&id_token, &metadata)?;
+            let header = profile_token::approved_header(&id_token, metadata)?;
             let keys = if profile_token::symmetric(header.alg) {
                 None
             } else {
@@ -703,19 +700,24 @@ impl UpstreamOidc for HttpOidc {
                         .await?,
                 )
             };
-            let key =
-                profile_token::signing_key(&header, keys.as_ref(), credentials.client_secret())?;
-            let claims = profile_token::verify(
+            let key = profile_token::signing_key(
+                &header,
+                keys.as_ref().map(|doc| doc.jwks()).transpose()?,
+                credentials.client_secret(),
+            )?;
+            #[cfg(any(test, feature = "test-support"))]
+            self.resources.verifications.fetch_add(1, Ordering::Relaxed);
+            let mut claims = profile_token::verify(
                 &id_token,
                 header.alg,
                 &key,
-                &metadata,
+                metadata,
                 &m.nonce,
                 c.client_id().as_str(),
                 self.future_skew_seconds,
                 (self.resources.clock.wall)(),
             )?;
-            let all = serde_json::to_value(&claims).map_err(|_| FederationError::Claims)?;
+            let all = claims.mapping_fields(c.claims())?;
 
             let groups = mapped_groups(c.claims().groups.as_deref(), &all)?;
 
@@ -736,7 +738,7 @@ impl UpstreamOidc for HttpOidc {
                 assurance: assurance::normalize(
                     claims.auth_time,
                     claims.acr.as_deref(),
-                    claims.amr.clone().unwrap_or_default(),
+                    claims.amr.take().unwrap_or_default(),
                     self.trusted(tenant, c),
                 )?,
             };
@@ -757,13 +759,12 @@ impl UpstreamOidc for HttpOidc {
         Box::pin(async move {
             let c = provider.settings();
             let t = self.transport(provider.clone(), deadline, true)?;
-            let bytes = discovery::Kind::Discovery {
+            let discovery = discovery::Kind::Discovery {
                 issuer: c.issuer().as_str().into(),
             }
             .probe(&t, &self.resources)
             .await?;
-            let metadata: Metadata = serde_json::from_slice(&bytes)
-                .map_err(|_| failure(ProviderStage::Discovery, ProviderReason::InvalidResponse))?;
+            let metadata = discovery.metadata()?;
             discovery::Kind::Keys {
                 uri: metadata.jwks_uri.clone(),
             }
@@ -821,7 +822,7 @@ fn mapped_department(
         None => UpstreamDepartmentSnapshot::NotConfigured,
         Some(key) => match claims.get(key) {
             None => UpstreamDepartmentSnapshot::Missing,
-            Some(value) => match serde_json::from_value::<DepartmentSnapshot>(value.clone()) {
+            Some(value) => match <DepartmentSnapshot as serde::Deserialize>::deserialize(value) {
                 Ok(snapshot) => UpstreamDepartmentSnapshot::Present(snapshot),
                 Err(_) => UpstreamDepartmentSnapshot::Invalid,
             },

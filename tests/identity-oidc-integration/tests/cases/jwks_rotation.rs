@@ -45,6 +45,21 @@ async fn exchange(
         .exchange(bound.clone(), material, random_secret()?, deadline())
         .await?)
 }
+pub(super) async fn measured<F: Future>(phase: &str, future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut calls = 0;
+    let mut bytes = 0;
+    let result = std::future::poll_fn(|cx| {
+        let mut result = std::task::Poll::Pending;
+        let allocations = allocation_counter::measure(|| result = future.as_mut().poll(cx));
+        calls += allocations.count_total;
+        bytes += allocations.bytes_total;
+        result
+    })
+    .await;
+    println!("OIDC {phase}: allocations={calls} allocated_bytes={bytes}");
+    result
+}
 #[tokio::test]
 #[allow(clippy::expect_used, reason = "test fixture")]
 async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
@@ -91,7 +106,24 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
         &settings(&issuer)?,
         &ProviderCredentials::new("fixture-secret".into(), None)?,
     );
-    exchange(&adapter, &bound, &issuer, &token, "entra-a", KEY_A).await?;
+    use rss_identity_oidc::test_support::reuse_counts;
+    measured(
+        "cold",
+        exchange(&adapter, &bound, &issuer, &token, "entra-a", KEY_A),
+    )
+    .await?;
+    let cold = reuse_counts(&adapter);
+    assert_eq!((cold.0, cold.1), (2, 1));
+    measured(
+        "warm",
+        exchange(&adapter, &bound, &issuer, &token, "entra-a", KEY_A),
+    )
+    .await?;
+    let warm = reuse_counts(&adapter);
+    assert_eq!(warm, (cold.0, 2, cold.2));
+    println!(
+        "OIDC cold/warm cumulative (public decodes, token verifications, resident bytes): {cold:?}/{warm:?}"
+    );
     let before = reads.load(SeqCst);
     assert_eq!(before, 1);
     rotated.store(true, SeqCst);
@@ -102,6 +134,7 @@ async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
             .await
             .is_err()
     );
+    assert_eq!(reuse_counts(&adapter).1, 4);
     server.abort();
     Ok(())
 }
