@@ -45,6 +45,9 @@ pub(super) async fn run(
     partial_resource_lock(store, pool, owner, c).await?;
     rebinding(store, owner, c).await?;
     bounded_pages(store, c).await?;
+    for budget in [1, 2] {
+        blocked_ticket_probe(store, owner, c, budget).await?;
+    }
     uncertainty(store, owner, c).await?;
     isolation_and_admission(store, pool, owner, c).await?;
     expanded_capacity(store, owner, c).await
@@ -147,6 +150,58 @@ async fn finish_fair_turn(
     assert_eq!(next.target().entity(), young.entity()); // future old task cannot block A
     store.finish(&next, Completion::Converged, c).await?;
     Ok(())
+}
+async fn blocked_ticket_probe(
+    store: &PgStore,
+    owner: &PgPool,
+    c: &Control<'_, Clock>,
+    budget: u32,
+) -> anyhow::Result<()> {
+    let queued = scope(&format!("wait-probe-{budget}"))?;
+    let a = format!("probe:{budget}:a");
+    let b = format!("probe:{budget}:b");
+    let holder = wake(store, &scope("probe-holder")?, &b, &[&b], c).await?;
+    let lease = Duration::from_secs(60);
+    let held = claim(store, &holder, lease, c).await?;
+    let old = wake(store, &queued, "old", &[&a, &b], c).await?;
+    let skipped = wake(store, &queued, "skipped", &[&b], c).await?;
+    let free = wake(store, &queued, "free", &[], c).await?;
+    wake(store, &queued, "young", &[&a], c).await?;
+    wake(store, &queued, "last", &[&b], c).await?;
+    sqlx::query("UPDATE rss_reconcile.targets SET next_run=now()-interval '1 hour' WHERE reconciler=$1 AND entity IN ('free','young','last')")
+        .bind(queued.reconciler()).execute(owner).await?;
+    let page = store.claim_due(&queued, 1, budget, lease, c).await?;
+    assert!(page.more);
+    assert_eq!(page.claims.len(), (budget - 1) as usize);
+    if let Some(granted) = page.claims.first() {
+        assert_eq!(granted.target(), &free);
+        store.finish(granted, Completion::Converged, c).await?;
+    }
+    let cursor: i64 = sqlx::query_scalar(
+        "SELECT cursor_ticket FROM rss_reconcile.scans WHERE tenant_id=$1::uuid AND reconciler=$2",
+    )
+    .bind(TENANT)
+    .bind(queued.reconciler())
+    .fetch_one(owner)
+    .await?;
+    let tickets = declarations(owner, &old).await?;
+    assert_eq!(tickets.len(), 2);
+    assert!(tickets.iter().all(|entry| entry.1 == Some(cursor)));
+    assert!(declarations(owner, &skipped).await?[0].1.is_none());
+    // A committed wake behind the cursor keeps the elder's position across release.
+    let keys = ResourceSet::new(queued.tenant(), [&a[..], &b[..]])?;
+    tokio::try_join!(store.wake(&old, &keys, c), store.release(&held, c))?;
+    for _ in 0..8 {
+        let page = store.claim_due(&queued, 1, budget, lease, c).await?;
+        if let Some(granted) = page.claims.first() {
+            store.finish(granted, Completion::Converged, c).await?;
+            if granted.target() == &old {
+                return Ok(());
+            }
+            assert_eq!(granted.target(), &free);
+        }
+    }
+    anyhow::bail!("old waiter did not recover after release")
 }
 async fn partial_resource_lock(
     store: &PgStore,

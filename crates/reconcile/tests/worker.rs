@@ -2148,3 +2148,95 @@ async fn stop_during_an_empty_page_prevents_immediate_continuation() -> anyhow::
     assert_eq!(store.scans.load(Ordering::SeqCst), 1);
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn empty_tail_coalesces_wakes_without_creating_an_idle_scan() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(2), &cancel);
+    let scope = scope()?;
+    let store = idle_store();
+    let business = business(0);
+    let notify = tokio::sync::Notify::new();
+    let worker = run_with_notify(
+        &store,
+        &business,
+        &scope,
+        idle_policy(Duration::from_millis(2), Duration::from_secs(1))?,
+        &control,
+        &stop,
+        &notify,
+        |_| {},
+    );
+    tokio::pin!(worker);
+    assert!(futures::poll!(&mut worker).is_pending());
+    for _ in 0..5 {
+        notify.notify_one();
+        assert!(futures::poll!(&mut worker).is_pending());
+        assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+    }
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(futures::poll!(&mut worker).is_pending());
+    assert_eq!(store.scans.load(Ordering::SeqCst), 2);
+    tokio::time::advance(Duration::from_millis(5)).await;
+    assert!(futures::poll!(&mut worker).is_pending());
+    assert_eq!(store.scans.load(Ordering::SeqCst), 2);
+    stop.cancel();
+    assert_eq!(worker.await?.converged, 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn paced_worker_drives_renewal_and_hard_cancellation() -> anyhow::Result<()> {
+    for cancel_early in [false, true] {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_secs(2), &cancel);
+        let scope = scope()?;
+        let mut store = idle_store();
+        store.lost = true;
+        store
+            .wake(
+                &Target::new(scope.clone(), "active")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
+            .await?;
+        let business = business(2);
+        let notify = tokio::sync::Notify::new();
+        let worker = run_with_notify(
+            &store,
+            &business,
+            &scope,
+            idle_policy(Duration::from_millis(2), Duration::from_secs(1))?,
+            &control,
+            &stop,
+            &notify,
+            |_| {},
+        );
+        tokio::pin!(worker);
+        assert!(futures::poll!(&mut worker).is_pending());
+        assert_eq!(business.active.load(Ordering::SeqCst), 1);
+        // With a 90ms lease, renewal is due at 30ms, inside the pacing interval.
+        tokio::time::advance(Duration::from_micros(29_500)).await;
+        for _ in 0..2 {
+            notify.notify_one();
+            assert!(futures::poll!(&mut worker).is_pending());
+        }
+        assert_eq!(store.scans.load(Ordering::SeqCst), 2);
+        if cancel_early {
+            cancel.cancel();
+            assert!(futures::poll!(&mut worker).is_ready());
+        } else {
+            tokio::time::advance(Duration::from_micros(500)).await;
+            assert!(futures::poll!(&mut worker).is_pending());
+            assert_eq!(business.active.load(Ordering::SeqCst), 0);
+            stop.cancel();
+            assert_eq!(worker.await?.fenced, 1);
+        }
+        assert_eq!(store.scans.load(Ordering::SeqCst), 2);
+    }
+    Ok(())
+}

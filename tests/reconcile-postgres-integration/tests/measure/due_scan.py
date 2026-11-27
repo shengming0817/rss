@@ -11,6 +11,7 @@ import time
 import psycopg
 
 BASE = "5d4c547dc86872d2c9b9b400ee1eee2aafe93c0a"
+HOT_BASE = "15380c399483de2c69aca09b177862445ab92309"
 INSTALL = "crates/reconcile-postgres/migrations/install.sql"
 TENANT = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 OTHER = "f47ac10b-58cc-4372-a567-0e02b2c3d478"
@@ -42,6 +43,8 @@ def notice_counts(diag, counts):
             counts["target_rows_examined"] += examined
             if "LIMIT probe_limit" in sql or "LIMIT page_limit" in sql:
                 counts["candidate_reads"] += examined
+        if node["Node Type"] == "LockRows" and "FROM rss_reconcile.resources WHERE tenant_id=t AND resource=ANY(required_keys)" in sql:
+            counts["resource_locks"] += loops * node["Actual Rows"]
         if node["Node Type"] == "LockRows" and "entity=candidate.entity FOR UPDATE NOWAIT" in sql:
             counts["completed_lock_queries"] += loops
             counts["target_locks"] += loops * node["Actual Rows"]
@@ -181,19 +184,24 @@ def deep_progress(admin, runtime, instrumented, revision):
     print(f"DEEP revision={revision} timeout_ms=20 cursor={cursor} counts={dict(counts)}", flush=True)
 
 
-def hot_progress(admin, runtime, instrumented):
-    seed(admin, 0, 10001)
-    admin.execute("SELECT setval('rss_reconcile.queue_tickets',10001)")
-    runtime.execute("SELECT rss_reconcile.wake(%s,'holder','holder',ARRAY['hot'])", (TENANT,))
-    runtime.execute("SELECT * FROM rss_reconcile.claim_due(%s,'holder',1,128,600000)", (TENANT,))
-    admin.execute("""INSERT INTO rss_reconcile.target_resources(tenant_id,reconciler,entity,resource)
-        SELECT tenant_id,reconciler,entity,'hot' FROM rss_reconcile.targets
-        WHERE reconciler='profile' AND queue_ticket<=10000""")
-    admin.execute("ANALYZE rss_reconcile.target_resources")
-    pages, entity, counts = observed_first(instrumented)
-    assert (pages, entity) == (79, "10001")
-    assert 0 < counts["max_page_candidate_reads"] <= 132, counts
-    print(f"HOT_WAITERS blocked=10000 first_page={pages} counts={dict(counts)}", flush=True)
+def hot_progress(admin, instrumented, revision, layouts):
+    admin.execute(Path(__file__).with_name("hot_seed.sql").read_text())
+    for layout in layouts:
+        admin.execute("SELECT pg_temp.seed_hot_scan(%s)", (layout,))
+        pages, entity, counts = observed_first(instrumented)
+        assert entity == "10001" and counts["returned"] == 1, (entity, counts)
+        if layout == "future":
+            assert pages == counts["target_locks"] == 1
+        elif layout == "miss" or revision == HOT_BASE:
+            assert pages == 79 and counts["target_locks"] >= 10001
+        else:
+            assert 1 <= pages <= 3 and counts["candidate_reads"] < 400 and counts["target_locks"] < 384, counts
+        assert 0 < counts["max_page_candidate_reads"] <= 132, counts
+        if layout != "future":
+            assert counts["resource_locks"] > 0, counts
+        print(f"HOT revision={revision} layout={layout} pages={pages} candidates={counts['candidate_reads']} "
+              f"target_locks={counts['target_locks']} resource_locks={counts['resource_locks']} "
+              f"nested_sql={counts['nested_sql']} max_candidates={counts['max_page_candidate_reads']}", flush=True)
 
 
 def mixed_queue(admin, runtime, future):
@@ -362,6 +370,11 @@ def main():
             head = subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"], text=True).strip()
             assert compiled_sql == Path(INSTALL).read_text() == subprocess.check_output(
                 ["/usr/bin/git", "show", f"{head}:{INSTALL}"], text=True), "candidate SQL differs from HEAD"
+            if sys.argv[1:] == ["--hot"]:
+                with psycopg.connect(**options) as instrumented:
+                    trace(instrumented)
+                    hot_progress(admin, instrumented, head, ("future", "hit", "miss"))
+                return
             for revision in (BASE, head):
                 ddl = compiled_sql if revision == head else subprocess.check_output(["/usr/bin/git", "show", f"{revision}:{INSTALL}"], text=True)
                 with admin.transaction():
@@ -383,7 +396,7 @@ def main():
                         for due in (1, 127, 128, 129, 1024):
                             compare(admin, runtime, instrumented, revision, 10000, due, skew=10000)
                         compare(admin, runtime, instrumented, revision, 100000, 2)
-                        hot_progress(admin, runtime, instrumented)
+                        hot_progress(admin, instrumented, revision, ("hit",))
                         wake_strategies(admin, runtime)
                         early_unblock(admin, runtime)
                         short_physical_lock(admin, runtime)
