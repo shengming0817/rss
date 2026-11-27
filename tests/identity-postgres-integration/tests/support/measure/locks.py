@@ -86,12 +86,13 @@ def samples(lines, plans, controls):
         if plans and " plan:" in message and "{" in message:
             item, _ = json.JSONDecoder().raw_decode(message[message.index("{"):])
             sql = " ".join(item["Query Text"].split())
-            for table in ("attempts", "password_attempts", "oidc_transactions", "link_intents", "tenant_state", "changed"):
-                needle = "FROM changed" if table == "changed" else "identity_authority." + table
-                if needle.lower() in sql.lower():
-                    observed_plans.add(table)
-                    print("AUTH_PLAN", json.dumps([db, now, sql, plan_nodes(item["Plan"])], separators=(",", ":")))
-                    break
+            tables = ("attempts", "password_attempts", "oidc_transactions", "link_intents", "tenant_state")
+            matched = {t for t in tables if "identity_authority." + t in sql.lower()}
+            if "from changed" in sql.lower():
+                matched.add("changed")
+            if matched:
+                observed_plans.update(matched)
+                print("AUTH_PLAN", json.dumps([db, now, sql, plan_nodes(item["Plan"])], separators=(",", ":")))
             continue
         wait = ACQUIRED.match(message)
         if wait and tx:
