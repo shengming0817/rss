@@ -1,6 +1,7 @@
 //! Run the same manual load on the baseline and candidate, outside the CI timing gate.
 use super::*;
 use futures::future::try_join_all;
+mod hot_worker;
 mod timing;
 
 const LEASE: Duration = Duration::from_secs(300);
@@ -135,13 +136,17 @@ async fn measure() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "paired due-scan profile; python3 with psycopg 3 required"]
 async fn due_scan_profile() -> anyhow::Result<()> {
-    use std::process::Stdio;
-    use tokio::io::AsyncWriteExt as _;
-
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(120), &cancel);
     let db = Database::new(&control).await?;
+    python_profile(&db, &[]).await
+}
+
+async fn python_profile(db: &Database, args: &[&str]) -> anyhow::Result<()> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt as _;
+
     let params = db.fixture.params();
     let fixture = serde_json::to_vec(&serde_json::json!({
         "host": params.host, "port": params.port, "dbname": params.database,
@@ -149,6 +154,7 @@ async fn due_scan_profile() -> anyhow::Result<()> {
     }))?;
     let mut child = tokio::process::Command::new("python3")
         .arg("tests/reconcile-postgres-integration/tests/measure/due_scan.py")
+        .args(args)
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .stdin(Stdio::piped())
         .kill_on_drop(true)

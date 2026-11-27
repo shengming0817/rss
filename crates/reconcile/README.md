@@ -25,7 +25,7 @@ core 没有 provider、消息引擎、设备命令或产品运行框架依赖。
 
 `ResourceSet::new(tenant, keys)` 校验最多 1024 个不透明键、排序去重；键遵循 Target 的 1..255 字节字符限制。资源不包含 reconciler，因此同租户跨 Scope 共用；`ResourceSet::empty(tenant)` 必须显式选择。资源只是调度信息，不替代产品授权、事务锁和远端幂等。
 
-`DurableStore::wake(target, resources, control)` 将新输入和完整声明原子登记；`bind_resources` 只修正声明，保留 failures、wake version 和 next_run。`claim_due` 返回 `ClaimBatch { claims, more }`，runner 每次取空槽与 claim_batch_size 的较小值，按独立 scan_budget 扫描；并发大于单批时分批填充；只有成功领取的 claim 占槽。
+`DurableStore::wake(target, resources, control)` 将新输入和完整声明原子登记；`bind_resources` 只修正声明，保留 failures、wake version 和 next_run。`claim_due` 返回 `ClaimBatch { claims, more }`，runner 每次取空槽与 claim_batch_size 的较小值，按独立 scan_budget 扫描；并发大于单批时分批填充；只有成功领取的 claim 占槽。连续 worker 收到空页后，下一次领取最早在回执后 1ms 启动。还有下一页时自动续扫，窗口结束时由通知、活动任务或定时补扫触发。等待期间继续执行与续租。
 
 `observe` / `apply` 返回 `ReconcileStep::Ready(value)` 或 `Deferred(after)`。正常忙必须在效果未提交或事务已确认回滚后让出，不能把提交未知、回滚失败或真实存储故障转换为 Deferred。Deferred 使用正整毫秒延迟，持久化后保留 failures，独立计入 Report.deferred 与 Observation::Deferred；不表示 apply 成功。资源绑定变化会取消旧执行资格并让出；只有原 token/epoch 仍有效时能交回旧资源。
 

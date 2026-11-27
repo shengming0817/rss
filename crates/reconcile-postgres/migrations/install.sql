@@ -189,6 +189,7 @@ DECLARE scan rss_reconcile.scans; page refcursor; candidate record; row rss_reco
  cutoff timestamptz; page_limit bigint; examined integer:=0;
  probe_limit integer; sampled_entities text[]; sampled_tickets bigint[];
  next_sample integer:=1; stream_sample integer:=1; hints_prepared boolean:=false; try_hints boolean; hint_lock_conflict boolean:=false;
+ extra_hint boolean:=false; can_probe_wait boolean;
 BEGIN
  PERFORM rss_reconcile.assert_tenant(t);
  IF n IS NULL OR n NOT BETWEEN 1 AND 1024 OR scan_budget IS NULL OR scan_budget<1 OR ttl IS NULL OR ttl NOT BETWEEN 1 AND 9223372036854775 THEN RAISE EXCEPTION 'invalid claim limits' USING ERRCODE='P1003'; END IF;
@@ -216,6 +217,9 @@ BEGIN
  FROM (SELECT entity,queue_ticket FROM rss_reconcile.targets
        WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL AND GREATEST(next_run,lease_until)<=cutoff
        ORDER BY GREATEST(next_run,lease_until) LIMIT probe_limit) AS due_sample;
+ -- The last ticket of a full sample is its upper bound. Once the ordinary
+ -- cursor has passed it, there is no remote hint to prepare on this page.
+ can_probe_wait:=try_hints AND coalesce(sampled_tickets[probe_limit]>scan.cursor_ticket,false);
  IF cardinality(sampled_tickets)=probe_limit THEN
   -- Seek directly from the persisted cursor. Filtering after the ticket LIMIT
   -- bounds both future prefixes and already-passed hot waiters on every page.
@@ -229,15 +233,18 @@ BEGIN
    WHERE queue_ticket>scan.cursor_ticket AND queue_ticket<=scan.high_watermark ORDER BY queue_ticket;
  END IF;
  LOOP
-  FETCH page INTO candidate;
-  EXIT WHEN NOT FOUND;
-  -- Leave the lookahead for the next page; its eligibility may change before then.
-  IF examined=scan_budget OR cardinality(claims)=n THEN more:=true; EXIT; END IF;
-  examined:=examined+1;
-  scan.cursor_ticket:=candidate.queue_ticket;
-  IF NOT candidate.eligible THEN
-   -- This ticket moved the cursor. Use its free lock attempt for a due ticket
-   -- ahead of it without declaring the intervening tickets visited.
+  IF NOT extra_hint THEN
+   FETCH page INTO candidate;
+   EXIT WHEN NOT FOUND;
+   -- Leave the lookahead for the next page, even after an off-cursor claim.
+   IF examined=scan_budget OR cardinality(claims)=n THEN more:=true; EXIT; END IF;
+   examined:=examined+1;
+   scan.cursor_ticket:=candidate.queue_ticket;
+  END IF;
+  IF extra_hint OR NOT candidate.eligible THEN
+   -- A future ticket lends its position. After a blocked ordinary ticket,
+   -- a remote hint uses a separate remaining position without moving the cursor.
+   extra_hint:=false;
    IF NOT try_hints THEN CONTINUE; END IF;
    IF NOT hints_prepared THEN
     -- Check only the bounded remote sample. A durable wait suppresses a
@@ -262,6 +269,8 @@ BEGIN
     next_sample:=next_sample+1;
    END LOOP;
    IF sampled_tickets[next_sample] IS NULL THEN CONTINUE; END IF;
+   IF candidate.eligible THEN examined:=examined+1; END IF;
+   candidate.eligible:=false;
    candidate.entity:=sampled_entities[next_sample];
    candidate.queue_ticket:=sampled_tickets[next_sample];
    next_sample:=next_sample+1;
@@ -292,7 +301,13 @@ BEGIN
    ) THEN row.queue_ticket END INTO desired_ticket;
    UPDATE rss_reconcile.target_resources SET waiting_ticket=desired_ticket
     WHERE tenant_id=t AND reconciler=r AND entity=row.entity AND waiting_ticket IS DISTINCT FROM desired_ticket;
-   IF desired_ticket IS NOT NULL THEN CONTINUE; END IF;
+   IF desired_ticket IS NOT NULL THEN
+    IF candidate.eligible AND can_probe_wait AND examined<scan_budget THEN
+     extra_hint:=true;
+     can_probe_wait:=false;
+    END IF;
+    CONTINUE;
+   END IF;
    UPDATE rss_reconcile.resources SET owner_reconciler=NULL,owner_entity=NULL,owner_token=NULL,owner_epoch=NULL
     WHERE tenant_id=t AND owner_reconciler=r AND owner_entity=row.entity AND owner_token=row.token AND owner_epoch=row.epoch;
    UPDATE rss_reconcile.targets SET token=gen_random_uuid(),epoch=epoch+1,lease_until=clock_timestamp()+(ttl::text||' milliseconds')::interval,result='running'

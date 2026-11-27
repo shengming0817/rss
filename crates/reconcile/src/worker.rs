@@ -332,6 +332,7 @@ async fn run_inner<
     observe: F,
 ) -> Result<Report, Error> {
     let mut active = Active::new(policy, observe);
+    let mut scan_after = Duration::ZERO;
     loop {
         if stop.is_cancelled() {
             active.drain(control).await?;
@@ -340,7 +341,8 @@ async fn run_inner<
         if control.check().is_err() {
             return Ok(active.report);
         }
-        if active.tasks.len() < policy.concurrency {
+        let pacing = control.elapsed() < scan_after;
+        if active.tasks.len() < policy.concurrency && !pacing {
             let before = active.tasks.len();
             let started = control.elapsed();
             let available = (policy.concurrency - before).min(policy.claim_batch_size);
@@ -351,6 +353,9 @@ async fn run_inner<
             match batch {
                 Ok(batch) => {
                     more = batch.more;
+                    if batch.claims.is_empty() {
+                        scan_after = control.elapsed().saturating_add(Duration::from_millis(1));
+                    }
                     if let Err(error) = active.enqueue(
                         store,
                         reconciler,
@@ -394,15 +399,22 @@ async fn run_inner<
                 continue;
             }
         }
-        let delay = active.delay(control.elapsed());
+        // Entering the loop while paced means a continuation is already requested.
+        // A newly returned terminal empty page still waits for a real wake or recovery.
+        let now = control.elapsed();
+        let wake_at = if pacing {
+            scan_after
+        } else {
+            now.saturating_add(active.delay(now))
+        };
         let available = active.tasks.len() < policy.concurrency;
         let event = control
             .run(async {
                 tokio::select! {
                     ()=stop.cancelled()=>Ok(None),
                     result=active.tasks.next(),if !active.tasks.is_empty()=>Ok(result),
-                    ()=wake_hint(notify),if available=>Ok(None),
-                    ()=control.sleep(delay),if available=>Ok(None),
+                    ()=wake_hint(notify, control, scan_after),if available && !pacing=>Ok(None),
+                    ()=control.sleep_until(wake_at),if available=>Ok(None),
                 }
             })
             .await;
@@ -414,10 +426,22 @@ async fn run_inner<
         }
     }
 }
-async fn wake_hint(notify: Option<&Notify>) {
+async fn wake_hint<T: Timer>(
+    notify: Option<&Notify>,
+    control: &Control<'_, T>,
+    scan_after: Duration,
+) {
     // reason: timer-only runs have no optional wake source to poll.
     match notify {
-        Some(notify) => notify.notified().await,
+        Some(notify) => {
+            // Subscribe to broadcasts now. Leave a stored permit in Notify until
+            // a wake can actually open a scan, so duplicates during pacing coalesce.
+            let notified = notify.notified();
+            if control.elapsed() < scan_after {
+                control.sleep_until(scan_after).await;
+            }
+            notified.await;
+        }
         None => std::future::pending().await,
     }
 }
@@ -501,7 +525,7 @@ async fn execute<S: DurableStore, R: Reconciler<S::Claim>, T: Timer>(
         tokio::select! {
             biased;
             outcome = &mut finish => return outcome,
-            renewed = async { outer.sleep_until(renew_at).await; renew_lease(store, &claim, policy, outer).await } => match renewed {
+            renewed = async { outer.wait_for_due(renew_at).await; renew_lease(store, &claim, policy, outer).await } => match renewed {
                 Ok(at) => renew_at = at,
                 Err(error) => {
                     // A committed finish releases its token before the receipt may arrive.
@@ -544,7 +568,7 @@ async fn attempt_with_renewal<S: DurableStore, R: Reconciler<S::Claim>, T: Timer
     loop {
         tokio::select! {
             result=&mut action=>return result,
-            renewed=async {outer.sleep_until(*renew_at).await;renew_lease(store,claim,policy,outer).await}=>match renewed {
+            renewed=async {outer.wait_for_due(*renew_at).await;renew_lease(store,claim,policy,outer).await}=>match renewed {
                 Ok(at)=>*renew_at=at,
                 Err(error) if error.kind()==ErrorKind::BindingChanged=>return Ok(Completion::Deferred(policy.scan)),
                 Err(error)=>return Err(Failure { stage: Stage::Renew,error }),
