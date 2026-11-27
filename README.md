@@ -10,6 +10,7 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。按�
 
 | 使用场景 | 组件入口 |
 |---|---|
+| 审计记录与可校验追加账本 | [Audit Core](crates/audit-core/README.md)、[Audit PostgreSQL](crates/audit-postgres/README.md)、[Ledger](crates/ledger/README.md)、[Ledger PostgreSQL](crates/ledger-postgres/README.md) |
 | 公共值与请求上下文 | [Contract](crates/contract/README.md)、[Request Context](crates/request-context/README.md) |
 | 诊断与数据保护 | [诊断上下文](crates/diagctx/README.md)、[Trace](crates/tracewire/README.md)、[Redact](crates/redact/README.md)、[Data Protection](crates/data-protection/README.md) |
 | 执行与协议适配 | [Runtime](crates/runtime/README.md)、[Platform](crates/platform/README.md)、[Axum](crates/axum/README.md) |

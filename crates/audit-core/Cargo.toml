@@ -1,0 +1,29 @@
+[package]
+name = "rss-audit-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Provider-free canonical audit record protocol"
+
+[dependencies]
+tracing = { workspace = true, optional = true }
+bytes.workspace = true
+rss-contract.workspace = true
+rss-diag-context = { path = "../diagctx", version = "0.1.0" }
+rss-ledger = { workspace = true, optional = true }
+rss-redact.workspace = true
+rss-request-context.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+integration = ["dep:tracing"]
+ledger = ["dep:rss-ledger"]
+
+[dev-dependencies]
+serde_json = "1"
+trybuild = "1"
+
+[lints]
+workspace = true

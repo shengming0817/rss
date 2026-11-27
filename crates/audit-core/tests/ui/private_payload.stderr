@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/private_payload.rs:4:13
+  |
+4 |     let _ = AuditPayload(Vec::new().into());
+  |             ^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/identity.rs
+  |
+  | pub struct AuditPayload(RedactedBytes);
+  |                         ^^^^^^^^^^^^^ private field

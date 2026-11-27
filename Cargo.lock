@@ -366,6 +366,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "audit-postgres-integration"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-audit-core",
+ "rss-audit-postgres",
+ "rss-contract",
+ "rss-data-protection",
+ "rss-diag-context",
+ "rss-ledger",
+ "rss-ledger-postgres",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "sqlx",
+ "testkit",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2506,6 +2530,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "ledger-postgres-integration"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "ring",
+ "rss-contract",
+ "rss-ledger",
+ "rss-ledger-postgres",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "serde_json",
+ "sqlx",
+ "testkit",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3484,6 +3529,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-audit-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rss-contract",
+ "rss-diag-context",
+ "rss-ledger",
+ "rss-redact",
+ "rss-request-context",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "trybuild",
+]
+
+[[package]]
+name = "rss-audit-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-audit-core",
+ "rss-contract",
+ "rss-ledger",
+ "rss-ledger-postgres",
+ "rss-redact",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "rss-axum"
 version = "0.1.0"
 dependencies = [
@@ -3619,6 +3702,39 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "rss-ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "hmac 0.12.1",
+ "rss-request-context",
+ "sha2 0.10.9",
+ "thiserror",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "rss-ledger-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "rss-ledger",
+ "rss-redact",
+ "rss-request-context",
+ "rss-transactional-messaging",
+ "rss-transactional-messaging-postgres",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]
