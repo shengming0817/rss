@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
+#[path = "../../fixtures/pg_clock.rs"]
+mod pg_clock;
+use pg_clock::TestClock;
 mod admission;
 mod atomicity;
 mod batch;
@@ -33,21 +36,6 @@ mod write_capacity;
 
 fn write_budget() -> Result<rss_audit_postgres::WriteBudget, Error> {
     rss_audit_postgres::WriteBudget::new(1024, 8 * 1024 * 1024, 32 * 1024 * 1024)
-}
-struct TestClock;
-impl Clock for TestClock {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "real monotonic clock for PostgreSQL acceptance"
-    )]
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-}
-impl ExecutionTimer for TestClock {
-    async fn sleep_until(&self, deadline: Deadline) {
-        tokio::task::unconstrained(tokio::time::sleep_until(deadline.instant().into())).await;
-    }
 }
 fn tenant() -> anyhow::Result<TenantId> {
     Ok(TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?)

@@ -1,8 +1,8 @@
 //! Trusted transaction borrowing without transferring settlement or connection ownership.
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
-use crate::{Control, Error, ReadLimit, StagedAppend, Timer, Window, repository};
+use crate::{Control, Error, ReadLimit, StagedAppend, Window, repository};
 use rss_ledger::{AppendRequest, Authenticator, LedgerId, Sequence};
-use rss_request_context::TenantId;
+use rss_request_context::{ExecutionTimer, TenantId};
 use rss_transactional_messaging::transaction::LocalTxDeadlineStage;
 use sqlx::{PgConnection, Postgres, Transaction};
 
@@ -12,7 +12,7 @@ use sqlx::{PgConnection, Postgres, Transaction};
 /// The owner must configure server statement/lock timeouts before lending the transaction.
 /// `Control` bounds client waiting; dropping a future does not cancel PostgreSQL execution.
 /// Retire the connection if rollback cannot be acknowledged within the owner's cleanup budget.
-pub async fn lock_head_in_transaction<T: Timer>(
+pub async fn lock_head_in_transaction<T: ExecutionTimer>(
     tx: &mut Transaction<'_, Postgres>,
     auth: &Authenticator,
     ledger: &LedgerId,
@@ -38,7 +38,7 @@ pub(crate) async fn lock_head(
 /// by the host via `validate_connection`. Does not change settings,
 /// acquire a connection or settle the transaction. Propagate errors to the owner; after
 /// cancellation the owner must isolate any connection whose settlement is unconfirmed.
-pub async fn append_in_transaction<T: Timer>(
+pub async fn append_in_transaction<T: ExecutionTimer>(
     tx: &mut Transaction<'_, Postgres>,
     auth: &Authenticator,
     request: &AppendRequest,
@@ -52,7 +52,7 @@ pub async fn append_in_transaction<T: Timer>(
 /// Append one same-chain batch in input order and return its staged sequence and insertion flags.
 /// A later chunk can fail after earlier entries were staged. Propagate every batch error,
 /// including a stable-ID conflict, and roll back the entire owner transaction.
-pub async fn append_batch_in_transaction<T: Timer>(
+pub async fn append_batch_in_transaction<T: ExecutionTimer>(
     tx: &mut Transaction<'_, Postgres>,
     auth: &Authenticator,
     requests: &[AppendRequest],
@@ -81,7 +81,7 @@ pub(crate) async fn append_positions(
 /// The window can include this transaction's uncommitted appends. It is not commit
 /// evidence. Tenant mismatch is an error, including for empty windows. Inherits the
 /// caller's isolation level and never changes settings or settles the transaction.
-pub async fn read_window_in_transaction<T: Timer>(
+pub async fn read_window_in_transaction<T: ExecutionTimer>(
     tx: &mut Transaction<'_, Postgres>,
     auth: &Authenticator,
     ledger: &LedgerId,

@@ -65,7 +65,7 @@ pub(super) fn binding(
 #[allow(clippy::expect_used, clippy::panic)]
 // reason: fixed integration identities and budgets.
 pub(super) fn deadline() -> rss_transactional_messaging::policy::OperationDeadline {
-    let clock = crate::Clock::new();
+    let clock = crate::TestClock;
     OperationDeadline::from_cutoff(
         Deadline::from_timeout(&clock, Duration::from_secs(5)).expect("deadline"),
         &clock,

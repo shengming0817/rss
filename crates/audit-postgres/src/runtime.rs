@@ -473,8 +473,7 @@ pub(crate) async fn validate_storage<T: ExecutionTimer>(
     }
     #[cfg(feature = "ledger")]
     if matches!(integrity, Integrity::Ledger(_)) {
-        let clock = crate::control::LedgerClock(control.timer, control.timer.now());
-        let budget = clock.budget(control, Stage::Setup);
+        let budget = control.ledger_control(Stage::Setup);
         if append {
             rss_ledger_postgres::validate_connection(connection, &budget).await?;
         } else {

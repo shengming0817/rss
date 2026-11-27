@@ -1,13 +1,16 @@
 //! Ledger persistence and transaction integration against real PostgreSQL.
 use rss_ledger::{AppendRequest, Authenticator, ChainId, KeyId, LedgerId, RecordId, Sequence};
 use rss_ledger_postgres::*;
-use rss_request_context::TenantId;
+use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+#[path = "../../fixtures/pg_clock.rs"]
+mod pg_clock;
+use pg_clock::TestClock;
 mod borrowed;
 #[path = "../../fixtures/message_fence.rs"]
 mod fence_fixture;
@@ -28,24 +31,6 @@ fn binding(tenant: TenantId) -> rss_transactional_messaging::fence::ExecutionBin
 mod messaging;
 mod scenarios;
 mod window;
-struct Clock(Instant);
-impl Clock {
-    #[allow(clippy::disallowed_methods)]
-    // reason: fixture clock owns the monotonic origin.
-    fn new() -> Self {
-        Self(Instant::now())
-    }
-}
-impl Timer for Clock {
-    #[allow(clippy::disallowed_methods)]
-    // reason: concrete injected fixture clock.
-    fn now(&self) -> Duration {
-        self.0.elapsed()
-    }
-    async fn sleep_until(&self, t: Duration) {
-        tokio::time::sleep(t.saturating_sub(self.now())).await;
-    }
-}
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 fn auth() -> anyhow::Result<Authenticator> {
     Ok(Authenticator::new(
@@ -131,9 +116,13 @@ async fn run() -> anyhow::Result<()> {
         .acquire_timeout(Duration::from_secs(3))
         .connect_with(base.username("ledger_runtime").password("fixture-only"))
         .await?;
-    let clock = Clock::new();
+    let clock = TestClock;
     let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(100), &cancel);
+    let control = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(100))?,
+        &cancel,
+    );
     verify_catalog_admission(&pool, &owner, &control).await?;
     let store = PgLedger::new(pool.clone(), auth()?, &control).await?;
     scenarios::run(&store, &pool, &owner, &control).await?;
@@ -149,14 +138,21 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn admission(store: &PgLedger, control: &Control<'_, Clock>) -> anyhow::Result<()> {
-    let clock = Clock::new();
+async fn admission(store: &PgLedger, control: &Control<'_, TestClock>) -> anyhow::Result<()> {
+    let clock = TestClock;
     let cancel = CancellationToken::new();
     cancel.cancel();
     for (c, cancelled) in [
-        (Control::new(&clock, Duration::from_secs(10), &cancel), true),
         (
-            Control::new(&clock, Duration::ZERO, &CancellationToken::new()),
+            Control::new(
+                &clock,
+                Deadline::from_timeout(&clock, Duration::from_secs(10))?,
+                &cancel,
+            ),
+            true,
+        ),
+        (
+            Control::new(&clock, Deadline::at(clock.now()), &CancellationToken::new()),
             false,
         ),
     ] {
@@ -205,7 +201,7 @@ async fn readonly(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     committed(
         store
@@ -258,7 +254,7 @@ async fn readonly(
 
 async fn rejected_probe_retires_connection(
     pool: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let one = PgPoolOptions::new()
         .max_connections(1)
@@ -283,7 +279,7 @@ async fn rejected_probe_retires_connection(
 async fn verify_catalog_admission(
     pool: &PgPool,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let mut connection = pool.acquire().await?;
     sqlx::query("SET search_path TO rss_ledger, pg_catalog")
@@ -313,7 +309,7 @@ async fn verify_catalog_admission(
 async fn verify_function_settings(
     connection: &mut sqlx::PgConnection,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     sqlx::query(
         "ALTER FUNCTION rss_ledger.prepare_append(uuid,text,text,smallint) RESET search_path",
@@ -336,7 +332,7 @@ async fn verify_function_settings(
 async fn verify_maintenance_authority(
     connection: &mut sqlx::PgConnection,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
         .fetch_one(owner)

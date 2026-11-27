@@ -6,14 +6,20 @@ RSS 工作区中 `rss-ledger` 的 PostgreSQL 原子持久化适配器。四库�
 ## 独立追加及业务事务
 
 调用方配置 TLS pool、注入密钥和时钟，使用 `PgLedger::new(pool, auth, control)` 验证组件 schema。
+调用方通过 `rss_request_context::Deadline::from_timeout` 将相对时长固定为同一时钟域的绝对截止，或直接传入上层的 `Deadline`。
 库不执行 migration。`Control` 使用同一绝对预算覆盖连接获取、SQL 和结算；连接未确认结算时隔离关闭。
 回滚失败同时保留原 operation 错误和 settlement 错误，避免结算失败覆盖业务失败原因。
 
 ```rust,no_run
 use rss_ledger::AppendRequest;
-use rss_ledger_postgres::{Control, Error, PgLedger, Timer};
-async fn append<T: Timer>(store: &PgLedger, request: &AppendRequest, control: &Control<'_, T>) {
-    store.append(request, control).await.fold(
+use rss_ledger_postgres::{Control, Error, PgLedger};
+use rss_request_context::{Deadline, ExecutionTimer};
+use tokio_util::sync::CancellationToken;
+async fn append<T: ExecutionTimer>(
+    store: &PgLedger, request: &AppendRequest, timer: &T, deadline: Deadline, cancel: &CancellationToken,
+) {
+    let control = Control::new(timer, deadline, cancel);
+    store.append(request, &control).await.fold(
         |receipt| { let _record = receipt.into_value(); }, // COMMIT ACK
         |error| { /* 未开始；结合错误分类恢复 */ },
         |error| { /* 已确认回滚；结合错误分类恢复 */ },
@@ -22,7 +28,7 @@ async fn append<T: Timer>(store: &PgLedger, request: &AppendRequest, control: &C
         |error| { /* 已失去 fencing authority */ },
     );
 }
-async fn business<T: Timer>(store: &PgLedger, request: AppendRequest, c: &Control<'_, T>) {
+async fn business<T: ExecutionTimer>(store: &PgLedger, request: AppendRequest, c: &Control<'_, T>) {
     let _attempt = store.local_tx(request.ledger().tenant(), c, move |tx| Box::pin(async move {
         let staged = tx.append(&request).await?;
         tx.with_connection(|connection| Box::pin(async move {

@@ -2,7 +2,10 @@ use super::*;
 
 #[allow(clippy::cognitive_complexity)]
 // reason: one bounded two-transaction scenario keeps reservation and settlement assertions together.
-pub(super) async fn run<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Result<()> {
+pub(super) async fn run<T: ExecutionTimer>(
+    pool: &PgPool,
+    control: &Control<'_, T>,
+) -> anyhow::Result<()> {
     let r = request("lock-first", "conditional", b"final fact")?;
     let a = auth()?;
     let mut tx = pool.begin().await?;
@@ -22,9 +25,13 @@ pub(super) async fn run<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> an
         .bind(TENANT)
         .execute(&mut *second)
         .await?;
-    let clock = Clock::new();
+    let clock = TestClock;
     let cancel = CancellationToken::new();
-    let short = Control::new(&clock, Duration::from_millis(250), &cancel);
+    let short = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_millis(250))?,
+        &cancel,
+    );
     // Only the transaction owner configures server execution limits.
     sqlx::query("SET LOCAL statement_timeout='100ms'")
         .execute(&mut *second)

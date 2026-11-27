@@ -1,4 +1,4 @@
-"""Verify a pushed RSS HEAD against four isolated consumer workspaces."""
+"""Verify a pushed RSS HEAD in four Audit and two standalone Ledger configurations."""
 import json
 import os
 from pathlib import Path
@@ -45,7 +45,7 @@ def metadata(cwd, env, *flags):
 def verify_mode(directory, features, rev, env, *, ledger_only=False):
     package = "ledger-consumer" if ledger_only else "audit-consumer"
     adapter = "rss-ledger-postgres" if ledger_only else "rss-audit-postgres"
-    dependencies = {"rss-ledger", adapter} if ledger_only else {"rss-audit-core", adapter}
+    dependencies = {"rss-ledger", "rss-request-context", adapter} if ledger_only else {"rss-audit-core", adapter}
     manifest = ["[workspace]", 'resolver = "2"', "[package]", f'name = "{package}"',
                 'version = "0.0.0"', 'edition = "2024"', "[features]",
                 f'messaging = ["{adapter}/messaging"]']
@@ -56,6 +56,8 @@ def verify_mode(directory, features, rev, env, *, ledger_only=False):
     if "messaging" in features:
         dependencies.update({PG, "rss-transactional-messaging"})
     manifest.append("[dependencies]")
+    if ledger_only:
+        manifest.append('tokio-util = "0.7"')
     for name in sorted(dependencies):
         manifest.append(f'{name} = {{ git = "{REPOSITORY}", rev = "{rev}", default-features = false }}')
     (directory / "Cargo.toml").write_text("\n".join(manifest) + "\n")

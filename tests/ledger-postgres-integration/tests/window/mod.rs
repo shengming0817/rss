@@ -46,7 +46,7 @@ pub async fn run(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     // Incompressible enough to exercise externally stored bytea, not just inline tiny rows.
     let mut bytes = vec![0; rss_ledger::MAX_PAYLOAD_BYTES];
@@ -84,7 +84,7 @@ async fn admitted_windows(
     ledger: &LedgerId,
     one: u64,
     total: u64,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     for (start, count, budget, expected, predecessor) in [
         (0, 1, one, 1, false),
@@ -116,7 +116,7 @@ async fn rejected_windows(
     ledger: &LedgerId,
     one: u64,
     total: u64,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     for (start, count, budget) in [
         (0, 1, 1),
@@ -145,7 +145,7 @@ async fn rejected_windows(
 async fn empty_windows(
     store: &PgLedger,
     ledger: &LedgerId,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     assert!(matches!(
         observe(
@@ -220,7 +220,7 @@ fn assert_status_only(rows: &[PgRow], status: i32) -> anyhow::Result<()> {
 async fn corruption(
     store: &PgLedger,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let original = request("window-corruption", "first", b"payload")?;
     committed(store.append(&original, control).await)?;
@@ -266,7 +266,7 @@ async fn corruption(
 async fn verify_tamper(
     store: &PgLedger,
     ledger: &LedgerId,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     for start in [0, 1] {
         assert!(matches!(
@@ -289,7 +289,7 @@ async fn verify_tamper(
 async fn malformed(
     store: &PgLedger,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let r = request("window-malformed", "r", b"original")?;
     let first = committed(store.append(&r, control).await)?;
@@ -364,7 +364,7 @@ async fn snapshot(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let first = committed(
         store

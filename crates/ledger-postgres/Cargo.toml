@@ -29,6 +29,7 @@ integration = ["dep:tracing"]
 messaging = ["dep:rss-transactional-messaging-postgres", "rss-transactional-messaging/consumer"]
 
 [dev-dependencies]
+rss-transactional-messaging-testkit = { path = "../transactional-messaging-testkit", version = "0.1.0", default-features = false }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tokio-util.workspace = true

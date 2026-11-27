@@ -1,8 +1,8 @@
 //! ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.9.0
-use crate::{Control, Error, StagedAppend, Timer, repository};
+use crate::{Control, Error, StagedAppend, repository};
 use futures::future::BoxFuture;
 use rss_ledger::{AppendRequest, Authenticator, LedgerId, RecordId, Sequence};
-use rss_request_context::TenantId;
+use rss_request_context::{ExecutionTimer, TenantId};
 use rss_transactional_messaging::transaction::{LocalTxAttempt, LocalTxDeadlineStage};
 use sqlx::{Connection, PgConnection, PgPool, Postgres, pool::PoolConnection};
 use std::sync::Arc;
@@ -31,7 +31,7 @@ pub struct PgLedger {
 }
 impl PgLedger {
     /// Validate the ledger schema/runtime role within the caller's budget; execute no migration.
-    pub async fn new<T: Timer>(
+    pub async fn new<T: ExecutionTimer>(
         pool: PgPool,
         auth: Authenticator,
         control: &Control<'_, T>,
@@ -56,7 +56,7 @@ impl PgLedger {
         })
     }
     /// Stop admission and drain within the caller's budget. Cancellation leaves admission closed.
-    pub async fn close<T: Timer>(&self, control: &Control<'_, T>) -> Result<(), Error> {
+    pub async fn close<T: ExecutionTimer>(&self, control: &Control<'_, T>) -> Result<(), Error> {
         let closing = self.pool.close();
         control
             .run(async {
@@ -66,7 +66,7 @@ impl PgLedger {
             .await
     }
     /// Independently append and await settlement. Keep the original request for unknown recovery.
-    pub async fn append<T: Timer>(
+    pub async fn append<T: ExecutionTimer>(
         &self,
         request: &AppendRequest,
         control: &Control<'_, T>,
@@ -80,7 +80,7 @@ impl PgLedger {
     }
     /// Read by stable identity in a settled transaction. Absence does not prove an uncertain
     /// earlier append was rolled back; retry the original append to serialize recovery.
-    pub async fn find<T: Timer>(
+    pub async fn find<T: ExecutionTimer>(
         &self,
         ledger: &LedgerId,
         id: &RecordId,
@@ -96,7 +96,7 @@ impl PgLedger {
     /// Read and authenticate a complete snapshot window, including its predecessor.
     /// Both count and encoded-byte budgets are required. SQL rejects an oversized result
     /// before sending payloads; budget rejection does not authenticate the rejected contents.
-    pub async fn read_window<T: Timer>(
+    pub async fn read_window<T: ExecutionTimer>(
         &self,
         ledger: &LedgerId,
         start: Sequence,
@@ -113,7 +113,7 @@ impl PgLedger {
     }
     /// Execute trusted business SQL and ledger appends under one tenant and one absolute budget.
     /// Propagate errors to roll back. Do not issue transaction/session control through raw SQL.
-    pub async fn local_tx<T: Timer, R: Send, F>(
+    pub async fn local_tx<T: ExecutionTimer, R: Send, F>(
         &self,
         tenant: TenantId,
         control: &Control<'_, T>,
@@ -244,7 +244,7 @@ enum Settlement<R> {
 
 // SQLx drops the command tag. PostgreSQL acknowledges COMMIT with ROLLBACK
 // for an aborted transaction, so keep the transaction until its state is known.
-async fn settlement<R, T: Timer>(
+async fn settlement<R, T: ExecutionTimer>(
     operation: Result<R, Error>,
     connection: &mut PgConnection,
     control: &Control<'_, T>,

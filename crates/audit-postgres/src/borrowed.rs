@@ -63,8 +63,7 @@ pub(crate) async fn append_batch<T: ExecutionTimer>(
                 Integrity::Plain => None,
                 #[cfg(feature = "ledger")]
                 Integrity::Ledger(auth) => {
-                    let clock = crate::control::LedgerClock(control.timer, control.timer.now());
-                    let budget = clock.budget(control, Stage::Operation);
+                    let budget = control.ledger_control(Stage::Operation);
                     let positions = rss_ledger_postgres::append_batch_in_transaction(
                         tx,
                         auth,

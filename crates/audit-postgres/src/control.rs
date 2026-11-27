@@ -6,10 +6,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Caller-owned absolute cutoffs for the transaction owner and its operation.
 pub struct Control<'a, T> {
-    pub(crate) timer: &'a T,
+    timer: &'a T,
     total_deadline: Deadline,
-    pub(crate) operation_deadline: Deadline,
-    pub(crate) cancel: &'a CancellationToken,
+    operation_deadline: Deadline,
+    cancel: &'a CancellationToken,
 }
 impl<'a, T: ExecutionTimer> Control<'a, T> {
     /// Bind absolute cutoffs without refreshing them. Operation is capped by total.
@@ -44,6 +44,13 @@ impl<'a, T: ExecutionTimer> Control<'a, T> {
             _ => self.total_deadline,
         }
     }
+    #[cfg(feature = "ledger")]
+    pub(crate) fn ledger_control(
+        &self,
+        stage: LocalTxDeadlineStage,
+    ) -> rss_ledger_postgres::Control<'a, T> {
+        rss_ledger_postgres::Control::new(self.timer, self.deadline(stage), self.cancel)
+    }
     /// Check cancellation and the original cutoff before starting synchronous work at a stage.
     pub fn check(&self, stage: LocalTxDeadlineStage) -> Result<(), Error> {
         if self.cancel.is_cancelled() {
@@ -68,58 +75,15 @@ impl<'a, T: ExecutionTimer> Control<'a, T> {
     }
 }
 
-#[cfg(feature = "ledger")]
-pub(crate) struct LedgerClock<'a, T>(pub &'a T, pub std::time::Instant);
-#[cfg(feature = "ledger")]
-impl<T: ExecutionTimer> rss_ledger_postgres::Timer for LedgerClock<'_, T> {
-    fn now(&self) -> Duration {
-        self.0.now().saturating_duration_since(self.1)
-    }
-    async fn sleep_until(&self, cutoff: Duration) {
-        self.0.sleep_until(Deadline::at(self.1 + cutoff)).await;
-    }
-}
-
-#[cfg(feature = "ledger")]
-impl<T: ExecutionTimer> LedgerClock<'_, T> {
-    pub(crate) fn budget<'a>(
-        &'a self,
-        control: &'a Control<'_, T>,
-        stage: LocalTxDeadlineStage,
-    ) -> rss_ledger_postgres::Control<'a, Self> {
-        rss_ledger_postgres::Control::new(
-            self,
-            control
-                .deadline(stage)
-                .instant()
-                .saturating_duration_since(self.1),
-            control.cancel,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rss_request_context::Clock;
-    struct Fixed(std::time::Instant);
-    impl Clock for Fixed {
-        fn now(&self) -> std::time::Instant {
-            self.0
-        }
-    }
-    impl ExecutionTimer for Fixed {
-        async fn sleep_until(&self, _: Deadline) {
-            std::future::pending::<()>().await;
-        }
-    }
+    use rss_transactional_messaging_testkit::memory::FakeClock;
+
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "fixed monotonic anchor for deadline classification"
-    )]
     fn operation_expiry_preserves_settlement_and_total_caps_every_stage() {
-        let clock = Fixed(std::time::Instant::now());
+        let clock = FakeClock::new();
         let cancel = CancellationToken::new();
         let expired = Deadline::at(clock.now());
         let future = Deadline::at(clock.now() + Duration::from_secs(1));
@@ -146,5 +110,26 @@ mod tests {
                 .operation_remaining()
                 .is_zero()
         );
+    }
+
+    #[cfg(feature = "ledger")]
+    #[test]
+    fn ledger_inherits_absolute_stage_cutoffs_after_time_spent_in_audit() -> anyhow::Result<()> {
+        let timer = FakeClock::new();
+        let cancel = CancellationToken::new();
+        let total = Deadline::from_timeout(&timer, Duration::from_secs(8))?;
+        let operation = Deadline::from_timeout(&timer, Duration::from_secs(3))?;
+        let audit = Control::new(&timer, total, operation, &cancel);
+
+        timer.advance(Duration::from_secs(2))?;
+        let setup = audit.ledger_control(LocalTxDeadlineStage::Setup);
+        let write = audit.ledger_control(LocalTxDeadlineStage::Operation);
+        assert_eq!(setup.remaining(), Duration::from_secs(6));
+        assert_eq!(write.remaining(), Duration::from_secs(1));
+
+        timer.advance(Duration::from_secs(1))?;
+        assert_eq!(write.remaining(), Duration::ZERO);
+        assert_eq!(setup.remaining(), Duration::from_secs(5));
+        Ok(())
     }
 }

@@ -6,7 +6,7 @@ pub async fn run(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let r = request("basic", "stable", b"exact\0payload")?;
     let first = committed(store.append(&r, control).await)?;
@@ -166,9 +166,13 @@ pub async fn run(
     Ok(())
 }
 async fn interruption(store: &PgLedger, owner: &PgPool) -> anyhow::Result<()> {
-    let clock = Clock::new();
+    let clock = TestClock;
     let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(5), &cancel);
+    let control = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(5))?,
+        &cancel,
+    );
     let r = request("transport", "r", b"bytes")?;
     let copy = r.clone();
     let owner = owner.clone();
@@ -199,7 +203,11 @@ async fn interruption(store: &PgLedger, owner: &PgPool) -> anyhow::Result<()> {
     assert_eq!(restored.entry().sequence().get(), 0);
     store.inject_next_fault(PgFault::CommitPending);
     let cancel2 = CancellationToken::new();
-    let short = Control::new(&clock, clock.now() + Duration::from_millis(100), &cancel2);
+    let short = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_millis(100))?,
+        &cancel2,
+    );
     let r = request("pending", "r", b"bytes")?;
     assert!(matches!(
         observe(store.append(&r, &short).await),
@@ -210,10 +218,17 @@ async fn interruption(store: &PgLedger, owner: &PgPool) -> anyhow::Result<()> {
     operation_expiry(store, &control).await
 }
 
-async fn operation_expiry(store: &PgLedger, control: &Control<'_, Clock>) -> anyhow::Result<()> {
-    let clock = Clock::new();
+async fn operation_expiry(
+    store: &PgLedger,
+    control: &Control<'_, TestClock>,
+) -> anyhow::Result<()> {
+    let clock = TestClock;
     let cancel = CancellationToken::new();
-    let short = Control::new(&clock, Duration::from_millis(100), &cancel);
+    let short = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_millis(100))?,
+        &cancel,
+    );
     let r = request("operation-expiry", "r", b"bytes")?;
     let copy = r.clone();
     let result = store
@@ -238,7 +253,7 @@ pub async fn adversarial(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let r = request("same-id-race", "r", b"immutable")?;
     let mut inserted = 0;
@@ -377,9 +392,13 @@ pub async fn adversarial(
         observe(damaged),
         Observed::RolledBack(Error::StorageContract)
     ));
-    let clock = Clock::new();
+    let clock = TestClock;
     let cancel = CancellationToken::new();
-    let budget = Control::new(&clock, Duration::from_secs(5), &cancel);
+    let budget = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(5))?,
+        &cancel,
+    );
     let copy = r.clone();
     let signal = cancel.clone();
     let result = store
@@ -402,7 +421,7 @@ pub async fn adversarial(
 async fn exhaustion(
     store: &PgLedger,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     // Independently authenticated max-sequence fixture: exercise signed SQL range exhaustion.
     sqlx::query("INSERT INTO rss_ledger.heads VALUES($1::uuid,'exhausted','fixture-key',1,9223372036854775807,decode($2,'hex'))")
@@ -433,7 +452,7 @@ async fn exhaustion(
 async fn business_atomicity(
     store: &PgLedger,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     sqlx::raw_sql("CREATE TABLE public.ledger_business(tenant_id uuid NOT NULL,id text NOT NULL,PRIMARY KEY(tenant_id,id) DEFERRABLE INITIALLY IMMEDIATE); ALTER TABLE public.ledger_business ENABLE ROW LEVEL SECURITY; ALTER TABLE public.ledger_business FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_scope ON public.ledger_business USING(tenant_id=nullif(current_setting('rss.tenant_id',true),'')::uuid); GRANT SELECT,INSERT ON public.ledger_business TO ledger_runtime;").execute(owner).await?;
     for fail in [false, true] {
@@ -498,7 +517,10 @@ async fn business_atomicity(
     business_deferred(store, control).await
 }
 
-async fn business_deferred(store: &PgLedger, control: &Control<'_, Clock>) -> anyhow::Result<()> {
+async fn business_deferred(
+    store: &PgLedger,
+    control: &Control<'_, TestClock>,
+) -> anyhow::Result<()> {
     let r = request("business", "deferred", b"effect")?;
     let copy = r.clone();
     let outcome = store.local_tx(r.ledger().tenant(), control, move |tx| Box::pin(async move {
@@ -520,7 +542,7 @@ async fn business_deferred(store: &PgLedger, control: &Control<'_, Clock>) -> an
 async fn definer_scope(
     store: &PgLedger,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     for statement in [
         "SELECT rss_ledger.prepare_append($1::uuid,'cross-sql','fixture-key',1::smallint)",
