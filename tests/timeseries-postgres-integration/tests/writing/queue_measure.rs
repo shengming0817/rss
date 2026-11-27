@@ -1,4 +1,8 @@
 //! Run each RSS_QUEUE_LOAD (2, 8, 24, mixed, pair) in a fresh release test process.
+//! From the workspace root, with Docker available:
+//! ```text
+//! RSS_TEST_RUN_ID="rss-$(uuidgen)" RSS_QUEUE_LOAD=mixed cargo run --release --locked -p testkit --features containers --bin rss-test-launcher -- -- cargo test --release --locked -p timeseries-postgres-integration --test suite -- writing::queue_measure::load --exact --ignored --nocapture
+//! ```
 use super::{
     prepare_measure::{items, rss_kib},
     *,
@@ -62,6 +66,7 @@ async fn load() -> anyhow::Result<()> {
             Some(Err(Error::Overloaded)) => rejected += 1,
             Some(result) => anyhow::bail!("unexpected first poll {result:?}"),
             None if store.available_preparation() == before => {
+                assert!(queued.len() < limit, "preparation queue exceeded its limit");
                 input_bytes += size;
                 queued.push(write);
             }
@@ -80,9 +85,22 @@ async fn load() -> anyhow::Result<()> {
     }
     let (active, waiting) = (granted.len(), queued.len());
     let stable_rss = rss_kib()?;
+    // In the mixed run, observe one real queued grant before cancelling it at the held pool.
+    let survivor = if load == "mixed" { queued.pop() } else { None };
     drop(queued);
     drop(granted);
+    if let Some(mut write) = survivor {
+        tokio::select! { biased;
+            result = &mut write => anyhow::bail!("resumed write settled with the pool held: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+    }
     let report = measurement::finish();
+    assert_eq!(report.preparation_waits.len(), usize::from(load == "mixed"));
+    let wait_us = report
+        .preparation_waits
+        .first()
+        .map(|w| (w.granted - w.queued).as_micros());
     let peak_waiters = report
         .capacity_samples
         .iter()
@@ -106,7 +124,7 @@ async fn load() -> anyhow::Result<()> {
     assert_eq!(f.store.available_preparation(), full);
     assert_eq!(f.count().await?, 1); // Only the warm-up write was committed.
     println!(
-        "QUEUE {load} active={active} queued={waiting} rejected={rejected} input_bytes={input_bytes} peak_charge={} rss_start_kib={start_rss} rss_peak_kib={peak_rss} rss_held_kib={stable_rss} rss_cancelled_kib={} cancelled={} writes_committed=0",
+        "QUEUE {load} active={active} queued={waiting} rejected={rejected} input_bytes={input_bytes} queued_grant_us={wait_us:?} peak_charge={} rss_start_kib={start_rss} rss_peak_kib={peak_rss} rss_held_kib={stable_rss} rss_cancelled_kib={} cancelled={} writes_committed=0",
         report.peak_reserved_bytes,
         rss_kib()?,
         active + waiting
