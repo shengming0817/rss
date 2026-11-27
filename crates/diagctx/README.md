@@ -1,7 +1,7 @@
 # rss-diag-context
 
-`rss-diag-context` provides validated `CorrelationId` and owned `DiagnosticCtx` values. The default
-API has no Tokio dependency: parse at a trust boundary and pass the context explicitly.
+`rss-diag-context` provides validated `CorrelationId` and owned `DiagnosticCtx` values. In this checkout,
+the default configuration supports explicit context passing without a Tokio dependency.
 
 ```rust
 use rss_diag_context::{CorrelationId, DiagnosticCtx};
@@ -10,15 +10,17 @@ assert_eq!(ctx.correlation().as_str(), "request-42");
 # Ok::<(), rss_diag_context::CorrelationIdError>(())
 ```
 
-Opt into ambient asynchronous propagation with the `task-local` feature:
+For a consumer project next to an RSS checkout named `rss`, enable task-local propagation from that checkout:
 
 ```toml
 [dependencies]
-rss-diag-context = { version = "0.1", features = ["task-local"] }
+rss-diag-context = { path = "../rss/crates/diagctx", features = ["task-local"] }
 ```
 
-`scope`, `current`, and `correlation` are available only with this feature. Task scoping uses Tokio's
-existing task-local mechanism; it does not create a runtime or spawn tasks on the caller's behalf.
+The checkout exposes `scope`, `current`, and `correlation` through this feature.
+For the published crates.io release, use `rss-diag-context = "=0.1.0"` on its own.
+That release exposes all three functions by default. Both forms scope the caller's future
+with Tokio's task-local mechanism.
 
 ```rust
 # #[cfg(feature = "task-local")]
