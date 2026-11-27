@@ -1,7 +1,7 @@
 use crate::{AdmissionViolation as Violation, Error, MIGRATION_SQL};
 use rss_request_context::TenantId;
 use sqlx::{
-    PgConnection, Postgres, Row,
+    Connection, PgConnection, Postgres, Row,
     postgres::{PgArguments, PgRow},
     query::Query,
 };
@@ -26,12 +26,11 @@ pub(crate) async fn validate_read(connection: &mut PgConnection) -> Result<(), E
 /// Reads only the PostgreSQL catalogs. The caller owns the connection, deadline and settlement.
 /// Use startup admission on the actual runtime connection to verify role privileges and RLS.
 pub async fn validate_structure(connection: &mut PgConnection) -> Result<(), Error> {
-    let row = structure_query(concat!(
+    let query = structure_query(concat!(
         include_str!("structure.sql"),
         "SELECT * FROM structure"
-    ))?
-    .fetch_one(connection)
-    .await?;
+    ))?;
+    let row = catalog_row(connection, query).await?;
     check(
         &row,
         &[
@@ -62,14 +61,13 @@ fn structure_query(sql: &'static str) -> Result<Query<'static, Postgres, PgArgum
 }
 
 async fn inspect(connection: &mut PgConnection, require_append: bool) -> Result<(), Error> {
-    let row = structure_query(concat!(
+    let query = structure_query(concat!(
         include_str!("structure.sql"),
         include_str!("admission.sql")
     ))?
     .bind("(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)")
-    .bind(require_append)
-    .fetch_one(connection)
-    .await?;
+    .bind(require_append);
+    let row = catalog_row(connection, query).await?;
     check(
         &row,
         &[
@@ -84,6 +82,51 @@ async fn inspect(connection: &mut PgConnection, require_append: bool) -> Result<
             ("privileges", Violation::Permissions),
         ],
     )
+}
+
+/// SQLx tracks its own transaction depth. A PgConnection may also have a
+/// transaction opened with SQL BEGIN. Never roll back that caller's work.
+async fn catalog_row(
+    connection: &mut PgConnection,
+    query: Query<'static, Postgres, PgArguments>,
+) -> Result<PgRow, Error> {
+    if !connection.is_in_transaction() && has_external_transaction(connection).await? {
+        sqlx::raw_sql("SAVEPOINT rss_audit_probe")
+            .execute(&mut *connection)
+            .await?;
+        let row = pinned_row(connection, query).await;
+        sqlx::raw_sql("ROLLBACK TO SAVEPOINT rss_audit_probe; RELEASE SAVEPOINT rss_audit_probe")
+            .execute(connection)
+            .await?;
+        return row;
+    }
+    let mut scope = connection.begin().await?;
+    let row = pinned_row(&mut scope, query).await;
+    scope.rollback().await?;
+    row
+}
+
+// A virtual transaction ID is stable inside a transaction (including read-only
+// transactions) and distinct in successive autocommit statements. Neither read
+// allocates a permanent XID or sends an intentionally failing SAVEPOINT.
+async fn has_external_transaction(connection: &mut PgConnection) -> Result<bool, Error> {
+    const VXID: &str = "SELECT virtualtransaction FROM pg_catalog.pg_locks
+        WHERE pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()
+        AND locktype OPERATOR(pg_catalog.=) 'virtualxid'
+        AND mode OPERATOR(pg_catalog.=) 'ExclusiveLock' AND granted";
+    let first: String = sqlx::query_scalar(VXID).fetch_one(&mut *connection).await?;
+    let second: String = sqlx::query_scalar(VXID).fetch_one(connection).await?;
+    Ok(first == second)
+}
+
+async fn pinned_row(
+    connection: &mut PgConnection,
+    query: Query<'static, Postgres, PgArguments>,
+) -> Result<PgRow, Error> {
+    sqlx::raw_sql("SET LOCAL search_path=pg_catalog,pg_temp; SET LOCAL quote_all_identifiers=off")
+        .execute(&mut *connection)
+        .await?;
+    Ok(query.fetch_one(connection).await?)
 }
 
 fn check(row: &PgRow, flags: &[(&str, Violation)]) -> Result<(), Error> {

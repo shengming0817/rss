@@ -1,6 +1,14 @@
 use super::*;
 use rss_audit_postgres::{AdmissionViolation, validate_structure};
 
+const CUSTOM_SETTINGS: &str =
+    "SET LOCAL search_path=rss_audit,pg_temp,pg_catalog; SET LOCAL quote_all_identifiers=on";
+
+async fn settings(c: &mut sqlx::PgConnection) -> anyhow::Result<(String, String)> {
+    Ok(sqlx::query_as("SELECT pg_catalog.current_setting('search_path'),pg_catalog.current_setting('quote_all_identifiers')")
+        .fetch_one(c).await?)
+}
+
 pub(super) async fn run(admin: &PgPool) -> anyhow::Result<()> {
     let mut snapshot = admin.begin().await?;
     sqlx::raw_sql(
@@ -8,8 +16,36 @@ pub(super) async fn run(admin: &PgPool) -> anyhow::Result<()> {
     )
     .execute(&mut *snapshot)
     .await?;
+    sqlx::raw_sql(CUSTOM_SETTINGS)
+        .execute(&mut *snapshot)
+        .await?;
+    let original = settings(&mut snapshot).await?;
     validate_structure(&mut snapshot).await?;
+    assert_eq!(settings(&mut snapshot).await?, original);
     snapshot.rollback().await?;
+
+    // A raw BEGIN is invisible to SQLx's transaction-depth counter. Preserve its
+    // settings and uncommitted work even when the component rejects drift.
+    let mut raw = admin.acquire().await?;
+    sqlx::raw_sql(
+        "BEGIN; ALTER TABLE rss_audit.records RENAME CONSTRAINT records_pkey TO renamed_pkey",
+    )
+    .execute(&mut *raw)
+    .await?;
+    sqlx::raw_sql(CUSTOM_SETTINGS).execute(&mut *raw).await?;
+    let original = settings(&mut raw).await?;
+    assert!(matches!(
+        validate_structure(&mut raw).await,
+        Err(Error::Admission(AdmissionViolation::Shape))
+    ));
+    assert_eq!(settings(&mut raw).await?, original);
+    sqlx::raw_sql("ALTER TABLE rss_audit.records RENAME CONSTRAINT renamed_pkey TO records_pkey")
+        .execute(&mut *raw)
+        .await?;
+    validate_structure(&mut raw).await?;
+    assert_eq!(settings(&mut raw).await?, original);
+    sqlx::raw_sql("ROLLBACK").execute(&mut *raw).await?;
+    drop(raw);
 
     for change in [
         "DROP INDEX rss_audit.records_tenant_ledger_sequence_uidx",
