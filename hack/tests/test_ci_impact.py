@@ -539,6 +539,34 @@ pub const PRIVATE: &str = include_str!(
         _, decision = self.repo.select(base=base, head=head)
         self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
 
+    def test_multiline_include_in_macro_keeps_the_expansion_site_reader(self):
+        fixture = "tests/fixtures/shared.txt"
+        self.repo._write("tests/leaf-integration/src/lib.rs",
+                         'pub const SHARED: &str = include_str!("../../fixtures/shared.txt");\n')
+        self.repo._write("tests/other-integration/src/lib.rs", '''
+#[path = "nested/reader.rs"]
+mod reader;
+pub const SHARED: &[u8; 7] = reader::read_shared!();
+''')
+        self.repo._write("tests/other-integration/src/nested/reader.rs", '''
+macro_rules! read_shared {
+    () => { include_bytes!(
+        "../../fixtures/shared.txt",
+    ) };
+}
+pub(crate) use read_shared;
+''')
+        self.repo._write("tests/other-integration/fixtures/shared.txt", "private\n")
+        base = self.repo.change(fixture, "shared\n")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        # Only the seven-byte shared file, relative to the invocation, type-checks.
+        subprocess.run(["cargo", "check", "-q", "--locked", "--target-dir", target,
+                        "-p", "other-integration"], cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "update\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other-integration"],
+                             reason="package-change")
+
     def test_inline_module_path_selects_reader_with_different_base_directory(self):
         fixture = "tests/fixtures/shared.rs"
         self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')

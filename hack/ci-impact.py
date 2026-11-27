@@ -424,10 +424,13 @@ def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
         # Only direct literal Rust includes have a known source-relative base.
         # Any remaining constructed filename or directory could read this fixture.
         imports = direct.findall(source)
+        # A macro body can resolve its include relative to a different file at
+        # expansion time. Keep the conservative scan in files defining macros.
+        remainder = source if re.search(r"\b(?:macro_rules|macro)\b", source) else direct.sub("", source)
         # #[path] may name a module file or an inline module directory.
         # Any ancestor of the input can be that directory, including dotted names.
         attrs = module_path.findall(source)
-        remainder = module_path.sub("", direct.sub("", source))
+        remainder = module_path.sub("", remainder)
         if (any(posixpath.normpath(posixpath.join(posixpath.dirname(filename), value)) == path
                 for value in imports) or any(
                     PurePosixPath(value).name in (*fixture.parts, "", "..")
