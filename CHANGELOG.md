@@ -8,7 +8,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ### Fresh-install version baseline
 
-- Start unpublished workspace packages at 0.1.0. The two published packages retain their 0.1.0 registry identities.
+- Start unpublished workspace packages at 0.1.0. The 0.1.0 releases of `rss-diag-context` and `rss-trace-context` remain available on crates.io. Current source APIs may introduce breaking changes. A new publication must use a fresh SemVer version.
 - Install the current component schemas into an empty database. Hosts adopting this revision must provision a fresh store and switch participating producers and consumers together.
 - Identity account and federation audit contracts, stored authentication facts, OIDC state, field protection, message DR digests and storage cursors use their v1 identities. Restart in-flight OIDC flows and paginated queries against the new installation.
 
@@ -77,8 +77,8 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Require immutable storage target/lineage and tenant epoch bindings for every PostgreSQL runtime,
   recovery operator and archive repository; remove legacy relay SQL overloads and optional
   authorization-target dispatch. Workspace consumers move directly to the new contract.
-- Add one-way migrations 0007/0008. External restore isolation, lineage installation, role grants
-  and runtime replacement are mandatory; stale claims or archive proofs cannot authorize writes.
+- Install the DR tables and functions with the fresh messaging schema. During restore, the host
+  isolates the store, provisions lineage and role grants, and replaces the runtime before admitting writes.
 
 ### rss-mqtt: canonical Outbox and transactional consumer (#2310)
 
@@ -144,7 +144,7 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Compensation failure pauses durably; explicit revision-checked resume preserves attempts and keys.
 - Move Saga receipt protection and integrity to the Saga owner. Remove the former consistency,
   diport, vocab, memory, secure and authorization-mint paths without aliases or compatibility flags.
-- Remove Saga-specific APIs from pre-publication `rss-data-protection`; ordinary field AAD is unchanged.
+- Use `rss-data-protection` for ordinary field AAD and keep Saga receipt AAD in `rss-saga`.
   Receipt AAD, canonical JSON, effect-key and HMAC golden vectors preserve their existing bytes.
 - PostgreSQL is a fresh component schema. No historical data adoption is required or provided.
 

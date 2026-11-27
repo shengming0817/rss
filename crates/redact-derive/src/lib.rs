@@ -336,26 +336,6 @@ fn parse_redact_attr(field: &syn::Field) -> syn::Result<(Option<Mode>, Option<Pa
                 }
                 return Ok(());
             }
-            if meta.path.is_ident("public") {
-                return Err(meta.error(
-                    "旧 #[redact(public)] 语法已移除：使用 #[redact(sensitivity = public)]",
-                ));
-            }
-            if meta.path.is_ident("internal") {
-                return Err(meta.error(
-                    "旧 #[redact(internal)] 语法已移除：使用 #[redact(sensitivity = internal)]",
-                ));
-            }
-            if meta.path.is_ident("secret") {
-                return Err(meta.error(
-                    "旧 #[redact(secret)] 语法已移除：使用 #[redact(sensitivity = secret)]",
-                ));
-            }
-            if meta.path.is_ident("pii") {
-                return Err(meta.error(
-                    "旧 #[redact(pii = \"...\")] 语法已移除：使用 #[redact(sensitivity = pii|pii_email|pii_phone|pii_name|pii_address)]",
-                ));
-            }
             Err(meta.error("未知 #[redact(...)] 键：仅支持 sensitivity/mode"))
         })?;
     }
@@ -382,10 +362,6 @@ fn parse_mode(value: &LitStr) -> syn::Result<Mode> {
         "fixed" => Ok(Mode::Fixed),
         "last4" => Ok(Mode::Last4),
         "email_mask" => Ok(Mode::EmailMask),
-        "hash" => Err(syn::Error::new(
-            value.span(),
-            "mode = \"hash\" 已移除：使用 rss_redact::redact_hash(value, &RedactionHashKey) 显式传入 HMAC key",
-        )),
         "drop" => Ok(Mode::Drop),
         other => Err(syn::Error::new(
             value.span(),
@@ -604,15 +580,6 @@ mod tests {
             );
             assert!(expand_str(&src).is_ok(), "mode {m} 应解析");
         }
-    }
-
-    #[test]
-    fn hash_mode_is_rejected() {
-        let err = expand_str(
-            r#"struct Bad { #[redact(sensitivity = public, mode = "hash")] x: String }"#,
-        )
-        .expect_err("hash mode removed");
-        assert!(err.to_string().contains("mode = \"hash\" 已移除"));
     }
 
     #[test]

@@ -67,7 +67,9 @@ members = [
 
 # Positive Release Surface selection. Unlisted packages remain internal.
 [workspace.metadata.release-surface]
-# #2315: maintainer confirmed no published or external frozen Rust API commitments.
+# #2315 records the original Rust API compatibility decisions.
+# PR #1806: rss-diag-context and rss-trace-context have immutable 0.1.0 registry
+# releases. Their current source APIs may break from those releases (uncommitted).
 compatibility-adoption = { baseline-rev = "fde9829ab01be3839465c18a7f04de10e152ab00", issue = 2315 }
 packages = [
   { package = "rss-timeseries-clickhouse", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", compatibility = { status = "uncommitted", issue = 2813 } },

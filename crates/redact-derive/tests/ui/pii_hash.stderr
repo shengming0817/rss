@@ -1,4 +1,4 @@
-error: mode = "hash" 已移除：使用 rss_redact::redact_hash(value, &RedactionHashKey) 显式传入 HMAC key
+error: 未知 mode `hash`：支持 show / fixed / last4 / email_mask / drop
  --> tests/ui/pii_hash.rs:7:46
   |
 7 |     #[redact(sensitivity = pii_email, mode = "hash")]
