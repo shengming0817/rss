@@ -64,22 +64,42 @@ def emit(full: bool, packages: set[str] | None, reasons: set[str]) -> None:
 
 def query(command: list[str], *, phase: str, cwd=None, env=None) -> subprocess.CompletedProcess[bytes]:
     """Bound one selector query, including children holding its output pipes or locks."""
+    child = None
+    cancelled = None
+
+    def kill_group():
+        if child is not None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        cancelled = signum
+        kill_group()
+
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {sig: signal.signal(sig, cancel) for sig in signals}
     try:
         with subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+            # A signal during Popen is recorded before the group is available.
+            if cancelled is not None:
+                kill_group()
             try:
                 stdout, stderr = child.communicate(timeout=QUERY_TIMEOUT_SECONDS)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                if isinstance(error, KeyboardInterrupt):
-                    raise
+            except subprocess.TimeoutExpired as error:
+                kill_group()
                 raise SelectionError(f"{phase}-timeout") from error
             return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
     except OSError as error:
         raise SelectionError(f"{phase}-unavailable") from error
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        if cancelled is not None:
+            raise SystemExit(128 + cancelled)
 
 
 @cache
@@ -358,7 +378,8 @@ def graph_changes(before: Path, after: Path, old_roots, new_roots) -> set[str]:
 def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
     # Shared fixture imports use literal paths. Include unresolved directory
     # references conservatively (e.g. a build script constructing a filename).
-    basename = PurePosixPath(path).name
+    fixture = PurePosixPath(path)
+    basename = fixture.name
     result = run(["/usr/bin/git", "grep", "-I", "-z", "-F", "-e", basename,
                   "-e", "fixtures", revision, "--"], cwd=root)
     if result.returncode not in (0, 1):
@@ -380,13 +401,13 @@ def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
         # Only direct literal Rust includes have a known source-relative base.
         # Any remaining constructed filename or directory could read this fixture.
         imports = direct.findall(line)
-        # Inline Rust modules can change the base directory of a #[path].
-        # Its last component remains known even when its directory does not.
+        # #[path] may name a module file or an inline module directory.
+        # Any ancestor of the input can be that directory, including dotted names.
         attrs = module_path.findall(line)
         remainder = module_path.sub("", direct.sub("", line))
         if (any(posixpath.normpath(posixpath.join(posixpath.dirname(filename), value)) == path
                 for value in imports) or any(
-                    posixpath.basename(value) == basename or not PurePosixPath(value).suffix
+                    PurePosixPath(value).name in (*fixture.parts, "", "..")
                     for value in attrs
                 ) or basename in remainder or directory.search(remainder)):
             packages.add(package)

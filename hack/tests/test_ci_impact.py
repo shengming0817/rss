@@ -10,10 +10,12 @@ import re
 import os
 from pathlib import Path
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -541,6 +543,66 @@ pub use inline::Shared;
         failure = subprocess.run(command, cwd=self.repo.root, capture_output=True, text=True)
         self.assertNotEqual(failure.returncode, 0)
         self.assertIn("unresolved import", failure.stderr)
+
+    def test_module_directory_with_dots_selects_both_fixture_readers(self):
+        fixture = "tests/fixtures/cases.v1/shared.rs"
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/cases.v1/shared.rs");\n')
+        self.repo._write("tests/other-integration/src/lib.rs", """
+#[path = "../../fixtures/cases.v1"]
+mod cases {
+    pub mod shared;
+}
+pub use cases::shared::Original;
+""")
+        base = self.repo.change(fixture, "pub struct Original;\n")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        command = ["cargo", "check", "-q", "--locked", "--target-dir", target, "-p", "other-integration"]
+        subprocess.run(command, cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "pub struct Replaced;\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other-integration"],
+                             reason="package-change")
+        result = subprocess.run(command, cwd=self.repo.root, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unresolved import", result.stderr)
+
+    def test_runner_cancellation_releases_query_descendant_lock(self):
+        head = self.repo.change("crates/leaf/src/lib.rs", "pub struct Updated;\n")
+        with tempfile.TemporaryDirectory() as temp:
+            tools = Path(temp)
+            cargo = tools / "cargo"
+            waiter = tools / "waiter.py"
+            waiter.write_text("import fcntl, os, sys, time\n"
+                              "with open(sys.argv[1], 'w') as f:\n"
+                              "    fcntl.flock(f, fcntl.LOCK_EX)\n"
+                              "    f.write(str(os.getpid()))\n    f.flush()\n    time.sleep(30)\n")
+            cargo.write_text(f"#!{sys.executable}\nimport os, subprocess, sys\n"
+                             f"subprocess.run([sys.executable, {str(waiter)!r}, os.environ['TEST_LOCK']])\n")
+            cargo.chmod(0o755)
+            for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                with self.subTest(sig=sig):
+                    lock = tools / f"{sig.name}.lock"
+                    env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                               RSS_COMPILER_CACHE="off", RSS_TARGET_POOL_N="off", TEST_LOCK=str(lock))
+                    cmd = [sys.executable, str(RSS_ROOT / "hack/ci-run.py"), "--",
+                           *DEFAULT_SELECTOR, "--base", self.repo.base, "--head", head]
+                    with subprocess.Popen(cmd, cwd=self.repo.root, env=env,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as runner:
+                        try:
+                            deadline = time.monotonic() + 10
+                            while not (lock.exists() and lock.stat().st_size):
+                                if runner.poll() is not None:
+                                    self.fail(runner.communicate()[1].decode())
+                                if time.monotonic() >= deadline:
+                                    self.fail("query descendant did not acquire its lock")
+                                time.sleep(0.02)
+                            runner.send_signal(sig)
+                            self.assertEqual(runner.wait(timeout=10), 128 + sig)
+                            with lock.open() as f:
+                                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        finally:
+                            if runner.poll() is None:
+                                runner.kill()
 
     def test_blocked_cargo_tree_returns_full_plan_and_releases_child_lock(self):
         member = self.repo.root / "crates/leaf/Cargo.toml"
