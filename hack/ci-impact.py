@@ -375,6 +375,27 @@ def graph_changes(before: Path, after: Path, old_roots, new_roots) -> set[str]:
     return affected
 
 
+def check_fixture_aliases(root: Path, revision: str, fixtures: set[str]) -> None:
+    """Literal source references cannot enumerate readers through a filesystem alias."""
+    if not fixtures:
+        return
+    entries = git(root, "ls-tree", "-rz", revision, phase="git-fixture-tree").split(b"\0")
+    links = [os.fsdecode(entry.split(b"\t", 1)[1]) for entry in entries if entry.startswith(b"120000 ")]
+    if not links:
+        return
+    with checkout(root, revision) as snapshot:
+        inputs = {(snapshot / fixture).resolve(strict=True) for fixture in fixtures}
+        for link in links:
+            try:
+                target = (snapshot / link).resolve()
+            except (OSError, RuntimeError) as error:
+                raise SelectionError("unknown-fixture-owner") from error
+            # A directory or file alias can be used from another package without
+            # any occurrence of "fixtures" or the canonical filename in its source.
+            if any(target == item or target in item.parents for item in inputs):
+                raise SelectionError("shared-fixture-alias")
+
+
 def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
     # Shared fixture imports use literal paths. Include unresolved directory
     # references conservatively (e.g. a build script constructing a filename).
@@ -439,6 +460,9 @@ def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
                 old_roots, old_reverse = workspace_graph(previous, metadata(previous))
                 affected = graph_changes(previous, current, old_roots, roots)
 
+        fixtures = [(status, path) for status, path in changes if path.startswith("tests/fixtures/")]
+        check_fixture_aliases(root, base, {path for status, path in fixtures if status != "A"})
+        check_fixture_aliases(root, head, {path for status, path in fixtures if status != "D"})
         before, after = set(affected), set(affected)
         for status, path in changes:
             if is_docs(path) or path in ("Cargo.toml", "Cargo.lock"):

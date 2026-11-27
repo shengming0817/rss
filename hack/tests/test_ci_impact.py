@@ -566,6 +566,38 @@ pub use cases::shared::Original;
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unresolved import", result.stderr)
 
+    def test_shared_fixture_directory_alias_uses_the_compared_revision(self):
+        fixture = "tests/fixtures/canonical/shared.rs"
+        self.repo._write(fixture, "pub struct Original;\n")
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/canonical/shared.rs");\n')
+        # This reader spells neither the canonical input name nor its directory in its path attribute.
+        self.repo._write("tests/other-integration/src/lib.rs", """
+#[path = "../support/compat"]
+mod cases { pub mod shared; }
+pub use cases::shared::Original;
+""")
+        link = self.repo.root / "tests/other-integration/support/compat"
+        link.parent.mkdir()
+        link.symlink_to("../../fixtures/canonical", target_is_directory=True)
+        (self.repo.root / "unrelated-link").symlink_to("README.md")
+        base = self.repo.commit("two readers including a committed directory alias")
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        command = ["cargo", "check", "-q", "--locked", "--target-dir", target, "-p", "other-integration"]
+        subprocess.run(command, cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "pub struct Replaced;\n")
+        failure = subprocess.run(command, cwd=self.repo.root, capture_output=True, text=True)
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("unresolved import", failure.stderr)
+        link.unlink()
+        self.repo._write("tests/other-integration/src/lib.rs", "pub struct Other;\n")
+        without_alias = self.repo.commit("remove the directory alias")
+        # HEAD now has only the unrelated symlink. The older input still had the alias.
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=True, packages=[], reason="shared-fixture-alias")
+        end = self.repo.change(fixture, "pub struct ChangedAgain;\n")
+        _, decision = self.repo.select(base=without_alias, head=end)
+        self.assert_decision(decision, full=False, packages=["leaf-integration"], reason="package-change")
+
     def test_runner_cancellation_releases_query_descendant_lock(self):
         head = self.repo.change("crates/leaf/src/lib.rs", "pub struct Updated;\n")
         with tempfile.TemporaryDirectory() as temp:
