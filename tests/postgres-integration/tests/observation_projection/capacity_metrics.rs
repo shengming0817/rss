@@ -1,17 +1,63 @@
-use super::fixture::rss_kib;
+use super::fixture::rss_command;
+use anyhow::{Context, ensure};
 use rss_observation_postgres::read_profile::ReadWork;
 use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 use std::{
     alloc::System,
+    process::Stdio,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
     time::Duration,
 };
-use tokio::task::JoinHandle;
+use tokio::{
+    io::AsyncReadExt as _,
+    process::{Child, Command},
+    task::JoinHandle,
+};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 #[global_allocator]
 static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+const RSS_PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
+const RSS_OUTPUT_LIMIT: usize = 64;
+
+async fn read_rss(
+    child: &mut Child,
+    stop: &CancellationToken,
+    timeout: Duration,
+) -> anyhow::Result<Option<u64>> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("missing RSS probe stdout")?
+        .take(RSS_OUTPUT_LIMIT as u64);
+    let mut bytes = Vec::new();
+    let operation = tokio::time::timeout(timeout, async {
+        let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
+        Ok::<_, std::io::Error>(status)
+    });
+    let completion = tokio::select! {
+        biased;
+        () = stop.cancelled() => Ok(None),
+        result = operation => result.context("RSS probe timed out").and_then(|status| status.map(Some).map_err(Into::into)),
+    };
+    drop(stdout);
+    if !matches!(completion, Ok(Some(_))) {
+        tokio::time::timeout(RSS_PROCESS_TIMEOUT, child.kill())
+            .await
+            .context("timed out reaping RSS probe")?
+            .context("kill and reap RSS probe")?;
+    }
+    let Some(status) = completion? else {
+        return Ok(None);
+    };
+    ensure!(status.success(), "RSS probe exited with {status}");
+    ensure!(
+        bytes.len() < RSS_OUTPUT_LIMIT,
+        "RSS probe returned oversized output"
+    );
+    Ok(Some(std::str::from_utf8(&bytes)?.trim().parse()?))
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Memory {
@@ -20,12 +66,25 @@ pub(super) struct Memory {
 }
 
 impl Memory {
-    pub(super) fn sample() -> anyhow::Result<Self> {
+    pub(super) async fn sample() -> anyhow::Result<Self> {
+        Self::sample_until(&CancellationToken::new())
+            .await?
+            .context("RSS sample cancelled")
+    }
+
+    async fn sample_until(stop: &CancellationToken) -> anyhow::Result<Option<Self>> {
+        if stop.is_cancelled() {
+            return Ok(None);
+        }
         let stats = ALLOCATOR.stats();
-        Ok(Self {
-            heap: i64::try_from(stats.bytes_allocated)? - i64::try_from(stats.bytes_deallocated)?,
-            rss: rss_kib()?,
-        })
+        let heap = i64::try_from(stats.bytes_allocated)? - i64::try_from(stats.bytes_deallocated)?;
+        let mut child = Command::from(rss_command())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        Ok(read_rss(&mut child, stop, RSS_PROCESS_TIMEOUT)
+            .await?
+            .map(|rss| Self { heap, rss }))
     }
 
     fn max(self, other: Self) -> Self {
@@ -45,10 +104,13 @@ impl Sampler {
     pub(super) fn start(mut peak: Memory) -> Self {
         let token = CancellationToken::new();
         let stop = token.clone().drop_guard();
-        let task = tokio::task::spawn_blocking(move || {
-            while !token.is_cancelled() {
-                peak = peak.max(Memory::sample()?);
-                std::thread::sleep(Duration::from_millis(2));
+        let task = tokio::spawn(async move {
+            while let Some(sample) = Memory::sample_until(&token).await? {
+                peak = peak.max(sample);
+                tokio::select! {
+                    () = token.cancelled() => break,
+                    () = tokio::time::sleep(Duration::from_millis(2)) => {}
+                }
             }
             Ok(peak)
         });
@@ -223,5 +285,50 @@ impl Sample {
             "capacity_io order=heap_read,heap_hit,index_read,index_hit,toast_read,toast_hit,toast_index_read,toast_index_hit source={:?} resolver={:?}",
             self.source_io, self.resolver_io
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stalled_probe() -> std::io::Result<Child> {
+        Command::new("/bin/sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+    }
+
+    #[tokio::test]
+    async fn timed_out_rss_probe_is_reaped() -> anyhow::Result<()> {
+        let mut child = stalled_probe()?;
+        let error = read_rss(
+            &mut child,
+            &CancellationToken::new(),
+            Duration::from_millis(25),
+        )
+        .await
+        .err()
+        .context("stalled probe unexpectedly finished")?;
+        assert!(
+            error.to_string().contains("RSS probe timed out"),
+            "{error:#}"
+        );
+        assert!(child.id().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_rss_probe_is_reaped() -> anyhow::Result<()> {
+        let mut child = stalled_probe()?;
+        let stop = CancellationToken::new();
+        let (result, ()) = tokio::join!(read_rss(&mut child, &stop, RSS_PROCESS_TIMEOUT), async {
+            tokio::task::yield_now().await;
+            stop.cancel();
+        });
+        assert!(result?.is_none());
+        assert!(child.id().is_none());
+        Ok(())
     }
 }

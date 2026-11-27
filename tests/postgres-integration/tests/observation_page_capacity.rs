@@ -45,7 +45,6 @@ const PAGE_ROWS: u32 = 64;
 const HOLD: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(120);
 const DEFINITION: DefinitionIdentity = DefinitionIdentity::new([36; 32]);
-const SEED_RESULT: &str = "capacity_seeded_bytes=";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "opt-in capacity sample, one mode/shape/concurrency per fresh process"]
@@ -118,6 +117,8 @@ fn input() -> anyhow::Result<(String, u32, u32)> {
 
 async fn seed_in_child(fixture: &Fixture) -> anyhow::Result<u64> {
     // Keep the encode/write allocation high-water outside the measured process.
+    let result_dir = tempfile::tempdir()?;
+    let result_path = result_dir.path().join("canonical-bytes");
     let output = tokio::time::timeout(
         TIMEOUT,
         tokio::process::Command::new(std::env::current_exe()?)
@@ -129,6 +130,7 @@ async fn seed_in_child(fixture: &Fixture) -> anyhow::Result<u64> {
             ])
             .env("RSS_OBS_SEED_URL", fixture.options.to_url_lossy().as_str())
             .env("RSS_OBS_SEED_CA", fixture.server.ca_pem())
+            .env("RSS_OBS_SEED_RESULT", &result_path)
             .kill_on_drop(true)
             .output(),
     )
@@ -140,17 +142,18 @@ async fn seed_in_child(fixture: &Fixture) -> anyhow::Result<u64> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(std::str::from_utf8(&output.stdout)?
-        .lines()
-        .find_map(|line| line.strip_prefix(SEED_RESULT))
-        .context("seed worker omitted canonical byte count")?
-        .parse()?)
+    std::fs::read_to_string(result_path)
+        .context("read seed worker canonical byte count")?
+        .parse()
+        .context("invalid seed worker canonical byte count")
 }
 
 #[tokio::test]
 #[ignore = "child process launched by observation_page_capacity"]
 async fn capacity_seed_worker() -> anyhow::Result<()> {
     let (shape, pages, reports) = input()?;
+    let result_path =
+        std::env::var_os("RSS_OBS_SEED_RESULT").context("missing seed result path")?;
     let options: PgConnectOptions = std::env::var("RSS_OBS_SEED_URL")?.parse()?;
     let options = options.ssl_root_cert_from_pem(std::env::var("RSS_OBS_SEED_CA")?.into_bytes());
     let pool = PgPoolOptions::new()
@@ -161,7 +164,8 @@ async fn capacity_seed_worker() -> anyhow::Result<()> {
     let bytes = seed(&store, &shape, reports, pages).await?;
     // End the backend session to publish its seed statistics before the baseline.
     pool.close().await;
-    println!("{SEED_RESULT}{bytes}");
+    std::fs::write(result_path, bytes.to_string())
+        .context("write seed worker canonical byte count")?;
     Ok(())
 }
 
@@ -321,7 +325,7 @@ impl CapacityRun {
             prepared.push((source, pg.projection(claim, effect)?, records));
         }
         let before = self.io().await?;
-        let baseline = metrics::Memory::sample()?;
+        let baseline = metrics::Memory::sample().await?;
         let sampler = metrics::Sampler::start(baseline);
         let mut workers = JoinSet::new();
         for (source, execution, records) in prepared {
@@ -338,13 +342,14 @@ impl CapacityRun {
                     .await
             });
         }
-        let (observed, hold_max) = tokio::time::timeout(TIMEOUT, async {
+        let workload = tokio::time::timeout(TIMEOUT, async {
             tokio::try_join!(self.observe_pages(), finish_pages(&mut workers))
         })
-        .await
-        .context("capacity workload did not finish")??;
-        let settled = metrics::Memory::sample()?;
-        let peak = sampler.finish().await?;
+        .await;
+        let peak = sampler.finish().await;
+        let (observed, hold_max) = workload.context("capacity workload did not finish")??;
+        let peak = peak?;
+        let settled = metrics::Memory::sample().await?;
         let after = self.io().await?;
         let calls = metrics::resolver_calls(&self.read_pool, self.pages).await?
             + metrics::resolver_calls(&self.effect_pool, self.pages).await?;
@@ -366,18 +371,18 @@ impl CapacityRun {
             held: observed.held,
             peak,
             settled,
-            pools_closed: metrics::Memory::sample()?,
+            pools_closed: metrics::Memory::sample().await?,
             hold_max,
         })
     }
 
     async fn observe_pages(&self) -> anyhow::Result<ObservedPages> {
         self.gate.ready.all_arrived(self.pages).await?;
-        let ready = metrics::Memory::sample()?;
+        let ready = metrics::Memory::sample().await?;
         let io = self.io().await?;
         self.gate.ready.release.add_permits(self.pages as usize);
         self.gate.holding.all_arrived(self.pages).await?;
-        let held = metrics::Memory::sample()?;
+        let held = metrics::Memory::sample().await?;
         tokio::time::sleep(HOLD).await;
         self.gate.holding.release.add_permits(self.pages as usize);
         Ok(ObservedPages { ready, held, io })

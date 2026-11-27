@@ -261,10 +261,14 @@ impl Fixture {
     }
 }
 
+pub(super) fn rss_command() -> std::process::Command {
+    let mut command = std::process::Command::new("ps");
+    command.args(["-o", "rss=", "-p", &std::process::id().to_string()]);
+    command
+}
+
 pub(super) fn rss_kib() -> anyhow::Result<u64> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()?;
+    let output = rss_command().output()?;
     anyhow::ensure!(output.status.success());
     Ok(std::str::from_utf8(&output.stdout)?.trim().parse()?)
 }
