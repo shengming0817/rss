@@ -575,12 +575,13 @@ async fn aggregate_boundaries() -> anyhow::Result<()> {
         assert!(raw.refreshed_through.is_none() && raw.next.is_none());
         let (done, maintenance) = measure(
             thread_cpu,
-            f.maintain(
+            f.maintain_rows(
                 case,
                 MaintenanceAction::Recompute {
                     spec: spec.clone(),
                     window,
                 },
+                1,
             ),
         )
         .await;
