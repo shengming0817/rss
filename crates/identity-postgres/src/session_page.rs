@@ -100,9 +100,7 @@ pub(crate) async fn read(
             "local_password" => true,
             "oidc" => {
                 let provider: Uuid = row.try_get("source_provider_id")?;
-                origins
-                    .get(&oidc_origin(&row)?)
-                    .is_some_and(|origin| origin.source.provider_id() == provider)
+                matches!(origins.get(&oidc_origin(&row)?).map(|result|result.as_ref()).transpose().map_err(|_|corrupt())?,Some(origin) if origin.source.provider_id()==provider)
             }
             "platform" => match current_platform(c, actor, &row, checks, &mut platforms).await {
                 Err(e) if e.kind() == MessagingErrorKind::Conflict => false,

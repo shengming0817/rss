@@ -157,3 +157,80 @@ async fn run() -> anyhow::Result<()> {
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn retired_refresh_and_same_version_reinstallation() -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(15), same_version()).await?
+}
+
+async fn same_version() -> anyhow::Result<()> {
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let issuer = format!("http://{}/realm", socket.local_addr()?);
+    let hits = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let endpoint = {
+        let (hits, entered, release, issuer) = (
+            hits.clone(),
+            entered.clone(),
+            release.clone(),
+            issuer.clone(),
+        );
+        move |headers: HeaderMap| {
+            let (hits, entered, release, issuer) = (
+                hits.clone(),
+                entered.clone(),
+                release.clone(),
+                issuer.clone(),
+            );
+            async move {
+                let n = hits.fetch_add(1, SeqCst);
+                assert_eq!(
+                    headers.get("if-none-match").and_then(|v| v.to_str().ok()),
+                    (n == 1).then_some("\"old\"")
+                );
+                if n == 1 {
+                    entered.add_permits(1);
+                    if let Ok(permit) = release.acquire().await {
+                        permit.forget();
+                    }
+                }
+                let auth = if n < 2 { "old-auth" } else { "new-auth" };
+                (
+                    [
+                        ("etag", if n < 2 { "\"old\"" } else { "\"new\"" }),
+                        ("cache-control", "max-age=0"),
+                    ],
+                    Json(
+                        serde_json::json!({"issuer":issuer,"authorization_endpoint":format!("{issuer}/{auth}"),"token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/keys"),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}),
+                    ),
+                )
+            }
+        }
+    };
+    let routes = Router::new().route("/realm/.well-known/openid-configuration", get(endpoint));
+    let server = tokio::spawn(axum::serve(socket, routes).into_future());
+    let adapter = HttpOidc::for_loopback_test(
+        crate::fixture_clock::clock(),
+        vec![],
+        policy()?,
+        reuse_policy(),
+    )?;
+    let c = settings(&issuer)?;
+    let creds = ProviderCredentials::new("fixture-secret".into(), None)?;
+    let old = fixture_provider(&adapter, tenant()?, &c, &creds);
+    let material = ProtocolMaterial::new("state".into())?;
+    let prepare = |bound| adapter.prepare(bound, &material, AuthenticationMode::Login, deadline());
+    assert!(prepare(old.clone()).await?.contains("/old-auth?"));
+    let mut flight = prepare(old.clone());
+    tokio::select! {r=&mut flight=>anyhow::bail!("old refresh ended before retirement {r:?}"), permit=entered.acquire()=>permit?.forget()}
+    adapter.revisions().retire(old.revision());
+    let reinstalled = fixture_install(&adapter, old.revision(), &c, &creds)?;
+    let (old_result, new_result) = tokio::join!(flight, prepare(reinstalled));
+    assert_eq!(old_result.err(), Some(FederationError::StaleConfiguration));
+    assert!(new_result?.contains("/new-auth?"));
+    assert_eq!(hits.load(SeqCst), 3);
+    release.add_permits(1);
+    server.abort();
+    Ok(())
+}

@@ -102,8 +102,29 @@ pub(crate) fn decode_origin(
 }
 /// Valid only under the enclosing session/collection locks.
 pub(crate) struct CheckedProvider {
-    pub view: ProviderView,
-    pub profile: AssuranceProfile,
+    tenant: TenantId,
+    view: ProviderView,
+    profile: AssuranceProfile,
+}
+impl CheckedProvider {
+    pub(crate) fn view(&self) -> &ProviderView {
+        &self.view
+    }
+    pub(crate) fn profile(&self) -> AssuranceProfile {
+        self.profile
+    }
+    pub(crate) fn matches(
+        &self,
+        tenant: TenantId,
+        id: ProviderId,
+        version: i64,
+        epoch: i64,
+    ) -> bool {
+        self.tenant == tenant
+            && self.view.id == id
+            && self.view.version == version
+            && self.view.revocation_epoch == epoch
+    }
 }
 
 pub(crate) struct CheckedOrigin {
@@ -111,13 +132,16 @@ pub(crate) struct CheckedOrigin {
     pub provider: Arc<CheckedProvider>,
 }
 
+/// A malformed stored value belongs to its own candidate. A page may reach that
+/// candidate after it has expired; postpone surfacing corruption until it is consumed.
+pub(crate) struct InvalidOrigin;
 pub(crate) async fn check_origins(
     c: &mut PgConnection,
     key: AccountKey,
     origins: &[Origin],
     checks: &crate::session_checks::SessionChecks,
     known: Option<&Arc<CheckedProvider>>,
-) -> Result<HashMap<Origin, CheckedOrigin>, PgError> {
+) -> Result<HashMap<Origin, Result<CheckedOrigin, InvalidOrigin>>, PgError> {
     let mut result = HashMap::new();
     if origins.is_empty() {
         return Ok(result);
@@ -135,38 +159,52 @@ pub(crate) async fn check_origins(
         .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(ids).bind(epochs).bind(versions).fetch_all(c).await?;
     for row in rows {
         let uuid: Uuid = row.try_get("provider_id")?;
-        let id = ProviderId::parse(&uuid.to_string()).map_err(|_| corrupt())?;
         let version = row.try_get("config_version")?;
         let epoch = row.try_get("revocation_epoch")?;
         let provider = if let Some(hit) = known.filter(|p| {
-            p.view.id == id && p.view.version == version && p.view.revocation_epoch == epoch
+            ProviderId::parse(&uuid.to_string())
+                .is_ok_and(|id| p.matches(key.tenant, id, version, epoch))
         }) {
-            Arc::clone(hit)
+            Ok(Arc::clone(hit))
         } else {
-            let view = decode_provider(&row)?;
-            let Some(oidc) = &checks.oidc else {
-                continue;
-            };
-            let profile = oidc.assurance_profile(key.tenant, &view.settings);
-            if profile.fingerprint != view.assurance_profile {
-                continue;
+            match decode_provider(&row) {
+                Ok(view) => {
+                    let Some(oidc) = &checks.oidc else {
+                        continue;
+                    };
+                    let profile = oidc.assurance_profile(key.tenant, &view.settings);
+                    if profile.fingerprint != view.assurance_profile {
+                        continue;
+                    }
+                    Ok(Arc::new(CheckedProvider {
+                        tenant: key.tenant,
+                        view,
+                        profile,
+                    }))
+                }
+                Err(_) => Err(InvalidOrigin),
             }
-            Arc::new(CheckedProvider { view, profile })
         };
         let ids: Vec<Uuid> = row.try_get("ids")?;
         let issuers: Vec<String> = row.try_get("issuers")?;
         for (identity, issuer) in ids.into_iter().zip(issuers) {
-            let source = FactSource::new(uuid, issuer).map_err(|_| corrupt())?;
+            let checked = provider
+                .as_ref()
+                .map_err(|_| InvalidOrigin)
+                .and_then(|provider| {
+                    let source = FactSource::new(uuid, issuer).map_err(|_| InvalidOrigin)?;
+                    Ok(CheckedOrigin {
+                        source,
+                        provider: provider.clone(),
+                    })
+                });
             result.insert(
                 Origin {
                     identity,
                     epoch,
                     version,
                 },
-                CheckedOrigin {
-                    source,
-                    provider: provider.clone(),
-                },
+                checked,
             );
         }
     }
@@ -182,7 +220,8 @@ pub(crate) async fn check_origin(
     check_origins(c, key, std::slice::from_ref(origin), checks, None)
         .await?
         .remove(origin)
-        .ok_or_else(reject)
+        .ok_or_else(reject)?
+        .map_err(|_| corrupt())
 }
 pub(crate) async fn identity(
     c: &mut PgConnection,

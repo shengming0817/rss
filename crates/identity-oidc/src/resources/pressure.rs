@@ -34,14 +34,7 @@ impl Drop for Locked {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "fixture owns the clock")]
-#[test]
-fn pool_pressure() -> anyhow::Result<()> {
-    const N: usize = 128;
-    let policy = ReusePolicy {
-        max_providers: N,
-        ..reuse_policy()
-    };
+fn binding_fixture() -> anyhow::Result<(ProviderSettings, ProviderRevision)> {
     let settings: ProviderSettings = ProviderSettingsInput {
         issuer: "https://idp.test".into(),
         client_id: "fixture".into(),
@@ -62,6 +55,17 @@ fn pool_pressure() -> anyhow::Result<()> {
         provider: ProviderId::generate(),
         version: 1,
     };
+    Ok((settings, base))
+}
+#[allow(clippy::disallowed_methods, reason = "fixture owns the clock")]
+#[test]
+fn pool_pressure() -> anyhow::Result<()> {
+    const N: usize = 128;
+    let policy = ReusePolicy {
+        max_providers: N,
+        ..reuse_policy()
+    };
+    let (settings, base) = binding_fixture()?;
     let http = reqwest::Client::new();
     for (victims, protected) in [(1, N / 4), (2, N / 4), (16, N / 4), (64, N / 4), (1, N)] {
         let mut samples = Vec::new();
@@ -152,5 +156,82 @@ fn active_document_lease_survives_full_budget_replacement() -> anyhow::Result<()
     assert_eq!(resources.bytes.load(Ordering::Acquire), 128);
     drop(replacement);
     assert_eq!(resources.bytes.load(Ordering::Acquire), 0);
+    Ok(())
+}
+
+#[test]
+fn owners_return_during_bulk_eviction() -> anyhow::Result<()> {
+    const N: usize = 32;
+    let (settings, base) = binding_fixture()?;
+    let registry = ProviderRevisions::new(N);
+    let resources = Resources::new(
+        ReusePolicy {
+            max_providers: N,
+            ..reuse_policy()
+        },
+        crate::ProviderClock::new(SharedExecutionTimer::new(fixture_clock::TestClock), || {
+            SystemTime::UNIX_EPOCH
+        }),
+    )?;
+    let _occupied = resources
+        .clients
+        .clone()
+        .try_acquire_many_owned((N - 1) as u32)?;
+    let mut held = Vec::new();
+    for i in 0..N {
+        let bound = registry.install(
+            ProviderRevision {
+                provider: ProviderId::generate(),
+                ..base
+            },
+            settings.clone(),
+            ProviderCredentials::new("fixture".into(), None)?,
+        )?;
+        let slot = resources.bind(&bound)?;
+        if i == N - 2 {
+            *slot
+                .client
+                .lock()
+                .map_err(|_| anyhow::anyhow!("fixture pool mutex"))? = Some(Arc::new(ClientPool {
+                http: reqwest::Client::new(),
+                _permit: Some(resources.clients.clone().try_acquire_owned()?),
+            }));
+        }
+        if i >= 8 {
+            held.push(slot);
+        }
+    }
+    let active = held
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("missing active resource"))?;
+    let mut entries = resources
+        .entries
+        .lock()
+        .map_err(|_| anyhow::anyhow!("fixture entry mutex"))?;
+    let (start, wait) = std::sync::mpsc::sync_channel(0);
+    let (done, returned) = std::sync::mpsc::sync_channel(0);
+    let owner = std::thread::spawn(move || {
+        if wait.recv().is_ok() {
+            drop(held);
+            let _ = done.send(());
+        }
+    });
+    let mut attempts = 0;
+    VISITED.set(0);
+    let permit = admit(&mut entries, || {
+        attempts += 1;
+        if attempts == 4 {
+            start.send(()).ok()?;
+            returned.recv().ok()?;
+        }
+        resources.clients.clone().try_acquire_owned().ok()
+    });
+    drop(start);
+    owner
+        .join()
+        .map_err(|_| anyhow::anyhow!("fixture holder panicked"))?;
+    assert!(permit.is_some());
+    assert!(VISITED.get() <= 4 * N);
+    assert!(Arc::strong_count(&active) > 1);
     Ok(())
 }

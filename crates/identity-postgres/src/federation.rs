@@ -489,8 +489,10 @@ impl Federation {
                 let uuid: Uuid = row.try_get("provider_id")?;
                 let id = ProviderId::parse(&uuid.to_string())?;
                 let decoded;
-                let (view, profile) = if let Some(hit) = loaded.checked_provider.as_ref().filter(|p| p.view.id == id) {
-                    (&hit.view, hit.profile)
+                let version=row.try_get("config_version")?;
+                let epoch=row.try_get("revocation_epoch")?;
+                let (view, profile) = if let Some(hit) = loaded.checked_provider.as_ref().filter(|p| p.matches(actor.key.tenant,id,version,epoch)) {
+                    (hit.view(), hit.profile())
                 } else {
                     decoded = db::decode_provider(&row)?;
                     let profile = oidc.assurance_profile(actor.key.tenant, &decoded.settings);

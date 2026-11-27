@@ -326,6 +326,7 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     security_options(f, &s, &p, &oidc).await?;
     damaged_origin(f, &p).await?;
     mixed_origins(f, &s, &p, id).await?;
+    expired_damaged_origin(f, &p, id).await?;
     after_withdrawal(f, id, &reference).await
 }
 
@@ -438,5 +439,65 @@ async fn after_withdrawal(
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "hold the origin read until the selected candidate expires, then follow its page cursor"
+)]
+async fn expired_damaged_origin(
+    f: &Fixture,
+    p: &ProviderView,
+    id: rss_identity_core::SessionId,
+) -> anyhow::Result<()> {
+    let local = f.actor().await?;
+    let local_id = local.view().id;
+    let prior: i64 = sqlx::query_scalar(
+        "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1",
+    )
+    .bind(id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    let cutoff:i64=sqlx::query_scalar("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+4 WHERE session_id=$1 RETURNING idle_expires_at").bind(id.as_uuid()).fetch_one(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.external_identities SET issuer='malformed' WHERE provider_id=$1::uuid").bind(p.id.to_string()).execute(&f.owner).await?;
+    let mut gate = f.owner.begin().await?;
+    sqlx::query("LOCK TABLE identity_authority.external_identities IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    let store = f.store.clone();
+    let page = tokio::spawn(async move { store.list_sessions(local, None, 1, deadline()).await });
+    wait_for_blocked_backend(f, pid).await?;
+    // Release on the PostgreSQL wall-clock boundary used to select the page.
+    sqlx::query(
+        "SELECT pg_sleep(greatest(0, $1::bigint + 0.1 - extract(epoch FROM clock_timestamp())))",
+    )
+    .bind(cutoff)
+    .execute(&mut *gate)
+    .await?;
+    gate.commit().await?;
+    let page = page.await??;
+    assert!(page.sessions.is_empty());
+    assert_eq!(page.next_cursor, Some(id));
+    sqlx::query(
+        "UPDATE identity_authority.external_identities SET issuer=$2 WHERE provider_id=$1::uuid",
+    )
+    .bind(p.id.to_string())
+    .bind(p.settings.issuer().as_str())
+    .execute(&f.owner)
+    .await?;
+    let next = f
+        .store
+        .list_sessions(f.actor().await?, page.next_cursor, 100, deadline())
+        .await?;
+    assert!(next.sessions.iter().any(|v| v.id == local_id));
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=$2 WHERE session_id=$1")
+        .bind(id.as_uuid())
+        .bind(prior)
+        .execute(&f.owner)
+        .await?;
     Ok(())
 }

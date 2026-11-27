@@ -313,6 +313,74 @@ pub(super) struct Representation {
     pub identity: Arc<()>,
 }
 impl Representation {
+    fn admit(
+        state: &mut State,
+        resources: &Resources,
+        document: PublicDocument,
+        headers: &HeaderMap,
+        stage: ProviderStage,
+    ) -> Result<Arc<Self>, FederationError> {
+        let uri = match &document {
+            PublicDocument::Metadata(m) => Some(m.jwks_uri.clone()),
+            PublicDocument::Keys(_) => None,
+        };
+        let reused = state
+            .cached
+            .as_ref()
+            .and_then(|old| old.value.keys.as_ref())
+            .filter(|(old, _)| Some(old) == uri.as_ref())
+            .map(|(_, d)| d.clone());
+        let etag = copy_validator(headers, header::ETAG)?;
+        let modified = copy_validator(headers, header::LAST_MODIFIED)?;
+        if state
+            .cached
+            .as_ref()
+            .is_some_and(|old| retire_changed_keys(&old.value, reused.as_ref()))
+        {
+            state.cached = None;
+        }
+        let child_charge = if uri.is_some() && reused.is_none() {
+            size_of::<Document>()
+        } else {
+            0
+        };
+        let overhead = size_of::<Self>()
+            + etag.as_ref().map_or(0, |v| v.as_bytes().len())
+            + modified.as_ref().map_or(0, |v| v.as_bytes().len())
+            + uri.as_ref().map_or(0, |u| u.as_str().len());
+        let total = document
+            .heap_bytes()
+            .checked_add(overhead)
+            .and_then(|n| n.checked_add(child_charge))
+            .ok_or(FederationError::Unavailable)?;
+        let replaced = state
+            .cached
+            .as_mut()
+            .and_then(|old| Arc::get_mut(&mut old.value))
+            .map(|v| &mut v.lease);
+        let mut lease = resources
+            .reserve(total, replaced)
+            .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
+        let keys = uri.map(|uri| {
+            (
+                uri,
+                reused.unwrap_or_else(|| {
+                    Arc::new(Document {
+                        _lease: Some(lease.split(child_charge)),
+                        ..Default::default()
+                    })
+                }),
+            )
+        });
+        Ok(Arc::new(Self {
+            document,
+            etag,
+            modified,
+            keys,
+            lease,
+            identity: Arc::new(()),
+        }))
+    }
     pub fn jwks(&self) -> Result<&Jwks, FederationError> {
         match &self.document {
             PublicDocument::Keys(keys) => Ok(keys),
@@ -328,6 +396,7 @@ impl Representation {
 }
 #[derive(Default)]
 pub(super) struct Document {
+    _lease: Option<ByteLease>,
     state: Mutex<State>,
     retired: AtomicBool,
 }
@@ -537,58 +606,8 @@ impl Document {
             old.clone()
         } else {
             let document = decoded.ok_or_else(|| invalid(stage))?;
-            let keys_uri = match &document {
-                PublicDocument::Metadata(m) => Some(m.jwks_uri.clone()),
-                PublicDocument::Keys(_) => None,
-            };
-            let etag = copy_validator(&parts.headers, header::ETAG)?;
-            let modified = copy_validator(&parts.headers, header::LAST_MODIFIED)?;
-            let keys = keys_uri.map(|uri| {
-                let doc = previous
-                    .as_ref()
-                    .and_then(|(r, _)| r.keys.as_ref())
-                    .filter(|(old, _)| old == &uri)
-                    .map(|(_, d)| d.clone())
-                    .unwrap_or_default();
-                (uri, doc)
-            });
-            // Charge the typed representation, retained HTTP validators and child-document binding.
-            let overhead = size_of::<Representation>()
-                + etag.as_ref().map_or(0, |v| v.as_bytes().len())
-                + modified.as_ref().map_or(0, |v| v.as_bytes().len())
-                + keys
-                    .as_ref()
-                    .map_or(0, |(u, _)| u.as_str().len() + size_of::<Document>());
-            // Parent and child leave the cache together even if admission of the new
-            // representation fails. A later request then starts without obsolete validators.
-            if let Some((old, _)) = &previous
-                && retire_changed_keys(old, keys.as_ref())
-            {
-                state.cached = None;
-            }
             drop(previous);
-            let replaced = state
-                .cached
-                .as_mut()
-                .and_then(|old| Arc::get_mut(&mut old.value))
-                .map(|old| &mut old.lease);
-            let lease = resources
-                .reserve(
-                    document
-                        .heap_bytes()
-                        .checked_add(overhead)
-                        .ok_or(FederationError::Unavailable)?,
-                    replaced,
-                )
-                .map_err(|_| failure(stage, ProviderReason::Unavailable))?;
-            Arc::new(Representation {
-                document,
-                etag,
-                modified,
-                keys,
-                lease,
-                identity: Arc::new(()),
-            })
+            Representation::admit(&mut state, resources, document, &parts.headers, stage)?
         };
         let freshness = freshness.update(&parts.headers);
         let ttl = freshness.remaining(
@@ -598,7 +617,7 @@ impl Document {
             (channel.clock.wall)(),
         );
         if let Some(old) = &state.cached {
-            retire_changed_keys(&old.value, value.keys.as_ref());
+            retire_changed_keys(&old.value, value.keys.as_ref().map(|(_, doc)| doc));
         }
         state.cached = if freshness.storable() {
             Some(Cached {
@@ -618,9 +637,9 @@ impl Document {
         })))
     }
 }
-fn retire_changed_keys(old: &Representation, next: Option<&(Url, Arc<Document>)>) -> bool {
+fn retire_changed_keys(old: &Representation, next: Option<&Arc<Document>>) -> bool {
     if let Some((_, old_keys)) = &old.keys
-        && next.is_none_or(|(_, new_keys)| !Arc::ptr_eq(old_keys, new_keys))
+        && next.is_none_or(|new_keys| !Arc::ptr_eq(old_keys, new_keys))
     {
         old_keys.retired.store(true, Ordering::Release);
         old_keys
@@ -643,3 +662,6 @@ fn valid_media(headers: &HeaderMap, stage: ProviderStage) -> bool {
         })
     })
 }
+
+#[cfg(test)]
+mod budget_tests;

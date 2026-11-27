@@ -144,6 +144,7 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
             assert_eq!(f.events().await? - events, i64::try_from(changed)?);
         }
     }
+    partial_batch(f, &s).await?;
     concurrent_edit(f, &s).await?;
     Ok(())
 }
@@ -238,5 +239,41 @@ async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> 
     );
     s.reconcile_assurance_profiles(scope, deadline()).await?;
     assert_eq!(f.events().await?, count + 2);
+    Ok(())
+}
+
+async fn partial_batch(f: &Fixture, s: &rss_identity_postgres::Federation) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 9").bind(f.key.tenant.to_string()).fetch_all(&f.owner).await?;
+    sqlx::query(
+        "UPDATE identity_authority.providers SET assurance_profile=$2 WHERE provider_id=ANY($1)",
+    )
+    .bind(&ids)
+    .bind([0u8; 32].as_slice())
+    .execute(&f.owner)
+    .await?;
+    let rows = || {
+        sqlx::query_as::<_,(i64,i64,Vec<u8>)>("SELECT config_version,revocation_epoch,assurance_profile FROM identity_authority.providers WHERE provider_id=ANY($1) ORDER BY provider_id").bind(&ids).fetch_all(&f.owner)
+    };
+    let before = rows().await?;
+    let events = f.events().await?;
+    sqlx::raw_sql("CREATE SEQUENCE public.audit_batch_sequence; CREATE FUNCTION public.fail_ninth() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$ BEGIN IF nextval('public.audit_batch_sequence')=9 THEN RAISE EXCEPTION 'second batch fixture'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_ninth BEFORE INSERT ON rss_audit.records FOR EACH ROW EXECUTE FUNCTION public.fail_ninth()").execute(&f.owner).await?;
+    assert!(
+        s.reconcile_assurance_profiles(scope, deadline())
+            .await
+            .is_err()
+    );
+    let partial = rows().await?;
+    let committed: Vec<_> = before
+        .iter()
+        .map(|(v, e, _)| (v + 1, e + 1, vec![1u8; 32]))
+        .collect();
+    assert_eq!(partial[..8], committed[..8]);
+    assert_eq!(partial[8], before[8]);
+    assert_eq!(f.events().await?, events + 8);
+    sqlx::raw_sql("DROP TRIGGER fail_ninth ON rss_audit.records; DROP FUNCTION public.fail_ninth(); DROP SEQUENCE public.audit_batch_sequence").execute(&f.owner).await?;
+    s.reconcile_assurance_profiles(scope, deadline()).await?;
+    assert_eq!(rows().await?, committed);
+    assert_eq!(f.events().await?, events + 9);
     Ok(())
 }

@@ -291,27 +291,27 @@ fn admit<T>(
         }
     }
     // All new bindings take this lock. An idle resource cannot acquire a new external owner here.
-    #[cfg(test)]
-    pressure::scan(entries.len());
-    let mut idle_entries: Vec<_> = entries
-        .iter()
-        .filter(|(_, entry)| idle(entry))
-        .map(|(key, entry)| (entry.last_used, *key))
-        .collect();
-    idle_entries.sort_unstable_by_key(|(last_used, _)| *last_used);
-    for (_, key) in idle_entries {
-        entries.remove(&key);
-        if let Some(value) = acquire() {
-            return Some(value);
+    // Take at most one more snapshot for owners that return their bindings during eviction.
+    for _ in 0..2 {
+        #[cfg(test)]
+        pressure::scan(entries.len());
+        let mut idle_entries: Vec<_> = entries
+            .iter()
+            .filter(|(_, entry)| idle(entry))
+            .map(|(key, entry)| (entry.last_used, *key))
+            .collect();
+        if idle_entries.is_empty() {
+            break;
+        }
+        idle_entries.sort_unstable_by_key(|(last_used, _)| *last_used);
+        for (_, key) in idle_entries {
+            entries.remove(&key);
+            if let Some(value) = acquire() {
+                return Some(value);
+            }
         }
     }
-    // A holder may have released its resource while we were traversing the original idle set.
-    while evict_idle(entries) {
-        if let Some(value) = acquire() {
-            return Some(value);
-        }
-    }
-    None
+    acquire()
 }
 fn evict_idle(entries: &mut HashMap<ProviderKey, Entry>) -> bool {
     #[cfg(test)]
@@ -331,6 +331,16 @@ fn evict_idle(entries: &mut HashMap<ProviderKey, Entry>) -> bool {
 pub(super) struct ByteLease {
     counter: Arc<AtomicUsize>,
     bytes: usize,
+}
+impl ByteLease {
+    /// Transfer part of an already admitted charge to its shared child.
+    pub(super) fn split(&mut self, bytes: usize) -> Self {
+        self.bytes -= bytes;
+        Self {
+            counter: self.counter.clone(),
+            bytes,
+        }
+    }
 }
 impl Drop for ByteLease {
     fn drop(&mut self) {
