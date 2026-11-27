@@ -201,7 +201,9 @@ def metadata(root: Path) -> dict:
     return document
 
 
-def workspace_graph(root: Path, document: dict) -> tuple[list[tuple[PurePosixPath, str]], dict[str, set[str]]]:
+def workspace_graph(root: Path, document: dict) -> tuple[
+    list[tuple[PurePosixPath, str]], dict[str, set[str]], set[str]
+]:
     try:
         metadata_root = Path(document["workspace_root"]).resolve()
         members = set(document["workspace_members"])
@@ -214,6 +216,7 @@ def workspace_graph(root: Path, document: dict) -> tuple[list[tuple[PurePosixPat
 
     id_to_name: dict[str, str] = {}
     roots: list[tuple[PurePosixPath, str]] = []
+    proc_macros: set[str] = set()
     try:
         for package in packages:
             package_id = package["id"]
@@ -227,6 +230,8 @@ def workspace_graph(root: Path, document: dict) -> tuple[list[tuple[PurePosixPat
                 raise ValueError("path escape")
             id_to_name[package_id] = name
             roots.append((relative, name))
+            if any("proc-macro" in target["kind"] for target in package["targets"]):
+                proc_macros.add(name)
     except (KeyError, TypeError, ValueError) as error:
         raise SelectionError("metadata-invalid") from error
     if set(id_to_name) != members:
@@ -234,6 +239,7 @@ def workspace_graph(root: Path, document: dict) -> tuple[list[tuple[PurePosixPat
     roots.sort(key=lambda item: (-len(item[0].parts), item[0].as_posix()))
 
     reverse = {name: set() for name in id_to_name.values()}
+    dependencies = {name: set() for name in reverse}
     seen_nodes: set[str] = set()
     try:
         for node in nodes:
@@ -248,11 +254,13 @@ def workspace_graph(root: Path, document: dict) -> tuple[list[tuple[PurePosixPat
                 dependency_name = id_to_name.get(dependency["pkg"])
                 if dependency_name is not None:
                     reverse[dependency_name].add(dependent)
+                    dependencies[dependent].add(dependency_name)
     except (KeyError, TypeError, ValueError) as error:
         raise SelectionError("metadata-invalid") from error
     if seen_nodes.intersection(members) != members:
         raise SelectionError("metadata-invalid")
-    return roots, reverse
+    # A procedural macro can get generated source from workspace dependencies.
+    return roots, reverse, package_closure(proc_macros, dependencies)
 
 
 def owner(path: str, roots: list[tuple[PurePosixPath, str]]) -> str | None:
@@ -263,15 +271,15 @@ def owner(path: str, roots: list[tuple[PurePosixPath, str]]) -> str | None:
     return None
 
 
-def reverse_closure(seeds: set[str], reverse: dict[str, set[str]]) -> set[str]:
+def package_closure(seeds: set[str], edges: dict[str, set[str]]) -> set[str]:
     selected = set(seeds)
     pending = list(seeds)
     while pending:
         dependency = pending.pop()
-        for dependent in reverse.get(dependency, set()):
-            if dependent not in selected:
-                selected.add(dependent)
-                pending.append(dependent)
+        for neighbor in edges.get(dependency, set()):
+            if neighbor not in selected:
+                selected.add(neighbor)
+                pending.append(neighbor)
     return selected
 
 
@@ -396,7 +404,7 @@ def check_fixture_aliases(root: Path, revision: str, fixtures: set[str]) -> None
                 raise SelectionError("shared-fixture-alias")
 
 
-def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
+def fixture_owners(root: Path, revision: str, path: str, roots, macro_sources: set[str]) -> set[str]:
     # Shared fixture imports use literal paths. Include unresolved directory
     # references conservatively (e.g. a build script constructing a filename).
     fixture = PurePosixPath(path)
@@ -424,9 +432,10 @@ def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
         # Only direct literal Rust includes have a known source-relative base.
         # Any remaining constructed filename or directory could read this fixture.
         imports = direct.findall(source)
-        # A macro body can resolve its include relative to a different file at
-        # expansion time. Keep the conservative scan in files defining macros.
-        remainder = source if re.search(r"\b(?:macro_rules|macro)\b", source) else direct.sub("", source)
+        # Macro expansions can resolve includes relative to a different file.
+        # Keep literal references in sources that can generate those expansions.
+        may_generate = package in macro_sources or re.search(r"\b(?:macro_rules|macro)\b", source)
+        remainder = source if may_generate else direct.sub("", source)
         # #[path] may name a module file or an inline module directory.
         # Any ancestor of the input can be that directory, including dotted names.
         attrs = module_path.findall(source)
@@ -455,14 +464,14 @@ def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
         return False, set(), {"selector-only" if selector_changed else "docs-only"}
 
     with checkout(root, head) as current:
-        roots, reverse = workspace_graph(current, metadata(current))
+        roots, reverse, macro_sources = workspace_graph(current, metadata(current))
         cargo_changed = any(path in ("Cargo.toml", "Cargo.lock") or path.endswith("/Cargo.toml")
                             for _, path in changes)
         affected = set()
-        old_roots, old_reverse = roots, reverse
+        old_roots, old_reverse, old_macro_sources = roots, reverse, macro_sources
         if cargo_changed:
             with checkout(root, base) as previous:
-                old_roots, old_reverse = workspace_graph(previous, metadata(previous))
+                old_roots, old_reverse, old_macro_sources = workspace_graph(previous, metadata(previous))
                 affected = graph_changes(previous, current, old_roots, roots)
 
         fixtures = [(status, path) for status, path in changes if path.startswith("tests/fixtures/")]
@@ -474,9 +483,9 @@ def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
                 continue
             if path.startswith("tests/fixtures/"):
                 if status != "A":
-                    before.update(fixture_owners(root, base, path, old_roots))
+                    before.update(fixture_owners(root, base, path, old_roots, old_macro_sources))
                 if status != "D":
-                    after.update(fixture_owners(root, head, path, roots))
+                    after.update(fixture_owners(root, head, path, roots, macro_sources))
             else:
                 package = owner(path, old_roots if status == "D" else roots)
                 if package is None:
@@ -484,8 +493,8 @@ def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
                     return True, set(), {reason}
                 (before if status == "D" else after).add(package)
         # Removed members can affect surviving callers. Only HEAD packages run.
-        surviving = reverse_closure(before, old_reverse).intersection(reverse)
-        return False, reverse_closure(after | surviving, reverse).intersection(reverse), {"package-change"}
+        surviving = package_closure(before, old_reverse).intersection(reverse)
+        return False, package_closure(after | surviving, reverse).intersection(reverse), {"package-change"}
 
 
 def main() -> None:
