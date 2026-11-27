@@ -601,20 +601,19 @@ async fn ordered_creation(f: &Fixture, c: Coordinate) -> anyhow::Result<()> {
     let b = spec("sorted-b", s, c)?;
     let (ready, started) = oneshot::channel();
     let (finish, release) = oneshot::channel();
-    let ordered = [a.clone(), b.clone()];
-    let mut reversed = [b, a];
+    let mut reversed = [b.clone(), a.clone()];
     reversed.sort_by(|a, b| a.id().cmp(b.id()));
     let store = f.store.clone();
     let first = f
         .runtime
         .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
             Box::pin(async move {
-                let mut candidates = Vec::new();
-                for spec in ordered {
-                    candidates.push(store.queue(tx, spec, direct()).await?);
-                }
+                let first = store.queue(tx, a, direct()).await?;
+                // Only A is held. If the peer takes B first, it will still own B
+                // when this callback resumes, exposing the opposite lock order.
                 notify_and_hold(tx, ready, release).await?;
-                Ok(candidates)
+                let second = store.queue(tx, b, direct()).await?;
+                Ok(vec![first, second])
             })
         });
     let second = async {
