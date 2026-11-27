@@ -6,20 +6,7 @@ pub(super) async fn run(
     control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     budget::run(pool).await?;
-    sqlx::query("ALTER ROLE audit_runtime REPLICATION")
-        .execute(admin)
-        .await?;
-    let replication = PgAudit::new(pool.clone(), Integrity::Plain, write_budget()?, control).await;
-    sqlx::query("ALTER ROLE audit_runtime NOREPLICATION")
-        .execute(admin)
-        .await?;
-    assert!(matches!(
-        replication,
-        Err(Error::Admission(
-            rss_audit_postgres::AdmissionViolation::Role
-        ))
-    ));
-    foreign_role(pool, admin, control).await?;
+    writer_roles(pool, admin, control).await?;
     borrowed(pool, admin, control).await?;
     sqlx::raw_sql("CREATE ROLE unrelated_audit_reader NOLOGIN; GRANT SELECT ON rss_audit.records TO unrelated_audit_reader").execute(admin).await?;
     // Grants to an unreachable role are permitted; no ACL grantee whitelist is implied.
@@ -140,4 +127,37 @@ async fn foreign_role(
     let mut actual = pool.acquire().await?;
     plain.validate_connection(&mut actual, control).await?;
     Ok(())
+}
+
+pub(super) async fn reject_replication_role<T>(
+    admin: &PgPool,
+    admission: impl Future<Output = Result<T, Error>>,
+) -> anyhow::Result<()> {
+    sqlx::query("ALTER ROLE audit_runtime REPLICATION")
+        .execute(admin)
+        .await?;
+    let result = admission.await;
+    sqlx::query("ALTER ROLE audit_runtime NOREPLICATION")
+        .execute(admin)
+        .await?;
+    assert!(matches!(
+        result,
+        Err(Error::Admission(
+            rss_audit_postgres::AdmissionViolation::Role
+        ))
+    ));
+    Ok(())
+}
+
+async fn writer_roles(
+    pool: &PgPool,
+    admin: &PgPool,
+    control: &Control<'_, TestClock>,
+) -> anyhow::Result<()> {
+    reject_replication_role(
+        admin,
+        PgAudit::new(pool.clone(), Integrity::Plain, write_budget()?, control),
+    )
+    .await?;
+    foreign_role(pool, admin, control).await
 }

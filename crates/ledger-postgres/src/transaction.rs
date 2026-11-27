@@ -172,39 +172,9 @@ impl PgLedger {
             }
             Err(error) => Err(error),
         };
-        // An acknowledged COMMIT command may end an already aborted transaction
-        // with PostgreSQL's ROLLBACK tag. Check usability before sending COMMIT.
-        let body = match body {
-            Ok(value) => {
-                if let Err(error) = control.check(LocalTxDeadlineStage::Operation) {
-                    return LocalTxAttempt::commit_unknown(error);
-                }
-                match control
-                    .run_stage(LocalTxDeadlineStage::Commit, async {
-                        match sqlx::query("SELECT 1").execute(&mut *tx).await {
-                            Ok(_) => Ok(Ok(value)),
-                            Err(error)
-                                if error
-                                    .as_database_error()
-                                    .and_then(|db| db.code())
-                                    .as_deref()
-                                    == Some("25P02") =>
-                            {
-                                Ok(Err(Error::from(error)))
-                            }
-                            Err(error) => Err(Error::from(error)),
-                        }
-                    })
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(error) => return LocalTxAttempt::commit_unknown(error),
-                }
-            }
-            Err(operation) => Err(operation),
-        };
-        match body {
-            Ok(value) => {
+        match settlement(body, &mut tx, control).await {
+            Settlement::Unknown(error) => LocalTxAttempt::commit_unknown(error),
+            Settlement::Commit(value) => {
                 let result = control
                     .run_stage(LocalTxDeadlineStage::Commit, async {
                         #[cfg(feature = "integration")]
@@ -227,7 +197,7 @@ impl PgLedger {
                     Err(e) => LocalTxAttempt::commit_unknown(e),
                 }
             }
-            Err(e) => {
+            Settlement::Rollback(e) => {
                 let mut rollback_started = false;
                 let rollback = control
                     .run_stage(LocalTxDeadlineStage::Rollback, async {
@@ -266,6 +236,43 @@ impl PgLedger {
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     }
 }
+enum Settlement<R> {
+    Commit(R),
+    Rollback(Error),
+    Unknown(Error),
+}
+
+// SQLx drops the command tag. PostgreSQL acknowledges COMMIT with ROLLBACK
+// for an aborted transaction, so keep the transaction until its state is known.
+async fn settlement<R, T: Timer>(
+    operation: Result<R, Error>,
+    connection: &mut PgConnection,
+    control: &Control<'_, T>,
+) -> Settlement<R> {
+    let value = match operation {
+        Ok(value) => value,
+        Err(error) => return Settlement::Rollback(error),
+    };
+    if let Err(error) = control.check(LocalTxDeadlineStage::Operation) {
+        return Settlement::Unknown(error);
+    }
+    control
+        .run_stage(LocalTxDeadlineStage::Commit, async {
+            match sqlx::query("SELECT 1").execute(connection).await {
+                Ok(_) => Ok(Settlement::Commit(value)),
+                Err(error)
+                    if error.as_database_error().and_then(|e| e.code()).as_deref()
+                        == Some("25P02") =>
+                {
+                    Ok(Settlement::Rollback(Error::from(error)))
+                }
+                Err(error) => Err(Error::from(error)),
+            }
+        })
+        .await
+        .unwrap_or_else(Settlement::Unknown)
+}
+
 struct Lease {
     connection: PoolConnection<Postgres>,
     quarantine: bool,

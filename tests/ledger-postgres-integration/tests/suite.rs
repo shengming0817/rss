@@ -306,13 +306,22 @@ async fn verify_catalog_admission(
         Err(Error::Admission(AdmissionViolation::Schema))
     ));
 
+    verify_function_settings(&mut connection, owner, control).await?;
+    verify_maintenance_authority(&mut connection, owner, control).await
+}
+
+async fn verify_function_settings(
+    connection: &mut sqlx::PgConnection,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     sqlx::query(
         "ALTER FUNCTION rss_ledger.prepare_append(uuid,text,text,smallint) RESET search_path",
     )
     .execute(owner)
     .await?;
-    let writer = validate_connection(&mut connection, control).await;
-    let reader = validate_read_connection(&mut connection, control).await;
+    let writer = validate_connection(connection, control).await;
+    let reader = validate_read_connection(connection, control).await;
     sqlx::query("ALTER FUNCTION rss_ledger.prepare_append(uuid,text,text,smallint) SET search_path=pg_catalog,rss_ledger")
         .execute(owner).await?;
     for result in [writer, reader] {
@@ -321,6 +330,14 @@ async fn verify_catalog_admission(
             Err(Error::Admission(AdmissionViolation::Functions))
         ));
     }
+    Ok(())
+}
+
+async fn verify_maintenance_authority(
+    connection: &mut sqlx::PgConnection,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
     let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
         .fetch_one(owner)
         .await?;
@@ -328,7 +345,7 @@ async fn verify_catalog_admission(
         sqlx::query("GRANT pg_maintain TO ledger_runtime")
             .execute(owner)
             .await?;
-        let result = validate_connection(&mut connection, control).await;
+        let result = validate_connection(connection, control).await;
         sqlx::query("REVOKE pg_maintain FROM ledger_runtime")
             .execute(owner)
             .await?;

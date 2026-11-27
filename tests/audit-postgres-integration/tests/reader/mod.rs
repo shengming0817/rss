@@ -28,20 +28,7 @@ pub(super) async fn run(
     sqlx::raw_sql("REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger FROM audit_runtime")
         .execute(admin)
         .await?;
-    PgAuditReader::new(pool.clone(), Integrity::Plain, control).await?;
-    sqlx::query("ALTER ROLE audit_runtime REPLICATION")
-        .execute(admin)
-        .await?;
-    let replication = PgAuditReader::new(pool.clone(), Integrity::Plain, control).await;
-    sqlx::query("ALTER ROLE audit_runtime NOREPLICATION")
-        .execute(admin)
-        .await?;
-    assert!(matches!(
-        replication,
-        Err(Error::Admission(
-            rss_audit_postgres::AdmissionViolation::Role
-        ))
-    ));
+    plain_reader_role(pool, admin, control).await?;
     assert!(
         PgAudit::new(
             pool.clone(),
@@ -186,5 +173,19 @@ async fn plain_ledger_privileges(
         PgAuditReader::new(pool.clone(), Integrity::Plain, control).await?;
     }
     sqlx::raw_sql("REVOKE audit_reader_table_indirect FROM audit_runtime; GRANT SELECT ON ALL TABLES IN SCHEMA rss_ledger TO audit_runtime").execute(admin).await?;
+    Ok(())
+}
+
+async fn plain_reader_role(
+    pool: &PgPool,
+    admin: &PgPool,
+    control: &Control<'_, TestClock>,
+) -> anyhow::Result<()> {
+    PgAuditReader::new(pool.clone(), Integrity::Plain, control).await?;
+    super::admission::reject_replication_role(
+        admin,
+        PgAuditReader::new(pool.clone(), Integrity::Plain, control),
+    )
+    .await?;
     Ok(())
 }
