@@ -1,10 +1,12 @@
 use super::*;
 mod budget;
+mod structure;
 pub(super) async fn run(
     pool: &PgPool,
     admin: &PgPool,
     control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
+    structure::run(admin).await?;
     budget::run(pool).await?;
     writer_roles(pool, admin, control).await?;
     borrowed(pool, admin, control).await?;
@@ -120,6 +122,7 @@ async fn foreign_role(
 ) -> anyhow::Result<()> {
     let plain = PgAudit::new(pool.clone(), Integrity::Plain, write_budget()?, control).await?;
     let mut foreign = admin.acquire().await?;
+    rss_audit_postgres::validate_structure(&mut foreign).await?;
     assert!(matches!(
         plain.validate_connection(&mut foreign, control).await,
         Err(Error::Admission(_))

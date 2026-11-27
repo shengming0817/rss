@@ -13,6 +13,7 @@ mod messaging;
 pub use messaging::{lock_head_in, validate_in};
 mod model;
 mod probe;
+pub use probe::validate_structure;
 mod reader;
 mod repository;
 mod runtime;

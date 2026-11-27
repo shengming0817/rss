@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!((limit.rows(), limit.bytes()), (3, 1024));
     let budget = WriteBudget::new(1, 1024, 1024)?;
     let _empty = budget.try_admit(&[])?;
+    let _validate = rss_audit_postgres::validate_structure;
     let _plain = Integrity::Plain;
     #[cfg(feature = "ledger")]
     {

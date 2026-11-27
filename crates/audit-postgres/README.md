@@ -134,6 +134,12 @@ it does not prove rollback or authorize a retry.
 
 ## Installation and startup validation
 
+`validate_structure(&mut PgConnection)` checks the Audit indexes, constraints, and
+`append_batch` signature, output and implementation in one catalog query. An installer
+can call it once per verification transaction, including a read-only snapshot. The
+caller owns the connection, deadline and commit or rollback. Role and RLS admission
+run on the actual runtime connection at startup.
+
 `PgAudit::new` validates the actual Audit pool's role, schema, RLS, ACLs and functions.
 Ledger mode validates Ledger storage on the same lease, including for a one-connection pool.
 For a different borrowed runtime, call `validate_connection(connection, control)` or
