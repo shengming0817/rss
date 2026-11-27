@@ -34,7 +34,7 @@ The direct digest binds the frozen input. The expected state digest binds the ob
 A committed direct claim records the caller's stable issuance ID and dispatch time in Claimed.
 After response loss, load the original ID and call `claim_direct` again under current product
 authorization. Only a committed Eligible result may be considered for protocol-specific resend.
-A matching Direct report binds that ID even after termination.
+Eligibility is sampled inside the claim transaction. At response handoff check the current command and deadline using `dispatch_id_at` and revalidate product authorization. A matching Direct report binds that ID even after termination.
 
 Only durable publication confirmation reaches Published; device ACK reaches Received; an exact
 actual-state match after Received reaches Applied. A device may reject after Published, Claimed

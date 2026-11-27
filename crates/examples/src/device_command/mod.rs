@@ -392,23 +392,112 @@ async fn direct_reconnect(
             .await,
     )?;
     let claim = ClaimId::parse("0d9cdad2-218d-4b7e-b095-ec6bea72aa6e")?;
-    for attempt in [claim, claim] {
-        let selected = store.clone();
-        let id = id.clone();
-        let result = committed(
-            runtime
-                .local_tx(binding, budget()?, move |tx| {
-                    Box::pin(async move {
-                        selected
-                            .claim_direct(tx, scope, &id, coordinate, attempt)
-                            .await
-                    })
-                })
-                .await,
-        )?;
-        anyhow::ensure!(
-            matches!(result,DirectClaim::Eligible(ref command) if command.record().claim_id==Some(claim) && command.version()==2)
-        );
+    let first = issue(
+        runtime,
+        binding,
+        store.clone(),
+        scope,
+        &id,
+        coordinate,
+        claim,
+    )
+    .await?;
+    // Even confirmed issuance can lose its network response. On reconnect read durable
+    // evidence first. Unconfirmed settlement also takes this path, without sending anything.
+    match first {
+        Issuance::Committed(DirectClaim::Eligible(_))
+        | Issuance::CommitUnknown(_)
+        | Issuance::RollbackFailed(_) => {}
+        Issuance::Committed(DirectClaim::Unavailable(_)) => return Ok(()),
     }
+    let stored = load(runtime, binding, store.clone(), scope, id.as_str()).await?;
+    let original = stored
+        .record()
+        .claim_id
+        .ok_or_else(|| anyhow::anyhow!("no durable issuance; withhold response"))?;
+    anyhow::ensure!(
+        original == claim && stored.spec().coordinate() == coordinate,
+        "different issuance"
+    );
+    // The fixture authorizes this exact command and coordinate. Applications repeat their
+    // current policy and protocol resend checks for every authenticated request.
+    let candidate = match issue(
+        runtime,
+        binding,
+        store.clone(),
+        scope,
+        &id,
+        coordinate,
+        original,
+    )
+    .await?
+    {
+        Issuance::Committed(value) => value,
+        Issuance::CommitUnknown(e) => {
+            return Err(anyhow::Error::new(e)
+                .context("replay commit unknown; withhold response and read back"));
+        }
+        Issuance::RollbackFailed(e) => {
+            return Err(anyhow::Error::new(e)
+                .context("replay rollback unconfirmed; withhold response and read back"));
+        }
+    };
+    // Capture monotonic time before sampling the server so elapsed commit/readback time
+    // can only shorten the remaining send window.
+    let timer = Timer::new();
+    let start = timer.now();
+    let (current, observed) = committed(
+        runtime
+            .local_tx(binding, budget()?, move |tx| {
+                Box::pin(async move {
+                    let current = store
+                        .load(tx, scope, &id)
+                        .await?
+                        .ok_or(sqlx::Error::RowNotFound)?;
+                    Ok((current, store.now(tx).await?))
+                })
+            })
+            .await,
+    )?;
+    let elapsed = i64::try_from(timer.now().saturating_duration_since(start).as_micros())?;
+    let now = observed
+        .checked_add(elapsed)
+        .ok_or_else(|| anyhow::anyhow!("invalid handoff time"))?;
+    anyhow::ensure!(
+        current.spec().scope() == scope
+            && current.spec().coordinate() == coordinate
+            && candidate.dispatch_id_at(&current, now) == Some(original),
+        "withhold stale offer"
+    );
     Ok(())
+}
+
+enum Issuance {
+    Committed(DirectClaim),
+    CommitUnknown(PgError),
+    RollbackFailed(PgError),
+}
+async fn issue(
+    runtime: &PgRuntime,
+    binding: ExecutionBinding,
+    store: Arc<PgStore>,
+    scope: Scope,
+    id: &CommandId,
+    coordinate: Coordinate,
+    claim: ClaimId,
+) -> anyhow::Result<Issuance> {
+    let id = id.clone();
+    let attempt = runtime
+        .local_tx(binding, budget()?, move |tx| {
+            Box::pin(async move { store.claim_direct(tx, scope, &id, coordinate, claim).await })
+        })
+        .await;
+    Ok(attempt.fold(
+        |v| Ok(Issuance::Committed(v)),
+        Err,
+        Err,
+        |e| Ok(Issuance::RollbackFailed(e)),
+        |e| Ok(Issuance::CommitUnknown(e)),
+        Err,
+    )?)
 }

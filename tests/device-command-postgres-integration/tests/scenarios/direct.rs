@@ -87,6 +87,8 @@ pub(crate) async fn run(original: &Fixture) -> anyhow::Result<()> {
     let id = ClaimId::parse("5da81944-34a9-4be3-a838-1ceafef62bc7")?;
     let other = ClaimId::parse("5da81944-34a9-4be3-a838-1ceafef62bc8")?;
     direct_lifecycle(&mut f, &clock, s, c, id, other).await?;
+    stale_at_commit(&f, &clock, c, id).await?;
+    ordered_creation(&f, c).await?;
     concurrent(&f, c, id).await?;
     competing_claims(&f, c, id, other).await?;
     replay_during_claim(&f, c, id).await?;
@@ -542,5 +544,107 @@ async fn direct_lifecycle(
         .fetch_one(&f.owner)
         .await?;
     assert_eq!(before, after);
+    Ok(())
+}
+
+// A callback may keep running after the claim or change its state before commit.
+// Neither candidate can authorize the response at the later handoff.
+async fn stale_at_commit(
+    f: &Fixture,
+    clock: &Arc<rss_device_command_postgres::IntegrationClock>,
+    c: Coordinate,
+    id: ClaimId,
+) -> anyhow::Result<()> {
+    let s = device(336507)?;
+    f.initialize(s, c).await?;
+    for cancel in [false, true] {
+        let name = if cancel {
+            "cancel-before-commit"
+        } else {
+            "expire-before-commit"
+        };
+        let deadline = clock.now() + 10;
+        let command = create(f, name, s, c, deadline).await?;
+        let cmd = command.spec().id().clone();
+        let store = f.store.clone();
+        let frozen = clock.clone();
+        let candidate = committed(
+            f.runtime
+                .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                    Box::pin(async move {
+                        let candidate = store.claim_direct(tx, s, &cmd, c, id).await?;
+                        if cancel {
+                            let _cancelled = store.cancel(tx, s, &cmd, c).await?;
+                        } else {
+                            frozen
+                                .advance_to(deadline)
+                                .map_err(|_| sqlx::Error::RowNotFound)?;
+                        }
+                        Ok(candidate)
+                    })
+                })
+                .await,
+        )?;
+        let latest = f.load(name, s).await?.ok_or(Error::InvalidSnapshot)?;
+        assert!(matches!(candidate, DirectClaim::Eligible(_)));
+        assert_eq!(candidate.dispatch_id_at(&latest, clock.now()), None);
+    }
+    Ok(())
+}
+
+// Transactions get opposite input orders. Each composition acquires the complete set
+// in tenant-local command-ID order, including the race before a command row exists.
+async fn ordered_creation(f: &Fixture, c: Coordinate) -> anyhow::Result<()> {
+    let s = device(336508)?;
+    f.initialize(s, c).await?;
+    let a = spec("sorted-a", s, c)?;
+    let b = spec("sorted-b", s, c)?;
+    let (ready, started) = oneshot::channel();
+    let (finish, release) = oneshot::channel();
+    let ordered = [a.clone(), b.clone()];
+    let mut reversed = [b, a];
+    reversed.sort_by(|a, b| a.id().cmp(b.id()));
+    let store = f.store.clone();
+    let first = f
+        .runtime
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+            Box::pin(async move {
+                let mut candidates = Vec::new();
+                for spec in ordered {
+                    candidates.push(store.queue(tx, spec, direct()).await?);
+                }
+                notify_and_hold(tx, ready, release).await?;
+                Ok(candidates)
+            })
+        });
+    let second = async {
+        let blocker = started.await?;
+        let store = f.store.clone();
+        let replay = f
+            .runtime
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move {
+                    let mut candidates = Vec::new();
+                    for spec in reversed {
+                        candidates.push(store.queue(tx, spec, direct()).await?);
+                    }
+                    Ok(candidates)
+                })
+            });
+        let release = async {
+            super::advance::wait_for_blocked(f, blocker).await?;
+            finish
+                .send(())
+                .map_err(|_| anyhow::anyhow!("creation ended early"))
+        };
+        let (result, gate) = tokio::join!(replay, release);
+        gate?;
+        committed(result)
+    };
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(committed(first)?, second?);
+    for name in ["sorted-a", "sorted-b"] {
+        assert_eq!(f.count("commands", name).await?, 1);
+    }
     Ok(())
 }

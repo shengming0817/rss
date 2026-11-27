@@ -98,8 +98,28 @@ pub enum ReportSource {
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "only a committed eligible claim can be considered for dispatch"]
 pub enum DirectClaim {
-    /// First grant or exact eligible replay. The protocol owner decides whether to resend.
+    /// Eligible when the row was locked and the command clock was sampled. Later writes or elapsed time can invalidate this candidate.
     Eligible(Command),
     /// Already received, terminal, or expired. No further dispatch is authorized.
     Unavailable(Command),
+}
+
+impl DirectClaim {
+    /// Check a committed candidate against the latest authorized command snapshot and the
+    /// response handoff time (Unix microseconds). The caller revalidates product policy and
+    /// protocol resend eligibility for this request before handing off any executable bytes.
+    #[must_use]
+    pub fn dispatch_id_at(&self, current: &Command, now: i64) -> Option<ClaimId> {
+        let Self::Eligible(claimed) = self else {
+            return None;
+        };
+        if claimed != current
+            || current.status() != crate::Status::Claimed
+            || now >= current.spec().deadline()
+            || now < current.record().dispatched_at?
+        {
+            return None;
+        }
+        current.record().claim_id
+    }
 }

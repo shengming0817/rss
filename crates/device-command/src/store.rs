@@ -103,6 +103,8 @@ pub trait Store: Send + Sync {
         delivery: Delivery,
     ) -> impl Future<Output = Result<Command, Self::Error>> + Send;
     /// Register or replay an exact direct issuance after checking current eligibility.
+    /// Perform this check after all other eligibility-changing writes in the transaction.
+    /// After confirmed commit validate the candidate at the protocol response boundary.
     fn claim_direct(
         &self,
         tx: &mut Self::Transaction<'_>,

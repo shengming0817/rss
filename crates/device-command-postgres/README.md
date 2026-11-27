@@ -68,11 +68,21 @@ between payload and command intent remain product responsibilities.
   Creation serializes each tenant-local command ID, and point mutations lock the command row
   before sampling time and applying version CAS. Batch writes acquire rows in command-ID order. Authority advancement and supersession use the same transaction. Pages
   bound memory, while the original transaction deadline bounds the entire authority change.
+- Across a multi-command transaction, visit tenant-local command IDs in ascending byte order
+  (PostgreSQL `COLLATE "C"`) for creation, locking point operations and page saves alike.
+  An exact recovery page returns request order but writes in sorted ID order. Compose it with
+  earlier or later writes only if the complete lock sequence is ordered. Run a scan with
+  unknown/overlapping IDs in a separate transaction or use one complete exact recovery page.
+  PostgreSQL can abort a transaction on a deadlock (40P01). Retry the whole callback only
+  after confirmed rollback of a transient failure, with replayable inputs, renewed authorization
+  and enough of the original deadline. Read back uncertain settlement first.
 - For ordered dispatch, the composition owner calls `tx.prepare_outbox_partitions` with the complete
   transaction partition set before command/authority mutations; repositories do not add locks incrementally.
 - Direct creation stores the frozen content digest. Claim by exact device, coordinate, command and
-  caller-supplied issuance ID. Send only after a committed Eligible result and renewed product
-  authorization. After uncertain settlement load the command, recheck policy and retry the same
+  caller-supplied issuance ID. Claim after all writes that can change eligibility. Eligible describes the row and server
+  time at the claim operation. At response handoff check the committed candidate against
+  the latest command and current time with `dispatch_id_at`, revalidate product authorization,
+  and apply the protocol’s resend rule. Suppress the response on any failed check. After uncertain settlement load the command, recheck policy and retry the same
   identity. Received and terminal commands yield no grant. Provide the original ID on direct reports.
   Direct commands require no dispatch row or publication query. Both paths use the same transaction.
 - Outbox append and command admission commit together. Broker publish itself is outside this

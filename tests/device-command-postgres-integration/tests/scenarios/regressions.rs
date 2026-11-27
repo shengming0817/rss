@@ -85,7 +85,14 @@ async fn concurrent_conflict(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Re
                 Box::pin(async move { b.queue(tx, right, Delivery::Outbox(mb)).await })
             })
     );
-    assert_ne!(committed(a).is_ok(), committed(b).is_ok());
+    let loser = match (committed(a), committed(b)) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => error.downcast::<PgError>()?,
+        _ => anyhow::bail!("expected one winning create and one conflict"),
+    };
+    assert_eq!(
+        loser.kind(),
+        rss_transactional_messaging::error::MessagingErrorKind::Conflict
+    );
     assert_eq!(f.count("commands", "racing-facts").await?, 1);
     assert_eq!(f.count("outbox", "dispatch.racing-facts").await?, 1);
     Ok(())
