@@ -4,9 +4,10 @@ mod form;
 use rss_identity_core::{assurance::AuthenticationMode, federation::*};
 use rss_identity_oidc::{
     HttpOidc, PrivateProviderAccess,
-    test_support::{fixture_install, fixture_provider, reuse_policy},
+    test_support::{fixture_dns, fixture_install, fixture_provider, reuse_policy},
 };
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use url::Url;
 
@@ -37,27 +38,32 @@ fn private_host() -> anyhow::Result<Ipv4Addr> {
 #[tokio::test]
 async fn private_keycloak_login() -> anyhow::Result<()> {
     let host = private_host()?;
+    let dns_name = format!("idp-{}.invalid", ProviderId::generate());
     let keycloak = testkit::keycloak_tls(
         host,
         std::env::var_os("IDENTITY_TEST_PRIVATE_HOST").is_some(),
+        &dns_name,
         include_bytes!("../support/realm.json"),
     )
     .await?;
     let issuer = format!("{}/realms/identity", keycloak.origin);
     let ca = &keycloak.ca_pem;
     let c = settings(&issuer)?;
-    let allowed = HttpOidc::new(
-        crate::fixture_clock::clock(),
-        vec![],
-        vec![PrivateProviderAccess {
-            tenant: tenant()?,
-            issuer: issuer.clone(),
-            client_id: "identity-test".into(),
-            cidrs: vec![format!("{host}/32").parse()?],
-        }],
-        policy()?,
-        reuse_policy(),
-    )?;
+    let adapter = |issuer: &str, network: Ipv4Addr| -> anyhow::Result<HttpOidc> {
+        Ok(HttpOidc::new(
+            crate::fixture_clock::clock(),
+            vec![],
+            vec![PrivateProviderAccess {
+                tenant: tenant()?,
+                issuer: issuer.to_owned(),
+                client_id: "identity-test".into(),
+                cidrs: vec![format!("{network}/32").parse()?],
+            }],
+            policy()?,
+            reuse_policy(),
+        )?)
+    };
+    let allowed = adapter(&issuer, host)?;
     let trusted = ProviderCredentials::new("fixture-secret".into(), Some(ca.clone()))?;
     let mut internal_return = c.input();
     internal_return.redirect_uri = "https://192.168.1.7/callback".into();
@@ -110,15 +116,30 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(allowed.test(no_ca,deadline()).await,Err(FederationError::Provider(f)) if f.reason == ProviderReason::TlsRejected)
     );
-    let bound = fixture_install(
-        &allowed,
-        ProviderRevision {
-            version: 3,
-            ..revision
-        },
-        &c,
-        &trusted,
-    )?;
+    let mut dns_issuer = Url::parse(&issuer)?;
+    dns_issuer.set_host(Some(&dns_name))?;
+    let issuer = dns_issuer.as_str();
+    let c = settings(issuer)?;
+    let other = if host == Ipv4Addr::new(10, 0, 0, 1) {
+        Ipv4Addr::new(10, 0, 0, 2)
+    } else {
+        Ipv4Addr::new(10, 0, 0, 1)
+    };
+    let mut outside = adapter(issuer, other)?;
+    let denied_lookups = fixture_dns(&mut outside, &dns_name, host.into());
+    let denial = outside
+        .test(
+            fixture_provider(&outside, tenant()?, &c, &trusted),
+            deadline(),
+        )
+        .await;
+    assert!(matches!(denial, Err(FederationError::Provider(f))
+        if f.stage == ProviderStage::Discovery && f.reason == ProviderReason::EgressDenied));
+    assert!(denied_lookups.load(Ordering::Relaxed) > 0);
+
+    let mut allowed = adapter(issuer, host)?;
+    let discovery_lookups = fixture_dns(&mut allowed, &dns_name, host.into());
+    let bound = fixture_provider(&allowed, tenant()?, &c, &trusted);
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let auth = allowed
         .prepare(
@@ -128,7 +149,9 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
             deadline(),
         )
         .await?;
+    assert!(discovery_lookups.load(Ordering::Relaxed) > 0);
     let browser = reqwest::Client::builder()
+        .resolve(&dns_name, SocketAddr::new(host.into(), 0))
         .no_proxy()
         .cookie_store(true)
         .redirect(reqwest::redirect::Policy::none())
@@ -144,7 +167,7 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
         .await?;
     let action = Url::parse(&form::action(&page)?)?;
     anyhow::ensure!(
-        action.origin() == Url::parse(&issuer)?.origin(),
+        action.origin() == dns_issuer.origin(),
         "unexpected form origin"
     );
     let reply = browser
@@ -168,9 +191,14 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
     let code = query
         .get("code")
         .ok_or_else(|| anyhow::anyhow!("code missing"))?;
-    let claims = allowed
-        .exchange(bound, material, code.clone().into(), deadline())
+    // A fresh adapter has no idle discovery connection or cached documents.
+    let mut cold = adapter(issuer, host)?;
+    let exchange_lookups = fixture_dns(&mut cold, &dns_name, host.into());
+    let same_revision = fixture_install(&cold, bound.revision(), &c, &trusted)?;
+    let claims = cold
+        .exchange(same_revision, material, code.clone().into(), deadline())
         .await?;
+    assert!(exchange_lookups.load(Ordering::Relaxed) > 0);
     assert_eq!(claims.issuer, issuer);
     claims.subject.validate()?;
     Ok(())

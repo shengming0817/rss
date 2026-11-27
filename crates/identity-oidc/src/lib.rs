@@ -155,6 +155,7 @@ pub struct HttpOidc {
     bindings: Bindings,
     resources: Arc<Resources>,
     revisions: ProviderRevisions,
+    lookup: Arc<dyn reqwest::dns::Resolve>,
     loopback: bool,
 }
 #[derive(Default)]
@@ -255,6 +256,7 @@ impl HttpOidc {
             policy,
             loopback,
             future_skew_seconds: 30,
+            lookup: Arc::new(egress::SystemResolver),
         })
     }
     fn grant(&self, tenant: TenantId, issuer: &str, client: &str) -> Option<&Grant> {
@@ -273,7 +275,8 @@ impl HttpOidc {
         credentials: &ProviderCredentials,
         cidrs: &[IpNet],
     ) -> Result<reqwest::Client, FederationError> {
-        let resolver = egress::VettedResolver::new(self.loopback, cidrs.to_vec());
+        let resolver =
+            egress::VettedResolver::new(self.loopback, cidrs.to_vec(), self.lookup.clone());
         let mut builder = reqwest::Client::builder()
             .no_proxy()
             .dns_resolver(Arc::new(resolver))
