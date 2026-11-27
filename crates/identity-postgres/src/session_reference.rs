@@ -170,6 +170,8 @@ impl Authority {
     /// The host must read reference coordinates from its trusted storage and apply its own resource
     /// authorization in the same SELECT. Never expose the SQL or accept HTTP-provided locators as identity.
     /// Only `identity_session_references` is installed: no login/profile relation or authentication proof.
+    /// OIDC rows reflect persisted provider enablement and generation. For current host trust and
+    /// verified session facts, use `recheck_session_reference`.
     /// Platform rows additionally require the host's current binding/credential qualification.
     pub async fn with_session_references_read<T: Send + 'static, F>(
         &self,

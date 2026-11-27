@@ -34,6 +34,7 @@ async fn identity_postgres() -> anyhow::Result<()> {
     cases::transactions::borrowed(&f).await?;
     cases::one_time::webauthn(&f).await?;
     cases::federation::state_once(&f).await?;
+    cases::federation::session_summary(&f).await?;
     f.close().await;
     let f = support::Fixture::new(&pg, Integrity::Plain).await?;
     f.bootstrap().await?;

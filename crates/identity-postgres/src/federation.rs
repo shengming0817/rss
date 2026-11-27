@@ -11,6 +11,7 @@ use rss_request_context::Clock;
 use rss_request_context::Deadline;
 use rss_request_context::TenantId;
 use serde::Serialize;
+use sqlx::Row;
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 #[derive(Clone)]
@@ -276,28 +277,10 @@ impl Federation {
                     lock_tenant_collection(c, tenant).await?;
                     let loaded = crate::session_storage::recheck_collection(&checks, c, &actor).await?;
                     crate::management::authorize(policy.as_ref(),instance,&loaded,ManagementOperation::ListProviders,None, c).await?;
-                    let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
-                        "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid OR",
-                        "DER BY provider_id LIMIT $2"
-                    ))
-                    .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1)
-                    .fetch_all(&mut *c)
-                    .await?;
-                    if ids.len() > usize::from(MAX_PROVIDERS) {
-                        return Err(FederationError::ProviderLimitReached.into());
-                    }
-                    let mut result = vec![];
-                    for id in ids {
-                        result.push(
-                            db::provider(
-                                c,
-                                tenant,
-                                ProviderId::parse(&id.to_string()).map_err(|_| transaction::corrupt())?,
-                            )
-                            .await?,
-                        );
-                    }
-                    Ok(result)
+                    let rows = sqlx::query("SELECT * FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2")
+                        .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(c).await?;
+                    if rows.len() > usize::from(MAX_PROVIDERS) { return Err(FederationError::ProviderLimitReached.into()); }
+                    rows.iter().map(|r| db::decode_provider(r).map_err(Into::into)).collect()
                 }) }).await
     }
     pub async fn test_provider(
@@ -494,30 +477,27 @@ impl Federation {
         let checks = self.authority.session_checks.clone();
         self.authority.read_sql(actor.binding, deadline, move |c| Box::pin(async move {
             let loaded = crate::session_storage::recheck_collection(&checks, c, &actor).await?;
-            // A persisted authentication fact must still match this process's approved interpretation.
-            if let Some(identity) = loaded.source_identity {
-                let (provider, _, _) = db::identity(c, actor.key.tenant, identity).await?;
-                let view = db::provider(c, actor.key.tenant, provider).await?;
-                if oidc.assurance_profile(actor.key.tenant, &view.settings).fingerprint != view.assurance_profile {
-                    return Err(FederationError::StaleConfiguration.into());
-                }
-            }
-            let ids: Vec<Uuid> = sqlx::query_scalar(
-                "SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2"
-            ).bind(actor.key.tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut *c).await?;
-            if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
+            let rows = sqlx::query("SELECT p.*, EXISTS(SELECT FROM identity_authority.external_identities e
+                    WHERE e.tenant_id=p.tenant_id AND e.principal_id=$2 AND e.provider_id=p.provider_id
+                    AND e.issuer=p.settings->>'issuer') AS linked
+                FROM identity_authority.providers p WHERE p.tenant_id=$1::uuid ORDER BY p.provider_id LIMIT $3")
+                .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid())
+                .bind(i64::from(MAX_PROVIDERS)+1).fetch_all(c).await?;
+            if rows.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
             let mut providers = Vec::new();
-            for id in ids {
-                let view = db::provider(c, actor.key.tenant, ProviderId::parse(&id.to_string())?).await?;
-                match check_step_up(c, actor.key, &view, oidc.as_ref()).await {
-                    Ok(()) => providers.push(LoginOption {
-                        provider_id: id,
-                        label: format!("{} · {} · {}", view.settings.issuer().as_str(), view.settings.client_id().as_str(), id),
-                    }),
-                    Err(transaction::MutationError::Federation(
-                        FederationError::Rejected | FederationError::StaleConfiguration
-                    )) => {},
-                    Err(error) => return Err(error),
+            for row in rows {
+                let uuid: Uuid = row.try_get("provider_id")?;
+                let id = ProviderId::parse(&uuid.to_string())?;
+                let decoded;
+                let (view, profile) = if let Some(hit) = loaded.checked_provider.as_ref().filter(|p| p.view.id == id) {
+                    (&hit.view, hit.profile)
+                } else {
+                    decoded = db::decode_provider(&row)?;
+                    let profile = oidc.assurance_profile(actor.key.tenant, &decoded.settings);
+                    (&decoded, profile)
+                };
+                if step_up_profile(view, profile).is_ok() && row.try_get::<bool,_>("linked")? {
+                    providers.push(LoginOption { provider_id: uuid, label: format!("{} · {} · {}", view.settings.issuer().as_str(), view.settings.client_id().as_str(), uuid) });
                 }
             }
             Ok(SessionSecurity {
@@ -597,19 +577,23 @@ pub(super) async fn check_step_up(
     view: &ProviderView,
     oidc: &dyn UpstreamOidc,
 ) -> Result<(), transaction::MutationError> {
-    let profile = oidc.assurance_profile(key.tenant, &view.settings);
-    if profile.fingerprint != view.assurance_profile {
-        return Err(FederationError::StaleConfiguration.into());
-    }
-    if !view.enabled || !profile.supports_step_up {
-        return Err(FederationError::Rejected.into());
-    }
+    step_up_profile(view, oidc.assurance_profile(key.tenant, &view.settings))?;
     let linked: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM identity_authority.external_identities WHERE tenant_id=$1::uuid AND principal_id=$2 AND provider_id=$3::uuid AND issuer=$4)"
     ).bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(view.id.to_string())
         .bind(view.settings.issuer().as_str()).fetch_one(c).await?;
     if !linked {
         return Err(FederationError::Rejected.into());
+    }
+    Ok(())
+}
+
+fn step_up_profile(view: &ProviderView, profile: AssuranceProfile) -> Result<(), FederationError> {
+    if profile.fingerprint != view.assurance_profile {
+        return Err(FederationError::StaleConfiguration);
+    }
+    if !view.enabled || !profile.supports_step_up {
+        return Err(FederationError::Rejected);
     }
     Ok(())
 }

@@ -163,8 +163,8 @@ pub(crate) async fn validate_source(
     let valid:bool=match source.clone() {
         GrantSource::Oidc { identity, provider, version, epoch } => {
             let origin = crate::federation_storage::Origin {identity, version, epoch};
-            let (source, profile) = crate::federation_storage::check_origin(c, key, &origin, checks).await?;
-            source.provider_id() == provider && profile.supports_step_up
+            let checked = crate::federation_storage::check_origin(c, key, &origin, checks).await?;
+            checked.source.provider_id() == provider && checked.provider.profile.supports_step_up
         }
         GrantSource::Webauthn{credential,epoch,rp,configuration}=>sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.webauthn_credentials c JOIN identity_authority.webauthn_rp r USING(tenant_id,rp) WHERE c.tenant_id=$1::uuid AND c.principal_id=$2 AND c.id=$3 AND c.epoch=$4 AND c.rp=$5 AND NOT c.revoked AND r.fingerprint=c.rp_config AND r.generation=$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(credential).bind(epoch).bind(rp).bind(configuration).fetch_one(&mut *c).await?,
     };

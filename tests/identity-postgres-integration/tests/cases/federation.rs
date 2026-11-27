@@ -255,3 +255,78 @@ async fn denied_after_replacement(
         .retain(|key| *key != proof.account());
     Ok(())
 }
+
+async fn reference_visible(
+    authority: &Authority,
+    f: &Fixture,
+    id: uuid::Uuid,
+) -> anyhow::Result<bool> {
+    use sqlx::{Arguments, Row};
+    let mut args = sqlx::postgres::PgArguments::default();
+    args.add(id)?;
+    Ok(authority.with_session_references_read(binding(f.key.tenant), deadline(), move |mut read| Box::pin(async move {
+        let rows = read.query("SELECT EXISTS(SELECT FROM identity_session_references WHERE session_id=$1) AS visible", args, 1).await?;
+        rows[0].try_get("visible").map_err(|_|AuthorityError::Unavailable)
+    })).await?)
+}
+
+pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    let s = service(f);
+    let p = enabled(f, &s).await?;
+    sqlx::query(
+        "INSERT INTO identity_authority.external_identities VALUES ($1::uuid,$2,$3,$4::uuid,$5,$6)",
+    )
+    .bind(f.key.tenant.to_string())
+    .bind(uuid::Uuid::new_v4())
+    .bind(f.key.principal.as_uuid())
+    .bind(p.id.to_string())
+    .bind(p.settings.issuer().as_str())
+    .bind("oidc:manager")
+    .execute(&f.owner)
+    .await?;
+    let oidc = issued(finish(&s, begin(f, &s, &p).await?, "manager").await?);
+    let oidc_actor = f
+        .store
+        .inspect_session(scope, secret(&oidc), deadline())
+        .await?;
+    let reference = oidc_actor.reference()?;
+    let id = oidc.view().id;
+    assert!(reference_visible(&f.store, f, id.as_uuid()).await?);
+    f.store
+        .recheck_session_reference(scope, &reference, deadline())
+        .await?;
+    let checks = f.oidc.checks.load(Ordering::SeqCst);
+    let approved = f
+        .store
+        .list_sessions(oidc_actor, None, 100, deadline())
+        .await?;
+    assert!(approved.sessions.iter().any(|v| v.id == id));
+    assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - checks, 1);
+    let withdrawn = withdrawn_authority(f).await?;
+    let local = f.actor().await?;
+    let local_id = local.view().id;
+    let page = withdrawn
+        .list_sessions(local, None, 100, deadline())
+        .await?;
+    assert!(page.sessions.iter().any(|v| v.id == local_id));
+    assert!(!page.sessions.iter().any(|v| v.id == id));
+    assert!(reference_visible(&withdrawn, f, id.as_uuid()).await?);
+    assert!(matches!(
+        withdrawn
+            .recheck_session_reference(scope, &reference, deadline())
+            .await,
+        Err(AuthorityError::Rejected)
+    ));
+    service_on(withdrawn.clone(), settings().redirect_uri())
+        .reconcile_assurance_profiles(scope, deadline())
+        .await?;
+    assert!(!reference_visible(&withdrawn, f, id.as_uuid()).await?);
+    assert!(
+        withdrawn
+            .recheck_session_reference(scope, &reference, deadline())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
