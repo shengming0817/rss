@@ -534,37 +534,87 @@ impl Federation {
         let tenant = binding.tenant();
         let budget = self.authority.budget(deadline)?;
         let instance = self.authority.instance();
+        let cutoff = budget.cutoff;
+        let bound = self
+            .authority
+            .read_sql(binding, cutoff, move |c| {
+                Box::pin(async move {
+                    let upper: Option<(Uuid, i64)> = sqlx::query_as(
+                        "SELECT provider_id,count(*) OVER () FROM
+                (SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid
+                 ORDER BY provider_id DESC LIMIT $2) candidates ORDER BY provider_id DESC LIMIT 1",
+                    )
+                    .bind(tenant.to_string())
+                    .bind(i64::from(MAX_PROVIDERS) + 1)
+                    .fetch_optional(c)
+                    .await?;
+                    if upper.is_some_and(|(_, n)| n > i64::from(MAX_PROVIDERS)) {
+                        return Err(reject().into());
+                    }
+                    Ok(upper.map(|(id, _)| id))
+                })
+            })
+            .await?;
+        let Some(upper) = bound else {
+            return Ok(());
+        };
+        let mut after = None;
+        let mut scanned = 0;
         loop {
             let oidc = self.oidc.clone();
-            let more = self.authority.conditional_write_sql(binding, budget.cutoff, move |c| Box::pin(async move {
-            let ids:Vec<Uuid> = sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT $2")
-                .bind(tenant.to_string()).bind(i64::from(MAX_PROVIDERS) + 1).fetch_all(&mut *c).await?;
-            if ids.len() > usize::from(MAX_PROVIDERS) { return Err(reject().into()); }
-            // Before the tenant is initialized there is no guard or provider to synchronize.
-            if ids.is_empty() { return Ok((false,Vec::new())); }
-            lock_tenant_collection(c, tenant).await?;
-            let mut events=Vec::new();
-
-            for id in ids {
-                let id=ProviderId::parse(&id.to_string())?;
-                let mut view=db::provider(c,tenant,id).await?;
-                let profile=oidc.assurance_profile(tenant,&view.settings).fingerprint;
-                if profile==view.assurance_profile { continue; }
-                let previous = view.revision(instance,tenant);
-                view.version=view.version.checked_add(1).ok_or(FederationError::Rejected)?;
-                view.revocation_epoch=view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;
-                view.assurance_profile=profile;
-                sqlx::query("UPDATE identity_authority.providers SET config_version=$3,revocation_epoch=$4,assurance_profile=$5,enabled=$6 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid")
-                    .bind(tenant.to_string()).bind(id.to_string()).bind(view.version).bind(view.revocation_epoch).bind(profile.as_slice()).bind(view.enabled).execute(&mut *c).await?;
-                oidc.revisions().retire(previous);
-                events.push(event(tenant,Action::ProviderUpdated,&view,None));
-                if events.len() == crate::transaction::MAX_MUTATION_EVENTS { return Ok((true, events)); }
+            let (last, count, changed) = self.authority.read_sql(binding, cutoff, move |c| Box::pin(async move {
+                const PAGE: i64 = 64;
+                let rows = sqlx::query("SELECT * FROM identity_authority.providers WHERE tenant_id=$1::uuid
+                    AND ($2::uuid IS NULL OR provider_id>$2) AND provider_id<=$3 ORDER BY provider_id LIMIT $4")
+                    .bind(tenant.to_string()).bind(after).bind(upper).bind(PAGE).fetch_all(c).await?;
+                let count = rows.len();
+                let mut last = None;
+                let mut changed = Vec::new();
+                for row in rows {
+                    let id: Uuid = row.try_get("provider_id")?;
+                    let view = db::decode_provider(&row)?;
+                    if oidc.assurance_profile(tenant,&view.settings).fingerprint != view.assurance_profile {
+                        changed.push(id);
+                    }
+                    last = Some(id);
+                }
+                Ok((last,count,changed))
+            })).await?;
+            scanned += count;
+            if scanned > usize::from(MAX_PROVIDERS) {
+                return Err(AuthorityError::Rejected);
             }
-            Ok((false,events))
-        })).await?;
-            if !more {
+            for ids in changed.chunks(crate::transaction::MAX_MUTATION_EVENTS) {
+                let ids = ids.to_vec();
+                let oidc = self.oidc.clone();
+                self.authority.conditional_write_sql(binding, cutoff, move |c| Box::pin(async move {
+                    lock_tenant_collection(c,tenant).await?;
+                    let rows = sqlx::query("SELECT * FROM identity_authority.providers WHERE tenant_id=$1::uuid
+                        AND provider_id=ANY($2) ORDER BY provider_id FOR UPDATE")
+                        .bind(tenant.to_string()).bind(ids).fetch_all(&mut *c).await?;
+                    let mut events = Vec::new();
+                    for row in rows {
+                        let mut view = db::decode_provider(&row)?;
+                        let profile = oidc.assurance_profile(tenant,&view.settings).fingerprint;
+                        if profile == view.assurance_profile { continue; }
+                        let previous = view.revision(instance,tenant);
+                        view.version = view.version.checked_add(1).ok_or(FederationError::Rejected)?;
+                        view.revocation_epoch = view.revocation_epoch.checked_add(1).ok_or(FederationError::Rejected)?;
+                        sqlx::query("UPDATE identity_authority.providers SET config_version=$3,revocation_epoch=$4,
+                            assurance_profile=$5 WHERE tenant_id=$1::uuid AND provider_id=$2::uuid")
+                            .bind(tenant.to_string()).bind(view.id.to_string()).bind(view.version)
+                            .bind(view.revocation_epoch).bind(profile.as_slice()).execute(&mut *c).await?;
+                        oidc.revisions().retire(previous);
+                        events.push(event(tenant,Action::ProviderUpdated,&view,None));
+                    }
+                    Ok(((),events))
+                })).await?;
+            }
+            // Later insertions behind the cursor and edits to visited rows belong to the next pass.
+            if last.is_none() || last == Some(upper) {
                 return Ok(());
             }
+            after = last;
         }
     }
 }
