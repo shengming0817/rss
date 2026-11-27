@@ -1,5 +1,5 @@
 use crate::support::*;
-use rss_identity_core::federation::*;
+use rss_identity_core::{department::UpstreamDepartmentSnapshot, federation::*};
 use rss_identity_postgres::StateSigner;
 use rss_identity_postgres::*;
 use rss_request_context::TenantId;
@@ -18,6 +18,7 @@ pub struct ScriptedOidc {
     revisions: ProviderRevisions,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
+    pub department: Mutex<UpstreamDepartmentSnapshot>,
     pub probe_error: Mutex<Option<FederationError>>,
     trusted: bool,
 }
@@ -27,6 +28,7 @@ impl ScriptedOidc {
             revisions: ProviderRevisions::new(16),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
+            department: Mutex::new(UpstreamDepartmentSnapshot::NotConfigured),
             probe_error: Mutex::new(None),
             trusted,
         })
@@ -84,8 +86,7 @@ impl UpstreamOidc for ScriptedOidc {
                 .unwrap()
                 .as_secs() as i64;
             Ok(UpstreamClaims {
-                department_snapshot:
-                    rss_identity_core::department::UpstreamDepartmentSnapshot::NotConfigured,
+                department_snapshot: self.department.lock().unwrap().clone(),
                 issuer: c.issuer().as_str().into(),
                 subject: rss_identity_core::entra::ExternalSubject::Oidc(code.to_string()),
                 profile: rss_identity_core::profile::Profile::missing(),
@@ -169,7 +170,7 @@ pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView
     enabled_settings(f, s, settings()).await
 }
 #[allow(clippy::unwrap_used, reason = "test fixture and ordered assertions")]
-async fn enabled_settings(
+pub async fn enabled_settings(
     f: &Fixture,
     s: &Federation,
     settings: ProviderSettings,
