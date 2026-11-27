@@ -275,6 +275,9 @@ impl crate::Federation {
         deadline: Deadline,
     ) -> Result<rss_identity_core::federation::BoundProvider, AuthorityError> {
         let tenant = binding.tenant();
+        if view.settings.redirect_uri() != self.callback {
+            return Err(FederationError::StaleConfiguration.into());
+        }
         let revision = view.revision(self.authority.instance(), tenant);
         let credential_version = view.credential_version;
         let settings = view.settings.clone();

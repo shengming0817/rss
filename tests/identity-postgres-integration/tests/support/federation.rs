@@ -18,6 +18,7 @@ pub struct ScriptedOidc {
     revisions: ProviderRevisions,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
+    pub trusted: std::sync::atomic::AtomicBool,
 }
 impl ScriptedOidc {
     pub fn new() -> Arc<Self> {
@@ -25,14 +26,16 @@ impl ScriptedOidc {
             revisions: ProviderRevisions::new(16),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
+            trusted: std::sync::atomic::AtomicBool::new(true),
         })
     }
 }
 impl UpstreamOidc for ScriptedOidc {
     fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> AssuranceProfile {
+        let trusted = self.trusted.load(Ordering::SeqCst);
         AssuranceProfile {
-            fingerprint: [1; 32],
-            supports_step_up: true,
+            fingerprint: [u8::from(trusted); 32],
+            supports_step_up: trusted,
         }
     }
     fn validate(
@@ -118,14 +121,17 @@ impl UpstreamOidc for ScriptedOidc {
     }
 }
 #[allow(clippy::unwrap_used, reason = "test fixture")]
-pub fn service(f: &Fixture, oidc: Arc<dyn UpstreamOidc>) -> Federation {
+pub fn service(f: &Fixture) -> Federation {
+    service_at(f, settings().redirect_uri())
+}
+#[allow(clippy::unwrap_used, reason = "test fixture")]
+pub fn service_at(f: &Fixture, callback: &str) -> Federation {
     Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
         f.store.clone(),
-        oidc,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),
         FederationConfig {
-            callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
+            callback: callback.into(),
             credential_keys: credential_keys(),
             targets: BTreeMap::from([("home".into(), RETURN.into())]),
         },

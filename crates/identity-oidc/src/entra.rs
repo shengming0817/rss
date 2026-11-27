@@ -9,7 +9,7 @@ use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     sync::Arc,
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -79,6 +79,9 @@ impl HttpEntra {
         max_token_bytes: usize,
         cache: JwksCachePolicy,
     ) -> Result<Self, FederationError> {
+        let now = clock.now();
+        policy.validate_at(now)?;
+        crate::check_durations(now, &[cache.ttl, cache.refresh_cooldown])?;
         if max_token_bytes == 0 {
             return Err(FederationError::Configuration);
         }
@@ -305,15 +308,11 @@ fn verify_signed_claims(
     validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud"]);
     validation.set_audience(&[p.app_id.to_string()]);
     validation.set_issuer(&[p.issuer()]);
-    validation.validate_nbf = true;
-    validation.leeway = 0;
+    validation.validate_exp = false; // exp and nbf are checked against the host observation.
     let c = decode::<Claims>(token, key, &validation)
         .map_err(|_| FederationError::Claims)?
         .claims;
-    let now = observed
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| FederationError::Unavailable)?
-        .as_secs() as i64;
+    let now = crate::profile_token::unix_seconds(observed)?;
     if c.ver != "2.0"
         || c.idtyp != "user"
         || c.tid != p.tenant

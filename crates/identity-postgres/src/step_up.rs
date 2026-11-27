@@ -132,7 +132,7 @@ pub async fn consume_step_up_on(
     }
     let source: GrantSource =
         serde_json::from_value(row.try_get("source")?).map_err(|_| corrupt())?;
-    validate_source(c, actor.key, &source).await?;
+    validate_source(c, actor.key, &source, &actor.session_checks).await?;
     session_storage::recheck_locked(c, actor).await?;
     if session_storage::now(c).await? >= row.try_get::<i64, _>("expires_at")? {
         return Err(reject());
@@ -155,9 +155,14 @@ pub(crate) async fn validate_source(
     c: &mut PgConnection,
     key: AccountKey,
     source: &GrantSource,
+    checks: &crate::session_checks::SessionChecks,
 ) -> Result<(), rss_transactional_messaging_postgres::PgError> {
     let valid:bool=match source.clone() {
-        GrantSource::Oidc{identity,provider,version,epoch}=>sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.external_identities e JOIN identity_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid AND e.principal_id=$2 AND e.identity_id=$3 AND p.provider_id=$4 AND p.enabled AND p.config_version=$5 AND p.revocation_epoch=$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(identity).bind(provider).bind(version).bind(epoch).fetch_one(&mut *c).await?,
+        GrantSource::Oidc { identity, provider, version, epoch } => {
+            let origin = crate::federation_storage::Origin {identity, version, epoch};
+            let (source, profile) = crate::federation_storage::check_origin(c, key, &origin, checks).await?;
+            source.provider_id() == provider && profile.supports_step_up
+        }
         GrantSource::Webauthn{credential,epoch,rp,configuration}=>sqlx::query_scalar("SELECT EXISTS(SELECT FROM identity_authority.webauthn_credentials c JOIN identity_authority.webauthn_rp r USING(tenant_id,rp) WHERE c.tenant_id=$1::uuid AND c.principal_id=$2 AND c.id=$3 AND c.epoch=$4 AND c.rp=$5 AND NOT c.revoked AND r.fingerprint=c.rp_config AND r.generation=$6)").bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(credential).bind(epoch).bind(rp).bind(configuration).fetch_one(&mut *c).await?,
     };
     if !valid {

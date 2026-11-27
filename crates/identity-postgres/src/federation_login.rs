@@ -348,6 +348,7 @@ impl Federation {
                         return Err(reject().into());
                     }
                     let now = session_storage::now(c).await?;
+                    let expires_at = callback_expiry(claims.issued_at, claims.expires_at, attempt.expiry, now, future_skew_seconds)?;
                     claims.assurance.check(attempt.mode, attempt.created, now, future_skew_seconds)?;
                     if attempt.mode == AuthenticationMode::StepUp {
                         let actor = actor.as_ref().ok_or_else(reject)?;
@@ -356,7 +357,7 @@ impl Federation {
                         let grant=crate::step_up::issue(c,actor,context,crate::step_up::GrantSource::Oidc {
                             identity:identity_id,provider:Uuid::parse_str(&view.id.to_string()).map_err(|_|corrupt())?,version:view.version,epoch:view.revocation_epoch,
                         },claims.assurance.auth_time().ok_or_else(reject)?, operation_proof_seconds).await?;
-                        if session_storage::now(c).await?>=attempt.expiry {return Err(reject().into());}
+                        if session_storage::now(c).await?>=expires_at {return Err(reject().into());}
                         db::consume(c,&locator).await?;
                         return Ok((FederatedOutcome::StepUp{grant,return_url:attempt.return_url},vec![crate::step_up::event(key,crate::step_up::AuthenticationAction::Verified)]));
                     }
@@ -378,7 +379,7 @@ impl Federation {
                         .await?;
                         crate::federation_link::advance(c,tenant,intent.id,crate::federation_link::LinkStage::TargetReady).await?;
                         if let Some(origin) = &intent.origin {
-                            db::check_origin(c, key, origin).await?;
+                            db::check_origin(c, key, origin, &session_checks).await?;
                         }
                         (match intent.origin {
                             Some(_) => sessions::SessionAuthentication::LinkedOidc { intent: intent.id },
@@ -402,13 +403,11 @@ impl Federation {
                     };
                     let (issued, session_event) = sessions::insert(c, state, replaced, origin, now, session_policy, max_auth_facts_bytes,&session_checks.timer).await?;
                     if linked {crate::profiles::retain_binding(c,key,replaced.ok_or_else(reject)?,issued.view().id).await?;}
-                    if session_storage::now(c).await? >= attempt.expiry {
-                        return Err(reject().into());
-                    }
                     let profile_event = match observation {
                         Some(observation) => crate::profiles::accept(c,key,issued.view().id,issued.view().absolute_expires_at,observation,limits).await?,
                         None => None,
                     };
+                    if session_storage::now(c).await? >= expires_at { return Err(reject().into()); }
                     db::consume(c, &locator).await?;
                     let action = if linked {
                         if already {
@@ -512,4 +511,29 @@ pub(crate) async fn check_actor(
     } else {
         Ok((None, None))
     }
+}
+
+/// All callback outcomes share the same locked database observation.
+fn callback_expiry(
+    issued_at: i64,
+    token_expiry: i64,
+    attempt_expiry: i64,
+    now: i64,
+    future_skew_seconds: u32,
+) -> Result<i64, FederationError> {
+    let expires_at = attempt_expiry.min(token_expiry);
+    if now >= expires_at
+        || !rss_identity_core::facts::acceptable_observation(issued_at, now, future_skew_seconds)
+    {
+        return Err(FederationError::Claims);
+    }
+    Ok(expires_at)
+}
+
+#[test]
+fn callback_evidence_must_still_be_live_at_settlement() {
+    assert_eq!(callback_expiry(99, 101, 150, 100, 0), Ok(101));
+    assert!(callback_expiry(99, 101, 150, 101, 0).is_err());
+    assert!(callback_expiry(99, 150, 101, 101, 0).is_err());
+    assert!(callback_expiry(105, 150, 160, 100, 3).is_err());
 }

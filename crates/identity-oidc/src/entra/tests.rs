@@ -17,9 +17,7 @@ fn signed_user_claims_are_bound_to_the_resource_profile() -> anyhow::Result<()> 
         required_scopes: vec!["mdm.enroll".into()],
         device_claim: "deviceid".into(),
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
+    let now = 10_000;
     let user = Uuid::new_v4();
     let device = Uuid::new_v4();
     let claims = json!({"iss":p.issuer(),"aud":p.app_id,"ver":"2.0","idtyp":"user","tid":p.tenant,"oid":user,"azp":p.authorized_clients[0],"iat":now-1,"nbf":now-1,"exp":now+300,"scp":"mdm.enroll other","deviceid":device});

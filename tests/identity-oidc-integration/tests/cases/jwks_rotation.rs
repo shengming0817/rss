@@ -18,10 +18,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
-const JWK_A: &str = include_str!("../../../../crates/identity-oidc/tests/fixtures/entra-a.json");
-const JWK_B: &str = include_str!("../../../../crates/identity-oidc/tests/fixtures/entra-b.json");
-const KEY_A: &[u8] = include_bytes!("../../../../crates/identity-oidc/tests/fixtures/entra-a.der");
-const KEY_B: &[u8] = include_bytes!("../../../../crates/identity-oidc/tests/fixtures/entra-b.der");
+use crate::support::{JWK_A, JWK_B, KEY_A, KEY_B};
 
 #[allow(
     clippy::disallowed_methods,

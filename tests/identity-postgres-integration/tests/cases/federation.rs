@@ -61,8 +61,8 @@ async fn step_finish(
 )]
 pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
     use rss_identity_core::assurance::Assurance;
-    let upstream = ScriptedOidc::new();
-    let s = service(f, upstream.clone());
+    let upstream = &f.oidc;
+    let s = service(f);
     let p = enabled(f, &s).await?;
     let old = issued(finish(&s, begin(f, &s, &p).await?, "alice").await?);
     let now: i64 =
@@ -91,6 +91,25 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     let context =
         rss_identity_core::step_up::StepUpContext::new("test.operation".into(), [7; 32]).unwrap();
+    upstream.trusted.store(false, Ordering::SeqCst);
+    assert!(
+        f.store
+            .inspect_session(binding(f.key.tenant), secret(&old), deadline())
+            .await
+            .is_err()
+    );
+    let mut denied = f.owner.begin().await?;
+    crate::support::fence(&mut denied, binding(f.key.tenant)).await?;
+    sqlx::query("SET LOCAL ROLE identity_runtime")
+        .execute(&mut *denied)
+        .await?;
+    assert!(
+        consume_step_up_on(&mut denied, &proof, &context, grant.expose())
+            .await
+            .is_err()
+    );
+    denied.rollback().await?;
+    upstream.trusted.store(true, Ordering::SeqCst);
     let mut tx = f.owner.begin().await?;
     crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
     sqlx::query("SET LOCAL ROLE identity_runtime")
@@ -112,8 +131,8 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 pub async fn state_once(f: &Fixture) -> anyhow::Result<()> {
-    let upstream = ScriptedOidc::new();
-    let s = service(f, upstream.clone());
+    let upstream = &f.oidc;
+    let s = service(f);
     let p = enabled(f, &s).await?;
     let token = begin(f, &s, &p).await?;
     assert!(
@@ -129,7 +148,9 @@ pub async fn state_once(f: &Fixture) -> anyhow::Result<()> {
         .is_err()
     );
     assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
-    let restarted = service(f, upstream.clone());
+    let moved = service_at(f, "https://identity.example.test/new/callback");
+    assert!(begin(f, &moved, &p).await.is_err());
+    let restarted = service(f);
     let (a, b) = tokio::join!(
         finish(&s, token.clone(), "alice"),
         finish(&restarted, token.clone(), "alice")

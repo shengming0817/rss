@@ -38,3 +38,12 @@ pub fn settings(issuer: &str) -> anyhow::Result<ProviderSettings> {
     }
     .try_into()?)
 }
+
+pub const JWK_A: &str =
+    include_str!("../../../../crates/identity-oidc/tests/fixtures/entra-a.json");
+pub const JWK_B: &str =
+    include_str!("../../../../crates/identity-oidc/tests/fixtures/entra-b.json");
+pub const KEY_A: &[u8] =
+    include_bytes!("../../../../crates/identity-oidc/tests/fixtures/entra-a.der");
+pub const KEY_B: &[u8] =
+    include_bytes!("../../../../crates/identity-oidc/tests/fixtures/entra-b.der");

@@ -20,7 +20,7 @@ pub struct Federation {
     pub(crate) signer: Arc<StateSigner>,
     pub(crate) group_policy: rss_identity_core::groups::GroupFactsMaxAge,
     pub(crate) credential_keys: Arc<CredentialKeys>,
-    callback: String,
+    pub(crate) callback: String,
     targets: Arc<BTreeMap<String, String>>,
 }
 /// Browser input plus transport attribution; the optional replacement is an authority-issued proof.
@@ -116,12 +116,16 @@ impl Federation {
     pub fn new(
         group_policy: rss_identity_core::groups::GroupFactsMaxAge,
         authority: Authority,
-        oidc: Arc<dyn UpstreamOidc>,
         signer: StateSigner,
         config: FederationConfig,
     ) -> Result<Self, AuthorityError> {
         authority.require_runtime()?;
         config.validate()?;
+        let oidc = authority
+            .session_checks
+            .oidc
+            .clone()
+            .ok_or(AuthorityError::Configuration)?;
         let FederationConfig {
             callback,
             credential_keys,
@@ -333,18 +337,16 @@ impl Federation {
             .await?;
         let remaining = budget.time_left();
         let reserve = (remaining / 4).min(std::time::Duration::from_secs(1));
-        let upstream_deadline = budget.cutoff.instant() - reserve;
-        let result = budget
-            .wait(
-                rss_request_context::Deadline::at(upstream_deadline),
-                self.oidc.test(
-                    installed,
-                    rss_request_context::Deadline::at(upstream_deadline),
-                ),
-            )
-            .await
-            .unwrap_or(Err(FederationError::Unavailable));
-        let diagnostic = result.as_ref().err().map(|e| e.diagnostic());
+        let upstream_deadline = Deadline::at(budget.cutoff.instant() - reserve);
+        let result = tokio::select! {
+            biased;
+            result = self.oidc.test(installed, upstream_deadline) => match result {
+                Ok(_) if upstream_deadline.is_expired(budget.timer.now()) => Err(FederationError::Unavailable),
+                other => other,
+            },
+            _ = rss_request_context::ExecutionTimer::sleep_until(&budget.timer, upstream_deadline) => Err(FederationError::Unavailable),
+        };
+        let diagnostic = result.as_ref().err().and_then(|e| e.diagnostic());
         let passed = result.is_ok();
         self.authority
             .write_sql(binding, budget.cutoff, move |c| {
@@ -638,20 +640,7 @@ impl FederationConfig {
                 return Err(FederationError::Configuration.into());
             }
         }
-        if self.callback.len() > 2048 || self.callback.chars().any(char::is_control) {
-            return Err(FederationError::Configuration.into());
-        }
-        let callback_url =
-            url::Url::parse(&self.callback).map_err(|_| FederationError::Configuration)?;
-        if callback_url.scheme() != "https"
-            || callback_url.host_str().is_none()
-            || callback_url.query().is_some()
-            || callback_url.fragment().is_some()
-            || !callback_url.username().is_empty()
-            || callback_url.password().is_some()
-        {
-            return Err(FederationError::Configuration.into());
-        }
+        validate_redirect_uri(&self.callback)?;
         Ok(())
     }
 }
@@ -711,6 +700,17 @@ mod contract_tests {
             values,
             *schema["properties"]["action"]["enum"].as_array().unwrap()
         );
+        for stage in [ProviderStage::Discovery, ProviderStage::Jwks] {
+            let failure = ProviderFailure {
+                stage,
+                reason: ProviderReason::Timeout,
+            };
+            assert_eq!(
+                FederationError::Provider(failure).diagnostic(),
+                Some(failure)
+            );
+        }
+        assert!(FederationError::Unavailable.diagnostic().is_none());
         let event = FederationEvent {
             tenant: Uuid::new_v4().to_string(),
             action: Action::ProviderTestFailed,

@@ -59,6 +59,9 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
         reuse_policy(),
     )?;
     let trusted = ProviderCredentials::new("fixture-secret".into(), Some(ca.clone()))?;
+    let mut internal_return = c.input();
+    internal_return.redirect_uri = "https://192.168.1.7/callback".into();
+    allowed.validate(tenant()?, &internal_return.try_into()?, &trusted)?;
     let denied = HttpOidc::new(
         crate::fixture_clock::clock(),
         vec![],

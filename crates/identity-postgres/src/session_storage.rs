@@ -252,7 +252,11 @@ async fn restore(
     }
     let origin = crate::federation_storage::decode_origin(row)?;
     let source = match &origin {
-        Some((origin, _)) => Some(crate::federation_storage::check_origin(c, key, origin).await?),
+        Some((origin, _)) => Some(
+            crate::federation_storage::check_origin(c, key, origin, session_checks)
+                .await?
+                .0,
+        ),
         None => None,
     };
     let lifetime = lifetime(row)?;

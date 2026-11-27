@@ -62,6 +62,7 @@ struct TokenResponse {
 }
 #[derive(serde::Deserialize)]
 struct AccessClaims {
+    iss: String,
     sub: String,
     azp: String,
     exp: i64,
@@ -157,25 +158,15 @@ impl crate::HttpOidc {
         let keys = self.signing_keys(&doc, &transport, Some(kid)).await?;
         let key =
             crate::profile_token::signing_key(&header, Some(&keys), credentials.client_secret())?;
-        let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
-        validation.set_audience(&[&target.client_id]);
-        validation.set_issuer(&[provider.issuer().as_str()]);
-        validation.leeway = 0;
-        let claims = jsonwebtoken::decode::<AccessClaims>(&token.access_token, &key, &validation)
-            .map_err(|_| FederationError::Claims)?
-            .claims;
-        let now = (self.resources.clock.wall)()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| FederationError::Unavailable)?
-            .as_secs() as i64;
-        if claims.sub != expected_subject
-            || claims.azp != target.client_id
-            || claims.exp <= now
-            || claims.exp > now + 30
-            || claims.exp > assertion_expires_at
-        {
-            return Err(FederationError::Claims);
-        }
+        let claims = verify_access(
+            &token.access_token,
+            &key,
+            provider.issuer().as_str(),
+            &target.client_id,
+            expected_subject,
+            assertion_expires_at,
+            (self.resources.clock.wall)(),
+        )?;
         transport.channel.check()?;
         crate::remaining(&self.resources.clock, deadline)?;
         Ok(EnterpriseAccess {
@@ -183,5 +174,84 @@ impl crate::HttpOidc {
             subject: claims.sub,
             expires_at: claims.exp,
         })
+    }
+}
+
+fn verify_access(
+    raw: &str,
+    key: &jsonwebtoken::DecodingKey,
+    issuer: &str,
+    client: &str,
+    expected_subject: &str,
+    assertion_expires_at: i64,
+    observed: std::time::SystemTime,
+) -> Result<AccessClaims, rss_identity_core::federation::FederationError> {
+    use rss_identity_core::federation::FederationError;
+    let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
+    validation.set_audience(&[client]);
+    validation.set_issuer(&[issuer]);
+    validation.set_required_spec_claims(&["iss", "aud", "exp"]);
+    validation.validate_exp = false;
+    let claims = jsonwebtoken::decode::<AccessClaims>(raw, key, &validation)
+        .map_err(|_| FederationError::Claims)?
+        .claims;
+    let now = crate::profile_token::unix_seconds(observed)?;
+    if claims.iss != issuer
+        || claims.sub != expected_subject
+        || claims.azp != client
+        || claims.exp <= now
+        || claims.exp > now.saturating_add(30)
+        || claims.exp > assertion_expires_at
+    {
+        return Err(FederationError::Claims);
+    }
+    Ok(claims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn exchange_binds_the_signed_token_to_issuer_client_and_host_time() -> anyhow::Result<()> {
+        let key = jsonwebtoken::DecodingKey::from_jwk(&serde_json::from_str(include_str!(
+            "../tests/fixtures/entra-a.json"
+        ))?)?;
+        let signer = EncodingKey::from_rsa_der(include_bytes!("../tests/fixtures/entra-a.der"));
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let claims =
+            json!({"iss":"https://issuer.test","aud":"rp","sub":"subject","azp":"rp","exp":120});
+        let verify = |claims: &serde_json::Value| -> anyhow::Result<bool> {
+            let token = jsonwebtoken::encode(&Header::new(Algorithm::RS256), claims, &signer)?;
+            Ok(verify_access(
+                &token,
+                &key,
+                "https://issuer.test",
+                "rp",
+                "subject",
+                130,
+                at,
+            )
+            .is_ok())
+        };
+        assert!(verify(&claims)?);
+        for field in ["iss", "aud", "exp"] {
+            let mut missing = claims.clone();
+            missing
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("fixture"))?
+                .remove(field);
+            assert!(!verify(&missing)?);
+        }
+        for (field, value) in [
+            ("iss", json!("https://other.test")),
+            ("aud", json!("other")),
+            ("exp", json!(100)),
+        ] {
+            let mut different = claims.clone();
+            different[field] = value;
+            assert!(!verify(&different)?);
+        }
+        Ok(())
     }
 }

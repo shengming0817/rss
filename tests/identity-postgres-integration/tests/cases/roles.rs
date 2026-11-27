@@ -56,3 +56,23 @@ pub async fn roles(f: &Fixture) -> anyhow::Result<()> {
     tx.rollback().await?;
     Ok(())
 }
+
+pub async fn check_delegation(f: &Fixture) -> anyhow::Result<()> {
+    // Check a non-inherited catalog grant using a disposable NOLOGIN role.
+    let mut tx = f.owner.begin().await?;
+    sqlx::raw_sql("CREATE ROLE identity_probe_test NOLOGIN; GRANT SELECT ON identity_authority.schema_version TO identity_probe_test WITH GRANT OPTION; GRANT identity_probe_test TO identity_maintenance WITH INHERIT FALSE, SET TRUE; SET LOCAL ROLE identity_maintenance")
+        .execute(&mut *tx).await?;
+    assert!(matches!(
+        rss_identity_postgres::verify_profile(
+            &mut tx,
+            rss_identity_postgres::AuthorityProfile::Maintenance,
+            f.instance
+        )
+        .await,
+        Err(rss_identity_postgres::AuthorityError::StorageIncompatible(
+            rss_identity_postgres::StorageMismatch::Privileges
+        ))
+    ));
+    tx.rollback().await?;
+    Ok(())
+}

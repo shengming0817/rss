@@ -76,6 +76,23 @@ pub struct ProviderSettingsInput {
     pub jit: bool,
 }
 
+/// Validate the registered browser return address while preserving its exact wire value.
+pub fn validate_redirect_uri(value: &str) -> Result<(), FederationError> {
+    let url = url::Url::parse(value).map_err(|_| FederationError::Configuration)?;
+    if value.len() > 2048
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(FederationError::Configuration);
+    }
+    Ok(())
+}
 impl ProviderSettingsInput {
     fn validate(&self) -> Result<(), FederationError> {
         if let crate::entra::SubjectMapping::Entra { tenant } = &self.claims.subject
@@ -85,18 +102,15 @@ impl ProviderSettingsInput {
         {
             return Err(FederationError::Configuration);
         }
-        for (s, max) in [
-            (&self.issuer, 2048),
-            (&self.client_id, 256),
-            (&self.redirect_uri, 2048),
-        ] {
+        for (s, max) in [(&self.issuer, 2048), (&self.client_id, 256)] {
             if s.is_empty() || s.len() > max || s.trim() != s || s.chars().any(char::is_control) {
                 return Err(FederationError::Configuration);
             }
         }
 
-        for value in [&self.issuer, &self.redirect_uri] {
-            let url = url::Url::parse(value).map_err(|_| FederationError::Configuration)?;
+        validate_redirect_uri(&self.redirect_uri)?;
+        {
+            let url = url::Url::parse(&self.issuer).map_err(|_| FederationError::Configuration)?;
             if !matches!(url.scheme(), "http" | "https")
                 || url.host_str().is_none()
                 || !url.username().is_empty()
@@ -413,21 +427,14 @@ impl FederationError {
     pub fn provider(stage: ProviderStage, reason: ProviderReason) -> Self {
         Self::Provider(ProviderFailure { stage, reason })
     }
-    pub fn diagnostic(self) -> ProviderFailure {
+    pub fn diagnostic(self) -> Option<ProviderFailure> {
         match self {
-            Self::Provider(f) => f,
-            Self::Claims => ProviderFailure {
+            Self::Provider(f) => Some(f),
+            Self::Claims => Some(ProviderFailure {
                 stage: ProviderStage::Claims,
                 reason: ProviderReason::InvalidToken,
-            },
-            Self::Unavailable => ProviderFailure {
-                stage: ProviderStage::Discovery,
-                reason: ProviderReason::Timeout,
-            },
-            _ => ProviderFailure {
-                stage: ProviderStage::Binding,
-                reason: ProviderReason::InvalidResponse,
-            },
+            }),
+            _ => None,
         }
     }
 }

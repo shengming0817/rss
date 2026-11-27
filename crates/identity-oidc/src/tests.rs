@@ -29,7 +29,7 @@ fn verify(
         nonce,
         client,
         skew,
-        std::time::SystemTime::now(),
+        std::time::UNIX_EPOCH + Duration::from_secs(100),
     )
 }
 #[allow(clippy::unwrap_used, reason = "test fixture")]
@@ -60,9 +60,12 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
         ("aud", json!(["client", "other"]), false),
         ("nonce", json!("wrong"), false),
         ("exp", json!(1), false),
+        ("exp", json!(101), true),
+        ("nbf", json!(100), true),
+        ("nbf", json!(101), false),
         ("iat", json!(4102444800_i64), false),
     ] {
-        let mut claims = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce"});
+        let mut claims = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"azp":"client","iat":1,"exp":4102444800_i64,"nonce":"nonce"});
         claims[field] = value;
         for key in [true, false] {
             assert_eq!(
@@ -162,6 +165,9 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
             ("aud", json!(["other"]), false),
             ("nonce", json!("other"), false),
             ("exp", json!(1), false),
+            ("exp", json!(101), true),
+            ("nbf", json!(100), true),
+            ("nbf", json!(101), false),
         ] {
             let mut raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","organization_snapshot":value});
             raw[field] = bad;
@@ -272,4 +278,19 @@ fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
     let mut metadata = token_metadata();
     metadata.1.keys.push(metadata.1.keys[0].clone());
     assert!(verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
+}
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "fixture anchors duration arithmetic"
+)]
+fn near_maximum_duration_is_unrepresentable() -> anyhow::Result<()> {
+    let oversized = Duration::MAX - Duration::from_secs(1);
+    let policy = TransportPolicy::new(oversized, Duration::from_secs(1), 1024, 4)?;
+    assert_eq!(
+        policy.validate_at(std::time::Instant::now()),
+        Err(FederationError::Configuration)
+    );
+    Ok(())
 }

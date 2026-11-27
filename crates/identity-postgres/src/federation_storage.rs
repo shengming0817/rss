@@ -70,8 +70,8 @@ pub(crate) async fn read_provider(
 }
 pub(crate) struct Origin {
     pub identity: Uuid,
-    epoch: i64,
-    version: i64,
+    pub(crate) epoch: i64,
+    pub(crate) version: i64,
 }
 
 pub(crate) fn decode_origin(
@@ -101,17 +101,35 @@ pub(crate) async fn check_origin(
     c: &mut PgConnection,
     key: AccountKey,
     origin: &Origin,
-) -> Result<rss_identity_core::facts::FactSource, rss_transactional_messaging_postgres::PgError> {
+    checks: &crate::session_checks::SessionChecks,
+) -> Result<
+    (rss_identity_core::facts::FactSource, AssuranceProfile),
+    rss_transactional_messaging_postgres::PgError,
+> {
     let row = sqlx::query(concat!(
-        "SELECT e.provider_id,e.issuer FROM identity_authority.external_identities e JOIN identity",
+        "SELECT e.provider_id,e.issuer,p.settings,p.assurance_profile FROM identity_authority.external_identities e JOIN identity",
         "_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid A",
         "ND e.identity_id=$2 AND p.enabled AND p.revocation_epoch=$3 AND p.config_version=$4 AND e.principal_id=$5"
     ))
     .bind(key.tenant.to_string()).bind(origin.identity).bind(origin.epoch)
     .bind(origin.version).bind(key.principal.as_uuid())
     .fetch_optional(c).await?.ok_or_else(reject)?;
-    rss_identity_core::facts::FactSource::new(row.try_get("provider_id")?, row.try_get("issuer")?)
-        .map_err(|_| corrupt())
+    let settings: ProviderSettings =
+        serde_json::from_value(row.try_get("settings")?).map_err(|_| corrupt())?;
+    let profile = checks
+        .oidc
+        .as_ref()
+        .ok_or_else(reject)?
+        .assurance_profile(key.tenant, &settings);
+    if row.try_get::<Vec<u8>, _>("assurance_profile")? != profile.fingerprint {
+        return Err(reject());
+    }
+    let source = rss_identity_core::facts::FactSource::new(
+        row.try_get("provider_id")?,
+        row.try_get("issuer")?,
+    )
+    .map_err(|_| corrupt())?;
+    Ok((source, profile))
 }
 pub(crate) async fn identity(
     c: &mut PgConnection,

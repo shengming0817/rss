@@ -334,7 +334,7 @@ impl WebauthnAuthority {
             let current=read(c,&actor,id,this.config).await?;
             if current.epoch!=snapshot.epoch || !matches!(current.ceremony,Ceremony::Register{..}) {return Err(reject().into());}
             management::authorize(this.authority.policy.as_ref(),this.authority.instance,&loaded,if host_recovery{ManagementOperation::AuthorizeWebauthnRecovery}else if recover{ManagementOperation::RecoverWebauthn}else{ManagementOperation::RegisterWebauthn},Some(actor.key),c).await?;
-            if let Some(source)=authorization {crate::step_up::validate_source(c,actor.key,&source).await?;}
+            if let Some(source)=authorization {crate::step_up::validate_source(c,actor.key,&source,&actor.session_checks).await?;}
             if recover {sqlx::query("UPDATE identity_authority.webauthn_credentials SET revoked=true,epoch=epoch+1 WHERE tenant_id=$1::uuid AND principal_id=$2 AND NOT revoked").bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).execute(&mut *c).await?;}
             let id_new=Uuid::new_v4();let hash=Sha256::digest(passkey.cred_id().as_ref());
             let inserted=sqlx::query("INSERT INTO identity_authority.webauthn_credentials(tenant_id,principal_id,id,rp,rp_config,credential_hash,value,label) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(rp,credential_hash) DO NOTHING")

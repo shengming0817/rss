@@ -48,6 +48,36 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
         .await
         .is_err()
     );
+    let bearer = f
+        .store
+        .login_local_bearer(scope, login("admin"), password(), source(), deadline())
+        .await?;
+    bearer_headers.insert(
+        "authorization",
+        format!("Bearer {}", bearer.secret().expose()).parse()?,
+    );
+    let (proof, _) = rss_identity_web_credentials::authenticate_bearer_request(
+        &f.store,
+        &config,
+        scope,
+        &bearer_headers,
+        deadline(),
+    )
+    .await?;
+    assert_eq!(proof.identity().principal_id, f.key.principal);
+    assert_eq!(proof.view().id, bearer.view().id);
+    f.store.revoke_current_session(proof, deadline()).await?;
+    assert!(
+        rss_identity_web_credentials::authenticate_bearer_request(
+            &f.store,
+            &config,
+            scope,
+            &bearer_headers,
+            deadline()
+        )
+        .await
+        .is_err()
+    );
     let passive = authenticate_request(
         &f.store,
         &config,

@@ -12,4 +12,6 @@
 
 Authority 接收可信 ExecutionBinding，签发后在原 scope 下复核会话。宿主借用事务用 recheck_authenticated_session_on 和 consume_step_up_on 完成当前会话与用途验证。业务写入和 Audit 共用原 PgTransaction 与截止时间。Ledger 先锁链头，再取业务锁。准备好的审计批次通过共享预算即时准入；容量不足或追加失败会传播给原事务 owner。只有提交已确认后才交付凭据，提交不确定时调用方须处理该结算结果。
 
-FederationConfig.callback 由宿主按生产路由生成。配置需要带主机的 HTTPS URL，排除用户信息、查询和 fragment；注册的 redirect_uri 必须与这个完整字符串匹配。WebAuthn 的可信 RP、Origin 和代际由宿主在装配时提供，挑战与操作证明在事务内消费。WebAuthn 0.5.5 的验证路径使用系统 OpenSSL，独立构建环境需提供其开发库和构建工具。
+联邦宿主通过 `AuthorityConfig::with_oidc` 一次装配上游适配器。会话恢复、管理授权和操作证明消费都会按该宿主当前的 MFA 信任指纹复核持久化来源。切换策略后，指纹不匹配的来源立即拒绝；`reconcile_assurance_profiles` 负责将新策略写入租户配置并轮换代际。所有服务进程须使用宿主当前的配置。
+
+FederationConfig.callback 由宿主按生产路由生成。变更回调后，已有 provider 需要更新注册才能继续登录。配置需要带主机的 HTTPS URL，排除用户信息、查询和 fragment；注册的 redirect_uri 必须与这个完整字符串匹配。WebAuthn 的可信 RP、Origin 和代际由宿主在装配时提供，挑战与操作证明在事务内消费。WebAuthn 0.5.5 的验证路径使用系统 OpenSSL，独立构建环境需提供其开发库和构建工具。

@@ -86,6 +86,7 @@ pub struct AuthorityConfig {
     audit: rss_audit_postgres::Integrity,
     audit_budget: rss_audit_postgres::WriteBudget,
     platform: Option<Arc<dyn platform::PlatformVerifier>>,
+    oidc: Option<Arc<dyn rss_identity_core::federation::UpstreamOidc>>,
     enterprise: Option<platform::EnterpriseConfig>,
     profile_limits: rss_identity_core::profile::ProfileLimits,
     authentication: AuthenticationPolicy,
@@ -96,6 +97,12 @@ pub struct AuthorityConfig {
     provider_capacity: std::num::NonZeroU16,
 }
 impl AuthorityConfig {
+    /// Install the host's OIDC adapter for login and subsequent session or proof revalidation.
+    pub fn with_oidc(mut self, oidc: Arc<dyn rss_identity_core::federation::UpstreamOidc>) -> Self {
+        self.oidc = Some(oidc);
+        self
+    }
+
     pub fn with_provider_capacity(
         mut self,
         capacity: std::num::NonZeroU16,
@@ -160,6 +167,7 @@ impl AuthorityConfig {
             audit,
             audit_budget,
             platform: None,
+            oidc: None,
             enterprise: None,
             profile_limits: Default::default(),
             authentication: AuthenticationPolicy::standard(std::time::Duration::from_secs(60))?,
@@ -244,6 +252,7 @@ impl Authority {
             enterprise: config.enterprise,
             session_checks: session_checks::SessionChecks {
                 platform: config.platform,
+                oidc: config.oidc,
                 timer: runtime.execution_timer().clone(),
             },
             kdf,

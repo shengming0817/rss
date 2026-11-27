@@ -5,28 +5,36 @@ WITH required_privileges AS (
 ), tables AS (
  SELECT c.oid,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='identity_authority' AND c.relkind='r'
+), reachable AS (
+ SELECT oid FROM pg_roles WHERE pg_has_role(current_user,oid,'SET')
+), allowed_functions AS (
+ SELECT unnest(ARRAY['identity_authority.share_host_tenant()'::regprocedure,'identity_authority.lock_session(bytea,uuid,text,text,uuid)'::regprocedure,'identity_authority.share_subject(uuid)'::regprocedure,'identity_authority.share_provider(uuid)'::regprocedure]) AS oid WHERE $1='runtime'
 ), checks AS (
  SELECT
  (NOT EXISTS(SELECT FROM pg_roles WHERE pg_has_role(current_user,oid,'MEMBER') AND (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication))) AS role_ok,
  (has_schema_privilege(current_user,'identity_authority','USAGE')
- AND NOT has_schema_privilege(current_user,'identity_authority','CREATE')
- AND NOT has_schema_privilege(current_user,'identity_authority','USAGE WITH GRANT OPTION')
+ AND NOT EXISTS(SELECT FROM reachable u WHERE has_schema_privilege(u.oid,'identity_authority','CREATE,USAGE WITH GRANT OPTION'))
+ AND NOT EXISTS(SELECT FROM reachable u JOIN pg_auth_members m ON m.member=u.oid WHERE m.admin_option)
  AND (SELECT bool_and(coalesce(has_table_privilege(current_user,t.oid,r.privilege),false)) FROM required_privileges r LEFT JOIN tables t ON t.relname=r.tab WHERE r.profile=$1)
  AND NOT EXISTS (
-   SELECT FROM tables t CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER'),('MAINTAIN')) p(privilege)
-   WHERE has_table_privilege(current_user,t.oid,p.privilege) IS DISTINCT FROM
+   SELECT FROM reachable u CROSS JOIN tables t CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER'),('MAINTAIN')) p(privilege)
+   WHERE has_table_privilege(u.oid,t.oid,p.privilege) AND NOT
      EXISTS(SELECT FROM required_privileges r WHERE r.profile=$1 AND r.tab=t.relname AND r.privilege=p.privilege)
-     OR has_table_privilege(current_user,t.oid,p.privilege||' WITH GRANT OPTION')
+     OR has_table_privilege(u.oid,t.oid,p.privilege||' WITH GRANT OPTION')
  )
  AND NOT EXISTS (
-   SELECT FROM tables t JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped
+   SELECT FROM reachable u CROSS JOIN tables t JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped
    CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) p(privilege)
-   WHERE has_column_privilege(current_user,t.oid,a.attnum,p.privilege) IS DISTINCT FROM
+   WHERE has_column_privilege(u.oid,t.oid,a.attnum,p.privilege) AND NOT
      (EXISTS(SELECT FROM required_privileges r WHERE r.profile=$1 AND r.tab=t.relname AND r.privilege=p.privilege)
       OR EXISTS(SELECT FROM required_columns r WHERE r.profile=$1 AND r.tab=t.relname AND r.col=a.attname AND r.privilege=p.privilege))
-     OR has_column_privilege(current_user,t.oid,a.attnum,p.privilege||' WITH GRANT OPTION')
+     OR has_column_privilege(u.oid,t.oid,a.attnum,p.privilege||' WITH GRANT OPTION')
  )
- AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='identity_authority' AND has_function_privilege(current_user,p.oid,'EXECUTE') IS DISTINCT FROM ($1='runtime' AND p.oid IN ('identity_authority.share_host_tenant()'::regprocedure,'identity_authority.lock_session(bytea,uuid,text,text,uuid)'::regprocedure,'identity_authority.share_subject(uuid)'::regprocedure,'identity_authority.share_provider(uuid)'::regprocedure)))
+ AND NOT EXISTS(SELECT FROM required_columns r JOIN tables t ON t.relname=r.tab WHERE r.profile=$1 AND NOT has_column_privilege(current_user,t.oid,r.col,r.privilege))
+ AND NOT EXISTS(SELECT FROM allowed_functions f WHERE NOT has_function_privilege(current_user,f.oid,'EXECUTE'))
+ AND NOT EXISTS(SELECT FROM reachable u CROSS JOIN pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+   WHERE n.nspname='identity_authority' AND (has_function_privilege(u.oid,p.oid,'EXECUTE WITH GRANT OPTION') OR
+     (has_function_privilege(u.oid,p.oid,'EXECUTE') AND NOT EXISTS(SELECT FROM allowed_functions f WHERE f.oid=p.oid))))
 ) AS privileges_ok
 )
 SELECT CASE

@@ -308,6 +308,7 @@ impl Federation {
                             principal: i.principal,
                         },
                         origin,
+                        &session_checks,
                     )
                     .await?;
                     let (source_id, issuer, subject) =

@@ -87,6 +87,19 @@ impl TransportPolicy {
             max_jwks_keys,
         })
     }
+    fn validate_at(self, now: std::time::Instant) -> Result<(), FederationError> {
+        check_durations(now, &[self.request_timeout, self.connect_timeout])
+    }
+}
+fn check_durations(now: std::time::Instant, durations: &[Duration]) -> Result<(), FederationError> {
+    if durations
+        .iter()
+        .all(|duration| now.checked_add(*duration).is_some())
+    {
+        Ok(())
+    } else {
+        Err(FederationError::Configuration)
+    }
 }
 fn remaining(
     clock: &ProviderClock,
@@ -187,6 +200,7 @@ impl HttpOidc {
         policy: TransportPolicy,
         reuse: ReusePolicy,
     ) -> Result<Self, FederationError> {
+        policy.validate_at(clock.now())?;
         if profiles.len() > 1024 || private_access.len() > 1024 {
             return Err(FederationError::Configuration);
         }
@@ -292,7 +306,6 @@ impl HttpOidc {
         let origin = parse_url(c.issuer().as_str(), self.loopback, cidrs)?
             .origin()
             .ascii_serialization();
-        parse_url(c.redirect_uri(), self.loopback, &[])?;
         self.revisions.check(&provider)?;
         let slot = if probe {
             None
@@ -573,7 +586,6 @@ impl UpstreamOidc for HttpOidc {
             self.loopback,
             self.private_for(tenant, c.issuer().as_str(), c.client_id().as_str()),
         )?;
-        parse_url(c.redirect_uri(), self.loopback, &[])?;
         let roots = certificates(credentials)?;
         if !roots.is_empty() {
             let mut builder = reqwest::Client::builder().no_proxy();
@@ -753,7 +765,9 @@ impl UpstreamOidc for HttpOidc {
                     ProviderReason::IssuerResponseUnsupported,
                 ));
             }
-            remaining(&self.resources.clock, deadline)?;
+            if deadline.is_expired(self.resources.clock.now()) {
+                return Err(FederationError::Unavailable);
+            }
             Ok(ConnectionReport {
                 checks: vec![
                     ProviderStage::Binding,

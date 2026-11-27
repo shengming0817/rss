@@ -12,6 +12,7 @@ pub(super) struct Claims {
     pub aud: Audiences,
     pub iat: i64,
     pub exp: i64,
+    pub nbf: Option<u64>,
     pub nonce: String,
     pub azp: Option<String>,
     pub auth_time: Option<i64>,
@@ -122,30 +123,34 @@ pub(super) fn verify(
     validation.set_required_spec_claims(&["iss", "sub", "aud", "exp"]);
     validation.set_audience(&[client]);
     validation.set_issuer(&[metadata.issuer.as_str()]);
-    validation.leeway = 0;
-    validation.validate_nbf = true;
+    validation.validate_exp = false; // The host clock checks both temporal claims below.
     let claims = decode::<Claims>(raw, key, &validation)
         .map_err(|_| FederationError::Claims)?
         .claims;
-    let now = i64::try_from(
-        observed
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| FederationError::Unavailable)?
-            .as_secs(),
-    )
-    .map_err(|_| FederationError::Unavailable)?;
+    let now = unix_seconds(observed)?;
     if claims.sub.is_empty()
         || claims.sub.len() > 256
         || claims.iat <= 0
         || claims.iat > now.saturating_add(i64::from(future_skew_seconds))
         || claims.exp <= claims.iat
         || claims.exp <= now
+        || claims.nbf.is_some_and(|nbf| nbf > now as u64)
         || claims.azp.as_ref().is_some_and(|v| v != client)
-        || matches!(&claims.aud,Audiences::Many(values) if values.len()>1 && claims.azp.as_deref()!=Some(client))
+        || matches!(&claims.aud, Audiences::Many(values) if values.as_slice() != [client])
         || rss_identity_core::federation::digest(nonce)
             != rss_identity_core::federation::digest(&claims.nonce)
     {
         return Err(FederationError::Claims);
     }
     Ok(claims)
+}
+
+pub(super) fn unix_seconds(observed: SystemTime) -> Result<i64, FederationError> {
+    i64::try_from(
+        observed
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| FederationError::Unavailable)?
+            .as_secs(),
+    )
+    .map_err(|_| FederationError::Unavailable)
 }

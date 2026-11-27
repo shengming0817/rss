@@ -28,6 +28,7 @@ async fn identity_postgres() -> anyhow::Result<()> {
     let f = support::Fixture::new(&pg, Integrity::Plain).await?;
     f.bootstrap().await?;
     cases::roles::roles(&f).await?;
+    cases::roles::check_delegation(&f).await?;
     cases::sessions::rotation(&f).await?;
     cases::web_credentials::run(&f).await?;
     cases::transactions::borrowed(&f).await?;

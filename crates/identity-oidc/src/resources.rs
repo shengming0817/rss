@@ -112,6 +112,15 @@ impl Resources {
         clock: super::ProviderClock,
     ) -> Result<Arc<Self>, FederationError> {
         let policy = policy.validate()?;
+        super::check_durations(
+            clock.now(),
+            &[
+                policy.idle_timeout,
+                policy.discovery_ttl,
+                policy.jwks_ttl,
+                policy.refresh_cooldown,
+            ],
+        )?;
         Ok(Arc::new(Self {
             clock,
             entries: Mutex::default(),
