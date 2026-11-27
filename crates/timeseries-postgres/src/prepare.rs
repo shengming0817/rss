@@ -27,6 +27,7 @@ pub(crate) struct Capacity(Arc<Mutex<State>>);
 struct State {
     slots: u32,
     bytes: u32,
+    max_waiters: u32,
     next: u64,
     closed: bool,
     waiting: BTreeMap<u64, Waiter>,
@@ -68,6 +69,7 @@ impl Capacity {
         Ok(Self(Arc::new(Mutex::new(State {
             slots: limits.max_prepare_batches.get(),
             bytes,
+            max_waiters: limits.max_prepare_waiters,
             next: 0,
             closed: false,
             waiting: BTreeMap::new(),
@@ -179,6 +181,11 @@ impl Capacity {
                     session,
                 });
             }
+            if state.waiting.len() >= state.max_waiters as usize {
+                #[cfg(feature = "integration")]
+                rss_timeseries::measurement::record("prepare_queue_full", start, 0, 0);
+                return Err(Error::Overloaded);
+            }
             let id = state.next;
             state.next = id.checked_add(1).ok_or(Error::Invariant)?;
             let (ready, rx) = oneshot::channel();
@@ -224,6 +231,10 @@ impl Capacity {
         let waiting = {
             let mut state = self.lock();
             state.closed = true;
+            #[cfg(feature = "integration")]
+            if !state.waiting.is_empty() {
+                rss_timeseries::measurement::Session::detailed().capacity(state.slots, state.bytes, 0);
+            }
             (
                 std::mem::take(&mut state.waiting),
                 std::mem::take(&mut state.weights),
@@ -297,6 +308,7 @@ mod tests {
         let capacity = Capacity(Arc::new(Mutex::new(State {
             slots: 2,
             bytes: 10,
+            max_waiters: 2,
             next: 0,
             closed: false,
             waiting: BTreeMap::new(),

@@ -98,8 +98,14 @@ the result; a digest mismatch conflicts; `NotVisible` is never rollback evidence
 Confirmed receipts contain only immutable admission facts. Query results report
 availability independently of acceptance.
 
-Each store shares two write preparation limits across tenants. Set
-`Limits::max_prepare_batches` and `max_prepare_bytes` explicitly. The latter
+Each store shares its write preparation limits across tenants. Set
+`Limits::max_prepare_waiters` to the number of writes allowed to wait for preparation.
+Zero allows only immediate grants. A fitting write may pass a byte-blocked queue head
+once. A write that must wait when the queue is full returns `Error::Overloaded`
+before encoding or database access. This rejection only settles the current attempt.
+To settle an earlier unknown outcome, use its original receipt identity.
+
+Set `max_prepare_batches` and `max_prepare_bytes` explicitly. The byte budget
 must be at least `Limits::MIN_PREPARE_BYTES` so every legal batch fits.
 Each prepared write reserves one slot and a byte allowance computed from its
 validated canonical JSON length and sample count. This covers JSON arenas,
