@@ -36,7 +36,65 @@ pub async fn verify(
     completion(&proxy, &store, direct, owner, d, control, true).await?;
     pending(&proxy, &store, direct, owner, d, control).await?;
     aborted_commit(&proxy, &store, direct, owner, d, control).await?;
+    Box::pin(discovery_ack(&proxy, &store, &pool, direct, d, control)).await?;
     assert_eq!(store.close(control).await, CloseOutcome::Drained);
+    Ok(())
+}
+async fn discovery_ack(
+    proxy: &Proxy,
+    store: &PgStore,
+    pool: &PgPool,
+    direct: &PgStore,
+    d: &Definition,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let s = scope("46634663-2222-4333-8444-555555555555")?;
+    let pid = backend(pool).await?;
+    let lost = proxy.lost.load(Ordering::SeqCst);
+    let faulty = completion_transport::CompletionFault {
+        store: store.clone(),
+        armed: false.into(),
+        arm: proxy.arm.clone(),
+        fault: completion_transport::Fault::DiscoveryAck,
+        committed: tokio::sync::Notify::new(),
+    };
+    let effects = Arc::new(Effects::default());
+    let executor = Executor::new(
+        faulty,
+        protection()?,
+        registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
+    );
+    executor.register(s, d, history_capacity()?, c).await?;
+    let page = executor
+        .run_once(s.tenant(), None, SweepBudget::new(1, 30)?, c)
+        .await?;
+    assert_read_failure(&page)?;
+    assert_eq!(proxy.lost.load(Ordering::SeqCst), lost + 1);
+    assert_ne!(backend(pool).await?, pid);
+    let lease = direct.claim(s, Duration::from_secs(5), c).await?;
+    assert_eq!(direct.history_head(&lease, c).await?.revision(), 2);
+    direct.release(&lease, c).await?;
+    assert_eq!(
+        *effects.calls.lock().map_err(|_| ErrorKind::Store)?,
+        ["execute:one"]
+    );
+    Ok(())
+}
+fn assert_read_failure(page: &SweepReport) -> anyhow::Result<()> {
+    let failure = page.items[0]
+        .result
+        .as_ref()
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("expected lost discovery ACK"))?;
+    assert_eq!(failure.error.kind(), ErrorKind::Store);
+    assert_eq!(
+        failure.error.diagnostic().map(Diagnostic::phase),
+        Some(DiagnosticPhase::Commit)
+    );
+    assert_eq!(failure.advances, 1);
+    assert_eq!(failure.head().map(HistoryHead::revision), Some(2));
+    assert!(failure.release_error.is_none());
     Ok(())
 }
 async fn pending(
@@ -105,8 +163,11 @@ async fn completion(
         store: store.clone(),
         armed: std::sync::atomic::AtomicBool::new(true),
         arm: proxy.arm.clone(),
-        when: EventKind::ForwardApplied,
-        interrupt_renewal,
+        fault: if interrupt_renewal {
+            completion_transport::Fault::Renewal
+        } else {
+            completion_transport::Fault::CommitAck
+        },
         committed: tokio::sync::Notify::new(),
     };
     let executor = Executor::new(

@@ -7,6 +7,22 @@ struct Meter<'a> {
     clock: &'a Clock,
     write_ns: AtomicU64,
     writes: AtomicU64,
+    snapshots: AtomicU64,
+    rows: AtomicU64,
+    searches: AtomicU64,
+}
+impl<'a> Meter<'a> {
+    fn new(store: &'a PgStore, clock: &'a Clock) -> Self {
+        Self {
+            store,
+            clock,
+            write_ns: AtomicU64::new(0),
+            writes: AtomicU64::new(0),
+            snapshots: AtomicU64::new(0),
+            rows: AtomicU64::new(0),
+            searches: AtomicU64::new(0),
+        }
+    }
 }
 impl Store for Meter<'_> {
     async fn register<T: Timer>(
@@ -60,7 +76,12 @@ impl Store for Meter<'_> {
         r: ReadBudget,
         c: &Control<'_, T>,
     ) -> Result<Snapshot, Error> {
-        self.store.snapshot(l, r, c).await
+        let snapshot = self.store.snapshot(l, r, c).await?;
+        // PgStore::snapshot streams one PG journal row per replayed event on each fresh claim.
+        self.rows
+            .fetch_add(snapshot.events().len() as u64, Ordering::SeqCst);
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        Ok(snapshot)
     }
     async fn candidates<T: Timer>(
         &self,
@@ -70,6 +91,7 @@ impl Store for Meter<'_> {
         limit: u32,
         c: &Control<'_, T>,
     ) -> Result<Vec<Scope>, Error> {
+        self.searches.fetch_add(1, Ordering::SeqCst);
         self.store.candidates(filter, t, after, limit, c).await
     }
     async fn commit<T: Timer>(
@@ -114,15 +136,7 @@ fn measured_protection<'a>(
     clock: &'a Clock,
     opens: &'a Mutex<Vec<Duration>>,
 ) -> Result<ReceiptProtection<CryptoMeter<'a>>, Error> {
-    let key = VersionedSagaReceiptIntegrityKey::from_bytes(
-        SagaReceiptIntegrityKeyId::parse("integrity-v1")
-            .map_err(|_| Error::new(ErrorKind::Protection))?,
-        vec![13; 32],
-    )
-    .map_err(|_| Error::new(ErrorKind::Protection))?;
-    let ring = SagaReceiptIntegrityKeyring::new(key, vec![])
-        .map_err(|_| Error::new(ErrorKind::Protection))?;
-    Ok(ReceiptProtection::new(CryptoMeter { clock, opens }, ring))
+    protection_with(CryptoMeter { clock, opens })
 }
 struct BigStep {
     name: &'static str,
@@ -205,7 +219,19 @@ pub(super) async fn run(
     c: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
     let profile = std::env::var("RSS_SAGA_HISTORY_PROFILE")?;
-    let entries = match profile.as_str() {
+    if profile == "fair-sweep" {
+        return fair_measurements(store, owner, clock, c).await;
+    }
+    history_profile(store, owner, clock, c, &profile).await
+}
+async fn history_profile(
+    store: &PgStore,
+    owner: &PgPool,
+    clock: &Clock,
+    c: &Control<'_, Clock>,
+    profile: &str,
+) -> anyhow::Result<()> {
+    let entries = match profile {
         "entries-100" => Some(100),
         "entries-1000" => Some(1000),
         "entries-10000" => Some(10000),
@@ -226,7 +252,7 @@ pub(super) async fn run(
         seed_entries(store, owner, s, &d, n, read, c).await?;
         registry(d.clone(), Arc::new(Effects::default()), false)?
     } else {
-        seed_bytes(store, s, &d, read, &profile, c).await?
+        seed_bytes(store, s, &d, read, profile, c).await?
     };
     let lease = store.claim(s, Duration::from_secs(30), c).await?;
     let start = clock.now();
@@ -238,12 +264,7 @@ pub(super) async fn run(
     let wire:i64=sqlx::query_scalar("SELECT coalesce(sum(100+octet_length(kind)+CASE WHEN protected IS NULL THEN 0 ELSE 1+octet_length(protected::text) END),0)::bigint FROM rss_saga.journal WHERE tenant_id=$1::text::uuid AND saga_id=$2").bind(s.tenant().to_string()).bind(s.id()).fetch_one(owner).await?;
     drop(snapshot);
     let opens = Mutex::new(Vec::new());
-    let meter = Meter {
-        store,
-        clock,
-        write_ns: AtomicU64::new(0),
-        writes: AtomicU64::new(0),
-    };
+    let meter = Meter::new(store, clock);
     let executor = Executor::new(meter, measured_protection(clock, &opens)?, registry, read);
     let start = clock.now();
     let report = executor.run(s, 1, c).await?;
@@ -309,4 +330,142 @@ async fn seed_bytes(
         .await?;
     assert!(matches!(executor.run(s,1,c).await,Err(e) if e.kind()==ErrorKind::EffectUnknown));
     Ok(big_registry(d.clone())?)
+}
+
+// All schedules execute the same ordered effects and return the same final receipt.
+const NAMES: [&str; 32] = [
+    "s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10", "s11", "s12", "s13",
+    "s14", "s15", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23", "s24", "s25", "s26",
+    "s27", "s28", "s29", "s30", "s31", "s32",
+];
+
+async fn fair_measurements(
+    store: &PgStore,
+    owner: &PgPool,
+    clock: &Clock,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let d = definition(&NAMES)?;
+    let read = read_budget()?;
+    let tenant = TenantId::parse("63636363-2222-4333-8444-555555555555")?;
+    for (index, (fair, budget, instances, expected)) in [
+        (false, 32, 1, (1, 1000, 0)),
+        (false, 1, 1, (32, 32992, 496)),
+        (true, 1, 1, (32, 32992, 496)),
+        (true, 32, 1, (1, 1000, 0)),
+        (true, 32, 2, (64, 65984, 992)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let effects = Arc::new(Effects::default());
+        let action = |name| Action {
+            name,
+            effects: effects.clone(),
+            fail: false,
+        };
+        let mut builder = DefinitionBuilder::new(d.clone())?;
+        let (last, rest) = NAMES.split_last().ok_or(ErrorKind::Definition)?;
+        for name in rest {
+            builder = builder.step(action(name))?;
+        }
+        let (builder, completion) = builder.last_step(action(last))?;
+        let mut scopes = Vec::new();
+        for i in 0..instances {
+            let s = Scope::new(tenant, uuid::Uuid::from_u128((10 * index + i + 1) as u128));
+            seed_entries(store, owner, s, &d, 1000, read, c).await?;
+            scopes.push(s);
+        }
+        let opens = Mutex::new(Vec::new());
+        let executor = Executor::new(
+            Meter::new(store, clock),
+            measured_protection(clock, &opens)?,
+            Registry::builder().register(builder)?.finish(),
+            read,
+        );
+        let start = clock.now();
+        let (done, advances) = drive_schedule(&executor, &scopes, fair, budget, c).await?;
+        let ms = clock.now().saturating_sub(start).as_secs_f64() * 1000.0;
+        let meter = executor.store();
+        let counts = (
+            meter.snapshots.load(Ordering::SeqCst),
+            meter.rows.load(Ordering::SeqCst),
+            opens.lock().map_err(|_| ErrorKind::Store)?.len(),
+        );
+        let commits = meter.writes.load(Ordering::SeqCst);
+        let searches = meter.searches.load(Ordering::SeqCst);
+        eprintln!(
+            "SAGA_FAIR_MEASURE fair={fair} budget={budget} instances={instances} snapshots={} journal_rows={} receipt_opens={} advances={advances} commits={commits} searches={searches} elapsed_ms={ms:.3}",
+            counts.0, counts.1, counts.2
+        );
+        assert_eq!(counts, expected);
+        assert_eq!(advances as usize, 32 * instances);
+        assert_eq!(commits as usize, 64 * instances);
+        let expected_calls: Vec<_> = NAMES
+            .iter()
+            .flat_map(|name| std::iter::repeat_n(format!("execute:{name}"), instances))
+            .collect();
+        assert_eq!(
+            *effects.calls.lock().map_err(|_| ErrorKind::Store)?,
+            expected_calls
+        );
+        assert_eq!(
+            done.iter().map(SuccessReference::scope).collect::<Vec<_>>(),
+            scopes
+        );
+        for reference in done {
+            assert_eq!(
+                executor.success_receipt(&reference, &completion, c).await?,
+                *last
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn drive_schedule(
+    executor: &Executor<Meter<'_>, CryptoMeter<'_>>,
+    scopes: &[Scope],
+    fair: bool,
+    budget: u32,
+    c: &Control<'_, Clock>,
+) -> anyhow::Result<(Vec<SuccessReference>, u32)> {
+    let instances = scopes.len();
+    let mut done = Vec::new();
+    let mut cursor = None;
+    let mut advances = 0;
+    while done.len() < instances {
+        let reports = if fair {
+            let page = executor
+                .run_once(
+                    scopes[0].tenant(),
+                    cursor,
+                    SweepBudget::new(instances as u32, budget)?,
+                    c,
+                )
+                .await?;
+            assert_eq!(page.stop, SweepStop::PageComplete);
+            cursor = page.next_cursor;
+            page.items
+                .into_iter()
+                .map(|item| item.result)
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            vec![executor.run(scopes[0], budget, c).await?]
+        };
+        for report in reports {
+            if instances == 2 {
+                assert_eq!(report.advances, 1);
+            }
+            advances += report.advances;
+            if report.success.is_some() {
+                assert_eq!(report.stop, RunStop::Completed);
+                assert_eq!(report.head().revision(), 1064);
+                done.push(report.success.ok_or(ErrorKind::ReceiptUnavailable)?);
+            } else {
+                assert_eq!(report.stop, RunStop::Yielded);
+            }
+        }
+    }
+    Ok((done, advances))
 }

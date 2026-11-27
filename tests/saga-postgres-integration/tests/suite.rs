@@ -43,7 +43,7 @@ async fn expire(owner: &PgPool, s: Scope) -> anyhow::Result<()> {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn saga_postgres_suite() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(240), suite()).await??;
+    tokio::time::timeout(Duration::from_secs(240), Box::pin(suite())).await??;
     Ok(())
 }
 async fn suite() -> anyhow::Result<()> {
@@ -62,6 +62,8 @@ async fn suite() -> anyhow::Result<()> {
     let control = Control::new(&clock, Duration::from_secs(180), &cancel);
     let store = runtime_store(&owner, &pool, &control).await?;
     registration::verify(&store, &pool, &owner, &control).await?;
+    boundaries::fair_arrival(&store, &control).await?;
+    history::corrupt_between_sweeps(&store, &owner, &control).await?;
     let d = definition(&["one", "two", "three"])?;
     run_scenarios(&store, &owner, &pool, &fixture, &d, &control).await?;
     eprintln!("saga T2: history bounds");
@@ -224,7 +226,7 @@ async fn compensation_roundtrip(
     d: &Definition,
     control: &Control<'_, Clock>,
 ) -> anyhow::Result<()> {
-    let s = scope(TENANT)?;
+    let s = scope("42634263-2222-4333-8444-555555555555")?;
     let effects = Arc::new(Effects::default());
     effects.fail_undo.store(true, Ordering::SeqCst);
     let executor = Executor::new(
@@ -236,7 +238,14 @@ async fn compensation_roundtrip(
     executor
         .register(s, d, history_capacity()?, control)
         .await?;
-    let report = executor.run(s, 30, control).await?;
+    let mut page = executor
+        .run_once(s.tenant(), None, SweepBudget::new(1, 30)?, control)
+        .await?;
+    let report = page
+        .items
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("missing compensation"))?
+        .result?;
     assert_eq!(report.head().status(), Status::CompensationFailed);
     assert_eq!(
         executor

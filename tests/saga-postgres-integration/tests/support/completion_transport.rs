@@ -4,12 +4,17 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    CommitAck,
+    Renewal,
+    DiscoveryAck,
+}
 pub struct CompletionFault {
     pub store: PgStore,
     pub armed: AtomicBool,
     pub arm: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    pub when: EventKind,
-    pub interrupt_renewal: bool,
+    pub fault: Fault,
     pub committed: tokio::sync::Notify,
 }
 impl Store for CompletionFault {
@@ -36,7 +41,7 @@ impl Store for CompletionFault {
         t: Duration,
         c: &Control<'_, T>,
     ) -> Result<(), Error> {
-        if self.interrupt_renewal {
+        if self.fault == Fault::Renewal {
             self.committed.notified().await;
             return Err(Error::new(ErrorKind::Store));
         }
@@ -80,6 +85,9 @@ impl Store for CompletionFault {
         n: u32,
         c: &Control<'_, T>,
     ) -> Result<Vec<Scope>, Error> {
+        if self.fault == Fault::DiscoveryAck && self.armed.swap(false, Ordering::SeqCst) {
+            self.arm.store(1, Ordering::SeqCst);
+        }
         self.store.candidates(filter, t, after, n, c).await
     }
     async fn commit<T: Timer>(
@@ -88,8 +96,13 @@ impl Store for CompletionFault {
         m: &Mutation,
         c: &Control<'_, T>,
     ) -> Result<(), Error> {
-        if m.event().kind == self.when && self.armed.swap(false, Ordering::SeqCst) {
-            if self.interrupt_renewal {
+        if m.event().kind == EventKind::ForwardApplied && self.fault == Fault::DiscoveryAck {
+            self.store.commit(l, m, c).await?;
+            self.armed.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        if m.event().kind == EventKind::ForwardApplied && self.armed.swap(false, Ordering::SeqCst) {
+            if self.fault == Fault::Renewal {
                 // Real PG commit completes, but its acknowledgement is withheld from the executor.
                 self.store.commit(l, m, c).await?;
                 self.committed.notify_one();

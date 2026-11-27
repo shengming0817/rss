@@ -38,7 +38,15 @@ library has no remove, latest, cleanup or automatic definition retirement operat
 caller-selected `Scope` (tenant + UUID), then call `run(scope, budget, control)`.
 `Control` carries an injected monotonic `Timer`, one absolute deadline and cancellation token.
 `budget` bounds driver advances, including probes and retry decisions; phases do not reset time. Budget exhaustion returns `RunStop::Yielded`, not a failure or successful Saga result.
-`run_once(tenant, cursor, SweepBudget::new(instance_limit, advance_limit)?, control)` runs one bounded page. Each instance gets at most one advance; errors stay in its result item. Pass the returned cursor to the next sweep so an unresolved first instance cannot starve later work. An empty final page resets the cursor for the next pass.
+`run_once(tenant, cursor, SweepBudget::new(instance_limit, advance_limit)?, control)` runs one bounded page. Candidates receive one turn each in order.
+Before each extra advance the last candidate checks the whole tenant for other runnable instances while holding its lease.
+A waiting peer or an exhausted attempt ordinal ends the turn with `RunStop::Yielded`. Exhausted ordinals drop out of discovery.
+If none are waiting the instance may spend the remaining advance budget using the same verified snapshot and authentication allowance.
+A new claim always reloads and authenticates history.
+On error, `InstanceFailure::head()` includes the last verified or acknowledged state (possibly a pending intent), and `advances` counts only complete advances.
+When both recovery and release fail, the item carries the recovery error and a separate `release_error`.
+A cancelled sweep can therefore retain an instance-level `CommitUnknown`.
+Pass the returned cursor to the next sweep so an unresolved first instance cannot starve later work. An empty final page resets the cursor for the next pass.
 
 The driver records an intent before admitting an external effect. `Applied` carries the typed
 receipt; `NotApplied` must prove absence and is retried up to the pinned `max_failures` limit. A negative recovery probe does not count as a proven execution failure; attempt numbers still increase monotonically.
@@ -219,7 +227,7 @@ historical receipt before any protector `open` call.
 The caller's read budget limits full history replay and authentication. Each receipt open consumes the maximum plaintext size from one invocation-wide allowance, including replay verification and subsequent compensation opens. Running out at a safe boundary returns `HistoryLimited` before another intent or Resume is written; another invocation may continue with a fresh finite allowance. Before admitting an intent,
 the executor also verifies that its maximum settlement remains readable under that budget.
 `RunStop::HistoryLimited(reason)` preserves a closed resource owner: `DurableCapacity` requires explicit growth, `ReadBudget` requires a larger configured read budget, and `AuthenticationAllowance` means a fresh invocation can continue. Static admission is checked before charging the current allowance, so a permanently insufficient read budget is never reported as a retryable invocation yield. It preserves business status and
-reports the acknowledged `HistoryHead`; it is distinct from advance-budget `Yielded`, failed
+reports the acknowledged `HistoryHead`; it is distinct from a budget or fairness `Yielded`, failed
 compensation and an unknown effect. Capacity exhaustion does not automatically abort a Saga.
 
 A forward intent reserves its maximum receipt settlement, required Abort and first compensation

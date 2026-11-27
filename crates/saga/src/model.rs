@@ -526,3 +526,64 @@ impl Snapshot {
         self.head = head;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_negative_probe_exhausts_forward_and_compensation_ordinals() -> Result<(), Error> {
+        let identity = crate::Identity::new(
+            rss_contract::ContractId::from_static("test.ordinals"),
+            rss_contract::ContractVersion::from_static_major(1),
+            rss_contract::SchemaDigest::from_static(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            crate::ActionGeneration::parse(&format!("sha256:{}", "b".repeat(64)))?,
+        );
+        let d = Definition::new(
+            "test",
+            identity,
+            vec![crate::StepSpec::new("one", "v1", "one", "undo", 1)?],
+        )?;
+        let cap = crate::HistoryCapacity::new(100, 1 << 28)?;
+        for (intent, settlement) in [
+            (EventKind::ForwardIntent, EventKind::ForwardProbeNotApplied),
+            (
+                EventKind::CompensationIntent,
+                EventKind::CompensationNotApplied,
+            ),
+        ] {
+            let mut snapshot =
+                Snapshot::empty(d.clone(), cap, crate::ReadBudget::new(cap, 1 << 28)?)?;
+            // Start immediately before the final attempt instead of allocating billions of rows.
+            let progress = &mut snapshot.head.progress;
+            if intent == EventKind::CompensationIntent {
+                progress.status = Status::Compensating;
+                progress.compensation = Some(0);
+                progress.forward = 1;
+                progress.compensation_attempt = u32::MAX - 1;
+            } else {
+                progress.forward_attempt = u32::MAX - 1;
+            }
+            let event = snapshot.next_event()?.ok_or(ErrorKind::Integrity)?;
+            assert_eq!((event.kind, event.attempt), (intent, u32::MAX));
+            snapshot.apply(event)?;
+            assert_eq!(
+                snapshot.candidate_filter()?,
+                Some(CandidateFilter::Runnable)
+            );
+            snapshot.apply(Event {
+                seq: 1,
+                step: 0,
+                attempt: u32::MAX,
+                kind: settlement,
+                receipt: None,
+            })?;
+            assert!(snapshot.next_event()?.is_none());
+            assert_eq!(snapshot.candidate_filter()?, None);
+            assert_eq!(snapshot.revision(), 2);
+        }
+        Ok(())
+    }
+}

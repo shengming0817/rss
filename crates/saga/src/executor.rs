@@ -18,7 +18,7 @@ pub enum RunStop {
     Completed,
     /// A compensation requires an explicit revision-checked resume.
     Paused,
-    /// The invocation yielded after its advance budget; it can be scheduled again.
+    /// The advance budget was spent, or the fair sweep stopped at a peer or exhausted attempt ordinal.
     Yielded,
 }
 /// Closed cause associated with a failed step.
@@ -60,7 +60,7 @@ pub struct Report {
     head: HistoryHead,
     /// Number of driver advances consumed by this invocation.
     pub advances: u32,
-    /// Completion, pause, or ordinary budget yield.
+    /// Completion, pause, history limit, or a budget or fairness yield.
     pub stop: RunStop,
     /// Failure information for compensation or a paused compensation attempt.
     pub failure: Option<Failure>,
@@ -126,6 +126,33 @@ impl AuthenticationWork {
         Ok(())
     }
 }
+#[derive(Clone, Copy)]
+enum Invocation {
+    Direct,
+    Resume(u64),
+    Fair,
+}
+
+// Kept outside the competing work and renewal futures. Snapshot advances only on commit ACK.
+#[derive(Default)]
+struct RunProgress {
+    verified: Option<Snapshot>,
+    advances: u32,
+}
+
+impl RunProgress {
+    fn failure(self, error: Error) -> InstanceFailure {
+        InstanceFailure {
+            error,
+            release_error: None,
+            head: self
+                .verified
+                .map(|snapshot| Box::new(snapshot.head().clone())),
+            advances: self.advances,
+        }
+    }
+}
+
 /// Caller-driven execution and recovery with exact definitions and mandatory receipt protection.
 pub struct Executor<S, P> {
     store: S,
@@ -227,7 +254,9 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         budget: u32,
         control: &Control<'_, T>,
     ) -> Result<Report, Error> {
-        self.enter(scope, None, budget, control).await
+        self.enter(scope, Invocation::Direct, budget, control)
+            .await
+            .map_err(InstanceFailure::into_error)
     }
     /// Explicitly authorize one retry of a paused compensation at an exact revision.
     pub async fn resume<T: Timer>(
@@ -237,28 +266,44 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         budget: u32,
         control: &Control<'_, T>,
     ) -> Result<Report, Error> {
-        self.enter(scope, Some(expected_revision), budget, control)
-            .await
+        self.enter(
+            scope,
+            Invocation::Resume(expected_revision),
+            budget,
+            control,
+        )
+        .await
+        .map_err(InstanceFailure::into_error)
     }
     async fn enter<T: Timer>(
         &self,
         scope: Scope,
-        resume: Option<u64>,
+        invocation: Invocation,
         budget: u32,
         control: &Control<'_, T>,
-    ) -> Result<Report, Error> {
+    ) -> Result<Report, InstanceFailure> {
+        let unverified = |error| RunProgress::default().failure(error);
         if budget == 0 {
-            return Err(Error::new(crate::ErrorKind::InvalidBudget));
+            return Err(unverified(Error::new(crate::ErrorKind::InvalidBudget)));
         }
-        control.check()?;
+        control.check().map_err(unverified)?;
         let lease = control
             .run(self.store.claim(scope, self.lease_policy.ttl(), control))
-            .await?;
+            .await
+            .map_err(unverified)?;
+        let mut progress = RunProgress::default();
         // Bound the size of the public future when a provider has large native async futures.
         // Two allocations per invocation also keep debug builds within ordinary worker stacks.
         let commit_inflight = AtomicBool::new(false);
         let renewal = Box::pin(self.renew_until_done(&lease, control));
-        let work = Box::pin(self.recover(&lease, resume, budget, control, &commit_inflight));
+        let work = Box::pin(self.recover(
+            &lease,
+            invocation,
+            budget,
+            control,
+            &mut progress,
+            &commit_inflight,
+        ));
         let result = tokio::select! {
             biased;
             work = work => work,
@@ -268,16 +313,27 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 renewal
             }),
         };
-        // Unknown/cancelled writes leave authority to expire: another write cannot prove settlement.
-        if !matches!(
-            result,
-            Err(ref failure) if matches!(failure.kind(),crate::ErrorKind::CommitUnknown
-                | crate::ErrorKind::RollbackUnknown
-                | crate::ErrorKind::Cancelled
-                | crate::ErrorKind::Deadline
-                | crate::ErrorKind::Fenced)
-        ) {
-            control.run(self.store.release(&lease, control)).await?;
+        // Drop journal and receipts before cleanup, retaining only the acknowledged head.
+        let result = result.map_err(|error| progress.failure(error));
+        if matches!(&result, Err(failure) if matches!(failure.error.kind(),
+            crate::ErrorKind::CommitUnknown | crate::ErrorKind::RollbackUnknown |
+            crate::ErrorKind::Cancelled | crate::ErrorKind::Deadline | crate::ErrorKind::Fenced))
+        {
+            return result; // Leave ambiguous writes and lost authority to expire.
+        }
+        if let Err(error) = control.run(self.store.release(&lease, control)).await {
+            return Err(match result {
+                Ok(report) => InstanceFailure {
+                    error,
+                    head: Some(Box::new(report.head)),
+                    advances: report.advances,
+                    release_error: None,
+                },
+                Err(mut failure) => {
+                    failure.release_error = Some(error);
+                    failure
+                }
+            });
         }
         result
     }
@@ -297,12 +353,13 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
     async fn recover<T: Timer>(
         &self,
         lease: &Lease,
-        resume: Option<u64>,
+        invocation: Invocation,
         budget: u32,
         control: &Control<'_, T>,
+        progress: &mut RunProgress,
         commit_inflight: &AtomicBool,
     ) -> Result<Report, Error> {
-        let mut snapshot = control
+        let snapshot = control
             .run(self.store.snapshot(lease, self.read, control))
             .await?;
         let entry = self.registry.resolve(snapshot.definition())?;
@@ -321,7 +378,8 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         let mut authentication = AuthenticationWork(self.read.authentication_bytes());
         self.verify_receipts(lease.scope(), &snapshot, &mut authentication, control)
             .await?;
-        if let Some(revision) = resume {
+        let snapshot = progress.verified.insert(snapshot);
+        if let Invocation::Resume(revision) = invocation {
             if revision != snapshot.revision() || snapshot.status() != Status::CompensationFailed {
                 return Err(Error::new(crate::ErrorKind::Conflict));
             }
@@ -339,7 +397,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             if let Err(error) = self
                 .commit_admission(
                     lease,
-                    &mut snapshot,
+                    snapshot,
                     event,
                     &authentication,
                     control,
@@ -350,20 +408,35 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 let crate::ErrorKind::HistoryLimited(reason) = error.kind() else {
                     return Err(error);
                 };
-                let mut result = report(lease.scope(), &snapshot, 0);
+                let mut result = report(lease.scope(), snapshot, 0);
                 result.stop = RunStop::HistoryLimited(reason);
                 return Ok(result);
             }
         }
-        for advances in 0..budget {
+        while progress.advances < budget {
             control.check()?;
             if snapshot.status().is_terminal() || snapshot.status() == Status::CompensationFailed {
-                return Ok(report(lease.scope(), &snapshot, advances));
+                break;
+            }
+            if progress.advances > 0 && matches!(invocation, Invocation::Fair) {
+                // Negative probes may consume the last attempt ordinal. Discovery then
+                // excludes this state even though the Saga is neither terminal nor paused.
+                if snapshot.next_event()?.is_none() {
+                    break;
+                }
+                // The live claim excludes this scope. Start from the tenant's beginning so
+                // peers before the page cursor (including new arrivals) also get a turn.
+                let peers = self
+                    .runnable(lease.scope().tenant(), None, 1, control)
+                    .await?;
+                if !peers.is_empty() {
+                    break;
+                }
             }
             if let Err(error) = self
                 .advance(
                     lease,
-                    &mut snapshot,
+                    snapshot,
                     &entry,
                     &mut authentication,
                     control,
@@ -374,12 +447,13 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 let crate::ErrorKind::HistoryLimited(reason) = error.kind() else {
                     return Err(error);
                 };
-                let mut result = report(lease.scope(), &snapshot, advances);
+                let mut result = report(lease.scope(), snapshot, progress.advances);
                 result.stop = RunStop::HistoryLimited(reason);
                 return Ok(result);
             }
+            progress.advances += 1;
         }
-        Ok(report(lease.scope(), &snapshot, budget))
+        Ok(report(lease.scope(), snapshot, progress.advances))
     }
     /// Resolve an acknowledged final receipt using the witness issued when its Step was registered.
     /// The stored row and actual registered Rust receipt type are rechecked before decoding.
@@ -686,9 +760,28 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         validate_candidates(&scopes, tenant, cursor, limit)?;
         Ok(scopes)
     }
+    async fn runnable<T: Timer>(
+        &self,
+        tenant: rss_request_context::TenantId,
+        cursor: Option<Scope>,
+        limit: u32,
+        control: &Control<'_, T>,
+    ) -> Result<Vec<Scope>, Error> {
+        let candidates = control
+            .run(self.store.candidates(
+                CandidateFilter::Runnable,
+                tenant,
+                cursor.map(|s| s.id()),
+                limit,
+                control,
+            ))
+            .await?;
+        validate_candidates(&candidates, tenant, cursor, limit)?;
+        Ok(candidates)
+    }
     /// Run one fair page. Pass back `next_cursor` on the next call; None restarts at the beginning.
-    /// Each admitted instance receives at most one advance, including probes. Instance errors are
-    /// retained in the report; cancellation/deadline returns all already observed progress.
+    /// Candidates get one turn in order. The last may spend the remaining advances while no
+    /// other runnable instance is waiting. Instance errors retain verified progress.
     pub async fn run_once<T: Timer>(
         &self,
         tenant: rss_request_context::TenantId,
@@ -700,16 +793,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             return Err(Error::new(crate::ErrorKind::Definition));
         }
         let limit = budget.instances.min(budget.advances);
-        let candidates = control
-            .run(self.store.candidates(
-                CandidateFilter::Runnable,
-                tenant,
-                cursor.map(|s| s.id()),
-                limit,
-                control,
-            ))
-            .await?;
-        validate_candidates(&candidates, tenant, cursor, limit)?;
+        let candidates = self.runnable(tenant, cursor, limit, control).await?;
         let mut report = SweepReport {
             items: vec![],
             next_cursor: cursor,
@@ -719,16 +803,40 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             report.next_cursor = None;
             return Ok(report);
         }
-        for scope in candidates {
+        let mut candidates = candidates.into_iter().peekable();
+        let mut remaining = budget.advances;
+        while let Some(scope) = candidates.next() {
             if let Err(error) = control.check() {
                 report.stop = sweep_stop(error.kind());
                 break;
             }
-            let result = self.run(scope, 1, control).await;
-            let interrupted =
-                result.as_ref().err().map(|e| e.kind()).filter(|k| {
-                    matches!(k, crate::ErrorKind::Cancelled | crate::ErrorKind::Deadline)
-                });
+            let allocation = if candidates.peek().is_some() {
+                1
+            } else {
+                remaining
+            };
+            remaining -= allocation;
+            let result = self
+                .enter(scope, Invocation::Fair, allocation, control)
+                .await;
+            let interrupted = control.check().err().map(|error| error.kind()).or_else(|| {
+                result
+                    .as_ref()
+                    .err()
+                    .map(|failure| {
+                        failure
+                            .release_error
+                            .as_ref()
+                            .unwrap_or(&failure.error)
+                            .kind()
+                    })
+                    .filter(|kind| {
+                        matches!(
+                            kind,
+                            crate::ErrorKind::Cancelled | crate::ErrorKind::Deadline
+                        )
+                    })
+            });
             report.items.push(InstanceResult { scope, result });
             report.next_cursor = Some(scope);
             if let Some(kind) = interrupted {
@@ -797,7 +905,29 @@ pub struct InstanceResult {
     /// Tenant and instance that was admitted.
     pub scope: Scope,
     /// Acknowledged progress or the instance's recovery error.
-    pub result: Result<Report, Error>,
+    pub result: Result<Report, InstanceFailure>,
+}
+/// A failed instance admission, including the durable progress established before the failure.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct InstanceFailure {
+    /// Original recovery or cleanup failure with its provider diagnostics.
+    #[source]
+    pub error: Error,
+    /// Additional release failure when recovery and subsequent cleanup both failed.
+    pub release_error: Option<Error>,
+    head: Option<Box<HistoryHead>>,
+    /// Fully acknowledged driver advances in this admission. An intent alone is not an advance.
+    pub advances: u32,
+}
+impl InstanceFailure {
+    fn into_error(self) -> Error {
+        self.release_error.unwrap_or(self.error)
+    }
+    /// Last verified or acknowledged head; absent if initial recovery did not establish one.
+    pub fn head(&self) -> Option<&HistoryHead> {
+        self.head.as_deref()
+    }
 }
 /// Reason this bounded sweep stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
