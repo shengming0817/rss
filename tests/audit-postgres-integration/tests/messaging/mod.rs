@@ -419,6 +419,25 @@ async fn connect_with(
     ))
 }
 
+async fn validate_with_settings(
+    tx: &mut PgTransaction<'_>,
+    integrity: &Integrity,
+) -> Result<(), rss_audit_postgres::Error> {
+    const SETTINGS: &str =
+        "SELECT current_setting('search_path'), current_setting('quote_all_identifiers')";
+    let before: (String, String) = tx.with_connection(|c| Box::pin(async {
+        sqlx::raw_sql("SET LOCAL search_path=public,pg_temp,pg_catalog; SET LOCAL quote_all_identifiers=on")
+            .execute(&mut *c).await?;
+        sqlx::query_as(SETTINGS).fetch_one(c).await
+    })).await?;
+    let result = rss_audit_postgres::validate_in(tx, integrity).await;
+    let after: (String, String) = tx
+        .with_connection(|c| Box::pin(async { sqlx::query_as(SETTINGS).fetch_one(c).await }))
+        .await?;
+    assert_eq!(after, before);
+    result
+}
+
 async fn startup(
     plain: &PgAudit,
     ledger: &PgAudit,
@@ -451,7 +470,7 @@ async fn startup(
         runtime
             .local_tx(execution()?, deadline()?, move |tx| {
                 Box::pin(async move {
-                    let result = rss_audit_postgres::validate_in(tx, &integrity).await;
+                    let result = validate_with_settings(tx, &integrity).await;
                     if is_ledger {
                         assert!(matches!(
                             result,
@@ -479,7 +498,7 @@ async fn startup(
         runtime
             .local_tx(execution()?, deadline()?, move |tx| {
                 Box::pin(async move {
-                    rss_audit_postgres::validate_in(tx, &integrity)
+                    validate_with_settings(tx, &integrity)
                         .await
                         .map_err(PgError::from)
                 })

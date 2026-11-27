@@ -52,21 +52,25 @@ use crate::ReusePolicy;
 mod policy;
 pub use policy::reuse_policy;
 
-/// Install one DNS answer before first use of this fixture adapter. The production
-/// resolver still checks the address before reqwest connects. Counts matching lookups.
-pub fn fixture_dns(adapter: &mut crate::HttpOidc, host: &str, address: IpAddr) -> Arc<AtomicUsize> {
+/// Supply the first and subsequent DNS answers for one fixture host. Fresh HTTP/1
+/// connections let each request exercise the production address filter independently.
+pub fn fixture_dns(
+    adapter: &mut crate::HttpOidc,
+    host: &str,
+    answers: [IpAddr; 2],
+) -> Arc<AtomicUsize> {
     let calls = Arc::new(AtomicUsize::new(0));
-    adapter.lookup = Arc::new(FixtureDns {
+    adapter.fixture_dns = Some(Arc::new(FixtureDns {
         host: host.to_owned(),
-        address: SocketAddr::new(address, 0),
+        answers,
         calls: calls.clone(),
-    });
+    }));
     calls
 }
 
 struct FixtureDns {
     host: String,
-    address: SocketAddr,
+    answers: [IpAddr; 2],
     calls: Arc<AtomicUsize>,
 }
 impl Resolve for FixtureDns {
@@ -76,8 +80,8 @@ impl Resolve for FixtureDns {
                 Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
             });
         }
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        let answer = self.address;
+        let subsequent = self.calls.fetch_add(1, Ordering::Relaxed) != 0;
+        let answer = SocketAddr::new(self.answers[usize::from(subsequent)], 0);
         Box::pin(async move { Ok(Box::new(std::iter::once(answer)) as Addrs) })
     }
 }

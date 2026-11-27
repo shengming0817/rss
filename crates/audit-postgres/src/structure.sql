@@ -2,6 +2,9 @@
 WITH relations AS MATERIALIZED (
  SELECT c.*, n.nspowner FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
  WHERE n.nspname='rss_audit'
+), columns AS MATERIALIZED (
+ SELECT a.*, c.relname FROM pg_catalog.pg_attribute a JOIN relations c ON c.oid=a.attrelid
+ WHERE c.relkind='r' AND a.attnum>0
 ), constraints AS MATERIALIZED (
  SELECT k.*, c.relname FROM pg_catalog.pg_constraint k JOIN relations c ON c.oid=k.conrelid
 ), functions AS MATERIALIZED (
@@ -22,6 +25,13 @@ SELECT
  FROM pg_catalog.pg_index i JOIN relations c ON c.oid=i.indrelid
  JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid JOIN pg_catalog.pg_am am ON am.oid=idx.relam
  WHERE c.relname='records') AS indexes,
+(SELECT count(*)=7 AND bool_and(NOT attisdropped AND NOT atthasdef AND attidentity='' AND attgenerated=''
+ AND attcollation=CASE WHEN attname IN ('source_id','event_id') THEN 'pg_catalog."C"'::regcollation::oid ELSE 0::oid END)
+ AND array_agg(relname||':'||attname||':'||format_type(atttypid,atttypmod)||':'||attnotnull::text ORDER BY relname,attnum)
+ = ARRAY['records:tenant_id:uuid:true',
+ 'records:source_id:text:true','records:event_id:text:true','records:position:bigint:true',
+ 'records:recorded_at:bigint:true','records:canonical:bytea:true','records:ledger_sequence:bigint:false']
+ FROM columns) AS columns,
 (SELECT pg_catalog.bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
  -- append_batch addresses the conflict target by constraint name.
  AND pg_catalog.count(*) FILTER (WHERE relname='records' AND contype='p' AND conname='records_pkey')=1

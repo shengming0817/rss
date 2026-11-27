@@ -1,8 +1,5 @@
 , reachable AS MATERIALIZED (
  SELECT * FROM pg_roles WHERE pg_has_role(current_user,oid,'SET')
-), columns AS MATERIALIZED (
- SELECT a.*, c.relname FROM pg_attribute a JOIN relations c ON c.oid=a.attrelid
- WHERE c.relkind='r' AND a.attnum>0
 )
 SELECT
 (SELECT session_user = current_user
@@ -26,13 +23,7 @@ SELECT
 (SELECT bool_and(relrowsecurity AND relforcerowsecurity)
  FROM relations WHERE relkind='r') AS forced_rls,
 structure.indexes,
-(SELECT count(*)=7 AND bool_and(NOT attisdropped AND NOT atthasdef AND attidentity='' AND attgenerated=''
- AND attcollation=CASE WHEN attname IN ('source_id','event_id') THEN 'pg_catalog."C"'::regcollation::oid ELSE 0::oid END)
- AND array_agg(relname||':'||attname||':'||format_type(atttypid,atttypmod)||':'||attnotnull::text ORDER BY relname,attnum)
- = ARRAY['records:tenant_id:uuid:true',
- 'records:source_id:text:true','records:event_id:text:true','records:position:bigint:true',
- 'records:recorded_at:bigint:true','records:canonical:bytea:true','records:ledger_sequence:bigint:false']
- FROM columns) AS columns,
+structure.columns,
 structure.constraints,
 (SELECT count(*)=1 AND array_agg(c.relname::text ORDER BY c.relname)=ARRAY['records']
  AND bool_and(p.polname='tenant_scope' AND p.polcmd='*' AND p.polpermissive AND p.polroles=ARRAY[0::oid]

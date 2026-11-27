@@ -126,7 +126,7 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
         Ipv4Addr::new(10, 0, 0, 1)
     };
     let mut outside = adapter(issuer, other)?;
-    let denied_lookups = fixture_dns(&mut outside, &dns_name, host.into());
+    let denied_lookups = fixture_dns(&mut outside, &dns_name, [host.into(); 2]);
     let denial = outside
         .test(
             fixture_provider(&outside, tenant()?, &c, &trusted),
@@ -138,7 +138,7 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
     assert!(denied_lookups.load(Ordering::Relaxed) > 0);
 
     let mut allowed = adapter(issuer, host)?;
-    let discovery_lookups = fixture_dns(&mut allowed, &dns_name, host.into());
+    let discovery_lookups = fixture_dns(&mut allowed, &dns_name, [host.into(); 2]);
     let bound = fixture_provider(&allowed, tenant()?, &c, &trusted);
     let material = ProtocolMaterial::new(random_secret()?.to_string())?;
     let auth = allowed
@@ -191,14 +191,32 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
     let code = query
         .get("code")
         .ok_or_else(|| anyhow::anyhow!("code missing"))?;
+    // Discovery can reach Keycloak, but the next DNS answer is outside the grant.
+    // The exact stage proves the token POST itself passed through VettedResolver.
+    let mut rebinding = adapter(issuer, host)?;
+    let lookups = fixture_dns(&mut rebinding, &dns_name, [host.into(), other.into()]);
+    let revision = bound.revision();
+    let probe = fixture_install(&rebinding, revision, &c, &trusted)?;
+    let denial = rebinding
+        .exchange(
+            probe,
+            ProtocolMaterial::new(random_secret()?.to_string())?,
+            "unused-fixture-code".into(),
+            deadline(),
+        )
+        .await;
+    assert!(matches!(denial, Err(FederationError::Provider(f))
+        if f.stage == ProviderStage::Exchange && f.reason == ProviderReason::EgressDenied));
+    assert_eq!(lookups.load(Ordering::Relaxed), 2);
+
     // A fresh adapter has no idle discovery connection or cached documents.
     let mut cold = adapter(issuer, host)?;
-    let exchange_lookups = fixture_dns(&mut cold, &dns_name, host.into());
+    let exchange_lookups = fixture_dns(&mut cold, &dns_name, [host.into(); 2]);
     let same_revision = fixture_install(&cold, bound.revision(), &c, &trusted)?;
     let claims = cold
         .exchange(same_revision, material, code.clone().into(), deadline())
         .await?;
-    assert!(exchange_lookups.load(Ordering::Relaxed) > 0);
+    assert!(exchange_lookups.load(Ordering::Relaxed) >= 2);
     assert_eq!(claims.issuer, issuer);
     claims.subject.validate()?;
     Ok(())

@@ -155,7 +155,8 @@ pub struct HttpOidc {
     bindings: Bindings,
     resources: Arc<Resources>,
     revisions: ProviderRevisions,
-    lookup: Arc<dyn reqwest::dns::Resolve>,
+    #[cfg(any(test, feature = "test-support"))]
+    fixture_dns: Option<Arc<dyn reqwest::dns::Resolve>>,
     loopback: bool,
 }
 #[derive(Default)]
@@ -256,7 +257,8 @@ impl HttpOidc {
             policy,
             loopback,
             future_skew_seconds: 30,
-            lookup: Arc::new(egress::SystemResolver),
+            #[cfg(any(test, feature = "test-support"))]
+            fixture_dns: None,
         })
     }
     fn grant(&self, tenant: TenantId, issuer: &str, client: &str) -> Option<&Grant> {
@@ -275,14 +277,20 @@ impl HttpOidc {
         credentials: &ProviderCredentials,
         cidrs: &[IpNet],
     ) -> Result<reqwest::Client, FederationError> {
-        let resolver =
-            egress::VettedResolver::new(self.loopback, cidrs.to_vec(), self.lookup.clone());
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
+            .pool_max_idle_per_host(self.resources.policy.max_idle_per_host);
+        let lookup: Arc<dyn reqwest::dns::Resolve> = Arc::new(egress::SystemResolver);
+        #[cfg(any(test, feature = "test-support"))]
+        let (builder, lookup) = match &self.fixture_dns {
+            Some(dns) => (builder.http1_only().pool_max_idle_per_host(0), dns.clone()),
+            None => (builder, lookup),
+        };
+        let resolver = egress::VettedResolver::new(self.loopback, cidrs.to_vec(), lookup);
+        let mut builder = builder
             .no_proxy()
             .dns_resolver(Arc::new(resolver))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(self.resources.policy.max_idle_per_host)
             .pool_idle_timeout(self.resources.policy.idle_timeout)
             .timeout(self.policy.request_timeout)
             .connect_timeout(self.policy.connect_timeout);

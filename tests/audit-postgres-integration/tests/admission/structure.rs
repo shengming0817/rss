@@ -75,6 +75,7 @@ async fn raw_transaction(admin: &PgPool) -> anyhow::Result<()> {
 async fn table_drift(admin: &PgPool) -> anyhow::Result<()> {
     for change in [
         "DROP INDEX rss_audit.records_tenant_ledger_sequence_uidx",
+        "ALTER TABLE rss_audit.records ALTER COLUMN canonical DROP NOT NULL",
         "ALTER TABLE rss_audit.records DROP CONSTRAINT records_recorded_at_check",
     ] {
         let mut tx = admin.begin().await?;

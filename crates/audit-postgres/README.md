@@ -134,7 +134,7 @@ it does not prove rollback or authorize a retry.
 
 ## Installation and startup validation
 
-`validate_structure(&mut PgConnection)` checks the Audit indexes, constraints, and
+`validate_structure(&mut PgConnection)` checks the Audit columns, indexes, constraints, and
 `append_batch` signature, output and implementation in one catalog query. An installer
 can call it once per verification transaction, including a read-only snapshot. The
 caller owns the connection, deadline and outer commit or rollback. Catalog probes render

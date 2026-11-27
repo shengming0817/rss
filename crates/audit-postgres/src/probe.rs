@@ -22,7 +22,7 @@ pub(crate) async fn validate(connection: &mut PgConnection) -> Result<(), Error>
 pub(crate) async fn validate_read(connection: &mut PgConnection) -> Result<(), Error> {
     inspect(connection, false).await
 }
-/// Check the Audit indexes, constraints and append function in the caller's transaction.
+/// Check the Audit columns, indexes, constraints and append function in the caller's transaction.
 /// Reads only the PostgreSQL catalogs. The caller owns the connection, deadline and settlement.
 /// Use startup admission on the actual runtime connection to verify role privileges and RLS.
 pub async fn validate_structure(connection: &mut PgConnection) -> Result<(), Error> {
@@ -38,6 +38,7 @@ pub async fn validate_structure(connection: &mut PgConnection) -> Result<(), Err
         &row,
         &[
             ("indexes", Violation::Shape),
+            ("columns", Violation::Shape),
             ("constraints", Violation::Shape),
             ("functions", Violation::Functions),
         ],
