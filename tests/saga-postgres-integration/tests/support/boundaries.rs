@@ -100,17 +100,49 @@ async fn at_gate<R>(
     released: &Notify,
     operation: impl Future<Output = anyhow::Result<R>>,
 ) -> anyhow::Result<(SweepReport, R)> {
-    let change = async {
-        entered.notified().await;
-        operation.await
+    let coordination = async {
+        tokio::select! {
+            biased;
+            () = entered.notified() => {}
+            early = &mut sweep => anyhow::bail!("sweep finished before entering gate: {:?}", early?),
+        }
+        // Once the step is inside the gate, fencing the old sweep is a valid result even
+        // before the new holder receives its claim acknowledgement. Drive both to completion.
+        let change = Box::pin(async {
+            let result = operation.await;
+            released.notify_one();
+            result
+        });
+        let (page, observed) = tokio::join!(sweep, change);
+        Ok((page?, observed?))
     };
-    let change = Box::pin(tokio::time::timeout(Duration::from_secs(20), change));
-    let observed = tokio::select! {
-        early = &mut sweep => anyhow::bail!("sweep finished before gate operation: {:?}", early?),
-        changed = change => changed.map_err(|_| anyhow::anyhow!("timed out waiting for gated Saga step"))??,
+    tokio::time::timeout(Duration::from_secs(20), Box::pin(coordination)).await?
+}
+
+#[tokio::test]
+async fn gated_takeover_can_finish_after_old_sweep() -> anyhow::Result<()> {
+    let entered = Notify::new();
+    let released = Notify::new();
+    let fenced = Notify::new();
+    let old_done = Notify::new();
+    let old_sweep = async {
+        entered.notify_one();
+        fenced.notified().await;
+        old_done.notify_one();
+        Ok(SweepReport {
+            items: Vec::new(),
+            next_cursor: None,
+            stop: SweepStop::PageComplete,
+        })
     };
-    released.notify_one();
-    Ok((sweep.await?, observed))
+    let takeover = async {
+        fenced.notify_one();
+        old_done.notified().await;
+        Ok(())
+    };
+    let (page, ()) = at_gate(Box::pin(old_sweep), &entered, &released, takeover).await?;
+    assert_eq!(page.stop, SweepStop::PageComplete);
+    Ok(())
 }
 
 fn arrival_registry(d: Definition, gate: Gated) -> Result<Registry, Error> {
