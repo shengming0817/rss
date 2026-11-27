@@ -38,7 +38,9 @@ storage lineage / tenant epoch 持久化 fencing，并约束正常消息、恢�
 
 RSS 持有可嵌入的审计记录协议、规范编码与事件身份（rss-audit-core），以及租户隔离的 PostgreSQL 审计追加、事务组合与有界读取（rss-audit-postgres）。
 rss-ledger 持有可独立消费的认证追加账本协议，rss-ledger-postgres 持有其 PostgreSQL 持久化、账本头与历史窗口校验；Audit 按需启用 Ledger。
-产品拥有事件含义、来源真实性、查询授权、密钥与生产运行，租户审计查询的 HTTP 适配归 rss-audit 仓库。
+产品拥有事件含义、来源真实性、查询授权、密钥与生产运行，面向用户的 HTTP 契约归消费产品。
+
+RSS 持有可嵌入的本地认证、租户联合身份、实例内会话和共用凭据协议。Identity Core 定义规则，Identity PostgreSQL 持有 schema、权限和同事务 Audit 追加，OIDC adapter 持有受控上游交互，Web Credentials 持有 Cookie/Bearer 呈现。独立 Identity、MDM 和 DA 各自拥有产品路由、DTO、资源授权和生产装配。
 
 Webhook 出站 adapter 已接纳：`rss-transactional-messaging-webhook` 拥有单目标 HTTPS、
 Standard Webhooks 签名、宿主授权地址限制的实际执行及 HTTP 接收结果分类；复用事务消息 Outbox、

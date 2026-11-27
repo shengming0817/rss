@@ -1,0 +1,32 @@
+[package]
+name = "identity-postgres-integration"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dev-dependencies]
+anyhow.workspace = true
+futures = { workspace = true, features = ["std", "async-await"] }
+http = "1"
+rss-audit-core.workspace = true
+rss-audit-postgres = { workspace = true, features = ["messaging", "ledger"] }
+rss-ledger.workspace = true
+rss-ledger-postgres.workspace = true
+rss-identity-core.workspace = true
+rss-identity-postgres.workspace = true
+rss-identity-web-credentials.workspace = true
+rss-request-context.workspace = true
+rss-transactional-messaging = { workspace = true, features = ["producer"] }
+rss-transactional-messaging-postgres = { workspace = true, features = ["integration"] }
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "json"] }
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+url.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }
+zeroize.workspace = true
+
+[lints]
+workspace = true

@@ -15,7 +15,7 @@ RSS 系列项目现阶段均不支持旧部署和旧数据迁移，移除旧实�
 | rss-mdm | `/Users/shengming/Documents/code/rss/rss-mdm` | Windows / macOS 企业终端管理产品的 Rust 服务端仓库，拥有 Inventory、MDM 业务、应用装配与产品验收。 |
 | rss-mdm-agent | `/Users/shengming/Documents/code/rss/rss-mdm-agent` | 独立 Rust 终端 Agent 仓库，承接设备侧采集与执行。 |
 | rss-web | `/Users/shengming/Documents/code/rss/rss-web` | RSS 浏览器前端仓库，拥有应用壳、UI、会话交互与 HTTP API 消费。 |
-| rss-identity | `/Users/shengming/Documents/code/rss/rss-identity` | 独立身份服务产品仓库，拥有本地认证、租户联合身份接入与服务端会话；资源级业务授权由消费产品持有。 |
+| rss-identity | `/Users/shengming/Documents/code/rss/rss-identity` | 独立身份服务产品仓库，拥有独立 Identity 服务 HTTP、运行装配与部署，固定消费 RSS 的身份库；资源级业务授权由消费产品持有。 |
 | rss-external-check | `/Users/shengming/Documents/code/rss/rss-external-check` | RSS 独立源码 / 固定候选 artifact 消费验证的可再生执行目录，由 Git 忽略；不持有唯一源码或唯一验收记录，隔离要求见 `docs/rules/verification-scope.md`。 |
 | WinMDM 历史快照 | `/Users/shengming/Documents/code/rss/rss-mdm/reference/winmdm20260220-develop` | 历史实现与来源证据参考，由 Git 忽略；来源与恢复方式见 `rss-mdm/reference/README.md`，快照内协作规则不作为当前仓库规则。 |
 

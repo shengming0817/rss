@@ -218,7 +218,7 @@ async fn finish(
     transaction: crate::transaction::BorrowedTransaction<'_>,
     body: Result<Option<TerminalDisposition>, PgConsumerEffectFailure>,
     intent: ReceiptIntent,
-    timer: &crate::transaction::PgTimer,
+    timer: &rss_request_context::SharedExecutionTimer,
     cutoff: Deadline,
 ) -> TransactionOutcome<PgConsumerTxCommitProof> {
     match body {

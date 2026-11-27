@@ -1,0 +1,23 @@
+[package]
+name = "identity-oidc-integration"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dev-dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["http1", "tokio"] }
+html5ever = "0.38"
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["aws_lc_rs"] }
+reqwest = { workspace = true, features = ["cookies"] }
+rss-identity-core.workspace = true
+rss-identity-oidc = { workspace = true, features = ["test-support"] }
+rss-request-context.workspace = true
+serde_json.workspace = true
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+url.workspace = true
+
+[lints]
+workspace = true

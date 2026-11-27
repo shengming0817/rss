@@ -3,6 +3,12 @@
 [workspace]
 resolver = "2"
 members = [
+  "tests/identity-postgres-integration",
+  "tests/identity-oidc-integration",
+  "crates/identity-core",
+  "crates/identity-postgres",
+  "crates/identity-oidc",
+  "crates/identity-web-credentials",
   "crates/audit-core",
   "crates/audit-postgres",
   "crates/ledger",
@@ -109,6 +115,13 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-identity-core = { path = "crates/identity-core", version = "0.1.0" }
+rss-identity-postgres = { path = "crates/identity-postgres", version = "0.1.0" }
+rss-identity-oidc = { path = "crates/identity-oidc", version = "0.1.0" }
+rss-identity-web-credentials = { path = "crates/identity-web-credentials", version = "0.1.0" }
+argon2 = { version = "=0.5.3", features = ["std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rss-audit-core = { path = "crates/audit-core", version = "0.1.0", default-features = false }
 rss-audit-postgres = { path = "crates/audit-postgres", version = "0.1.0", default-features = false }
 rss-ledger = { path = "crates/ledger", version = "0.1.0", default-features = false }

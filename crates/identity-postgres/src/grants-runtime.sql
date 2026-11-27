@@ -1,0 +1,38 @@
+GRANT USAGE ON SCHEMA identity_authority TO {role};
+GRANT SELECT ON identity_authority.schema_version TO {role};
+GRANT SELECT ON identity_authority.deployment TO {role};
+GRANT SELECT,UPDATE ON identity_authority.tenants TO {role};
+GRANT SELECT ON identity_authority.directory_revisions TO {role};
+GRANT SELECT,UPDATE ON identity_authority.tenant_state TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.accounts TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.memberships TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.local_credentials TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.attempts TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.sessions TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.providers TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.provider_credentials TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.external_identities TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.link_intents TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.oidc_transactions TO {role};
+GRANT USAGE ON SCHEMA rss_transactional_messaging TO {role};
+GRANT SELECT ON rss_transactional_messaging.policy TO {role};
+GRANT SELECT ON rss_transactional_messaging.outbox TO {role};
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.prepare_outbox_partitions(jsonb), rss_transactional_messaging.append_outbox(bytea,jsonb) TO {role};
+GRANT EXECUTE ON FUNCTION rss_transactional_messaging.check_execution() TO {role};
+GRANT SELECT,INSERT,UPDATE ON identity_authority.local_profiles TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.profile_observations TO {role};
+GRANT SELECT,INSERT,DELETE ON identity_authority.profile_operations TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.platform_challenges TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.password_attempts TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.webauthn_accounts TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.webauthn_credentials TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.webauthn_ceremonies TO {role};
+GRANT SELECT,INSERT,UPDATE,DELETE ON identity_authority.step_up_grants TO {role};
+
+GRANT SELECT,INSERT ON identity_authority.webauthn_rp TO {role};
+
+GRANT USAGE ON SCHEMA rss_audit TO {role};
+GRANT SELECT ON rss_audit.records TO {role};
+GRANT EXECUTE ON FUNCTION rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[]) TO {role};
+GRANT EXECUTE ON FUNCTION identity_authority.share_host_tenant(),identity_authority.share_subject(uuid), identity_authority.share_provider(uuid) TO {role};
+GRANT EXECUTE ON FUNCTION identity_authority.lock_session(bytea,uuid,text,text,uuid) TO {role};

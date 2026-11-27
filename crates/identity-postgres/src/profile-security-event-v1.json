@@ -1,0 +1,99 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant",
+    "principal",
+    "actor",
+    "action",
+    "source",
+    "snapshot_id",
+    "revision",
+    "changed_fields"
+  ],
+  "properties": {
+    "tenant": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "principal": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "actor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "action": {
+      "enum": [
+        "observed",
+        "local_updated"
+      ]
+    },
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "identity_local"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "provider"
+          ],
+          "properties": {
+            "kind": {
+              "const": "idp"
+            },
+            "provider": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      ]
+    },
+    "snapshot_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "revision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "changed_fields": {
+      "type": "array",
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "displayName",
+          "username",
+          "email",
+          "emailVerified",
+          "extensions",
+          "maxAgeSeconds"
+        ]
+      }
+    }
+  }
+}

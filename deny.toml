@@ -42,6 +42,15 @@ allow = [
 ]
 # Internal publish=false packages are excluded from license validation.
 private = { ignore = true }
+# #3351: exact WebAuthn 0.5.5 upstream crates, including the test-only SoftPasskey.
+exceptions = [
+  { name = "webauthn-rs", version = "=0.5.5", allow = ["MPL-2.0"] },
+  { name = "webauthn-rs-core", version = "=0.5.5", allow = ["MPL-2.0"] },
+  { name = "webauthn-rs-proto", version = "=0.5.5", allow = ["MPL-2.0"] },
+  { name = "webauthn-attestation-ca", version = "=0.5.5", allow = ["MPL-2.0"] },
+  { name = "base64urlsafedata", version = "=0.5.5", allow = ["MPL-2.0"] },
+  { name = "webauthn-authenticator-rs", version = "=0.5.5", allow = ["MPL-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"     # pre-GA 容忍多版本；趋近 GA 收紧为 deny
@@ -51,11 +60,11 @@ deny = [
   # rsa 已退出锁图；保留 ban 防止重新进入 feature-resolved 图（#1133 / #2376）。
   # 重新引入须显式复核供应链风险，不恢复已撤销的 cargo-audit 豁免。
   { crate = "rsa" },
-  # JWT 验签供应链收敛（issue #1195 / 1109-A1）：oidc adapter 改用纯 RustCrypto（p256/hmac/sha2）做 ES256+HS256
-  # 验签后，jsonwebtoken 退出依赖图。本 ban 防重新引入——jsonwebtoken v9 后端 = ring（被迫钉死 =9.3.1），v10 显式
-  # 后端会拉 rsa（上方已 ban）/ aws-lc-sys（OpenSSL 派生 license 不在 allow-list）。重新引入须显式决策（移除本
-  # ban + 论证 crypto 后端 license/供应链）。图外时为 no-op（同 rsa）。use-instead 走 p256/hmac/sha2（RustCrypto）。
-  { crate = "jsonwebtoken" },
+  # #3351: Identity OIDC consumes the verified ES/RS/PS/EdDSA implementation.
+  # Its integration fixture signs test tokens. Other consumers select no JWT backend.
+  { crate = "jsonwebtoken:=11.1.0", wrappers = ["rss-identity-oidc", "identity-oidc-integration"] },
+  { crate = "jsonwebtoken:<11.1.0" },
+  { crate = "jsonwebtoken:>11.1.0" },
   # Adapter 厚薄纪律（ADR-023 / #1494）：禁 FSM 框架 `statig` 进入依赖图——业务生命周期状态机只属
   # 能力核心，adapters 仅持有 provider 实现。图外时本 ban 为 no-op；一旦 adapters
   # （或其它 crate）引入即 `deny check bans` 失败。INVARIANT: ADAPTER-THIN-FSM-01 { level = "Medium",
@@ -65,15 +74,24 @@ deny = [
   { crate = "native-tls", use-instead = "rustls" },
   { crate = "tokio-native-tls", use-instead = "tokio-rustls" },
   { crate = "async-native-tls", use-instead = "rustls" },
-  { crate = "openssl", use-instead = "rustls" },
-  # #2306: librdkafka owns this native TLS exception; all other TLS bans remain.
-  { crate = "openssl-sys", wrappers = ["rdkafka-sys"] },
+  # #3351: WebAuthn verification uses OpenSSL; SoftPasskey is dev-only.
+  # The Kafka adapter retains its existing native SSL path.
+  { crate = "openssl:=0.10.81", wrappers = ["webauthn-rs-core", "webauthn-attestation-ca", "webauthn-authenticator-rs"] },
+  { crate = "openssl:<0.10.81" },
+  { crate = "openssl:>0.10.81" },
+  { crate = "openssl-sys:=0.9.117", wrappers = ["rdkafka-sys", "openssl", "webauthn-rs-core", "webauthn-attestation-ca", "webauthn-authenticator-rs"] },
+  { crate = "openssl-sys:<0.9.117" },
+  { crate = "openssl-sys:>0.9.117" },
   { crate = "openssl-src", wrappers = ["openssl-sys"] },
   { crate = "rdkafka-sys", wrappers = ["rdkafka"] },
   { crate = "rdkafka", wrappers = ["rss-transactional-messaging-kafka", "kafka-integration"] },
   { crate = "async-openssl", use-instead = "rustls" },
-  { crate = "aws-lc-rs", use-instead = "rustls ring provider" },
-  { crate = "aws-lc-sys", use-instead = "rustls ring provider" },
+  { crate = "aws-lc-rs:=1.18.1", wrappers = ["jsonwebtoken"] },
+  { crate = "aws-lc-rs:<1.18.1" },
+  { crate = "aws-lc-rs:>1.18.1" },
+  { crate = "aws-lc-sys:=0.45.0", wrappers = ["aws-lc-rs"] },
+  { crate = "aws-lc-sys:<0.45.0" },
+  { crate = "aws-lc-sys:>0.45.0" },
   # INVARIANT: DIPORT-MACRO-CONFINE-02 { level = "Medium", exec = "check", source = "config" }.
   # rss-runtime owns the remaining async dispatch macros. This constrains dependency parents,
   # not Rust impl sites or macro-generated unsafe code.

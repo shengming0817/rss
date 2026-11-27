@@ -16,6 +16,12 @@ pub struct WriteBudget {
     total: usize,
 }
 impl WriteBudget {
+    /// Whether one batch can fit the configured per-batch and aggregate limits.
+    /// This does not reserve bytes or observe temporary contention.
+    pub fn supports_batch(&self, rows: usize, canonical_bytes: usize) -> bool {
+        rows <= self.rows && canonical_bytes <= self.bytes as usize
+    }
+
     /// All limits are positive; a legal batch must fit in the shared capacity.
     pub fn new(rows: usize, bytes: u32, in_flight_bytes: u32) -> Result<Self, Error> {
         if rows == 0

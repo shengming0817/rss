@@ -1,0 +1,53 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "tenant",
+    "principal",
+    "session_id",
+    "replaced_session_id",
+    "epoch",
+    "source"
+  ],
+  "properties": {
+    "action": {
+      "enum": [
+        "created",
+        "refreshed",
+        "revoked",
+        "all_revoked"
+      ]
+    },
+    "tenant": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "principal": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "replaced_session_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source": {
+      "enum": [
+        "local_password",
+        "oidc",
+        "platform"
+      ]
+    }
+  }
+}
