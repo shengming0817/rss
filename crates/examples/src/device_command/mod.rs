@@ -405,10 +405,10 @@ async fn direct_reconnect(
     // Even confirmed issuance can lose its network response. On reconnect read durable
     // evidence first. Unconfirmed settlement also takes this path, without sending anything.
     match first {
-        Issuance::Committed(DirectClaim::Eligible(_))
-        | Issuance::CommitUnknown(_)
-        | Issuance::RollbackFailed(_) => {}
-        Issuance::Committed(DirectClaim::Unavailable(_)) => return Ok(()),
+        Issuance::Committed(candidate) if matches!(*candidate, DirectClaim::Unavailable(_)) => {
+            return Ok(());
+        }
+        Issuance::Committed(_) | Issuance::CommitUnknown(_) | Issuance::RollbackFailed(_) => {}
     }
     let stored = load(runtime, binding, store.clone(), scope, id.as_str()).await?;
     let original = stored
@@ -473,7 +473,7 @@ async fn direct_reconnect(
 }
 
 enum Issuance {
-    Committed(DirectClaim),
+    Committed(Box<DirectClaim>),
     CommitUnknown(PgError),
     RollbackFailed(PgError),
 }
@@ -493,7 +493,7 @@ async fn issue(
         })
         .await;
     Ok(attempt.fold(
-        |v| Ok(Issuance::Committed(v)),
+        |v| Ok(Issuance::Committed(Box::new(v))),
         Err,
         Err,
         |e| Ok(Issuance::RollbackFailed(e)),
