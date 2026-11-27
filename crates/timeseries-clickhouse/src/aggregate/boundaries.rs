@@ -37,6 +37,7 @@ impl Ranges {
 
 #[derive(Default)]
 pub(crate) struct Boundaries {
+    pub(crate) visible: String,
     deletes: Ranges,
     pruned: Ranges,
 }
@@ -49,8 +50,15 @@ impl Boundaries {
             match fence.kind.as_str() {
                 "delete" if !fence.restored => ranges.deletes.push(fence.window),
                 "pruned" => ranges.pruned.push(fence.window),
-                _ => {} // reason: restored deletes remain part of the page snapshot only.
+                _ => continue, // restored deletes remain part of the page snapshot only.
             }
+            // The outer raw query pins the exact stream and Series. The control
+            // query already matched every interval to this selector.
+            ranges.visible.push_str(&format!(
+                " AND NOT (observed_at>={} AND observed_at<{})",
+                fence.window.start().micros(),
+                fence.window.end().micros()
+            ));
         }
         #[cfg(feature = "integration")]
         crate::measurement::record(|m| m.build_cpu += crate::measurement::elapsed(start));

@@ -105,6 +105,11 @@ pub(crate) async fn namespace_has_fences(
         .fetch_one(c)
         .await
         .map_err(sql_error)?;
+    #[cfg(feature = "integration")]
+    crate::measurement::record(|m| {
+        m.namespace_counts += 1;
+        m.namespace_fence_rows += count as usize;
+    });
     has_fences(count, max)
 }
 pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<Vec<Fence>, Error> {

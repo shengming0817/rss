@@ -595,11 +595,17 @@ async fn aggregate_boundaries() -> anyhow::Result<()> {
         assert_eq!(raw.buckets.iter().map(|b| b.valid_samples).sum::<u64>(), 32);
         let digests: Vec<String> = sqlx::query_scalar("SELECT a.digest FROM rss_ts_ch.summaries s JOIN rss_ts_ch.attempts a ON a.id=s.object_id ORDER BY s.lo").fetch_all(&f.admin).await?;
         assert_eq!(digests.len(), 2);
+        assert_eq!(maintenance.namespace_counts, 1);
+        assert_eq!(maintenance.aggregate_fence_rows, related as usize);
+        if related == 16 {
+            assert!(online.boundary_checks < 32 * 16 && maintenance.boundary_checks < 32 * 16);
+        }
         for (path, c) in [("raw", online), ("recompute", maintenance)] {
             println!(
-                "fences case={case} path={path} loaded={} checks={} build_cpu_ns={} match_cpu_ns={} digests={digests:?}",
+                "fences case={case} path={path} loaded={} checks={} namespace_rows={} build_cpu_ns={} match_cpu_ns={} digests={digests:?}",
                 c.aggregate_fence_rows,
                 c.boundary_checks,
+                c.namespace_fence_rows,
                 c.build_cpu.as_nanos(),
                 c.match_cpu.as_nanos()
             );

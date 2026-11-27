@@ -1290,6 +1290,25 @@ async fn overlapping_deletes_restore_exact_state_duration_across_fold_pages() ->
     }
     for (step, expected) in [("both", 50), ("restored", 70)] {
         if step == "restored" {
+            let resume = Authorized::<MaintenanceRequest>::verify(
+                &authority(TENANT)?,
+                MaintenanceRequest::new(
+                    id(step)?,
+                    MaintenanceAction::Recompute {
+                        spec: spec.clone(),
+                        window: window(100, 200)?,
+                    },
+                    MaintenanceBudget {
+                        rows: NonZeroU32::new(2).ok_or(Error::Invariant)?,
+                        buckets: NonZeroU32::MIN,
+                    },
+                )?,
+            )?;
+            let MaintenanceProgress::More { next, .. } =
+                confirmed(f.store.step(&resume, None, deadline()?).await?)?
+            else {
+                anyhow::bail!("expected a partial fold");
+            };
             f.maintain(
                 "restore-left",
                 MaintenanceAction::Restore {
@@ -1299,6 +1318,10 @@ async fn overlapping_deletes_restore_exact_state_duration_across_fold_pages() ->
                 },
             )
             .await?;
+            assert!(matches!(
+                confirmed(f.store.step(&resume, Some(&next), deadline()?).await?)?,
+                MaintenanceProgress::More { .. }
+            ));
         }
         let raw = f.store.aggregate(&q, None, deadline()?).await?;
         assert!(raw.refreshed_through.is_none());

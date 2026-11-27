@@ -8,7 +8,7 @@ use crate::{
     control::{self, Fence},
     page::{Dependencies, ReadBudget, Recheck, Request, View},
     projection::{ReadFailure, literal},
-    read::{ReadRow, selection, visible},
+    read::{ReadRow, selection},
     transaction::{bytes, decode, sql_error},
 };
 use rss_request_context::{Clock, Deadline};
@@ -115,7 +115,7 @@ impl<C: Clock> Operation<'_, C> {
         spec: &SummarySpec,
         at: Timestamp,
         boundary: i64,
-        fences: &[Fence],
+        visibility: &str,
         deadline: Deadline,
     ) -> Result<Option<ReadRow>, Error> {
         if !needs_prior(spec) {
@@ -126,7 +126,7 @@ impl<C: Clock> Operation<'_, C> {
             selection(&spec.selection())?,
             dependency_start(spec, at),
             at.micros(),
-            visible(fences)?
+            visibility
         );
         let rows = self
             .raw_rows(
@@ -143,12 +143,11 @@ impl<C: Clock> Operation<'_, C> {
         spec: &SummarySpec,
         window: Interval,
         boundary: i64,
-        fences: &[Fence],
         bounds: &Boundaries,
         deadline: Deadline,
     ) -> Result<(SummaryBuilder, i64, i64), Error> {
         let prior = self
-            .predecessor(spec, window.start(), boundary, fences, deadline)
+            .predecessor(spec, window.start(), boundary, &bounds.visible, deadline)
             .await?;
         let revision = prior.as_ref().map_or(0, |r| r.revision);
         let (builder, start) = seeded_builder(
@@ -594,11 +593,10 @@ impl Request for AggregateQuery {
                 let raw_bounds = hits
                     .front()
                     .map_or(bounds, |(w, _)| bounds.capped(w.start()));
-                let run =
-                    raw.get_or_insert_with(|| raw::Run::new(q.spec(), &fences, published, at));
-                let boundaries = boundaries.get_or_insert_with(|| Boundaries::new(&fences));
+                let bounds = boundaries.get_or_insert_with(|| Boundaries::new(&fences));
+                let run = raw.get_or_insert_with(|| raw::Run::new(q.spec(), published, at));
                 let result = run
-                    .summary(store, window, raw_bounds, boundaries, budget, &mut start)
+                    .summary(store, window, raw_bounds, bounds, budget, &mut start)
                     .await;
                 if at == q.query().window().start() {
                     refs.dependency_start = start;

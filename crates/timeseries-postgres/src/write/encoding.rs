@@ -64,14 +64,7 @@ pub(super) async fn prepare(
         let series = &sample.input().series;
         #[cfg(feature = "integration")]
         let old = (series_index.allocation_size(), bindings.allocation_size());
-        let value = match series_index.entry(series) {
-            Entry::Occupied(entry) => series_digests[*entry.get()],
-            Entry::Vacant(entry) => {
-                entry.insert(index);
-                *series.digest()?.as_bytes()
-            }
-        };
-        series_digests.push(value);
+        push_series(&mut series_index, &mut series_digests, series)?;
         let digest = sample.append_canonical(&mut samples.raw)?;
         samples.finish(digest);
         // SQL orders locks and definition errors by key/version. Only the last
@@ -181,6 +174,23 @@ pub(super) async fn prepare(
         _buffers: buffers,
     })
 }
+fn push_series<'a>(
+    index: &mut HashMap<&'a Series, usize, RandomState>,
+    digests: &mut Vec<[u8; 32]>,
+    series: &'a Series,
+) -> Result<(), Error> {
+    let value = match index.entry(series) {
+        Entry::Occupied(entry) => digests[*entry.get()],
+        Entry::Vacant(entry) => {
+            let digest = series.digest()?;
+            entry.insert(digests.len());
+            *digest.as_bytes()
+        }
+    };
+    digests.push(value);
+    Ok(())
+}
+
 async fn checkpoint(index: usize, clock: &impl Clock, budget: Budget) -> Result<(), Error> {
     if index > 0 && index.is_multiple_of(32) {
         tokio::task::yield_now().await;

@@ -48,6 +48,7 @@ pub(crate) struct Resources {
     pub(crate) ch: Connections,
 }
 pub(crate) struct Material {
+    pub(crate) boundaries: crate::maintain::BoundaryCache,
     reader: Credentials,
     pub(crate) key: CursorKey,
 }
@@ -144,7 +145,11 @@ impl<C: Clock> ChOwner<C> {
                 clock: self.inner.clock.clone(),
                 tenant,
                 version: material_version,
-                material: RwLock::new(Some(Material { reader, key })),
+                material: RwLock::new(Some(Material {
+                    reader,
+                    key,
+                    boundaries: Default::default(),
+                })),
                 retired: AtomicBool::new(false),
                 guarantees: Guarantees {
                     atomicity: Atomicity::RecoverableBatch,

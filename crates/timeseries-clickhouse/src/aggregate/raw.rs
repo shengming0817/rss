@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) struct Run<'a> {
     spec: &'a SummarySpec,
-    fences: &'a [Fence],
     published: i64,
     seeded: bool,
     prior: Option<Sample>,
@@ -12,15 +11,9 @@ pub(super) struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
-    pub(super) fn new(
-        spec: &'a SummarySpec,
-        fences: &'a [Fence],
-        published: i64,
-        start: Timestamp,
-    ) -> Self {
+    pub(super) fn new(spec: &'a SummarySpec, published: i64, start: Timestamp) -> Self {
         Self {
             spec,
-            fences,
             published,
             seeded: false,
             prior: None,
@@ -36,6 +29,7 @@ impl<'a> Run<'a> {
         start: Timestamp,
         end: Timestamp,
         cutoff: Deadline,
+        visibility: &str,
     ) -> Result<Vec<ReadRow>, ReadFailure> {
         let condition = format!(
             "{} AND revision<={} AND observed_at>={} AND observed_at<{}{}",
@@ -43,7 +37,7 @@ impl<'a> Run<'a> {
             self.published,
             start.micros(),
             end.micros(),
-            visible(self.fences)?
+            visibility
         );
         store
             .raw_rows(
@@ -60,6 +54,7 @@ impl<'a> Run<'a> {
         store: &Operation<'_, C>,
         window: Interval,
         bounds: Lookahead,
+        visibility: &str,
         budget: &mut ReadBudget,
     ) -> Result<(), Error> {
         let width = self.spec.resolution_micros().get();
@@ -75,7 +70,7 @@ impl<'a> Run<'a> {
             } else {
                 budget.deadline
             };
-            let read = self.fetch(store, window.start(), end, cutoff);
+            let read = self.fetch(store, window.start(), end, cutoff, visibility);
             match budget
                 .group(store, cutoff, speculative, count > 1, false, read)
                 .await?
@@ -121,7 +116,7 @@ impl<'a> Run<'a> {
                     self.spec,
                     window.start(),
                     self.published,
-                    self.fences,
+                    &boundaries.visible,
                     budget.deadline,
                 )
                 .await?
@@ -133,7 +128,8 @@ impl<'a> Run<'a> {
             seeded_builder(self.spec, window, boundaries, self.prior.as_ref(), limit)?;
         *dependency = start;
         if self.complete_until < window.end() {
-            self.refill(store, window, bounds, budget).await?;
+            self.refill(store, window, bounds, &boundaries.visible, budget)
+                .await?;
         }
         let mut cuts = boundaries.cuts(&builder, window);
         while self

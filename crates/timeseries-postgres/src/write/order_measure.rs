@@ -101,3 +101,29 @@ async fn preparation_by_order() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn repeats_only_reuse_the_complete_series() -> anyhow::Result<()> {
+    let b = distribution::batch("alternating", 0)?;
+    let first = &b.samples()[0].input().series;
+    let other = &b.samples()[1].input().series;
+    let mut spec = first.definition().spec().clone();
+    spec.unit = Id::new("changed")?;
+    let different = Series::new(
+        Definition::new(spec)?,
+        first.subject().clone(),
+        first.resource().clone(),
+        first.dimensions().clone(),
+    )?;
+    let input = [first, other, &different, other, first, &different];
+    let mut cache = HashMap::with_hasher(RandomState::new());
+    let mut output = Vec::new();
+    for series in input {
+        push_series(&mut cache, &mut output, series)?;
+    }
+    assert_eq!(cache.len(), 3);
+    for (actual, expected) in output.iter().zip(input) {
+        assert_eq!(actual, expected.digest()?.as_bytes());
+    }
+    Ok(())
+}

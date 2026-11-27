@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Row};
 mod prune;
 mod recompute;
+pub(crate) use recompute::BoundaryCache;
 const DOMAIN: &[u8] = b"rss.timeseries.clickhouse.maintenance.v1";
 #[derive(Default, Serialize, Deserialize)]
 struct State {

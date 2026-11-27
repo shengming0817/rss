@@ -2,8 +2,65 @@ use super::*;
 use crate::{
     aggregate,
     projection::{self, SummaryRow},
-    read::{selection, visible},
+    read::selection,
 };
+use std::sync::{Arc, Mutex};
+
+/// One immutable entry per tenant material. The namespace transaction has already
+/// checked the live revision and request identity. Eviction or restart simply reloads.
+#[derive(Default)]
+pub(crate) struct BoundaryCache(Mutex<Option<Cached>>);
+struct Cached {
+    request: Digest,
+    revision: i64,
+    bounds: Arc<aggregate::Boundaries>,
+}
+impl BoundaryCache {
+    async fn for_step<C: Clock>(
+        &self,
+        store: &Operation<'_, C>,
+        c: &mut PgConnection,
+        r: &MaintenanceRequest,
+        spec: &SummarySpec,
+        window: Interval,
+        revision: i64,
+    ) -> Result<Arc<aggregate::Boundaries>, Error> {
+        let request = r.binding()?;
+        if let Some(hit) = self.0.lock().map_err(|_| Error::Invariant)?.as_ref()
+            && hit.revision == revision
+            && hit.request == request
+        {
+            return Ok(hit.bounds.clone());
+        }
+        let max = store.limits.max_fences.get();
+        let fences = if control::namespace_has_fences(c, r.scope(), max).await? {
+            // Include the predecessor halo and check pruning across the entire registered plan.
+            let start = Timestamp::new(aggregate::dependency_start(spec, window.start()))?;
+            control::visible_fences(
+                c,
+                &spec.selection(),
+                Interval::new(start, window.end())?,
+                max,
+                None,
+                false,
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        let bounds = aggregate::Boundaries::new(&fences);
+        if bounds.pruned(window.start().micros(), window.end().micros()) {
+            return Err(Error::HistoryExpired);
+        }
+        let bounds = Arc::new(bounds);
+        *self.0.lock().map_err(|_| Error::Invariant)? = Some(Cached {
+            request,
+            revision,
+            bounds: bounds.clone(),
+        });
+        Ok(bounds)
+    }
+}
 #[derive(Serialize, Deserialize)]
 pub(super) struct Fold {
     at: Timestamp,
@@ -60,26 +117,11 @@ pub(super) async fn step<C: Clock>(
     if state.publish.is_some() {
         return publish(store, c, r, state, revision, deadline).await;
     }
-    let max = store.limits.max_fences.get();
-    let fences = if control::namespace_has_fences(c, r.scope(), max).await? {
-        // Include the predecessor halo and check pruning across the entire registered plan.
-        let start = Timestamp::new(aggregate::dependency_start(spec, window.start()))?;
-        control::visible_fences(
-            c,
-            &spec.selection(),
-            Interval::new(start, window.end())?,
-            max,
-            None,
-            false,
-        )
-        .await?
-    } else {
-        Vec::new()
-    };
-    let bounds = aggregate::Boundaries::new(&fences);
-    if bounds.pruned(window.start().micros(), window.end().micros()) {
-        return Err(Error::HistoryExpired);
-    }
+    let bounds = store
+        .material
+        .boundaries
+        .for_step(store, c, r, spec, window, revision)
+        .await?;
     if state.fold.as_ref().is_none_or(|f| f.revision != revision) {
         sqlx::query("INSERT INTO rss_ts_ch.ranges(tenant_id,namespace,spec_digest,spec,lo,hi) VALUES($1::text::uuid,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(window.start().micros()).bind(window.end().micros()).execute(&mut *c).await.map_err(sql_error)?;
@@ -96,7 +138,7 @@ pub(super) async fn step<C: Clock>(
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
         let (builder, max_input_revision, dependency_start) = store
-            .builder(spec, bucket, boundary, &fences, &bounds, deadline)
+            .builder(spec, bucket, boundary, &bounds, deadline)
             .await?;
         fold.builder = Some(builder);
         fold.max_input_revision = max_input_revision;
@@ -113,7 +155,7 @@ pub(super) async fn step<C: Clock>(
         selection(&spec.selection())?,
         bucket.start().micros(),
         bucket.end().micros(),
-        visible(&fences)?,
+        bounds.visible,
         last
     );
     let rows = store
