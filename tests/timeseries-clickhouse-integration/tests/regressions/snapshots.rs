@@ -1238,3 +1238,78 @@ async fn hold_last_ignores_pruned_history_outside_its_contribution_window() -> a
     recompute(&f, "boundary-cache", &q).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn overlapping_deletes_restore_exact_state_duration_across_fold_pages() -> anyhow::Result<()>
+{
+    let f = Fixture::new("ch-overlap-duration").await?;
+    let mut def = definition(TENANT)?.spec().clone();
+    def.metric = Metric::Bool;
+    let d = Definition::new(def)?;
+    f.register(&d).await?;
+    let series = Series::new(
+        d.clone(),
+        id("device")?,
+        id("resource")?,
+        Default::default(),
+    )?;
+    let stream = Stream::new(d.spec().scope.clone(), id("sensor")?, id("generation")?);
+    let readings = [95, 110, 120, 130, 140, 150, 160, 170, 180, 190]
+        .into_iter()
+        .map(|at| {
+            Sample::new(SampleInput {
+                stream: stream.clone(),
+                series: series.clone(),
+                id: Id::new(format!("p{at}"))?,
+                observed_at: Timestamp::new(at)?,
+                sequence: at as u64,
+                interval: None,
+                reading: Reading::Valid(Value::Bool(true)),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    confirmed(f.write(&batch("seed", readings)?).await?)?;
+    let spec = SummarySpec::new(
+        stream,
+        series,
+        NonZeroU64::new(100).ok_or(Error::Invariant)?,
+        CoveragePolicy::HoldLast(NonZeroU64::new(100).ok_or(Error::Invariant)?),
+        None,
+    )?;
+    let q = authorized(spec.clone(), window(100, 200)?, 30, AggregateOp::Timeline)?;
+    for (id, range) in [("left", window(110, 145)?), ("right", window(130, 160)?)] {
+        f.maintain(
+            id,
+            MaintenanceAction::Delete {
+                selection: spec.selection(),
+                window: range,
+                restore_until: Timestamp::new(i64::MAX)?,
+            },
+        )
+        .await?;
+    }
+    for (step, expected) in [("both", 50), ("restored", 70)] {
+        if step == "restored" {
+            f.maintain(
+                "restore-left",
+                MaintenanceAction::Restore {
+                    selection: spec.selection(),
+                    window: window(110, 145)?,
+                    deletion_fence: id("left")?,
+                },
+            )
+            .await?;
+        }
+        let raw = f.store.aggregate(&q, None, deadline()?).await?;
+        assert!(raw.refreshed_through.is_none());
+        assert_eq!(raw.buckets[0].covered_micros, expected);
+        recompute(&f, step, &q).await?;
+        let cached = f.store.aggregate(&q, None, deadline()?).await?;
+        assert_eq!(cached.refreshed_through, Some(Timestamp::new(200)?));
+        assert_eq!(
+            serde_json::to_value(raw.buckets)?,
+            serde_json::to_value(cached.buckets)?
+        );
+    }
+    Ok(())
+}
