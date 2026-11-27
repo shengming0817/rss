@@ -18,7 +18,7 @@ pub enum RunStop {
     Completed,
     /// A compensation requires an explicit revision-checked resume.
     Paused,
-    /// The invocation yielded after its advance budget; it can be scheduled again.
+    /// The advance budget was spent or a fair sweep yielded to another runnable instance.
     Yielded,
 }
 /// Closed cause associated with a failed step.
@@ -60,7 +60,7 @@ pub struct Report {
     head: HistoryHead,
     /// Number of driver advances consumed by this invocation.
     pub advances: u32,
-    /// Completion, pause, or ordinary budget yield.
+    /// Completion, pause, history limit, or a budget or fairness yield.
     pub stop: RunStop,
     /// Failure information for compensation or a paused compensation attempt.
     pub failure: Option<Failure>,
@@ -144,6 +144,7 @@ impl RunProgress {
     fn failure(self, error: Error) -> InstanceFailure {
         InstanceFailure {
             error,
+            release_error: None,
             head: self
                 .verified
                 .map(|snapshot| Box::new(snapshot.head().clone())),
@@ -253,14 +254,9 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         budget: u32,
         control: &Control<'_, T>,
     ) -> Result<Report, Error> {
-        self.enter(
-            scope,
-            Invocation::Direct,
-            budget,
-            control,
-            &mut RunProgress::default(),
-        )
-        .await
+        self.enter(scope, Invocation::Direct, budget, control)
+            .await
+            .map_err(InstanceFailure::into_error)
     }
     /// Explicitly authorize one retry of a paused compensation at an exact revision.
     pub async fn resume<T: Timer>(
@@ -275,9 +271,9 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             Invocation::Resume(expected_revision),
             budget,
             control,
-            &mut RunProgress::default(),
         )
         .await
+        .map_err(InstanceFailure::into_error)
     }
     async fn enter<T: Timer>(
         &self,
@@ -285,15 +281,17 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
         invocation: Invocation,
         budget: u32,
         control: &Control<'_, T>,
-        progress: &mut RunProgress,
-    ) -> Result<Report, Error> {
+    ) -> Result<Report, InstanceFailure> {
+        let unverified = |error| RunProgress::default().failure(error);
         if budget == 0 {
-            return Err(Error::new(crate::ErrorKind::InvalidBudget));
+            return Err(unverified(Error::new(crate::ErrorKind::InvalidBudget)));
         }
-        control.check()?;
+        control.check().map_err(unverified)?;
         let lease = control
             .run(self.store.claim(scope, self.lease_policy.ttl(), control))
-            .await?;
+            .await
+            .map_err(unverified)?;
+        let mut progress = RunProgress::default();
         // Bound the size of the public future when a provider has large native async futures.
         // Two allocations per invocation also keep debug builds within ordinary worker stacks.
         let commit_inflight = AtomicBool::new(false);
@@ -303,7 +301,7 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
             invocation,
             budget,
             control,
-            progress,
+            &mut progress,
             &commit_inflight,
         ));
         let result = tokio::select! {
@@ -315,19 +313,27 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 renewal
             }),
         };
-        // Unknown/cancelled writes leave authority to expire: another write cannot prove settlement.
-        if !matches!(
-            result,
-            Err(ref failure) if matches!(failure.kind(),crate::ErrorKind::CommitUnknown
-                | crate::ErrorKind::RollbackUnknown
-                | crate::ErrorKind::Cancelled
-                | crate::ErrorKind::Deadline
-                | crate::ErrorKind::Fenced)
-        ) {
-            let release = control.run(self.store.release(&lease, control)).await;
-            let report = result?;
-            release?;
-            return Ok(report);
+        // Drop journal and receipts before cleanup, retaining only the acknowledged head.
+        let result = result.map_err(|error| progress.failure(error));
+        if matches!(&result, Err(failure) if matches!(failure.error.kind(),
+            crate::ErrorKind::CommitUnknown | crate::ErrorKind::RollbackUnknown |
+            crate::ErrorKind::Cancelled | crate::ErrorKind::Deadline | crate::ErrorKind::Fenced))
+        {
+            return result; // Leave ambiguous writes and lost authority to expire.
+        }
+        if let Err(error) = control.run(self.store.release(&lease, control)).await {
+            return Err(match result {
+                Ok(report) => InstanceFailure {
+                    error,
+                    head: Some(Box::new(report.head)),
+                    advances: report.advances,
+                    release_error: None,
+                },
+                Err(mut failure) => {
+                    failure.release_error = Some(error);
+                    failure
+                }
+            });
         }
         result
     }
@@ -805,16 +811,20 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 remaining
             };
             remaining -= allocation;
-            let mut progress = RunProgress::default();
             let result = self
-                .enter(scope, Invocation::Fair, allocation, control, &mut progress)
-                .await
-                .map_err(|error| progress.failure(error));
+                .enter(scope, Invocation::Fair, allocation, control)
+                .await;
             let interrupted = control.check().err().map(|error| error.kind()).or_else(|| {
                 result
                     .as_ref()
                     .err()
-                    .map(|failure| failure.error.kind())
+                    .map(|failure| {
+                        failure
+                            .release_error
+                            .as_ref()
+                            .unwrap_or(&failure.error)
+                            .kind()
+                    })
                     .filter(|kind| {
                         matches!(
                             kind,
@@ -899,11 +909,16 @@ pub struct InstanceFailure {
     /// Original recovery or cleanup failure with its provider diagnostics.
     #[source]
     pub error: Error,
+    /// Additional release failure when recovery and subsequent cleanup both failed.
+    pub release_error: Option<Error>,
     head: Option<Box<HistoryHead>>,
     /// Fully acknowledged driver advances in this admission. An intent alone is not an advance.
     pub advances: u32,
 }
 impl InstanceFailure {
+    fn into_error(self) -> Error {
+        self.release_error.unwrap_or(self.error)
+    }
     /// Last verified or acknowledged head; absent if initial recovery did not establish one.
     pub fn head(&self) -> Option<&HistoryHead> {
         self.head.as_deref()

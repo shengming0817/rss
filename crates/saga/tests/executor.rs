@@ -627,6 +627,43 @@ async fn sweep_failure_distinguishes_verified_head_from_completed_advances() -> 
     }
     Ok(())
 }
+#[tokio::test]
+async fn sweep_retains_both_effect_and_release_failures() -> anyhow::Result<()> {
+    let d = definition(&["one"])?;
+    let memory = Memory::default();
+    let effects = Arc::new(Effects::default());
+    let executor = Executor::new(
+        memory.clone(),
+        protection()?,
+        registry(d.clone(), effects.clone(), false)?,
+        read_budget()?,
+    );
+    let s = scope()?;
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let c = Control::new(&clock, Duration::from_secs(10), &cancel);
+    executor.register(s, &d, history_capacity()?, &c).await?;
+    memory.2.store(3, Ordering::SeqCst);
+    effects.unknown_once.store(true, Ordering::SeqCst);
+    let page = executor
+        .run_once(s.tenant(), None, SweepBudget::new(1, 2)?, &c)
+        .await?;
+    let failure = page.items[0]
+        .result
+        .as_ref()
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("expected double failure"))?;
+    assert_eq!(failure.error.kind(), ErrorKind::EffectUnknown);
+    assert_eq!(
+        failure.release_error.as_ref().map(Error::kind),
+        Some(ErrorKind::Store)
+    );
+    assert_eq!(failure.head().map(HistoryHead::revision), Some(1));
+    assert_eq!(failure.advances, 0);
+    effects.unknown_probe.store(true, Ordering::SeqCst);
+    assert!(matches!(executor.run(s, 1, &c).await, Err(error) if error.kind() == ErrorKind::Store));
+    Ok(())
+}
 #[cfg(feature = "rss-runtime")]
 struct PendingStep(Arc<tokio::sync::Notify>);
 #[cfg(feature = "rss-runtime")]

@@ -1,13 +1,14 @@
 use super::*;
 use tokio::sync::Notify;
 struct Gated {
+    name: &'static str,
     entered: Arc<Notify>,
     released: Arc<Notify>,
 }
 impl Step for Gated {
     type Receipt = String;
     fn name(&self) -> &str {
-        "one"
+        self.name
     }
     fn receipt_schema(&self) -> &str {
         "receipt.v1"
@@ -15,7 +16,7 @@ impl Step for Gated {
     async fn execute(&self, _: EffectContext) -> EffectOutcome<String> {
         self.entered.notify_one();
         self.released.notified().await;
-        EffectOutcome::Applied("one".into())
+        EffectOutcome::Applied(self.name.into())
     }
     async fn probe(&self, _: EffectContext) -> ProbeOutcome<String> {
         ProbeOutcome::Unknown
@@ -34,15 +35,22 @@ pub(super) async fn fair_arrival(
     let tenant = TenantId::parse("43634363-2222-4333-8444-555555555555")?;
     let low = Scope::new(tenant, uuid::Uuid::from_u128(1));
     let high = Scope::new(tenant, uuid::Uuid::from_u128(2));
-    let d = definition(&["one", "two", "three", "four"])?;
+    let d = definition(&["one", "two", "three", "four", "five"])?;
     let entered = Arc::new(Notify::new());
     let released = Arc::new(Notify::new());
-    let mut builder = DefinitionBuilder::new(d.clone())?.step(Gated {
-        entered: entered.clone(),
-        released: released.clone(),
-    })?;
     let effects = Arc::new(Effects::default());
-    for name in ["two", "three", "four"] {
+    let mut builder = DefinitionBuilder::new(d.clone())?
+        .step(Action {
+            name: "one",
+            fail: false,
+            effects: effects.clone(),
+        })?
+        .step(Gated {
+            name: "two",
+            entered: entered.clone(),
+            released: released.clone(),
+        })?;
+    for name in ["three", "four", "five"] {
         builder = builder.step(Action {
             name,
             fail: false,
@@ -74,19 +82,19 @@ pub(super) async fn fair_arrival(
     registered?;
     let page = page?;
     assert_eq!(page.next_cursor, Some(high));
-    assert_eq!(turns(&page)?, [(high, 1)]);
+    assert_eq!(turns(&page)?, [(high, 2)]);
     let end = executor
         .run_once(tenant, page.next_cursor, budget, control)
         .await?;
     assert_eq!(end.next_cursor, None);
     assert!(end.items.is_empty());
 
-    released.notify_one(); // low's first effect
     let both = executor
         .run_once(tenant, end.next_cursor, budget, control)
         .await?;
     assert_eq!(turns(&both)?, [(low, 1), (high, 1)]);
-    assert_eq!(executor.run(low, 2, control).await?.advances, 2);
+    released.notify_one(); // low's second effect
+    assert_eq!(executor.run(low, 3, control).await?.advances, 3);
     let last = executor
         .run_once(tenant, None, SweepBudget::new(2, 3)?, control)
         .await?;
@@ -120,6 +128,7 @@ pub(super) async fn fence_during_effect(
     let effects = Arc::new(Effects::default());
     let builder = DefinitionBuilder::new(d.clone())?
         .step(Gated {
+            name: "one",
             entered: entered.clone(),
             released: released.clone(),
         })?
