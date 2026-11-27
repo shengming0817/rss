@@ -1,4 +1,6 @@
 //! Run one capacity sample per process. See the ignored test for its inputs.
+//! Use `rss-test-launcher -- <test-binary> --exact observation_page_capacity --ignored --nocapture`.
+//! Run with `RSS_PG_WORK_PROFILE=1` in a separate process for server-side plans and timings.
 #[allow(
     dead_code,
     reason = "this executable uses only the shared Observation fixture setup"
@@ -26,7 +28,10 @@ use rss_projection_postgres::{
     EffectIsolation, PgEffect, PgEffectOutcome, PgOperationError, PgProjection, PgStore,
     PgTransaction,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    ConnectOptions, PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -36,28 +41,21 @@ const PAGE_ROWS: u32 = 64;
 const HOLD: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(120);
 const DEFINITION: DefinitionIdentity = DefinitionIdentity::new([36; 32]);
+const SEED_RESULT: &str = "capacity_seeded_bytes=";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "opt-in capacity sample, one mode/shape/concurrency per fresh process"]
 async fn observation_page_capacity() -> anyhow::Result<()> {
     // RSS_OBS_MODE=reference|local RSS_OBS_SHAPE=small|large|mixed RSS_OBS_PAGES=1|2|4
     let mode = std::env::var("RSS_OBS_MODE")?;
-    let shape = std::env::var("RSS_OBS_SHAPE")?;
-    let pages: u32 = std::env::var("RSS_OBS_PAGES")?.parse()?;
+    let (shape, pages, reports) = input()?;
     ensure!(
         matches!(mode.as_str(), "reference" | "local"),
         "invalid mode"
     );
-    ensure!(matches!(pages, 1 | 2 | 4), "expected 1, 2 or 4 pages");
-    let reports = match shape.as_str() {
-        "small" => PAGE_ROWS,
-        "large" => 1,
-        "mixed" => 8,
-        _ => anyhow::bail!("invalid shape"),
-    };
     let fixture = Fixture::new().await?;
-    let seeded_bytes = seed(&fixture, &shape, reports, pages).await?;
     fixture.pool.close().await;
+    let seeded_bytes = seed_in_child(&fixture).await?;
     fixture.enable_query_plans().await?;
     let connect = || {
         PgPoolOptions::new()
@@ -81,6 +79,7 @@ async fn observation_page_capacity() -> anyhow::Result<()> {
         observer: fixture.admin.clone(),
         gate: Arc::new(PageGate::new()),
         profile: Arc::new(ReadProfile::default()),
+        timing: Arc::new(metrics::ResolverTime::default()),
         clock: Arc::new(clock()),
         stop: CancellationToken::new(),
     };
@@ -90,11 +89,75 @@ async fn observation_page_capacity() -> anyhow::Result<()> {
     } else {
         run.measure(sources).await?
     };
-    sample.assert_work(&mode, seeded_bytes, u64::from(pages * reports));
+    sample.assert_work(&mode, u64::from(pages * reports));
+    let query_plans = std::env::var_os("RSS_PG_WORK_PROFILE").is_some();
     println!(
-        "observation_capacity mode={mode} shape={shape} pages={pages} reports_per_page={reports} page_budget={PAGE_BYTES}"
+        "observation_capacity mode={mode} shape={shape} pages={pages} reports_per_page={reports} page_budget={PAGE_BYTES} query_plans={query_plans} artificial_hold_ms={}",
+        HOLD.as_millis()
     );
     sample.print();
+    Ok(())
+}
+
+fn input() -> anyhow::Result<(String, u32, u32)> {
+    let pages = std::env::var("RSS_OBS_PAGES")?.parse()?;
+    ensure!(matches!(pages, 1 | 2 | 4), "expected 1, 2 or 4 pages");
+    let shape = std::env::var("RSS_OBS_SHAPE")?;
+    let reports = match shape.as_str() {
+        "small" => PAGE_ROWS,
+        "large" => 1,
+        "mixed" => 8,
+        _ => anyhow::bail!("invalid shape"),
+    };
+    Ok((shape, pages, reports))
+}
+
+async fn seed_in_child(fixture: &Fixture) -> anyhow::Result<u64> {
+    // Keep the encode/write allocation high-water outside the measured process.
+    let output = tokio::time::timeout(
+        TIMEOUT,
+        tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "capacity_seed_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("RSS_OBS_SEED_URL", fixture.options.to_url_lossy().as_str())
+            .env("RSS_OBS_SEED_CA", fixture.server.ca_pem())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("seed worker timed out")??;
+    ensure!(
+        output.status.success(),
+        "seed worker failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(std::str::from_utf8(&output.stdout)?
+        .lines()
+        .find_map(|line| line.strip_prefix(SEED_RESULT))
+        .context("seed worker omitted canonical byte count")?
+        .parse()?)
+}
+
+#[tokio::test]
+#[ignore = "child process launched by observation_page_capacity"]
+async fn capacity_seed_worker() -> anyhow::Result<()> {
+    let (shape, pages, reports) = input()?;
+    let options: PgConnectOptions = std::env::var("RSS_OBS_SEED_URL")?.parse()?;
+    let options = options.ssl_root_cert_from_pem(std::env::var("RSS_OBS_SEED_CA")?.into_bytes());
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let store = rss_observation_postgres::PgStore::new(pool.clone(), Clock, deadline()).await?;
+    let bytes = seed(&store, &shape, reports, pages).await?;
+    // End the backend session to publish its seed statistics before the baseline.
+    pool.close().await;
+    println!("{SEED_RESULT}{bytes}");
     Ok(())
 }
 
@@ -106,12 +169,16 @@ fn tenant(index: u32) -> String {
     format!("00000000-0000-0000-0000-{index:012}")
 }
 
-async fn seed(fixture: &Fixture, shape: &str, reports: u32, pages: u32) -> anyhow::Result<u64> {
-    let store = fixture.store().await?;
+async fn seed(
+    store: &rss_observation_postgres::PgStore<Clock>,
+    shape: &str,
+    reports: u32,
+    pages: u32,
+) -> anyhow::Result<u64> {
     let mut total = 0;
     for worker in 0..pages {
         let stream = scope(&tenant(worker), "capacity", "r", "s", "e")?;
-        activate(&store, &stream, None).await?;
+        activate(store, &stream, None).await?;
         let mut page_bytes = 0;
         for index in 0..reports {
             let large = shape != "small" && index == 0;
@@ -211,6 +278,7 @@ struct CapacityRun {
     observer: PgPool,
     gate: Arc<PageGate>,
     profile: Arc<ReadProfile>,
+    timing: Arc<metrics::ResolverTime>,
     clock: Arc<ProjectionClock>,
     stop: CancellationToken,
 }
@@ -238,6 +306,7 @@ impl CapacityRun {
             let effect = ProbeEffect {
                 source: source.clone(),
                 gate: self.gate.clone(),
+                timing: self.timing.clone(),
                 clock: self.clock.clone(),
                 stop: self.stop.clone(),
             };
@@ -276,6 +345,7 @@ impl CapacityRun {
             source: metrics::Work::from(&self.profile.source),
             resolver: metrics::Work::from(&self.profile.resolver),
             resolver_calls: calls,
+            resolver_elapsed_us: self.timing.snapshot(),
             source_io: metrics::delta_io(observed.io, before),
             resolver_io: metrics::delta_io(after, observed.io),
             baseline,
@@ -391,6 +461,7 @@ impl Resolver for PgSource<Clock, LocalPages> {
 struct ProbeEffect<R> {
     source: Arc<R>,
     gate: Arc<PageGate>,
+    timing: Arc<metrics::ResolverTime>,
     clock: Arc<ProjectionClock>,
     stop: CancellationToken,
 }
@@ -407,11 +478,14 @@ impl<R: Resolver> PgEffect for ProbeEffect<R> {
     ) -> Result<PgEffectOutcome, PgOperationError> {
         let control = Control::new(&*self.clock, TIMEOUT, &self.stop);
         let position: Position = item.as_ref().position();
+        let started = rss_observation::Clock::now(&Clock);
         let record = self
             .source
             .restore(tx, item, &control)
             .await
             .map_err(|e| PgOperationError::rejected(Phase::Restore, None, Some(position), e))?;
+        self.timing
+            .record(rss_observation::Clock::now(&Clock).duration_since(started));
         if position.get() == 1 {
             self.gate.holding.pause().await;
         }

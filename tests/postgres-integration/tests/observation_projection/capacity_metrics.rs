@@ -2,7 +2,11 @@ use super::fixture::rss_kib;
 use rss_observation_postgres::read_profile::ReadWork;
 use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
-use std::{alloc::System, sync::atomic::Ordering::Relaxed, time::Duration};
+use std::{
+    alloc::System,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -109,6 +113,28 @@ pub(super) fn delta_io(after: Io, before: Io) -> Io {
     std::array::from_fn(|index| after[index] - before[index])
 }
 
+#[derive(Default)]
+pub(super) struct ResolverTime {
+    total_nanos: AtomicU64,
+    max_nanos: AtomicU64,
+}
+
+impl ResolverTime {
+    pub(super) fn record(&self, elapsed: Duration) {
+        // Resolver calls share a two-minute deadline.
+        let nanos = elapsed.as_nanos() as u64;
+        self.total_nanos.fetch_add(nanos, Relaxed);
+        self.max_nanos.fetch_max(nanos, Relaxed);
+    }
+
+    pub(super) fn snapshot(&self) -> [u64; 2] {
+        [
+            self.total_nanos.load(Relaxed) / 1000,
+            self.max_nanos.load(Relaxed) / 1000,
+        ]
+    }
+}
+
 pub(super) struct Work {
     bytes: u64,
     decoded: u64,
@@ -134,6 +160,7 @@ pub(super) struct Sample {
     pub(super) source: Work,
     pub(super) resolver: Work,
     pub(super) resolver_calls: i64,
+    pub(super) resolver_elapsed_us: [u64; 2],
     pub(super) source_io: Io,
     pub(super) resolver_io: Io,
     pub(super) baseline: Memory,
@@ -145,14 +172,14 @@ pub(super) struct Sample {
 }
 
 impl Sample {
-    pub(super) fn assert_work(&self, mode: &str, canonical_bytes: u64, reports: u64) {
-        assert_eq!(self.source.bytes, canonical_bytes);
+    pub(super) fn assert_work(&self, mode: &str, reports: u64) {
+        assert_eq!(self.source.bytes, self.canonical_bytes);
         assert_eq!(self.source.decoded, reports);
         assert_eq!(u64::try_from(self.resolver_calls).ok(), Some(reports));
         let expected = if mode == "local" {
             (0, 0, 0, reports)
         } else {
-            (canonical_bytes, reports, reports, 0)
+            (self.canonical_bytes, reports, reports, 0)
         };
         assert_eq!(
             (
@@ -175,18 +202,20 @@ impl Sample {
         ];
         let heap = stages.map(|sample| sample.heap);
         let rss = stages.map(|sample| sample.rss);
+        // Allocations and deallocations are separate counters sampled during concurrent work.
         println!(
-            "capacity_memory stages=baseline,ready,held,sampled_peak,settled heap_bytes={heap:?} rss_kib={rss:?} longest_owned_us={}",
+            "capacity_memory stages=baseline,ready,held,sampled_peak,settled rust_live_heap_bytes_estimate={heap:?} rss_kib={rss:?} gated_page_hold_us_max={}",
             self.hold_max.as_micros()
         );
         println!(
-            "capacity_work canonical_bytes={} source_decoded_buffers={} resolver_sql={} resolver_body_bytes={} resolver_rust_hashes={} resolver_pg_hashes={}",
+            "capacity_work canonical_bytes={} source_decoded_buffers={} resolver_sql={} resolver_body_bytes={} resolver_rust_hashes={} resolver_pg_hashes={} resolver_elapsed_us_total_max={:?}",
             self.canonical_bytes,
             self.source.decoded_buffer_bytes,
             self.resolver_calls,
             self.resolver.bytes,
             self.resolver.rust_hashes,
             self.resolver.pg_hashes,
+            self.resolver_elapsed_us,
         );
         println!(
             "capacity_io order=heap_read,heap_hit,index_read,index_hit,toast_read,toast_hit,toast_index_read,toast_index_hit source={:?} resolver={:?}",
