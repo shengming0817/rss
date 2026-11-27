@@ -38,7 +38,7 @@ async fn configured(f: &Fixture, limit: u32, batch: u16) -> anyhow::Result<Autho
 
 pub async fn occupied(f: &Fixture, tenant: &str, kind: &str) -> anyhow::Result<i64> {
     let (state, physical): (i64, i64) = sqlx::query_as(
-        "SELECT value,CASE kind WHEN 'oidc_capacity' THEN
+        "SELECT occupied,CASE kind WHEN 'oidc_capacity' THEN
         (SELECT count(*) FROM identity_authority.oidc_transactions WHERE tenant_id=$1::uuid)
         ELSE (SELECT count(*) FROM identity_authority.attempts WHERE tenant_id=$1::uuid)
         +(SELECT count(*) FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid) END
@@ -179,6 +179,25 @@ async fn cleanup(
     assert!(
         matches!(strict.begin_login(request(f,p,"local-test")?,deadline()).await,Err(AuthorityError::RateLimited{retry_after_seconds}) if retry_after_seconds.get()>0)
     );
+    for ordinary in [true, false] {
+        f.reset_attempts().await?;
+        sqlx::query("INSERT INTO identity_authority.attempts VALUES
+          ($1::uuid,'s:local-test',1,now()-interval '1 minute'),($1::uuid,'other',1,now()+interval '5 minutes')")
+          .bind(A).execute(&f.owner).await?;
+        if ordinary {
+            assert!(matches!(
+                fed.begin_login(request(f, p, "local-test")?, deadline())
+                    .await,
+                Err(AuthorityError::Busy)
+            ));
+        } else {
+            assert!(matches!(
+                bad(f, store, "absent").await,
+                Err(AuthorityError::Busy)
+            ));
+        }
+        assert_eq!(occupied(f, A, "attempt_capacity").await?, 1);
+    }
     // Force the second insertion to fail after the source and its charge have been written.
     f.reset_attempts().await?;
     sqlx::raw_sql("CREATE FUNCTION public.reject_claim() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'claim fixture'; END $$;

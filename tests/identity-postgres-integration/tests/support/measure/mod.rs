@@ -14,6 +14,7 @@ use rss_identity_core::{
 use rss_identity_postgres::platform::PlatformPurpose;
 use serde_json::json;
 use std::num::{NonZeroU64, NonZeroUsize};
+mod controls;
 mod platform;
 mod work;
 
@@ -197,7 +198,7 @@ async fn run_fixture(
     ledger: bool,
     multi: bool,
     trace: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<serde_json::Value>> {
     let integrity = if ledger {
         rss_audit_postgres::Integrity::Ledger(Arc::new(rss_ledger::Authenticator::new(
             rss_ledger::KeyId::parse("measure")?,
@@ -305,11 +306,16 @@ async fn run_fixture(
             );
         }
     }
+    let controls = if trace && !ledger && !multi {
+        controls::collect(&f, &federation, subjects[0].provider).await?
+    } else {
+        vec![]
+    };
     drop(store);
     drop(federation);
     runtime.close().await;
     f.close().await;
-    Ok(())
+    Ok(controls)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -326,9 +332,10 @@ async fn contention() -> anyhow::Result<()> {
     )
     .await?;
     let trace = std::env::var_os("RSS_AUTH_TRACE").is_some();
+    let mut controls = vec![];
     for ledger in [false, true] {
         for multi in [false, true] {
-            run_fixture(&pg, ledger, multi, trace).await?;
+            controls.extend(run_fixture(&pg, ledger, multi, trace).await?);
         }
     }
     if trace {
@@ -338,6 +345,7 @@ async fn contention() -> anyhow::Result<()> {
                 "/tests/support/measure/locks.py"
             ))
             .arg(network.name())
+            .arg(serde_json::to_string(&controls)?)
             .status()?;
         anyhow::ensure!(status.success(), "PG trace extraction failed");
     }

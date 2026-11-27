@@ -16,7 +16,11 @@ CREATE TABLE identity_authority.tenants(tenant_id uuid PRIMARY KEY);
 CREATE TABLE identity_authority.tenant_state (
  tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
  kind text NOT NULL CHECK(kind IN ('profile_sequence','receipt_clock','attempt_capacity','oidc_capacity')),
- value bigint NOT NULL DEFAULT 0 CHECK(value>=0 AND (kind<>'oidc_capacity' OR value<=10000)),
+ -- Clock writers may update value. Only physical DML triggers may update occupied.
+ value bigint NOT NULL DEFAULT 0 CHECK(value>=0),
+ occupied bigint NOT NULL DEFAULT 0 CHECK(occupied>=0),
+ CHECK(CASE WHEN kind IN ('attempt_capacity','oidc_capacity') THEN value=0 ELSE occupied=0 END),
+ CHECK(kind<>'oidc_capacity' OR occupied<=10000),
  PRIMARY KEY(tenant_id,kind)
 );
 -- Source counters live as long as the tenant so a replaced source never reuses its old generation.
@@ -186,12 +190,12 @@ CREATE INDEX link_expiry ON identity_authority.link_intents(tenant_id,expires_at
 -- The INSERT transition relation excludes UPSERT updates. Each tenant is touched at
 -- most once per statement, including bulk expiry and multi-tenant fixture deletes.
 CREATE FUNCTION identity_authority.account_capacity_delta() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
 DECLARE delta record;
 BEGIN
  FOR delta IN SELECT tenant_id, count(*) AS n FROM changed GROUP BY tenant_id ORDER BY tenant_id LOOP
   UPDATE identity_authority.tenant_state
-     SET value=value + CASE TG_OP WHEN 'INSERT' THEN delta.n ELSE -delta.n END
+     SET occupied=occupied + CASE TG_OP WHEN 'INSERT' THEN delta.n ELSE -delta.n END
    WHERE tenant_id=delta.tenant_id AND kind=TG_ARGV[0];
   IF NOT FOUND THEN RAISE EXCEPTION 'missing identity capacity state'; END IF;
  END LOOP;

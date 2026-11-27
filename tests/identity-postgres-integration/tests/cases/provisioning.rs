@@ -56,6 +56,11 @@ pub async fn provisioning(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     let mut conn = f.owner.acquire().await?;
     grant_profile(&mut conn, &role, AuthorityProfile::Provisioning).await?;
+    for name in [&*role, "identity_runtime", "identity_maintenance"] {
+        let can_forge:bool=sqlx::query_scalar("SELECT has_column_privilege($1::name,'identity_authority.tenant_state','occupied','UPDATE')
+         OR has_column_privilege($1::name,'identity_authority.tenant_state','occupied','INSERT')").bind(name).fetch_one(&mut *conn).await?;
+        assert!(!can_forge);
+    }
     drop(conn);
     let runtime = f.runtime_as(&role).await?;
     let kdf = Arc::new(

@@ -48,6 +48,7 @@ async fn plans() -> anyhow::Result<()> {
         "session_preload_libraries='auto_explain'",
         "auto_explain.log_min_duration=0",
         "auto_explain.log_analyze=on",
+        "auto_explain.log_nested_statements=on",
         "auto_explain.log_buffers=on",
         "auto_explain.log_timing=off",
         "auto_explain.log_format=json",

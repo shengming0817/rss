@@ -75,7 +75,9 @@ async fn inventory(f: &Fixture, n: i32, template: &serde_json::Value) -> anyhow:
 pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Result<()> {
     let local = f.login().await?;
     let state = oidc::state(s.begin_login(request(f, p.id, "test")?, deadline()).await?);
+    let before = amount(f).await?;
     let external = oidc::issued(oidc::finish(s, state, "external").await?);
+    assert_eq!(amount(f).await?, before - 1);
     s.begin_login(request(f, p.id, "test")?, deadline()).await?;
     let template:serde_json::Value=sqlx::query_scalar("SELECT to_jsonb(t) FROM identity_authority.oidc_transactions t WHERE link_intent IS NULL AND NOT claimed LIMIT 1").fetch_one(&f.owner).await?;
     for n in [0, 5000, 9999, 10000] {
@@ -171,10 +173,15 @@ async fn expiry(
     local: &IssuedSession,
     template: &serde_json::Value,
 ) -> anyhow::Result<()> {
-    inventory(f, 300, template).await?;
+    inventory(f, 9999, template).await?;
     let link = link(f, s, p.id, local, true).await?;
     let id:uuid::Uuid=sqlx::query_scalar("SELECT link_intent FROM identity_authority.oidc_transactions WHERE link_intent IS NOT NULL").fetch_one(&f.owner).await?;
-    sqlx::query("UPDATE identity_authority.oidc_transactions SET created_at=1,expires_at=CASE WHEN link_intent IS NULL THEN 2 ELSE 3 END").execute(&f.owner).await?;
+    assert_eq!(amount(f).await?, 10000);
+    sqlx::query("INSERT INTO identity_authority.link_intents SELECT copy.* FROM identity_authority.link_intents i
+       CROSS JOIN generate_series(1,129) n CROSS JOIN LATERAL jsonb_populate_record(i,jsonb_build_object(
+         'intent_id',md5(n::text)::uuid,'created_at',1,'expires_at',2)) copy WHERE i.intent_id=$1").bind(id).execute(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.oidc_transactions SET created_at=1,expires_at=CASE WHEN link_intent IS NULL THEN 2 ELSE 3 END
+        WHERE link_intent IS NOT NULL OR attempt_id IN(SELECT sha256(int4send(n)) FROM generate_series(1,300) n)").execute(&f.owner).await?;
     sqlx::query(
         "UPDATE identity_authority.link_intents SET created_at=1,expires_at=3 WHERE intent_id=$1",
     )
@@ -182,7 +189,7 @@ async fn expiry(
     .execute(&f.owner)
     .await?;
     assert!(cancel(s, &link, Some(oidc::secret(local))).await.is_err());
-    for (rows, retained) in [(174, true), (47, true), (3, false)] {
+    for (rows, retained, remaining) in [(9873, true, 1_i64), (9746, true, 0), (9702, false, 0)] {
         s.begin_login(request(f, p.id, "expiry")?, deadline())
             .await?;
         assert_eq!(amount(f).await?, rows);
@@ -193,6 +200,8 @@ async fn expiry(
         .fetch_one(&f.owner)
         .await?;
         assert_eq!(exists, retained);
+        let expired:i64=sqlx::query_scalar("SELECT count(*) FROM identity_authority.link_intents WHERE tenant_id=$1::uuid AND expires_at=2").bind(A).fetch_one(&f.owner).await?;
+        assert_eq!(expired, remaining);
     }
     Ok(())
 }
