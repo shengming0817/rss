@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/newtype_mismatch.rs:16:49
+   |
+16 |     let _ = RecordIdentity::new(tenant, source, operation);
+   |             -------------------                 ^^^^^^^^^ expected `EventId`, found `OperationId`
+   |             |
+   |             arguments to this function are incorrect
+   |
+note: associated function defined here
+  --> src/model.rs
+   |
+   |     pub const fn new(tenant: TenantId, source: SourceIdentity, event_id: EventId) -> Self {
+   |                  ^^^

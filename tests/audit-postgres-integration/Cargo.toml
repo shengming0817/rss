@@ -1,0 +1,30 @@
+[package]
+name = "audit-postgres-integration"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dev-dependencies]
+testkit = { path = "../../crates/testkit", features = ["containers"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+anyhow.workspace = true
+
+rss-data-protection.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rss-audit-core.workspace = true
+rss-audit-postgres = { workspace = true, features = ["ledger", "messaging", "integration"] }
+rss-ledger = { workspace = true, features = ["integration"] }
+rss-ledger-postgres = { workspace = true, features = ["integration"] }
+rss-transactional-messaging = { workspace = true, features = ["consumer", "producer"] }
+rss-transactional-messaging-postgres = { workspace = true, features = ["integration", "recovery"] }
+rss-contract.workspace = true
+rss-diag-context = { path = "../../crates/diagctx", version = "0.1.0" }
+rss-request-context.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+tokio-util.workspace = true
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
+
+[lints]
+workspace = true

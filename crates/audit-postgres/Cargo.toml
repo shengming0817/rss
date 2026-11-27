@@ -1,0 +1,37 @@
+[package]
+name = "rss-audit-postgres"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Atomic tenant-scoped PostgreSQL audit persistence"
+
+[dependencies]
+tracing = { workspace = true, optional = true }
+rss-audit-core.workspace = true
+rss-contract.workspace = true
+rss-request-context.workspace = true
+rss-redact.workspace = true
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false }
+rss-ledger = { workspace = true, optional = true }
+rss-ledger-postgres = { workspace = true, optional = true }
+rss-transactional-messaging-postgres = { workspace = true, optional = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+url.workspace = true # Security floor for the SQLx dependency.
+thiserror.workspace = true
+futures = { workspace = true, features = ["std", "async-await", "executor"] }
+tokio = { workspace = true, features = ["macros", "sync"] }
+tokio-util.workspace = true
+
+[features]
+default = []
+ledger = ["rss-audit-core/ledger", "dep:rss-ledger", "dep:rss-ledger-postgres"]
+messaging = ["dep:rss-transactional-messaging-postgres", "rss-ledger-postgres?/messaging"]
+integration = ["dep:tracing", "rss-audit-core/integration"]
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

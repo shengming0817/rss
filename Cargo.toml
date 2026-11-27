@@ -3,6 +3,12 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/audit-core",
+  "crates/audit-postgres",
+  "crates/ledger",
+  "crates/ledger-postgres",
+  "tests/audit-postgres-integration",
+  "tests/ledger-postgres-integration",
   "crates/timeseries",
   "crates/timeseries-postgres",
   "crates/timeseries-clickhouse",
@@ -103,6 +109,10 @@ repository = "https://github.com/shengming0817/rss"
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # CI 的 `--locked` standard Cargo invocations keep these declarations aligned with Cargo.lock.
 [workspace.dependencies]
+rss-audit-core = { path = "crates/audit-core", version = "0.1.0", default-features = false }
+rss-audit-postgres = { path = "crates/audit-postgres", version = "0.1.0", default-features = false }
+rss-ledger = { path = "crates/ledger", version = "0.1.0", default-features = false }
+rss-ledger-postgres = { path = "crates/ledger-postgres", version = "0.1.0", default-features = false }
 clickhouse = { version = "=0.15.3", default-features = false, features = ["rustls-tls-ring", "rustls-tls-webpki-roots"] }
 rss-timeseries-clickhouse = { path = "crates/timeseries-clickhouse", version = "0.1.0" }
 rss-timeseries-postgres = { path = "crates/timeseries-postgres", version = "0.1.0" }
