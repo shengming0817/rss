@@ -21,7 +21,9 @@ impl<'a, T: ExecutionTimer> Control<'a, T> {
     }
     /// Remaining duration in the caller's clock domain.
     pub fn remaining(&self) -> Duration {
-        self.deadline.remaining(self.timer.now()).unwrap_or_default()
+        self.deadline
+            .remaining(self.timer.now())
+            .unwrap_or_default()
     }
     pub(crate) fn check(&self, stage: LocalTxDeadlineStage) -> Result<(), Error> {
         if self.cancel.is_cancelled() {
@@ -49,5 +51,44 @@ impl<'a, T: ExecutionTimer> Control<'a, T> {
             () = self.timer.sleep_until(self.deadline) => Err(Error::Deadline(stage)),
             result = future => result,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::FutureExt;
+    use rss_transactional_messaging_testkit::memory::FakeClock;
+
+    #[tokio::test]
+    async fn simultaneous_wakeups_prefer_cancel_then_deadline_over_business() -> anyhow::Result<()>
+    {
+        for cancelled in [false, true] {
+            let timer = FakeClock::new();
+            let deadline = Deadline::from_timeout(&timer, Duration::from_secs(1))?;
+            let cancel = CancellationToken::new();
+            let business_ready = CancellationToken::new();
+            let control = Control::new(&timer, deadline, &cancel);
+            let stage = LocalTxDeadlineStage::Operation;
+            let operation = control.run_stage(stage, async {
+                business_ready.cancelled().await;
+                Ok(())
+            });
+            tokio::pin!(operation);
+            assert!(operation.as_mut().now_or_never().is_none());
+
+            business_ready.cancel();
+            timer.advance(Duration::from_secs(1))?;
+            if cancelled {
+                cancel.cancel();
+            }
+            assert_eq!(control.remaining(), Duration::ZERO);
+            match operation.await {
+                Err(Error::Cancelled(LocalTxDeadlineStage::Operation)) if cancelled => {}
+                Err(Error::Deadline(LocalTxDeadlineStage::Operation)) if !cancelled => {}
+                result => anyhow::bail!("unexpected simultaneous result: {result:?}"),
+            }
+        }
+        Ok(())
     }
 }

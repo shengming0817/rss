@@ -2,7 +2,7 @@ use super::*;
 use sqlx::{Acquire, Postgres, Transaction};
 
 // ref: launchbadge/sqlx sqlx-core/src/{transaction.rs,pool/connection.rs}@v0.9.0
-pub(super) async fn run<T: Timer>(
+pub(super) async fn run<T: ExecutionTimer>(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
@@ -30,7 +30,7 @@ pub(super) async fn run<T: Timer>(
 
 #[allow(clippy::cognitive_complexity)]
 // reason: one owned interruption fixture keeps server bounds, quarantine and replacement assertions together.
-async fn interrupted<T: Timer>(
+async fn interrupted<T: ExecutionTimer>(
     store: &PgLedger,
     single: &PgPool,
     owner: &PgPool,
@@ -79,7 +79,7 @@ async fn interrupted<T: Timer>(
     recover(store, single, &request, control).await
 }
 
-async fn recover<T: Timer>(
+async fn recover<T: ExecutionTimer>(
     store: &PgLedger,
     single: &PgPool,
     request: &AppendRequest,
@@ -122,9 +122,13 @@ async fn interrupt(
     case: (&str, u8, bool),
 ) -> anyhow::Result<()> {
     let (id, append, cancelled) = case;
-    let clock = Clock::new();
+    let clock = TestClock;
     let cancel = CancellationToken::new();
-    let budget = Control::new(&clock, Duration::from_secs(3), &cancel);
+    let budget = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(3))?,
+        &cancel,
+    );
     let authenticator = auth()?;
     let operation = operate(tx, &authenticator, request, &budget, append);
     let interrupt = async {
@@ -146,7 +150,7 @@ async fn interrupt(
     }
 }
 
-async fn operate<T: Timer>(
+async fn operate<T: ExecutionTimer>(
     tx: &mut Transaction<'_, Postgres>,
     authenticator: &Authenticator,
     request: &AppendRequest,

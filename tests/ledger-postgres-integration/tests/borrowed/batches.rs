@@ -2,7 +2,7 @@
 use super::*;
 use sqlx::{Postgres, Transaction};
 
-pub(super) async fn run<T: Timer>(
+pub(super) async fn run<T: ExecutionTimer>(
     pool: &PgPool,
     owner: &PgPool,
     control: &Control<'_, T>,
@@ -21,7 +21,7 @@ async fn scoped(pool: &PgPool) -> anyhow::Result<Transaction<'static, Postgres>>
     Ok(tx)
 }
 
-async fn ordered_errors<T: Timer>(
+async fn ordered_errors<T: ExecutionTimer>(
     pool: &PgPool,
     owner: &PgPool,
     control: &Control<'_, T>,
@@ -58,7 +58,7 @@ async fn ordered_errors<T: Timer>(
     Ok(())
 }
 
-async fn exhaustion<T: Timer>(
+async fn exhaustion<T: ExecutionTimer>(
     pool: &PgPool,
     owner: &PgPool,
     control: &Control<'_, T>,
@@ -100,7 +100,7 @@ async fn exhaustion<T: Timer>(
     );
     use_final_sequence(pool, control, &rows).await
 }
-async fn use_final_sequence<T: Timer>(
+async fn use_final_sequence<T: ExecutionTimer>(
     pool: &PgPool,
     control: &Control<'_, T>,
     rows: &[AppendRequest],
@@ -119,7 +119,7 @@ async fn use_final_sequence<T: Timer>(
     Ok(())
 }
 
-async fn competing<T: Timer>(
+async fn competing<T: ExecutionTimer>(
     pool: &PgPool,
     owner: &PgPool,
     control: &Control<'_, T>,
@@ -177,7 +177,7 @@ async fn competing<T: Timer>(
     Ok(())
 }
 
-async fn unpersisted_prefix<T: Timer>(
+async fn unpersisted_prefix<T: ExecutionTimer>(
     pool: &PgPool,
     owner: &PgPool,
     control: &Control<'_, T>,

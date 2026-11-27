@@ -5,7 +5,7 @@ pub(super) async fn run(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
-    control: &Control<'_, Clock>,
+    control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     let request = request(
         "window-nulls",

@@ -1,6 +1,6 @@
 use super::fence_fixture;
 use super::{CancellationToken, Control, Duration, PgLedger, PgPool, auth, committed, request};
-use rss_request_context::{Clock as MessageClock, Deadline, ExecutionTimer};
+use rss_request_context::Deadline;
 use rss_transactional_messaging::{
     inbox::{IdempotencyDisposition, InboxStore},
     message::MessageEnvelope,
@@ -17,19 +17,6 @@ use std::sync::{
 };
 mod helpers;
 use helpers::{binding, deadline, message};
-impl MessageClock for super::Clock {
-    fn now(&self) -> std::time::Instant {
-        self.0 + rss_ledger_postgres::Timer::now(self)
-    }
-}
-impl ExecutionTimer for super::Clock {
-    async fn sleep_until(&self, d: Deadline) {
-        tokio::task::unconstrained(async move {
-            tokio::time::sleep(d.remaining(self.now()).unwrap_or_default()).await;
-        })
-        .await;
-    }
-}
 struct Effect {
     auth: Arc<rss_ledger::Authenticator>,
     fail: bool,
@@ -112,14 +99,18 @@ pub async fn run(
         PgPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?,
     );
     let runtime =
-        Arc::new(PgRuntime::connect(config, super::Clock::new(), fence_fixture::storage()).await?);
+        Arc::new(PgRuntime::connect(config, super::TestClock, fence_fixture::storage()).await?);
     let inbox = PgInboxStore::new(
         runtime.clone(),
         LeaseRenewalPolicy::from_ttl(Duration::from_secs(30))?,
     )?;
-    let clock = super::Clock::new();
+    let clock = super::TestClock;
     let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(30), &cancel);
+    let control = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(30))?,
+        &cancel,
+    );
     sqlx::raw_sql("GRANT UPDATE ON rss_ledger.entries TO ledger_runtime")
         .execute(owner)
         .await?;

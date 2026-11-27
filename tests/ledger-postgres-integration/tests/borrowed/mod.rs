@@ -3,7 +3,7 @@ mod batches;
 mod interruption;
 mod locking;
 
-pub(super) async fn run<T: Timer>(
+pub(super) async fn run<T: ExecutionTimer>(
     store: &PgLedger,
     pool: &PgPool,
     owner: &PgPool,
@@ -22,7 +22,7 @@ pub(super) async fn run<T: Timer>(
     permissions(pool, owner, control).await
 }
 
-async fn scope<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Result<()> {
+async fn scope<T: ExecutionTimer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Result<()> {
     let request = request("borrowed", "event", b"original")?;
     let authenticator = auth()?;
     let mut tx = pool.begin().await?;
@@ -56,7 +56,7 @@ async fn scope<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Res
     Ok(())
 }
 
-async fn visibility<T: Timer>(
+async fn visibility<T: ExecutionTimer>(
     store: &PgLedger,
     pool: &PgPool,
     control: &Control<'_, T>,
@@ -106,7 +106,7 @@ async fn visibility<T: Timer>(
     Ok(())
 }
 
-async fn commit<T: Timer>(
+async fn commit<T: ExecutionTimer>(
     store: &PgLedger,
     pool: &PgPool,
     control: &Control<'_, T>,
@@ -131,7 +131,7 @@ async fn commit<T: Timer>(
     Ok(())
 }
 
-async fn replay<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Result<()> {
+async fn replay<T: ExecutionTimer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Result<()> {
     let request = request("borrowed", "event", b"original")?;
     let authenticator = auth()?;
     let mut tx = pool.begin().await?;
@@ -169,10 +169,14 @@ async fn replay<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Re
 async fn cancellation(pool: &PgPool) -> anyhow::Result<()> {
     let request = request("borrowed", "event", b"original")?;
     let authenticator = auth()?;
-    let clock = Clock::new();
+    let clock = TestClock;
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let stopped = Control::new(&clock, Duration::from_secs(5), &cancel);
+    let stopped = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(5))?,
+        &cancel,
+    );
     let mut tx = pool.begin().await?;
     assert!(matches!(
         lock_head_in_transaction(&mut tx, &authenticator, request.ledger(), &stopped).await,
@@ -199,7 +203,7 @@ async fn cancellation(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn permissions<T: Timer>(
+async fn permissions<T: ExecutionTimer>(
     pool: &PgPool,
     owner: &PgPool,
     control: &Control<'_, T>,
@@ -221,17 +225,21 @@ async fn permissions<T: Timer>(
 }
 
 async fn validation_budget(pool: &PgPool) -> anyhow::Result<()> {
-    let clock = Clock::new();
+    let clock = TestClock;
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let stopped = Control::new(&clock, Duration::from_secs(5), &cancel);
+    let stopped = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(5))?,
+        &cancel,
+    );
     let mut tx = pool.begin().await?;
     assert!(matches!(
         validate_connection(&mut tx, &stopped).await,
         Err(Error::Cancelled(LocalTxDeadlineStage::Setup))
     ));
     let running = CancellationToken::new();
-    let expired = Control::new(&clock, Duration::ZERO, &running);
+    let expired = Control::new(&clock, Deadline::at(clock.now()), &running);
     assert!(matches!(
         validate_connection(&mut tx, &expired).await,
         Err(Error::Deadline(LocalTxDeadlineStage::Setup))
@@ -240,7 +248,10 @@ async fn validation_budget(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn same_chain_batch<T: Timer>(pool: &PgPool, control: &Control<'_, T>) -> anyhow::Result<()> {
+async fn same_chain_batch<T: ExecutionTimer>(
+    pool: &PgPool,
+    control: &Control<'_, T>,
+) -> anyhow::Result<()> {
     let auth = auth()?;
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")

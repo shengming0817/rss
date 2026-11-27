@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn run(store: &PgLedger, control: &Control<'_, Clock>) -> anyhow::Result<()> {
+pub(super) async fn run(store: &PgLedger, control: &Control<'_, TestClock>) -> anyhow::Result<()> {
     let item = request("settlement-state", "staged", b"bytes")?;
     let staged = item.clone();
     let result = store
@@ -23,10 +23,14 @@ pub(super) async fn run(store: &PgLedger, control: &Control<'_, Clock>) -> anyho
     ));
     assert!(committed(store.find(item.ledger(), item.record_id(), control).await)?.is_none());
 
-    let clock = Clock::new();
+    let clock = TestClock;
     let token = CancellationToken::new();
     let signal = token.clone();
-    let long = Control::new(&clock, Duration::from_secs(60 * 60 * 24 * 365), &token);
+    let long = Control::new(
+        &clock,
+        Deadline::from_timeout(&clock, Duration::from_secs(60 * 60 * 24 * 365))?,
+        &token,
+    );
     let result = store.local_tx(item.ledger().tenant(), &long, move |tx| Box::pin(async move {
         let millis = tx.with_connection(|c| Box::pin(async move {
             sqlx::query_scalar::<_, i64>("SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'")
