@@ -18,6 +18,14 @@ pub(super) async fn run(
             .await
             .is_err()
     );
+    runtime_drift(pool, admin, control).await
+}
+
+async fn runtime_drift(
+    pool: &PgPool,
+    admin: &PgPool,
+    control: &Control<'_, TestClock>,
+) -> anyhow::Result<()> {
     for (change, restore) in [
         (
             "GRANT UPDATE ON rss_audit.records TO audit_runtime",

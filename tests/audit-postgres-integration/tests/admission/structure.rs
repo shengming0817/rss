@@ -10,6 +10,26 @@ async fn settings(c: &mut sqlx::PgConnection) -> anyhow::Result<(String, String)
 }
 
 pub(super) async fn run(admin: &PgPool) -> anyhow::Result<()> {
+    read_only_installation(admin).await?;
+    raw_transaction(admin).await?;
+    table_drift(admin).await?;
+    function_drift(
+        admin,
+        "RETURNS TABLE(source_id text",
+        "RETURNS TABLE(source_alias text",
+        true,
+    )
+    .await?;
+    function_drift(
+        admin,
+        "audit tenant mismatch",
+        "changed fixture message",
+        false,
+    )
+    .await
+}
+
+async fn read_only_installation(admin: &PgPool) -> anyhow::Result<()> {
     let mut snapshot = admin.begin().await?;
     sqlx::raw_sql(
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY; SET LOCAL ROLE audit_owner",
@@ -24,6 +44,10 @@ pub(super) async fn run(admin: &PgPool) -> anyhow::Result<()> {
     assert_eq!(settings(&mut snapshot).await?, original);
     snapshot.rollback().await?;
 
+    Ok(())
+}
+
+async fn raw_transaction(admin: &PgPool) -> anyhow::Result<()> {
     // A raw BEGIN is invisible to SQLx's transaction-depth counter. Preserve its
     // settings and uncommitted work even when the component rejects drift.
     let mut raw = admin.acquire().await?;
@@ -45,8 +69,10 @@ pub(super) async fn run(admin: &PgPool) -> anyhow::Result<()> {
     validate_structure(&mut raw).await?;
     assert_eq!(settings(&mut raw).await?, original);
     sqlx::raw_sql("ROLLBACK").execute(&mut *raw).await?;
-    drop(raw);
+    Ok(())
+}
 
+async fn table_drift(admin: &PgPool) -> anyhow::Result<()> {
     for change in [
         "DROP INDEX rss_audit.records_tenant_ledger_sequence_uidx",
         "ALTER TABLE rss_audit.records DROP CONSTRAINT records_recorded_at_check",
@@ -63,47 +89,49 @@ pub(super) async fn run(admin: &PgPool) -> anyhow::Result<()> {
         tx.rollback().await?;
     }
 
-    // Keep the function properties and body identical when testing output drift,
-    // and keep the signature identical when testing implementation drift.
-    for (original, replacement, recreate) in [
-        (
-            "RETURNS TABLE(source_id text",
-            "RETURNS TABLE(source_alias text",
-            true,
-        ),
-        ("audit tenant mismatch", "changed fixture message", false),
-    ] {
-        let mut tx = admin.begin().await?;
-        sqlx::raw_sql("SET LOCAL ROLE audit_owner")
-            .execute(&mut *tx)
-            .await?;
-        let definition: String = sqlx::query_scalar(
-            "SELECT pg_get_functiondef('rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[])'::regprocedure)"
-        ).fetch_one(&mut *tx).await?;
-        assert!(definition.contains(original));
-        if recreate {
-            sqlx::raw_sql("DROP FUNCTION rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[])")
-                .execute(&mut *tx).await?;
-        }
-        sqlx::raw_sql(sqlx::AssertSqlSafe(definition.replacen(
-            original,
-            replacement,
-            1,
-        )))
+    Ok(())
+}
+
+// Vary only the OUT name or only the body. PostgreSQL requires a drop to rename an OUT parameter.
+async fn function_drift(
+    admin: &PgPool,
+    original: &str,
+    replacement: &str,
+    recreate: bool,
+) -> anyhow::Result<()> {
+    let mut tx = admin.begin().await?;
+    sqlx::raw_sql("SET LOCAL ROLE audit_owner")
         .execute(&mut *tx)
         .await?;
-        if recreate {
-            sqlx::raw_sql("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_audit FROM PUBLIC; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_audit TO audit_runtime")
-                .execute(&mut *tx).await?;
-        }
-        assert!(
-            matches!(
-                validate_structure(&mut tx).await,
-                Err(Error::Admission(AdmissionViolation::Functions))
-            ),
-            "{original}"
-        );
-        tx.rollback().await?;
+    let definition: String = sqlx::query_scalar(
+            "SELECT pg_get_functiondef('rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[])'::regprocedure)"
+        ).fetch_one(&mut *tx).await?;
+    assert!(definition.contains(original));
+    if recreate {
+        sqlx::raw_sql(
+            "DROP FUNCTION rss_audit.append_batch(uuid,text[],text[],bigint[],bytea[],bigint[])",
+        )
+        .execute(&mut *tx)
+        .await?;
     }
+    sqlx::raw_sql(sqlx::AssertSqlSafe(definition.replacen(
+        original,
+        replacement,
+        1,
+    )))
+    .execute(&mut *tx)
+    .await?;
+    if recreate {
+        sqlx::raw_sql("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA rss_audit FROM PUBLIC; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_audit TO audit_runtime")
+                .execute(&mut *tx).await?;
+    }
+    assert!(
+        matches!(
+            validate_structure(&mut tx).await,
+            Err(Error::Admission(AdmissionViolation::Functions))
+        ),
+        "{original}"
+    );
+    tx.rollback().await?;
     Ok(())
 }
