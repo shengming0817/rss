@@ -531,7 +531,8 @@ mod inline {
 pub use inline::Shared;
 """)
         base = self.repo.change(fixture, "pub struct Shared;\n")
-        command = ["cargo", "check", "-q", "--locked", "-p", "other-integration"]
+        target = self.enterContext(tempfile.TemporaryDirectory())
+        command = ["cargo", "check", "-q", "--locked", "--target-dir", target, "-p", "other-integration"]
         subprocess.run(command, cwd=self.repo.root, check=True)
         head = self.repo.change(fixture, "pub struct Replaced;\n")
         _, decision = self.repo.select(base=base, head=head)
