@@ -2,6 +2,10 @@ use crate::support::*;
 use rss_identity_core::account::AccountKey;
 use rss_request_context::TenantId;
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub async fn roles(f: &Fixture) -> anyhow::Result<()> {
     let other = AccountKey {
         tenant: TenantId::parse(B)?,
@@ -21,6 +25,21 @@ pub async fn roles(f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("SET LOCAL ROLE identity_maintenance")
         .execute(&mut *tx)
         .await?;
+    sqlx::query("SET LOCAL search_path=identity_authority,pg_catalog")
+        .execute(&mut *tx)
+        .await?;
+    assert_eq!(
+        rss_identity_postgres::schema_signature(&mut tx)
+            .await?
+            .as_deref(),
+        Some(rss_identity_postgres::SCHEMA_SIGNATURE.trim())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW search_path")
+            .fetch_one(&mut *tx)
+            .await?,
+        "identity_authority, pg_catalog"
+    );
     let visible: Vec<String> =
         sqlx::query_scalar("SELECT tenant_id::text FROM identity_authority.accounts")
             .fetch_all(&mut *tx)

@@ -1,12 +1,12 @@
 # rss-identity-postgres
 
-宿主提供已绑定 storage lineage 与 tenant epoch 的 PgRuntime、共享 PasswordKdf、ManagementPolicy 和逐操作时限。用 AuthorityConfig::new(instance, sessions, integrity, audit_budget) 装配实例。Integrity 和 WriteBudget 来自同一 RSS revision 的 rss-audit-postgres。每个宿主容量域建立一个 WriteBudget，给所有使用它的写入者传入克隆；Identity 单次变更多至八条审计事件。
+宿主提供已绑定 storage lineage 与 tenant epoch 的 PgRuntime、共享 PasswordKdf、ManagementPolicy 和逐操作时限。用 AuthorityConfig::new(instance, sessions, integrity, audit_budget) 装配实例。Integrity 和 WriteBudget 来自同一 RSS revision 的 rss-audit-postgres。每个宿主容量域建立一个 WriteBudget，给所有使用它的写入者传入克隆；Identity 单次变更多至八条审计事件；配置至少需要 8 行、1,048,576 字节的批次容量，aggregate 容量至少覆盖一个完整批次。
 
 ## 全新安装与权限
 
-按所选 RSS revision 安装事务消息 schema，再以独立的 NOLOGIN、NOSUPERUSER、NOBYPASSRLS owner 安装 Audit schema。选择 Ledger 时一并安装 Ledger schema，并赋予实际写入角色对应的读取和函数执行权限。由宿主迁移程序在安装事务内调用 install、grant_profile 和 verify_profile。日常服务使用 Runtime 角色；Maintenance 只执行初始化和维护动作；Provisioning 在调用方拥有的目标事务内工作。各角色以自己的凭据运行启动探针。schema、授权 SQL 和签名均随本 crate 提交。
+在 PostgreSQL 17 上按所选 RSS revision 安装事务消息 schema，再以独立的 NOLOGIN、NOSUPERUSER、NOBYPASSRLS owner 安装 Audit schema。选择 Ledger 时一并安装 Ledger schema，并赋予实际写入角色对应的读取和函数执行权限。由宿主迁移程序以安装权限执行 install 和 grant_profile，后者包括 Plain 所需的 Audit schema USAGE、记录读取与 append_batch 函数执行权限。在安装事务内 SET LOCAL ROLE 到实际目标角色再调用 verify_profile。该入口核对 Identity 的 schema 与权限，连接 Authority 时再验证完整 Audit 写入准入。日常服务使用 Runtime 角色；Maintenance 只执行初始化和维护动作；Provisioning 在调用方拥有的目标事务内工作。各角色以自己的凭据运行启动探针。schema、授权 SQL 和签名均随本 crate 提交。
 
-如需复算 schema-signature.sha256，在一次性空 PG 中执行 migrations/0001_authority.sql，再用 psql -XAt 执行 src/schema-signature.sql。生产安装调用库的公开 API。
+如需复算 schema-signature.sha256，在一次性空 PG 中执行 migrations/0001_authority.sql，再以 search_path=pg_catalog 执行 src/schema-signature.sql。嵌入宿主可调用 schema_signature 在自己的连接上计算相同结果。生产安装调用库的公开 API。
 
 ## 会话与事务
 

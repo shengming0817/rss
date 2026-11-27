@@ -12,7 +12,11 @@ pub(crate) fn private_network(network: IpNet) -> bool {
     network == network.trunc()
         && ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
             .iter()
-            .any(|parent| parent.parse::<IpNet>().unwrap().contains(&network))
+            .any(|parent| {
+                parent
+                    .parse::<IpNet>()
+                    .is_ok_and(|net| net.contains(&network))
+            })
 }
 
 pub(crate) fn allowed(ip: IpAddr, loopback: bool, cidrs: &[IpNet]) -> bool {
@@ -40,7 +44,10 @@ pub(crate) fn allowed(ip: IpAddr, loopback: bool, cidrs: &[IpNet]) -> bool {
             "224.0.0.0/3",
         ],
         IpAddr::V6(_) => {
-            if !"2000::/3".parse::<ipnet::IpNet>().unwrap().contains(&ip) {
+            if !"2000::/3"
+                .parse::<IpNet>()
+                .is_ok_and(|net| net.contains(&ip))
+            {
                 return false;
             }
             &["2001::/23", "2001:db8::/32", "2002::/16", "3fff::/20"]
@@ -48,7 +55,7 @@ pub(crate) fn allowed(ip: IpAddr, loopback: bool, cidrs: &[IpNet]) -> bool {
     };
     !blocked
         .iter()
-        .any(|net| net.parse::<ipnet::IpNet>().unwrap().contains(&ip))
+        .any(|net| net.parse::<IpNet>().map_or(true, |net| net.contains(&ip)))
 }
 
 struct SystemResolver;
@@ -66,11 +73,6 @@ pub(crate) struct VettedResolver {
     cidrs: Vec<IpNet>,
 }
 impl VettedResolver {
-    #[cfg(test)]
-    pub(crate) fn with_lookup(mut self, lookup: Arc<dyn Resolve>) -> Self {
-        self.lookup = lookup;
-        self
-    }
     pub(crate) fn new(loopback: bool, cidrs: Vec<IpNet>) -> Self {
         Self {
             lookup: Arc::new(SystemResolver),
@@ -106,6 +108,10 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     async fn mixed_empty_and_rebound_dns_fail_closed() {
         for answers in [
             vec![],
@@ -141,6 +147,10 @@ mod tests {
         );
     }
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn reserved_and_encoded_addresses_are_not_public() {
         for address in [
             "0.0.0.0",
@@ -169,6 +179,10 @@ mod tests {
         assert!(!allowed("10.0.0.1".parse().unwrap(), true, &[]));
     }
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     async fn private_dns_checks_every_answer_and_preserves_vetted_addresses() {
         for (answers, accepted) in [
             (vec!["10.42.0.9:0", "[fd12::9]:0"], true),

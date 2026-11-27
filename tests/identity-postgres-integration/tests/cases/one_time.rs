@@ -40,6 +40,10 @@ async fn consume(
     }
     Ok(accepted)
 }
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub async fn webauthn(f: &Fixture) -> anyhow::Result<()> {
     let s = f.login().await?;
     let w = WebauthnAuthority::new(

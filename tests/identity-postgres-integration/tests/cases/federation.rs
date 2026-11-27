@@ -3,6 +3,10 @@ use rss_identity_core::federation::ProviderView;
 use rss_identity_postgres::*;
 use std::sync::atomic::Ordering;
 use zeroize::Zeroizing;
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 async fn step_begin(
     f: &Fixture,
     s: &Federation,
@@ -53,11 +57,15 @@ async fn step_finish(
     .await
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
     use rss_identity_core::assurance::Assurance;
     let upstream = ScriptedOidc::new();
     let s = service(f, upstream.clone());
-    let p = enabled_department(f, &s, 60).await?;
+    let p = enabled(f, &s).await?;
     let old = issued(finish(&s, begin(f, &s, &p).await?, "alice").await?);
     let now: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
@@ -87,8 +95,22 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
         rss_identity_core::step_up::StepUpContext::new("test.operation".into(), [7; 32]).unwrap();
     let mut tx = f.owner.begin().await?;
     crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
+    sqlx::query("SET LOCAL ROLE identity_runtime")
+        .execute(&mut *tx)
+        .await?;
     rss_identity_postgres::consume_step_up_on(&mut tx, &proof, &context, grant.expose()).await?;
-    tx.rollback().await?;
+    tx.commit().await?;
+    let mut replay = f.owner.begin().await?;
+    crate::support::fence(&mut replay, binding(f.key.tenant)).await?;
+    sqlx::query("SET LOCAL ROLE identity_runtime")
+        .execute(&mut *replay)
+        .await?;
+    assert!(
+        rss_identity_postgres::consume_step_up_on(&mut replay, &proof, &context, grant.expose())
+            .await
+            .is_err()
+    );
+    replay.rollback().await?;
     Ok(())
 }
 pub async fn state_once(f: &Fixture) -> anyhow::Result<()> {

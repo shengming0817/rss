@@ -286,6 +286,11 @@ fn proof_expiry(
 mod tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn proof_conversion_deducts_fractional_seconds_and_settlement_latency() {
         let sampled = Instant::now();
         let budget = sampled + Duration::from_secs(30);

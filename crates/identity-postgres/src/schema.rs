@@ -2,16 +2,41 @@
 use crate::{AuthorityError, AuthorityProfile};
 use rss_identity_core::InstanceId;
 use rss_transactional_messaging_postgres::PgError;
-use sqlx::PgConnection;
+use sqlx::{Connection, PgConnection};
 pub const SCHEMA_VERSION: i32 = 24;
 pub const MIGRATION_SQL: &str = include_str!("../migrations/0001_authority.sql");
-pub const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
+const SCHEMA_SIGNATURE_SQL: &str = include_str!("schema-signature.sql");
 pub const SCHEMA_SIGNATURE: &str = include_str!("schema-signature.sha256");
+/// Compute the schema signature in a pinned catalog search path. Rolling back our
+/// transaction or nested savepoint restores the caller's connection settings.
+pub async fn schema_signature(
+    connection: &mut PgConnection,
+) -> Result<Option<String>, sqlx::Error> {
+    let mut sample = connection.begin().await?;
+    sqlx::query("SET LOCAL search_path = pg_catalog")
+        .execute(&mut *sample)
+        .await?;
+    let signature = sqlx::query_scalar(SCHEMA_SIGNATURE_SQL)
+        .fetch_one(&mut *sample)
+        .await?;
+    sample.rollback().await?;
+    Ok(signature)
+}
+
 /// Run inside the host's migration transaction on an empty identity schema.
 pub async fn install(
     connection: &mut PgConnection,
     instance: InstanceId,
 ) -> Result<(), sqlx::Error> {
+    let major: i32 =
+        sqlx::query_scalar("SELECT current_setting('server_version_num')::int / 10000")
+            .fetch_one(&mut *connection)
+            .await?;
+    if major != 17 {
+        return Err(sqlx::Error::Protocol(
+            "Identity schema requires PostgreSQL 17".into(),
+        ));
+    }
     sqlx::raw_sql(MIGRATION_SQL)
         .execute(&mut *connection)
         .await?;
@@ -122,9 +147,7 @@ pub(crate) async fn probe(
     if versions != [SCHEMA_VERSION] {
         return Ok(Some("schema-version".into()));
     }
-    let signature: Option<String> = sqlx::query_scalar(SCHEMA_SIGNATURE_SQL)
-        .fetch_one(&mut *connection)
-        .await?;
+    let signature: Option<String> = schema_signature(connection).await?;
     if signature.as_deref() != Some(SCHEMA_SIGNATURE.trim()) {
         return Ok(Some("schema-contract".into()));
     }
@@ -205,7 +228,7 @@ async fn verify_host_admission(
         if !valid {return Ok(false);}
         let actual:uuid::Uuid=sqlx::query_scalar("SELECT authority_id FROM identity_authority.deployment").fetch_one(&mut *c).await?;
         let versions:Vec<i32>=sqlx::query_scalar("SELECT version FROM identity_authority.schema_version").fetch_all(&mut *c).await?;
-        let signature:Option<String>=sqlx::query_scalar(SCHEMA_SIGNATURE_SQL).fetch_one(c).await?;
+        let signature:Option<String>=schema_signature(c).await?;
         Ok(actual==instance.as_uuid() && versions==[SCHEMA_VERSION] && signature.as_deref()==Some(SCHEMA_SIGNATURE.trim()))
     }.await.map_err(|_|AuthorityError::Unavailable)?;
     if result {
@@ -234,8 +257,7 @@ pub async fn grant_personnel_fact_read(
 /// Verify a dedicated personnel reader. Host-owned schema privileges are independent.
 pub async fn verify_personnel_fact_read(c: &mut PgConnection) -> Result<(), AuthorityError> {
     use crate::StorageMismatch;
-    let signature: Option<String> = sqlx::query_scalar(SCHEMA_SIGNATURE_SQL)
-        .fetch_one(&mut *c)
+    let signature: Option<String> = schema_signature(c)
         .await
         .map_err(|_| AuthorityError::Unavailable)?;
     if signature.as_deref() != Some(SCHEMA_SIGNATURE.trim()) {

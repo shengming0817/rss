@@ -192,6 +192,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn first_use_boundaries_and_uuid_variant_are_exact() {
         let ms = 1_800_000_000_000;
         let uuid = Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, ms / 1000, 0));

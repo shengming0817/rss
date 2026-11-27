@@ -182,6 +182,10 @@ impl TrustedDepartmentSnapshot<'_> {
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn account() -> AccountKey {
         AccountKey {
             tenant: rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")
@@ -190,6 +194,12 @@ mod tests {
         }
     }
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::panic,
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn assigned_and_absent_retained_views_check_both_deadlines() {
         let start = Instant::now();
         let expiry = start + Duration::from_secs(1);

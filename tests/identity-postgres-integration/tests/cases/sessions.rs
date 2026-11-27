@@ -33,8 +33,12 @@ pub async fn rotation(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn ledger_state(f: &Fixture) -> anyhow::Result<(i64, serde_json::Value)> {
+    Ok(sqlx::query_as("SELECT (SELECT count(*) FROM rss_ledger.entries),coalesce(jsonb_agg(to_jsonb(h) ORDER BY tenant_id,chain_id),'[]') FROM rss_ledger.heads h").fetch_one(&f.owner).await?)
+}
 pub async fn audit_settlement(f: &Fixture) -> anyhow::Result<()> {
     let session = f.login().await?;
+    let ledger_before = ledger_state(f).await?;
     let before = f.events().await?;
     let scope = binding(f.key.tenant);
     let old = || SessionSecret::parse(session.secret().expose().into());
@@ -44,6 +48,7 @@ pub async fn audit_settlement(f: &Fixture) -> anyhow::Result<()> {
         Err(AuthorityError::RolledBack(_))
     ));
     assert_eq!(f.events().await?, before);
+    assert_eq!(ledger_state(f).await?, ledger_before);
     f.store.inspect_session(scope, old()?, deadline()).await?;
     sqlx::query("DROP TRIGGER reject_event ON rss_audit.records")
         .execute(&f.owner)
@@ -62,5 +67,8 @@ pub async fn audit_settlement(f: &Fixture) -> anyhow::Result<()> {
             .await?;
     assert!(total > before);
     assert_eq!(total, linked);
+    let (entries, heads) = ledger_state(f).await?;
+    assert_eq!(entries - ledger_before.0, total - before);
+    assert_ne!(heads, ledger_before.1);
     Ok(())
 }

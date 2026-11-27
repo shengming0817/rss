@@ -183,6 +183,13 @@ impl WebauthnAuthority {
         authorization: RegistrationAuthorization,
         deadline: OperationDeadline,
     ) -> Result<WebauthnChallenge<CreationChallengeResponse>, AuthorityError> {
+        if matches!(
+            (&authorization, recover),
+            (RegistrationAuthorization::First, true)
+                | (RegistrationAuthorization::HostRecovery, false)
+        ) {
+            return Err(AuthorityError::InvalidInput);
+        }
         if label.is_empty() || label.len() > 255 || label.chars().any(char::is_control) {
             return Err(AuthorityError::InvalidInput);
         }

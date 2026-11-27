@@ -89,8 +89,8 @@ impl PasswordPolicy {
     pub const PARALLELISM: u32 = 1;
     pub const SALT_BYTES: usize = 16;
     pub const HASH_BYTES: usize = 32;
-    fn argon2() -> Argon2<'static> {
-        Argon2::new(
+    fn argon2() -> Result<Argon2<'static>, PasswordError> {
+        Ok(Argon2::new(
             argon2::Algorithm::Argon2id,
             argon2::Version::V0x13,
             argon2::Params::new(
@@ -99,8 +99,8 @@ impl PasswordPolicy {
                 Self::PARALLELISM,
                 Some(Self::HASH_BYTES),
             )
-            .expect("fixed Argon2 policy"),
-        )
+            .map_err(|_| PasswordError::Unavailable)?,
+        ))
     }
     fn validate_encoding(value: &str) -> Result<(), PasswordError> {
         use base64::Engine;
@@ -212,7 +212,7 @@ impl PasswordKdf {
     pub async fn hash(&self, secret: Password) -> Result<PasswordEncoding, PasswordError> {
         self.compute(move || {
             let salt = SaltString::generate(&mut OsRng);
-            PasswordPolicy::argon2()
+            PasswordPolicy::argon2()?
                 .hash_password(secret.0.as_bytes(), &salt)
                 .map(|h| PasswordEncoding(Zeroizing::new(h.to_string())))
                 .map_err(|_| PasswordError::Unavailable)
@@ -227,7 +227,7 @@ impl PasswordKdf {
         self.compute(move || {
             let hash =
                 PasswordHash::new(encoded.as_str()).map_err(|_| PasswordError::Unavailable)?;
-            Ok(PasswordPolicy::argon2()
+            Ok(PasswordPolicy::argon2()?
                 .verify_password(secret.0.as_bytes(), &hash)
                 .is_ok())
         })
@@ -244,6 +244,10 @@ impl PasswordKdf {
 mod tests {
     use super::*;
     #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     async fn closing_kdf_waits_for_actual_work_and_rejects_new_work() {
         let kdf = Arc::new(
             PasswordKdf::new(
@@ -283,6 +287,11 @@ mod tests {
             .unwrap();
     }
     #[tokio::test]
+    #[allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     async fn cancelled_waiter_does_not_release_running_work() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (end_tx, end_rx) = std::sync::mpsc::channel();

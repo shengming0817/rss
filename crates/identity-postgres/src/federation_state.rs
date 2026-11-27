@@ -180,6 +180,10 @@ impl StateSigner {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn state_authentication_precedes_tenant_use_and_separates_purpose() {
         use super::*;
         let tenant =

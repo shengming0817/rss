@@ -13,12 +13,21 @@ use std::time::Duration;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn jwt(claims: &Value, kid: Option<&str>, key: &[u8]) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = kid.map(str::to_owned);
     encode(&header, claims, &EncodingKey::from_rsa_der(key)).unwrap()
 }
 #[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     let key_a = include_bytes!("fixtures/entra-a.der");
     let key_b = include_bytes!("fixtures/entra-b.der");
@@ -235,6 +244,10 @@ async fn signed_entra_resource_tokens() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn transport_policy() -> rss_identity_oidc::TransportPolicy {
     rss_identity_oidc::TransportPolicy::new(
         std::time::Duration::from_secs(5),
@@ -245,6 +258,11 @@ fn transport_policy() -> rss_identity_oidc::TransportPolicy {
     .unwrap()
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn upstream_deadline() -> rss_request_context::Deadline {
     rss_request_context::Deadline::at(
         std::time::Instant::now()
@@ -253,6 +271,10 @@ fn upstream_deadline() -> rss_request_context::Deadline {
     )
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn cache_policy() -> rss_identity_oidc::entra::JwksCachePolicy {
     rss_identity_oidc::entra::JwksCachePolicy::new(
         Duration::from_secs(60),
@@ -263,6 +285,11 @@ fn cache_policy() -> rss_identity_oidc::entra::JwksCachePolicy {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 async fn jwks_refresh_cooldown_expiry_and_capacity() -> anyhow::Result<()> {
     use axum::{http::StatusCode, response::IntoResponse};
     use rss_identity_oidc::entra::JwksCachePolicy;

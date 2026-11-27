@@ -1,6 +1,11 @@
 use rss_identity_core::directory::{AccountQuery, Field};
 
 #[test]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn principal_uuid_operands_are_canonical_for_equal_and_set_queries() {
     use rss_identity_core::directory::Expression;
     let canonical = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -31,6 +36,10 @@ fn principal_uuid_operands_are_canonical_for_equal_and_set_queries() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn query_preserves_false_and_composes_only_explicit_sources() {
     let q = AccountQuery::parse(
         Some("enabled==false;(login=icontains='a\\'b',memberActive==true)"),
@@ -59,6 +68,10 @@ fn query_preserves_false_and_composes_only_explicit_sources() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn field_types_and_budgets_reject_unsupported_queries() {
     for filter in [
         "enabled==0",
@@ -104,6 +117,10 @@ fn field_types_and_budgets_reject_unsupported_queries() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn department_predicates_require_an_exact_idp_source() {
     let id = "11111111-1111-4111-8111-111111111111";
     for field in ["department", "departmentSubtree"] {
@@ -123,6 +140,10 @@ fn department_predicates_require_an_exact_idp_source() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn fields_used_by_a_continuation_include_nested_filters_and_ordering() {
     let q = AccountQuery::parse(
         Some("enabled==true;(login==alice,email=isnull=true)"),

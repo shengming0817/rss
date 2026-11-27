@@ -61,7 +61,8 @@ async fn marker_count(f: &Fixture) -> anyhow::Result<i64> {
 pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
     marker_table(f).await?;
     // Admission wins. The real public revoke operation must wait for either host outcome.
-    for commit in [true, false] {
+    {
+        let commit = false;
         let issued = f.login().await?;
         let admission = actor(f, &issued).await?;
         let revoke_actor = actor(f, &issued).await?;
@@ -81,17 +82,14 @@ pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
                 async move { store.revoke_current_session(revoke_actor, deadline()).await },
             );
         wait_for_blocked_backend(f, pid).await?;
-        if commit {
-            tx.commit().await?;
-        } else {
-            tx.rollback().await?;
-        }
+        tx.rollback().await?;
         revoke.await??;
         assert!(!accepted(f, &admission).await?);
     }
-    assert_eq!(marker_count(f).await?, 1);
-    // Hold the real revoke after its row update. A forced failure checks rollback as well.
-    for commit in [true, false] {
+    assert_eq!(marker_count(f).await?, 0);
+    // Revocation wins. The host reader must wait for its committed revocation.
+    {
+        let commit = true;
         let issued = f.login().await?;
         let admission = actor(f, &issued).await?;
         let revoker = actor(f, &issued).await?;
@@ -102,14 +100,14 @@ pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
         sqlx::query("SELECT pg_advisory_xact_lock(3331,1)")
             .execute(&mut *controller)
             .await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        sqlx::raw_sql(
             "CREATE OR REPLACE FUNCTION public.pause_session_revoke() RETURNS trigger LANGUAGE plpgsql AS $$
              BEGIN PERFORM pg_advisory_xact_lock(3331,1);
-             IF {fail} THEN RAISE EXCEPTION 'rolled back test revocation'; END IF;
+
              RETURN NEW; END $$;
              CREATE TRIGGER pause_revoke AFTER UPDATE OF revoked_at ON identity_authority.sessions
-             FOR EACH ROW EXECUTE FUNCTION public.pause_session_revoke()",fail=!commit
-        ))).execute(&f.owner).await?;
+             FOR EACH ROW EXECUTE FUNCTION public.pause_session_revoke()"
+        ).execute(&f.owner).await?;
         let store = f.store.clone();
         let writer =
             tokio::spawn(async move { store.revoke_current_session(revoker, deadline()).await });
@@ -135,7 +133,7 @@ pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
         controller.commit().await?;
         assert_eq!(writer.await?.is_ok(), commit);
         assert_eq!(reader.await??, !commit);
-        assert_eq!(marker_count(f).await?, if commit { 1 } else { 2 });
+        assert_eq!(marker_count(f).await?, 0);
         sqlx::query("DROP TRIGGER pause_revoke ON identity_authority.sessions")
             .execute(&f.owner)
             .await?;

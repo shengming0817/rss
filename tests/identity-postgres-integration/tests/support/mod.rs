@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use rss_identity_core::{
     InstanceId, PrincipalId,
     account::{AccountKey, LoginKey, Password},
@@ -23,23 +22,43 @@ pub const SYSTEM: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 pub const A: &str = "11111111-1111-4111-8111-111111111111";
 pub const B: &str = "22222222-2222-4222-8222-222222222222";
 pub const PASSWORD: &str = "correct horse battery staple";
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub fn password() -> Password {
     Password::new(PASSWORD.into()).unwrap()
 }
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub fn login(s: &str) -> LoginKey {
     LoginKey::parse(s).unwrap()
 }
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub fn source() -> AttemptSource {
     AttemptSource::parse("local-test").unwrap()
 }
 pub fn deadline() -> OperationDeadline {
     OperationDeadline::from_remaining(Duration::from_secs(30))
 }
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub fn credential_keys() -> Arc<CredentialKeys> {
     Arc::new(CredentialKeys::new("fixture".into(), vec![("fixture".into(), [8; 32])]).unwrap())
 }
 pub struct Timer;
 impl Clock for Timer {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -54,18 +73,11 @@ pub struct HostPolicy {
     pub protected: RwLock<Vec<AccountKey>>,
     pub recent: RwLock<ReauthenticationRequirement>,
 }
-impl HostPolicy {
-    pub fn protect(&self, key: AccountKey) {
-        self.protected.write().unwrap().push(key);
-    }
-    pub fn allow(&self, key: AccountKey) {
-        self.managers.write().unwrap().push(key);
-    }
-    pub fn revoke(&self, key: AccountKey) {
-        self.managers.write().unwrap().retain(|k| *k != key);
-    }
-}
 impl ManagementPolicy for HostPolicy {
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn authorize<'a>(
         &'a self,
         c: &'a ManagementContext<'a>,
@@ -113,6 +125,10 @@ pub struct Fixture {
     management_cookie: tokio::sync::Mutex<Option<String>>,
 }
 impl Fixture {
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     pub async fn new(
         pg: &testkit::PgTlsFixture,
         integrity: rss_audit_postgres::Integrity,
@@ -329,6 +345,10 @@ impl Fixture {
             .fetch_one(&self.owner)
             .await?)
     }
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     pub async fn close(self) {
         self.runtime.close().await;
         self.maintenance_runtime.close().await;
@@ -343,6 +363,10 @@ impl Fixture {
         self.admin.close().await;
     }
 }
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub fn binding(tenant: TenantId) -> ExecutionBinding {
     ExecutionBinding::new(
         StorageIdentity::new([1; 16], [2; 16]).unwrap(),

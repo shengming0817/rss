@@ -635,6 +635,9 @@ impl FederationConfig {
                 return Err(FederationError::Configuration.into());
             }
         }
+        if self.callback.len() > 2048 || self.callback.chars().any(char::is_control) {
+            return Err(FederationError::Configuration.into());
+        }
         let callback_url =
             url::Url::parse(&self.callback).map_err(|_| FederationError::Configuration)?;
         if callback_url.scheme() != "https"
@@ -654,6 +657,10 @@ impl FederationConfig {
 mod contract_tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn callback_configuration_accepts_the_host_route_and_requires_a_safe_https_url() {
         let mut config = FederationConfig {
             callback: "https://identity.example.test/api/v1/identity/oidc/callback".into(),
@@ -678,6 +685,10 @@ mod contract_tests {
         }
     }
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn action_vocabulary_and_payload_match_schema() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("federation-security-event-v2.json")).unwrap();

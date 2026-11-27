@@ -66,10 +66,10 @@ use rss_request_context::TenantId;
 use rss_transactional_messaging::{fence::ExecutionBinding, policy::OperationDeadline};
 use rss_transactional_messaging_postgres::PgRuntime;
 pub use schema::{
-    MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_SIGNATURE_SQL, SCHEMA_VERSION,
-    grant_personnel_fact_read, grant_platform_subject_admission, grant_profile,
-    grant_profile_source_admission, install, verify_personnel_fact_read,
-    verify_platform_subject_admission, verify_profile, verify_profile_source_admission,
+    MIGRATION_SQL, SCHEMA_SIGNATURE, SCHEMA_VERSION, grant_personnel_fact_read,
+    grant_platform_subject_admission, grant_profile, grant_profile_source_admission, install,
+    schema_signature, verify_personnel_fact_read, verify_platform_subject_admission,
+    verify_profile, verify_profile_source_admission,
 };
 pub use session_reference::{RevalidatedSession, SessionReference};
 pub use sessions::{
@@ -151,6 +151,10 @@ impl AuthorityConfig {
         audit: rss_audit_postgres::Integrity,
         audit_budget: rss_audit_postgres::WriteBudget,
     ) -> Result<Self, AuthorityError> {
+        let max_events = transaction::MAX_MUTATION_EVENTS;
+        if !audit_budget.supports_batch(max_events, max_events * rss_audit_core::MAX_RECORD_BYTES) {
+            return Err(AuthorityError::Configuration);
+        }
         Ok(Self {
             instance,
             sessions,
@@ -160,14 +164,13 @@ impl AuthorityConfig {
             enterprise: None,
             profile_limits: Default::default(),
             authentication: AuthenticationPolicy::standard(std::time::Duration::from_secs(60))?,
-            profile_receipt_capacity: std::num::NonZeroU32::new(4096).expect("positive default"),
+            profile_receipt_capacity: const { std::num::NonZeroU32::new(4096).unwrap() },
             future_skew_seconds: 30,
-            operation_proof_seconds: std::num::NonZeroU32::new(300).expect("positive default"),
-            max_auth_facts_bytes: std::num::NonZeroU32::new(32768).expect("positive default"),
-            provider_capacity: std::num::NonZeroU16::new(
-                rss_identity_core::federation::MAX_PROVIDERS,
-            )
-            .expect("positive capacity"),
+            operation_proof_seconds: const { std::num::NonZeroU32::new(300).unwrap() },
+            max_auth_facts_bytes: const { std::num::NonZeroU32::new(32768).unwrap() },
+            provider_capacity: const {
+                std::num::NonZeroU16::new(rss_identity_core::federation::MAX_PROVIDERS).unwrap()
+            },
         })
     }
 }
@@ -316,6 +319,10 @@ fn check_probe(result: Result<Option<String>, AuthorityError>) -> Result<(), Aut
 mod tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn probe_preserves_settlement_and_retry_class() {
         for reason in [
             StorageFailure::Transient,

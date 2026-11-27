@@ -264,21 +264,27 @@ impl HttpOidc {
         } else {
             Some(self.resources.bind(&provider)?)
         };
-        let http = if probe {
+        let http = if let Some(slot) = &slot {
+            let mut pooled = slot
+                .client
+                .lock()
+                .map_err(|_| failure(ProviderStage::Binding, ProviderReason::Unavailable))?;
+            if let Some(client) = pooled.as_ref() {
+                client.clone()
+            } else {
+                let permit = self.resources.client_permit()?;
+                let client = Arc::new(ClientPool {
+                    http: self.build_client(provider.credentials(), cidrs)?,
+                    _permit: Some(permit),
+                });
+                *pooled = Some(client.clone());
+                client
+            }
+        } else {
             Arc::new(ClientPool {
                 http: self.build_client(provider.credentials(), cidrs)?,
                 _permit: None,
             })
-        } else {
-            let mut pooled = slot.as_ref().unwrap().client.lock().unwrap();
-            if pooled.is_none() {
-                let permit = self.resources.client_permit()?;
-                *pooled = Some(Arc::new(ClientPool {
-                    http: self.build_client(provider.credentials(), cidrs)?,
-                    _permit: Some(permit),
-                }));
-            }
-            pooled.as_ref().unwrap().clone()
         };
         Ok(Transport {
             channel: Channel {
@@ -304,7 +310,7 @@ impl HttpOidc {
         let (doc, _) = t
             .slot
             .as_ref()
-            .unwrap()
+            .ok_or(FederationError::Configuration)?
             .discovery
             .read(&self.resources, &t, kind, None)
             .await?;
@@ -373,7 +379,7 @@ fn parse_url(value: &str, loopback: bool, cidrs: &[IpNet]) -> Result<Url, Federa
     {
         return Err(FederationError::Configuration);
     }
-    let host = u.host_str().unwrap();
+    let host = u.host_str().ok_or(FederationError::Configuration)?;
     if host
         .trim_matches(['[', ']'])
         .parse::<std::net::IpAddr>()

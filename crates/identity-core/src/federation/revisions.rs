@@ -44,7 +44,10 @@ impl ProviderRevisions {
         if revision.version <= 0 {
             return Err(FederationError::Configuration);
         }
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = key(revision);
         let active = entries.get(&id).and_then(Weak::upgrade);
         let current = match active {
@@ -98,7 +101,10 @@ impl ProviderRevisions {
     }
 
     fn retire_through(&self, r: ProviderRevision, last: i64) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = key(r);
         if let Some(generation) = entries.get(&id).and_then(Weak::upgrade)
             && generation.version <= last

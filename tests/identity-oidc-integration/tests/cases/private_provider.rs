@@ -16,6 +16,17 @@ use testcontainers::{
 use url::Url;
 
 fn private_host() -> anyhow::Result<Ipv4Addr> {
+    if let Some(value) = std::env::var_os("IDENTITY_TEST_PRIVATE_HOST") {
+        let address: Ipv4Addr = value
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid IDENTITY_TEST_PRIVATE_HOST"))?
+            .parse()?;
+        anyhow::ensure!(
+            address.is_private(),
+            "Keycloak published endpoint must be RFC1918"
+        );
+        return Ok(address);
+    }
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     // Route lookup only. No datagram is transmitted.
     socket.connect(("10.255.255.255", 9))?;
@@ -59,6 +70,15 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
     .with_startup_timeout(Duration::from_secs(90))
     .start()
     .await?;
+    let docker_host = keycloak.get_host().await?;
+    anyhow::ensure!(
+        std::env::var_os("IDENTITY_TEST_PRIVATE_HOST").is_some()
+            || matches!(
+                docker_host.to_string().as_str(),
+                "localhost" | "127.0.0.1" | "::1"
+            ),
+        "set IDENTITY_TEST_PRIVATE_HOST to the reachable RFC1918 publish address of the remote Docker daemon"
+    );
     let issuer = format!(
         "https://{host}:{}/realms/identity",
         keycloak.get_host_port_ipv4(8443).await?
@@ -81,6 +101,25 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
     anyhow::ensure!(
         denied
             .validate(tenant()?, &settings("https://127.0.0.1")?, &trusted)
+            .is_err()
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let local = settings(&format!(
+        "https://localhost:{}",
+        listener.local_addr()?.port()
+    ))?;
+    let attempt = denied
+        .test(
+            fixture_provider(&denied, tenant()?, &local, &trusted),
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(attempt,Err(FederationError::Provider(f)) if f.reason==ProviderReason::EgressDenied)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listener.accept())
+            .await
             .is_err()
     );
     let bound = fixture_provider(&allowed, tenant()?, &c, &trusted);

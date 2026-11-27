@@ -1,6 +1,10 @@
 use rss_identity_core::profile::*;
 use serde_json::json;
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn values_remain_typed_and_cannot_become_security_facts() {
     let settings = ProfileSettings {
         extensions_claim: Some("attributes".into()),
@@ -73,6 +77,10 @@ fn extension_budgets_and_sensitive_material_fail_closed() {
     }
 }
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn local_profile_has_no_verified_email_or_authority_override() {
     let local = LocalProfile {
         display_name: None,
@@ -91,6 +99,10 @@ fn local_profile_has_no_verified_email_or_authority_override() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn jsonb_unrepresentable_strings_are_invalid_at_every_depth() {
     for value in [
         json!({"note":"\u{0}"}),
@@ -111,6 +123,10 @@ fn jsonb_unrepresentable_strings_are_invalid_at_every_depth() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn expanded_members_and_arrays_round_trip_with_the_original_byte_budget() {
     let mut object = serde_json::Map::new();
     for i in 0..1023 {

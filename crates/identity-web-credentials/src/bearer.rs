@@ -48,6 +48,10 @@ pub async fn authenticate_bearer_request(
 mod tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn bearer_presentation_rejects_duplicates_mixed_and_malformed_credentials() {
         let token = "a".repeat(64);
         let mut headers = HeaderMap::new();

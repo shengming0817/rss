@@ -4,6 +4,10 @@ use rss_identity_core::{
 };
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn federated_accounts_are_members_without_local_credentials() {
     let key = AccountKey {
         tenant: rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")
@@ -25,6 +29,10 @@ fn federated_accounts_are_members_without_local_credentials() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn provider_settings_are_validated_at_every_deserialization_boundary() {
     use rss_identity_core::federation::*;
     let valid = serde_json::json!({"issuer":"https://idp.example.test","client_id":"client","redirect_uri":"https://identity.example.test/callback","scopes":["openid"],"claims":{"subject":{"kind":"oidc"},"profile":{"extensionsClaim":null,"maxAgeSeconds":14400},"groups":null},"jit":false});

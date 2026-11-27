@@ -629,6 +629,10 @@ impl Authority {
 mod contract_tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn session_action_vocabulary_matches_declared_schema() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("session-security-event-v1.json")).unwrap();

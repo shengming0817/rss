@@ -107,10 +107,28 @@ pub struct AccountQuery {
 pub struct InvalidQuery;
 impl Default for AccountQuery {
     fn default() -> Self {
-        Self::parse(None, None, None, None, 50).expect("default account query")
+        Self {
+            filter: None,
+            sort: vec![Sort {
+                field: Field::PrincipalId,
+                descending: false,
+            }],
+            fields: Self::default_fields(),
+            source: None,
+            limit: 50,
+        }
     }
 }
 impl AccountQuery {
+    fn default_fields() -> Vec<Field> {
+        vec![
+            Field::PrincipalId,
+            Field::Login,
+            Field::Enabled,
+            Field::MemberActive,
+            Field::HasLocalPassword,
+        ]
+    }
     /// Parse bounded account-directory inputs; omitted ordering uses `principalId`.
     ///
     /// Filters use `;` for AND and `,` for OR (AND binds more tightly); parentheses
@@ -152,13 +170,7 @@ impl AccountQuery {
                 .into_iter()
                 .map(Field::parse)
                 .collect::<Result<Vec<_>, _>>()?,
-            None => vec![
-                Field::PrincipalId,
-                Field::Login,
-                Field::Enabled,
-                Field::MemberActive,
-                Field::HasLocalPassword,
-            ],
+            None => Self::default_fields(),
         };
         if fields.iter().any(|field| !field.output()) {
             return Err(InvalidQuery);

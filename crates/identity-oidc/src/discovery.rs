@@ -231,7 +231,10 @@ impl Document {
         t.channel.check()?;
         super::left(t.deadline, stage)?;
         let flight = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let now = resources.now();
             let running = state.flight.as_ref().and_then(WeakShared::upgrade);
             if let Some(hit) = &state.cached {
@@ -268,7 +271,11 @@ impl Document {
                 let work = async move {
                     let _permit = permit;
                     let result = owner.fetch(&resources, &channel, &request_kind).await;
-                    owner.state.lock().unwrap().flight = None;
+                    owner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .flight = None;
                     result
                 }
                 .boxed()
@@ -321,7 +328,7 @@ impl Document {
         let previous = self
             .state
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .cached
             .as_ref()
             .map(|c| (c.value.clone(), c.freshness));
@@ -352,7 +359,10 @@ impl Document {
             Kind::Discovery { .. } => resources.policy.discovery_ttl,
             Kind::Keys { .. } => resources.policy.jwks_ttl,
         };
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.check()?;
         channel.check()?;
         let mut freshness = crate::freshness::Freshness::default();
@@ -459,7 +469,12 @@ fn retire_changed_keys(old: &Representation, next: Option<&(Url, Arc<Document>)>
         && next.is_none_or(|(_, new_keys)| !Arc::ptr_eq(old_keys, new_keys))
     {
         old_keys.retired.store(true, Ordering::Release);
-        old_keys.state.lock().unwrap().cached.take();
+        old_keys
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cached
+            .take();
         return true;
     }
     false

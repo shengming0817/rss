@@ -5,9 +5,17 @@ use rss_identity_oidc::ReusePolicy;
 use rss_identity_oidc::{HttpOidc, PrivateProviderAccess};
 use rss_request_context::TenantId;
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn tenant() -> TenantId {
     TenantId::parse("11111111-1111-4111-8111-111111111111").unwrap()
 }
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn grant(issuer: &str, cidrs: &[&str]) -> PrivateProviderAccess {
     PrivateProviderAccess {
         tenant: tenant(),
@@ -16,6 +24,10 @@ fn grant(issuer: &str, cidrs: &[&str]) -> PrivateProviderAccess {
         cidrs: cidrs.iter().map(|value| value.parse().unwrap()).collect(),
     }
 }
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn settings(issuer: &str, client: &str) -> ProviderSettings {
     ProviderSettingsInput {
         issuer: issuer.into(),
@@ -34,6 +46,10 @@ fn settings(issuer: &str, client: &str) -> ProviderSettings {
     .unwrap()
 }
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn private_grants_are_exact_and_do_not_grant_mfa() {
     let issuer = "https://10.42.0.9:8443/realms/reference";
     let adapter = HttpOidc::new(
@@ -138,6 +154,10 @@ fn only_bounded_canonical_private_networks_are_authorizable() {
     );
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn transport_policy() -> rss_identity_oidc::TransportPolicy {
     rss_identity_oidc::TransportPolicy::new(
         std::time::Duration::from_secs(5),

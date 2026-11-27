@@ -240,6 +240,10 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn claims(groups: UpstreamGroups) -> UpstreamClaims {
         UpstreamClaims {
             department_snapshot:
@@ -259,6 +263,10 @@ mod tests {
             .map_err(|_| corrupt())?
             .checked()
     }
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn projected(value: &serde_json::Value, now: i64) -> Groups {
         let facts = decode(value.clone()).unwrap();
         facts
@@ -266,10 +274,18 @@ mod tests {
             .project(source(), facts.provider_config_version, now)
             .unwrap()
     }
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn source() -> FactSource {
         FactSource::new(Uuid::new_v4(), "https://idp.test".into()).unwrap()
     }
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn department_format_is_explicit_and_legacy_is_rejected() {
         let facts = AuthenticationFacts::collect(
             claims(UpstreamGroups::NotConfigured),
@@ -300,6 +316,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn department_snapshot_is_closed_fixed_and_independent_of_groups() {
         let mapping = DepartmentSnapshotClaim::new("organization_snapshot".into(), 60).unwrap();
         let snapshot: DepartmentSnapshot = serde_json::from_value(serde_json::json!({"version":1,"sourceRevision":"r1","nodes":[{"id":"dept","displayName":"Department","parentId":null}],"memberships":["dept"]})).unwrap();
@@ -376,6 +396,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn snapshot_is_fixed_and_only_available_contains_values() {
         let facts = AuthenticationFacts::collect(
             claims(UpstreamGroups::present(vec![]).unwrap()),
@@ -436,6 +460,10 @@ mod tests {
         }
     }
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn storage_rejects_old_or_malformed_formats() {
         let facts = AuthenticationFacts::collect(
             claims(UpstreamGroups::present(vec![]).unwrap()),
@@ -475,6 +503,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn future_observation_preserves_identity_and_withholds_groups_until_observed() {
         for groups in [
             UpstreamGroups::NotConfigured,

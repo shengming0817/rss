@@ -49,6 +49,10 @@ async fn exchange(
         .await?)
 }
 #[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 async fn jwks_refreshes_on_new_signing_key() -> anyhow::Result<()> {
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let issuer = format!("http://{}/realm", socket.local_addr()?);

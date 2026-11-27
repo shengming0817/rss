@@ -180,6 +180,10 @@ impl From<rss_transactional_messaging::error::MessagingErrorKind> for StorageFai
 mod diagnostic_tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn host_configuration_input_and_deadline_are_distinct() {
         let keys = crate::CredentialKeys::new("absent".into(), vec![])
             .err()

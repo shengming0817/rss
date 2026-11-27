@@ -41,6 +41,10 @@ async fn host_authorization(
     })).await
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 pub async fn provisioning(f: &Fixture) -> anyhow::Result<()> {
     // Each fixture gets its own role, avoiding shared role mutations across concurrent tests.
     let role = format!("provision_{}", uuid::Uuid::new_v4().simple());

@@ -125,6 +125,12 @@ mod tests {
     use super::*;
     use std::time::Duration;
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::panic,
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn retained_values_check_exact_deadlines_and_proof_wins() {
         let start = Instant::now();
         let snapshot = start + Duration::from_secs(1);
@@ -181,6 +187,10 @@ mod tests {
         }
     }
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn unavailable_is_not_promoted_and_still_requires_live_proof() {
         let start = Instant::now();
         let proof = start + Duration::from_secs(10);

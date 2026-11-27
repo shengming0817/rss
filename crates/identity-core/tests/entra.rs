@@ -2,6 +2,10 @@ use rss_identity_core::{entra::*, federation::*};
 use serde_json::json;
 use uuid::Uuid;
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn subject_strategy_is_explicit_and_namespaces_do_not_collide() {
     let tenant = Uuid::new_v4();
     let user = Uuid::new_v4();

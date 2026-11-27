@@ -1,5 +1,9 @@
 use rss_identity_core::account::{LoginKey, Password, PasswordEncoding, PasswordKdf};
 #[tokio::test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 async fn passwords_and_login_keys_are_bounded() {
     assert!(LoginKey::parse(" alice").is_err());
     assert!(LoginKey::parse("Ａlice").is_err());
@@ -36,6 +40,10 @@ async fn passwords_and_login_keys_are_bounded() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn password_work_reservation_is_checked_without_allocating_it() {
     use rss_identity_core::account::PasswordPolicy;
     use std::num::{NonZeroU64, NonZeroUsize};

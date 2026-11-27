@@ -33,7 +33,7 @@ impl AuthenticatedSession {
         self.assurance()?;
         Ok(SessionReference {
             instance: self.authority,
-            tenant: Uuid::parse_str(&self.key.tenant.to_string()).expect("validated tenant"),
+            tenant: Uuid::from_bytes(self.key.tenant.octets()),
             principal: self.key.principal.as_uuid(),
             session: self.view.id.as_uuid(),
             credential_kind: self.view.credential_kind,

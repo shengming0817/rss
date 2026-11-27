@@ -316,6 +316,10 @@ pub(crate) async fn write_credentials(
 mod tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn credentials_are_authenticated_to_their_owner_and_version() {
         let keys = CredentialKeys::new("first".into(), vec![("first".into(), [1; 32])]).unwrap();
         let a = Uuid::new_v4();

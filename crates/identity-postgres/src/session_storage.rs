@@ -463,6 +463,11 @@ pub(crate) fn credential_kind(row: &sqlx::postgres::PgRow) -> Result<CredentialK
 mod tests {
     use super::*;
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn idle_renewal_respects_the_original_monotonic_cutoff() {
         let start = Instant::now();
         let sample = TimeSample {
@@ -480,6 +485,10 @@ mod tests {
         assert_eq!(expired, original);
     }
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn policy_wait_cannot_extend_recent_authentication() {
         let start = Instant::now();
         let sample = TimeSample {
@@ -492,6 +501,11 @@ mod tests {
         assert!(!sample.within_age(100, Duration::ZERO, start));
     }
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn database_fraction_and_all_later_latency_consume_deadline() {
         let start = Instant::now();
         let sample = TimeSample {
@@ -529,6 +543,12 @@ mod fact_ownership_tests {
         groups::{GroupFactsMaxAge, Groups, UpstreamGroups},
     };
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        clippy::panic,
+        clippy::unwrap_used,
+        reason = "Fixed test inputs and immediate fixture assertions"
+    )]
     fn collection_and_projection_transfer_group_and_department_storage() {
         let groups = vec!["engineering".to_owned()];
         let id = rss_identity_core::department::DepartmentId::new("dept".into()).unwrap();

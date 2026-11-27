@@ -104,8 +104,6 @@ pub(super) struct Resources {
     pub refreshes: Arc<Semaphore>,
     clients: Arc<Semaphore>,
     pub policy: ReusePolicy,
-    #[cfg(test)]
-    offset: Mutex<Duration>,
 }
 impl Resources {
     pub fn new(policy: ReusePolicy) -> Result<Arc<Self>, FederationError> {
@@ -116,24 +114,11 @@ impl Resources {
             refreshes: Arc::new(Semaphore::new(policy.max_refreshes)),
             clients: Arc::new(Semaphore::new(policy.max_providers)),
             policy,
-            #[cfg(test)]
-            offset: Mutex::default(),
         }))
     }
 
-    #[cfg(test)]
-    pub fn resident_bytes(&self) -> usize {
-        self.bytes.load(Ordering::Acquire)
-    }
     pub fn now(&self) -> Instant {
-        let now = Instant::now();
-        #[cfg(test)]
-        let now = now + *self.offset.lock().unwrap();
-        now
-    }
-    #[cfg(test)]
-    pub fn advance(&self, duration: Duration) {
-        *self.offset.lock().unwrap() += duration;
+        Instant::now()
     }
     pub fn bind(
         &self,
@@ -144,7 +129,10 @@ impl Resources {
             return Err(FederationError::Configuration);
         }
         let id = key(revision);
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !entries.contains_key(&id)
             && entries.len() >= self.policy.max_providers
             && !evict_idle(&mut entries)
@@ -206,7 +194,10 @@ impl Resources {
     }
 
     pub fn client_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, FederationError> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
             if let Ok(permit) = self.clients.clone().try_acquire_owned() {
                 return Ok(permit);
@@ -227,7 +218,10 @@ impl Resources {
         if bytes > self.policy.max_resident_bytes {
             return Err(FederationError::Unavailable);
         }
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let credit = replaced.as_ref().map_or(0, |lease| lease.bytes);
         while self
             .bytes

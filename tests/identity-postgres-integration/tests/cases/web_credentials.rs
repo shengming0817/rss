@@ -28,6 +28,22 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
         .execute(&f.owner)
         .await?;
     let scope = binding(f.key.tenant);
+    let mut bearer_headers = HeaderMap::new();
+    bearer_headers.insert(
+        "authorization",
+        format!("Bearer {}", issued.secret().expose()).parse()?,
+    );
+    assert!(
+        rss_identity_web_credentials::authenticate_bearer_request(
+            &f.store,
+            &config,
+            scope,
+            &bearer_headers,
+            deadline()
+        )
+        .await
+        .is_err()
+    );
     let passive = authenticate_request(
         &f.store,
         &config,

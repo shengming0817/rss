@@ -5,6 +5,10 @@ use rss_identity_core::{
 };
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn explicit_session_policy_preserves_absolute_expiry() {
     let policy = SessionPolicy::new(900, 14_400).unwrap();
     let mut session = SessionLifetime::new(1_000, policy).unwrap();
@@ -21,6 +25,10 @@ fn explicit_session_policy_preserves_absolute_expiry() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn authentication_state_has_no_product_role_requirement() {
     let key = AccountKey {
         tenant: rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")
@@ -37,6 +45,10 @@ fn authentication_state_has_no_product_role_requirement() {
 }
 
 #[test]
+#[allow(
+    clippy::unwrap_used,
+    reason = "Fixed test inputs and immediate fixture assertions"
+)]
 fn instance_identity_is_non_nil_and_exact() {
     let first = InstanceId::generate();
     assert_ne!(first, InstanceId::generate());
