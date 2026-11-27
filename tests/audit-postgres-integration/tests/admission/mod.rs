@@ -6,6 +6,19 @@ pub(super) async fn run(
     control: &Control<'_, TestClock>,
 ) -> anyhow::Result<()> {
     budget::run(pool).await?;
+    sqlx::query("ALTER ROLE audit_runtime REPLICATION")
+        .execute(admin)
+        .await?;
+    let replication = PgAudit::new(pool.clone(), Integrity::Plain, write_budget()?, control).await;
+    sqlx::query("ALTER ROLE audit_runtime NOREPLICATION")
+        .execute(admin)
+        .await?;
+    assert!(matches!(
+        replication,
+        Err(Error::Admission(
+            rss_audit_postgres::AdmissionViolation::Role
+        ))
+    ));
     foreign_role(pool, admin, control).await?;
     borrowed(pool, admin, control).await?;
     sqlx::raw_sql("CREATE ROLE unrelated_audit_reader NOLOGIN; GRANT SELECT ON rss_audit.records TO unrelated_audit_reader").execute(admin).await?;

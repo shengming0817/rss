@@ -1,4 +1,5 @@
 use super::*;
+mod settlement;
 #[allow(clippy::cognitive_complexity)]
 // reason: fixture assertions keep each failure beside its durable-state check.
 pub async fn run(
@@ -161,6 +162,7 @@ pub async fn run(
     interruption(store, owner).await?;
     exhaustion(store, owner, control).await?;
     business_atomicity(store, owner, control).await?;
+    settlement::run(store, control).await?;
     Ok(())
 }
 async fn interruption(store: &PgLedger, owner: &PgPool) -> anyhow::Result<()> {

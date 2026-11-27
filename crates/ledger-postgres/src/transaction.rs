@@ -147,7 +147,7 @@ impl PgLedger {
         #[cfg(feature = "integration")]
         let fault = self.fault.swap(0, std::sync::atomic::Ordering::SeqCst);
         let setup = control.run_stage(LocalTxDeadlineStage::Setup, async {
-            let millis=control.remaining().as_millis().max(1).to_string();
+            let millis=control.remaining().as_millis().clamp(1, i32::MAX as u128).to_string();
             sqlx::query("SELECT set_config('rss.tenant_id',$1,true),set_config('statement_timeout',$2,true),set_config('lock_timeout',$2,true)")
                 .bind(tenant.to_string()).bind(millis).execute(&mut *tx).await.map_err(Error::from)?;
             Ok(())
@@ -172,10 +172,37 @@ impl PgLedger {
             }
             Err(error) => Err(error),
         };
-        // An expired control cannot poll rollback; do not invent rollback evidence.
-        if let Err(error) = control.check(LocalTxDeadlineStage::Operation) {
-            return LocalTxAttempt::commit_unknown(error);
-        }
+        // An acknowledged COMMIT command may end an already aborted transaction
+        // with PostgreSQL's ROLLBACK tag. Check usability before sending COMMIT.
+        let body = match body {
+            Ok(value) => {
+                if let Err(error) = control.check(LocalTxDeadlineStage::Operation) {
+                    return LocalTxAttempt::commit_unknown(error);
+                }
+                match control
+                    .run_stage(LocalTxDeadlineStage::Commit, async {
+                        match sqlx::query("SELECT 1").execute(&mut *tx).await {
+                            Ok(_) => Ok(Ok(value)),
+                            Err(error)
+                                if error
+                                    .as_database_error()
+                                    .and_then(|db| db.code())
+                                    .as_deref()
+                                    == Some("25P02") =>
+                            {
+                                Ok(Err(Error::from(error)))
+                            }
+                            Err(error) => Err(Error::from(error)),
+                        }
+                    })
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => return LocalTxAttempt::commit_unknown(error),
+                }
+            }
+            Err(operation) => Err(operation),
+        };
         match body {
             Ok(value) => {
                 let result = control
@@ -219,7 +246,10 @@ impl PgLedger {
                         LocalTxAttempt::rolled_back(e)
                     }
                     Err(settlement) if !rollback_started => {
-                        LocalTxAttempt::commit_unknown(settlement)
+                        LocalTxAttempt::commit_unknown(Error::Rollback {
+                            operation: Box::new(e),
+                            settlement: Box::new(settlement),
+                        })
                     }
                     Err(settlement) => LocalTxAttempt::rollback_failed(Error::Rollback {
                         operation: Box::new(e),

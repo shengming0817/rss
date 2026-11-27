@@ -6,7 +6,8 @@ use tokio_util::sync::CancellationToken;
 pub trait Timer: Send + Sync {
     /// Current monotonic coordinate.
     fn now(&self) -> Duration;
-    /// Wait until a coordinate in the same origin.
+    /// Wait until a coordinate in the same origin. An elapsed deadline must be ready
+    /// on its first poll; operation and settlement share this absolute cutoff.
     fn sleep_until(&self, deadline: Duration) -> impl Future<Output = ()> + Send;
 }
 /// One absolute budget, including transaction settlement. Never reset between stages.

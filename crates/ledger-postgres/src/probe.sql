@@ -16,11 +16,12 @@ WITH reachable AS (
 (2,'schema',(SELECT obj_description(oid,'pg_namespace')='rss-ledger-postgres:1' AND has_schema_privilege(oid,'USAGE') FROM pg_namespace WHERE nspname='rss_ledger')),
 (3,'schema',(SELECT count(*)=2 AND bool_and(relname IN ('heads','entries') AND relpersistence='p' AND has_table_privilege(oid,'SELECT')) FROM relations)),
 (4,'role',NOT EXISTS(SELECT FROM reachable WHERE rolsuper OR rolbypassrls OR rolcreaterole OR rolreplication)),
-(5,'permissions',NOT EXISTS(SELECT FROM reachable r CROSS JOIN relations c WHERE c.relowner=r.oid OR has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES'))),
+(5,'permissions',NOT EXISTS(SELECT FROM reachable r CROSS JOIN relations c WHERE c.relowner=r.oid OR has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES')
+ OR CASE WHEN current_setting('server_version_num')::integer >= 170000 THEN has_table_privilege(r.oid,c.oid,'MAINTAIN') ELSE false END)),
 (6,'permissions',NOT EXISTS(SELECT FROM reachable r JOIN pg_namespace n ON n.nspname='rss_ledger' WHERE n.nspowner=r.oid OR has_schema_privilege(r.oid,n.oid,'CREATE'))),
 (7,'permissions',NOT EXISTS(SELECT FROM relations c CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE a.grantee=0 OR (a.privilege_type='MAINTAIN' AND EXISTS(SELECT FROM reachable r WHERE r.oid=a.grantee OR pg_has_role(r.oid,a.grantee,'USAGE'))))),
 (8,'permissions',NOT EXISTS(SELECT FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a WHERE n.nspname='rss_ledger' AND a.grantee=0)),
-(9,'functions',(SELECT count(*)=2 AND bool_and(prosecdef AND proconfig=ARRAY['search_path=pg_catalog, rss_ledger'] AND ((proname='prepare_append' AND prorettype='rss_ledger.heads'::regtype AND pronargs=4) OR (proname='insert_entries' AND prorettype='void'::regtype AND pronargs=9))) FROM funcs)),
+(9,'functions',(SELECT count(*)=2 AND bool_and(prosecdef AND proconfig IS NOT DISTINCT FROM ARRAY['search_path=pg_catalog, rss_ledger'] AND ((proname='prepare_append' AND prorettype=(SELECT reltype FROM relations WHERE relname='heads') AND pronargs=4) OR (proname='insert_entries' AND prorettype='void'::regtype AND pronargs=9))) FROM funcs)),
 (10,'role',NOT EXISTS(SELECT FROM funcs p JOIN pg_roles r ON r.oid=p.proowner WHERE r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcanlogin OR r.rolcreaterole OR r.oid IN (SELECT oid FROM reachable))),
 (11,'permissions',NOT EXISTS(SELECT FROM funcs p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0)),
 (12,'rls',(SELECT count(*)=2 AND bool_and(polname='tenant_scope' AND polcmd='*' AND polpermissive AND polroles=ARRAY[0::oid] AND pg_get_expr(polqual,polrelid)=pg_get_expr(polwithcheck,polrelid) AND pg_get_expr(polqual,polrelid)='(tenant_id = (NULLIF(current_setting(''rss.tenant_id''::text, true), ''''::text))::uuid)') FROM pg_policy WHERE polrelid IN (SELECT oid FROM relations))),
@@ -45,7 +46,7 @@ WITH reachable AS (
 (19,'constraints',NOT EXISTS (
  SELECT FROM (
     SELECT c.relname::text,pg_get_constraintdef(k.oid) FROM pg_constraint k JOIN relations c ON c.oid=k.conrelid
-    WHERE k.contype<>'n'
+    WHERE k.contype NOT IN ('n','f')
     EXCEPT VALUES
     ('entries',$d$CHECK (((seq <> 0) OR (previous_tag = decode(repeat('00'::text, 32), 'hex'::text))))$d$),
     ('entries','CHECK ((encoding_version = 1))'),
@@ -55,7 +56,6 @@ WITH reachable AS (
     ('entries','CHECK ((octet_length(previous_tag) = 32))'),
     ('entries','CHECK (((octet_length(record_id) >= 1) AND (octet_length(record_id) <= 514)))'),
     ('entries','CHECK ((seq >= 0))'),('entries','CHECK ((octet_length(tag) = 32))'),
-    ('entries','FOREIGN KEY (tenant_id, chain_id) REFERENCES rss_ledger.heads(tenant_id, chain_id)'),
     ('entries','UNIQUE (tenant_id, chain_id, record_id)'),
     ('heads','CHECK (((octet_length(chain_id) >= 1) AND (octet_length(chain_id) <= 255)))'),
     ('heads',$d$CHECK (((seq IS NOT NULL) OR (tag = decode(repeat('00'::text, 32), 'hex'::text))))$d$),
@@ -65,6 +65,16 @@ WITH reachable AS (
  ) invalid_constraints
 )
 ),
+-- Foreign keys deparse differently when the referenced schema is on search_path.
+(19,'constraints',(SELECT count(*)=1 AND bool_and((
+    src.relname='entries' AND k.confrelid=(SELECT oid FROM relations WHERE relname='heads')
+    AND k.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=k.conrelid AND attname='tenant_id'),
+                       (SELECT attnum FROM pg_attribute WHERE attrelid=k.conrelid AND attname='chain_id')]
+    AND k.confkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=k.confrelid AND attname='tenant_id'),
+                        (SELECT attnum FROM pg_attribute WHERE attrelid=k.confrelid AND attname='chain_id')]
+    AND k.confupdtype='a' AND k.confdeltype='a' AND k.confmatchtype='s'
+    AND NOT k.condeferrable AND NOT k.condeferred AND k.convalidated) IS TRUE)
+ FROM pg_constraint k JOIN relations src ON src.oid=k.conrelid WHERE k.contype='f')),
 (20,'permissions',NOT EXISTS(SELECT FROM pg_attribute a JOIN relations c ON c.oid=a.attrelid CROSS JOIN LATERAL aclexplode(a.attacl) acl WHERE a.attnum>0 AND acl.grantee=0)),
 (21,'rls',(SELECT bool_and(relrowsecurity AND relforcerowsecurity) FROM relations)),
 (22,'permissions',NOT EXISTS(SELECT FROM acl a CROSS JOIN reachable r WHERE a.is_grantable AND (a.grantee=r.oid OR pg_has_role(r.oid,a.grantee,'USAGE'))) AND NOT EXISTS(SELECT FROM pg_auth_members m JOIN reachable r ON m.member=r.oid WHERE m.admin_option))

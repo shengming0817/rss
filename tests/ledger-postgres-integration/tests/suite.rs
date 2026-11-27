@@ -134,6 +134,7 @@ async fn run() -> anyhow::Result<()> {
     let clock = Clock::new();
     let cancel = CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(100), &cancel);
+    verify_catalog_admission(&pool, &owner, &control).await?;
     let store = PgLedger::new(pool.clone(), auth()?, &control).await?;
     scenarios::run(&store, &pool, &owner, &control).await?;
     window::run(&store, &pool, &owner, &control).await?;
@@ -276,5 +277,65 @@ async fn rejected_probe_retires_connection(
         .await?;
     assert_ne!(before, after);
     one.close().await;
+    Ok(())
+}
+
+async fn verify_catalog_admission(
+    pool: &PgPool,
+    owner: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET search_path TO rss_ledger, pg_catalog")
+        .execute(&mut *connection)
+        .await?;
+    validate_connection(&mut connection, control).await?;
+    sqlx::query("RESET search_path")
+        .execute(&mut *connection)
+        .await?;
+
+    sqlx::query("ALTER SCHEMA rss_ledger RENAME TO candidate_ledger")
+        .execute(owner)
+        .await?;
+    let missing = validate_connection(&mut connection, control).await;
+    sqlx::query("ALTER SCHEMA candidate_ledger RENAME TO rss_ledger")
+        .execute(owner)
+        .await?;
+    assert!(matches!(
+        missing,
+        Err(Error::Admission(AdmissionViolation::Schema))
+    ));
+
+    sqlx::query(
+        "ALTER FUNCTION rss_ledger.prepare_append(uuid,text,text,smallint) RESET search_path",
+    )
+    .execute(owner)
+    .await?;
+    let writer = validate_connection(&mut connection, control).await;
+    let reader = validate_read_connection(&mut connection, control).await;
+    sqlx::query("ALTER FUNCTION rss_ledger.prepare_append(uuid,text,text,smallint) SET search_path=pg_catalog,rss_ledger")
+        .execute(owner).await?;
+    for result in [writer, reader] {
+        assert!(matches!(
+            result,
+            Err(Error::Admission(AdmissionViolation::Functions))
+        ));
+    }
+    let version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+        .fetch_one(owner)
+        .await?;
+    if version >= 170000 {
+        sqlx::query("GRANT pg_maintain TO ledger_runtime")
+            .execute(owner)
+            .await?;
+        let result = validate_connection(&mut connection, control).await;
+        sqlx::query("REVOKE pg_maintain FROM ledger_runtime")
+            .execute(owner)
+            .await?;
+        assert!(matches!(
+            result,
+            Err(Error::Admission(AdmissionViolation::Permissions))
+        ));
+    }
     Ok(())
 }

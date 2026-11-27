@@ -103,8 +103,7 @@ def verify_mode(directory, features, rev, env, *, ledger_only=False):
     binary = directory / "target/debug" / package
     output = subprocess.check_output([binary], cwd=directory, env=env, timeout=30, text=True)
     require(output.strip() == package.replace("-", " ") + " passed", f"unexpected output: {output}")
-    shutil.copyfile(directory / "Cargo.lock", directory / f"{package}.lock")
-    print(f"{directory.name}/{package}: passed", flush=True)
+    print(f"{directory.relative_to(directory.parents[1])}: passed", flush=True)
 
 
 def main():
@@ -126,13 +125,15 @@ def main():
     print(f"Verified six-package closure. Testing {REPOSITORY} @ {rev} in {run_dir}", flush=True)
     for mode, features in [("plain", []), ("ledger", ["ledger"]), ("messaging", ["messaging"]),
                            ("combined", ["ledger", "messaging"])]:
-        directory = run_dir / mode
-        (directory / "src").mkdir(parents=True)
-        validate_cargo_config(directory, env)
+        scenarios = [(False, features)]
         if "ledger" in features:
-            verify_mode(directory, [f for f in features if f == "messaging"], rev, env, ledger_only=True)
-        verify_mode(directory, features, rev, env)
-        shutil.rmtree(directory / "target")
+            scenarios.append((True, [f for f in features if f == "messaging"]))
+        for standalone, flags in scenarios:
+            directory = run_dir / mode / ("ledger-consumer" if standalone else "audit-consumer")
+            (directory / "src").mkdir(parents=True)
+            validate_cargo_config(directory, env)
+            verify_mode(directory, flags, rev, env, ledger_only=standalone)
+            shutil.rmtree(directory / "target")
 
 
 if __name__ == "__main__":

@@ -16,10 +16,10 @@ WITH reachable AS MATERIALIZED (
 SELECT current_setting('rss.tenant_id',true) AS tenant,
 (SELECT session_user = current_user
  AND EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner
-   WHERE n.nspname='rss_audit' AND NOT r.rolcanlogin AND NOT r.rolsuper
+   WHERE n.nspname='rss_audit' AND NOT r.rolcanlogin AND NOT r.rolreplication AND NOT r.rolsuper
      AND NOT r.rolbypassrls AND NOT r.rolcreaterole
      AND NOT pg_has_role(current_user,r.oid,'SET'))
- AND NOT EXISTS (SELECT 1 FROM reachable r WHERE (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb))
+ AND NOT EXISTS (SELECT 1 FROM reachable r WHERE (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolreplication OR r.rolcreatedb))
  AND NOT EXISTS (SELECT 1 FROM pg_namespace n, reachable r
    WHERE n.nspname='rss_audit'
      AND has_schema_privilege(r.oid,n.oid,'CREATE'))
@@ -83,6 +83,7 @@ SELECT current_setting('rss.tenant_id',true) AS tenant,
  reachable r WHERE n.nspname='rss_audit' AND c.relkind='r'
  AND (
  has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+ OR CASE WHEN current_setting('server_version_num')::integer >= 170000 THEN has_table_privilege(r.oid,c.oid,'MAINTAIN') ELSE false END
  OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES')
  OR has_table_privilege(r.oid,c.oid,'SELECT WITH GRANT OPTION')
  OR has_any_column_privilege(r.oid,c.oid,'SELECT WITH GRANT OPTION')))
@@ -104,6 +105,7 @@ SELECT current_setting('rss.tenant_id',true) AS tenant,
  WHEN c.relkind='S' THEN has_sequence_privilege(r.oid,c.oid,'USAGE,UPDATE')
  WHEN c.relkind IN ('r','p','v','m','f') THEN
  has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+ OR CASE WHEN current_setting('server_version_num')::integer >= 170000 THEN has_table_privilege(r.oid,c.oid,'MAINTAIN') ELSE false END
  OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE,REFERENCES')
  ELSE false END))
  AND NOT EXISTS (SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

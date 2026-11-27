@@ -29,6 +29,19 @@ pub(super) async fn run(
         .execute(admin)
         .await?;
     PgAuditReader::new(pool.clone(), Integrity::Plain, control).await?;
+    sqlx::query("ALTER ROLE audit_runtime REPLICATION")
+        .execute(admin)
+        .await?;
+    let replication = PgAuditReader::new(pool.clone(), Integrity::Plain, control).await;
+    sqlx::query("ALTER ROLE audit_runtime NOREPLICATION")
+        .execute(admin)
+        .await?;
+    assert!(matches!(
+        replication,
+        Err(Error::Admission(
+            rss_audit_postgres::AdmissionViolation::Role
+        ))
+    ));
     assert!(
         PgAudit::new(
             pool.clone(),
