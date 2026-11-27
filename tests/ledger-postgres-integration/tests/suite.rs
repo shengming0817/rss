@@ -221,6 +221,7 @@ async fn readonly(
         .await?;
     validate_read_connection(&mut c, control).await?;
     assert!(validate_connection(&mut c, control).await.is_err());
+    rejected_probe_retires_connection(pool, control).await?;
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
         .bind(TENANT)
@@ -251,5 +252,29 @@ async fn readonly(
     );
     sqlx::raw_sql("REVOKE ledger_indirect FROM ledger_runtime; REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger FROM ledger_indirect; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger TO ledger_runtime").execute(owner).await?;
     validate_connection(&mut c, control).await?;
+    Ok(())
+}
+
+async fn rejected_probe_retires_connection(
+    pool: &PgPool,
+    control: &Control<'_, Clock>,
+) -> anyhow::Result<()> {
+    let one = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(7))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await?;
+    let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&one)
+        .await?;
+    assert!(matches!(
+        PgLedger::new(one.clone(), auth()?, control).await,
+        Err(Error::Admission(_))
+    ));
+    let after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&one)
+        .await?;
+    assert_ne!(before, after);
+    one.close().await;
     Ok(())
 }
