@@ -497,7 +497,7 @@ async fn first_publication(
     count: usize,
     lock_prefix: bool,
 ) -> anyhow::Result<()> {
-    use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWorker};
+    use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWaitPolicy, RelayWorker};
     append(f, prefix, 0, count, 0).await?;
     sqlx::query("UPDATE rss_transactional_messaging.outbox SET retry_after=clock_timestamp()-interval '2 days' WHERE message_id LIKE $1").bind(format!("{prefix}-%")).execute(&f.owner).await?;
     let mut held = f.owner.begin().await?;
@@ -519,8 +519,11 @@ async fn first_publication(
     let config = RelayConfig::new(
         NonZeroUsize::MIN,
         NonZeroUsize::MIN,
-        Duration::from_secs(30),
-        Duration::from_secs(1),
+        RelayWaitPolicy {
+            idle_scan_interval: Duration::from_secs(30),
+            error_backoff: Duration::from_secs(1),
+            ..RelayWaitPolicy::STANDARD
+        },
     )?;
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let worker = RelayWorker::new(

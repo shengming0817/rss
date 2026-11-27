@@ -27,7 +27,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingEmitter, TransactionalMessagingObservation,
 };
 use rss_transactional_messaging::policy::{
-    ConsumerExecutionPolicy, ExecutionBudget, OperationDeadline, RetryPolicy,
+    ConsumerExecutionPolicy, ExecutionBudget, OperationDeadline, RemoteClaimWaitPolicy, RetryPolicy,
 };
 use rss_transactional_messaging::transaction::{
     ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator, SettlementDecision,
@@ -74,7 +74,11 @@ fn provider_deadline() -> OperationDeadline {
 }
 
 fn consumer_policy() -> ConsumerExecutionPolicy {
-    ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD)
+    ConsumerExecutionPolicy::new(
+        RetryPolicy::STANDARD,
+        ExecutionBudget::STANDARD,
+        RemoteClaimWaitPolicy::STANDARD,
+    )
 }
 
 fn envelope(route: &MessageRoute, id: &str) -> MessageEnvelope<Vec<u8>> {

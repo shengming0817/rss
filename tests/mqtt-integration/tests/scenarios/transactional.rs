@@ -6,7 +6,7 @@ use rss_transactional_messaging::{
     inbox::ConsumerGroup,
     policy::{
         ConsumerExecutionPolicy, ExecutionBudget, LeaseRenewalPolicy, OperationDeadline,
-        RetryPolicy,
+        RemoteClaimWaitPolicy, RetryPolicy,
     },
     transaction::{
         ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator, ReceiptIntent,
@@ -233,7 +233,11 @@ impl TransactionCase {
             &validator,
             &self.subscription,
             &*self.clock,
-            ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+            ConsumerExecutionPolicy::new(
+                RetryPolicy::STANDARD,
+                ExecutionBudget::STANDARD,
+                RemoteClaimWaitPolicy::STANDARD,
+            ),
             &Emitter,
         );
         let transaction = FaultTransaction {
@@ -308,6 +312,7 @@ impl TransactionCase {
             ConsumerExecutionPolicy::new(
                 RetryPolicy::STANDARD,
                 ExecutionBudget::new(Duration::from_millis(800), Duration::from_millis(150))?,
+                RemoteClaimWaitPolicy::STANDARD,
             ),
             &Emitter,
         );

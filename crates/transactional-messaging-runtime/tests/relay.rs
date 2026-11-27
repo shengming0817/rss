@@ -34,7 +34,9 @@ use rss_transactional_messaging::transport::{
     PublishFailure, PublishFailureKind, PublishFailureReason, PublishFailureStage, PublishOutcome,
     Publisher,
 };
-use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWorker, relay_once};
+use rss_transactional_messaging_runtime::relay::{
+    RelayConfig, RelayWaitPolicy, RelayWorker, relay_once,
+};
 use rss_transactional_messaging_testkit::memory::{
     FakeClock, MemoryPublisher as ScriptedPublisher,
 };
@@ -521,8 +523,11 @@ async fn relay_shutdown_drains_the_active_batch_within_budget() {
         RelayConfig::new(
             NonZeroUsize::MIN,
             NonZeroUsize::MIN,
-            Duration::from_millis(100),
-            Duration::from_millis(200),
+            RelayWaitPolicy {
+                idle_scan_interval: Duration::from_millis(100),
+                error_backoff: Duration::from_millis(200),
+                ..RelayWaitPolicy::STANDARD
+            },
         )
         .expect("config"),
     );
@@ -562,8 +567,11 @@ async fn relay_worker_uses_runtime_token_and_reports_cancelled_status() {
         RelayConfig::new(
             NonZeroUsize::MIN,
             NonZeroUsize::MIN,
-            Duration::from_millis(100),
-            Duration::from_millis(200),
+            RelayWaitPolicy {
+                idle_scan_interval: Duration::from_millis(100),
+                error_backoff: Duration::from_millis(200),
+                ..RelayWaitPolicy::STANDARD
+            },
         )
         .expect("config"),
     );
@@ -609,8 +617,11 @@ async fn relay_worker_recovers_after_a_core_owned_claim_deadline() {
         RelayConfig::new(
             NonZeroUsize::MIN,
             NonZeroUsize::MIN,
-            Duration::from_millis(100),
-            Duration::from_millis(200),
+            RelayWaitPolicy {
+                idle_scan_interval: Duration::from_millis(100),
+                error_backoff: Duration::from_millis(200),
+                ..RelayWaitPolicy::STANDARD
+            },
         )
         .expect("config"),
     );
@@ -1115,8 +1126,11 @@ async fn directly_awaited_relay_accepts_borrowed_timer_and_stops_before_claim() 
         RelayConfig::new(
             NonZeroUsize::MIN,
             NonZeroUsize::MIN,
-            Duration::from_millis(100),
-            Duration::from_millis(200),
+            RelayWaitPolicy {
+                idle_scan_interval: Duration::from_millis(100),
+                error_backoff: Duration::from_millis(200),
+                ..RelayWaitPolicy::STANDARD
+            },
         )
         .expect("config"),
     );
@@ -1146,18 +1160,38 @@ impl rss_request_context::ExecutionTimer for ShutdownTimer {
 }
 
 #[test]
-fn relay_delays_share_only_the_busy_loop_floor() {
-    let config = |idle, backoff| RelayConfig::new(limit(), NonZeroUsize::MIN, idle, backoff);
-    let floor = Duration::from_millis(100);
-    let short = Duration::from_millis(99);
-    assert!(config(short, floor).is_err());
-    assert!(config(floor, short).is_err());
-    let long = Duration::from_secs(90_000);
-    let valid = config(floor, long).expect("independent delays");
-    assert_eq!(valid.claim_limit(), limit());
-    assert_eq!(valid.max_in_flight(), NonZeroUsize::MIN);
-    assert_eq!(valid.idle_scan_interval(), floor);
-    assert_eq!(valid.error_backoff(), long);
+fn standard_relay_waits_and_positive_duration_validation() {
+    let policy = RelayWaitPolicy::STANDARD;
+    assert_eq!(policy.empty_pages_per_slice.get(), 8);
+    assert_eq!(
+        [
+            policy.continuation_delay,
+            policy.contention_delay,
+            policy.idle_scan_interval,
+            policy.error_backoff
+        ],
+        [Duration::from_millis(100); 4]
+    );
+    for invalid in [
+        RelayWaitPolicy {
+            continuation_delay: Duration::ZERO,
+            ..policy
+        },
+        RelayWaitPolicy {
+            contention_delay: Duration::ZERO,
+            ..policy
+        },
+        RelayWaitPolicy {
+            idle_scan_interval: Duration::ZERO,
+            ..policy
+        },
+        RelayWaitPolicy {
+            error_backoff: Duration::ZERO,
+            ..policy
+        },
+    ] {
+        assert!(RelayConfig::new(limit(), NonZeroUsize::MIN, invalid).is_err());
+    }
 }
 
 #[allow(clippy::expect_used)] // reason: explicit fixture coordinates are validated before exercising the provider.

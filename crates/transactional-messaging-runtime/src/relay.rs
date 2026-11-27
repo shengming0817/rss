@@ -25,12 +25,44 @@ use rss_transactional_messaging::transport::{
     Publisher,
 };
 
-const EMPTY_PAGES_PER_SLICE: u8 = 8;
-const MIN_SCAN_DELAY: Duration = Duration::from_millis(100);
+/// Host-selected scheduling of empty scans and recoverable failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RelayWaitPolicy {
+    /// Maximum consecutive empty Continue pages before a timed yield.
+    pub empty_pages_per_slice: NonZeroUsize,
+    /// Pause after a full slice of empty Continue pages.
+    pub continuation_delay: Duration,
+    /// Pause immediately after an empty RetryLater (contended scan).
+    pub contention_delay: Duration,
+    /// Pause after an empty Complete scan, interruptible by local completion.
+    pub idle_scan_interval: Duration,
+    /// Minimum pause following a recoverable error.
+    pub error_backoff: Duration,
+}
 
-/// A scan delay below the operational floor could busy-loop on a failing or empty store.
+impl RelayWaitPolicy {
+    /// Scan eight empty pages per slice and wait 100 milliseconds for each kind of pause.
+    pub const STANDARD: Self = Self {
+        empty_pages_per_slice: NonZeroUsize::MIN.saturating_add(7),
+        continuation_delay: Duration::from_millis(100),
+        contention_delay: Duration::from_millis(100),
+        idle_scan_interval: Duration::from_millis(100),
+        error_backoff: Duration::from_millis(100),
+    };
+
+    fn delays(self) -> [Duration; 4] {
+        [
+            self.continuation_delay,
+            self.contention_delay,
+            self.idle_scan_interval,
+            self.error_backoff,
+        ]
+    }
+}
+
+/// A zero scheduling delay could busy-loop on a failing, contended or empty store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("relay idle scan interval and error backoff must each be at least 100ms")]
+#[error("relay scan delays and error backoff must be positive")]
 pub struct RelayConfigError;
 
 /// Admission and backpressure configuration for one relay worker.
@@ -38,26 +70,23 @@ pub struct RelayConfigError;
 pub struct RelayConfig {
     claim_limit: NonZeroUsize,
     max_in_flight: NonZeroUsize,
-    idle_scan_interval: Duration,
-    error_backoff: Duration,
+    wait: RelayWaitPolicy,
 }
 
 impl RelayConfig {
-    /// Set the per-request claim bound, total work capacity and independent scan delays.
+    /// Set per-request and in-flight bounds and validate every scheduling delay.
     pub fn new(
         claim_limit: NonZeroUsize,
         max_in_flight: NonZeroUsize,
-        idle_scan_interval: Duration,
-        error_backoff: Duration,
+        wait: RelayWaitPolicy,
     ) -> Result<Self, RelayConfigError> {
-        if idle_scan_interval.min(error_backoff) < MIN_SCAN_DELAY {
+        if wait.delays().contains(&Duration::ZERO) {
             return Err(RelayConfigError);
         }
         Ok(Self {
             claim_limit,
             max_in_flight,
-            idle_scan_interval,
-            error_backoff,
+            wait,
         })
     }
 
@@ -73,16 +102,10 @@ impl RelayConfig {
         self.max_in_flight
     }
 
-    /// Time between empty scans in the absence of completed work.
+    /// Scheduling delays and empty-page bound selected by the host.
     #[must_use]
-    pub const fn idle_scan_interval(self) -> Duration {
-        self.idle_scan_interval
-    }
-
-    /// Minimum wait before a new scan after a recoverable infrastructure error.
-    #[must_use]
-    pub const fn error_backoff(self) -> Duration {
-        self.error_backoff
+    pub const fn wait_policy(self) -> RelayWaitPolicy {
+        self.wait
     }
 }
 
@@ -434,8 +457,11 @@ where
         }
         let longest_delay = self
             .config
-            .idle_scan_interval
-            .max(self.config.error_backoff);
+            .wait
+            .delays()
+            .into_iter()
+            .max()
+            .unwrap_or_default();
         absolute_deadline(self.clock.as_ref(), longest_delay, self.emitter.as_ref())?;
         self.drive(binding, &token).await
     }
@@ -496,7 +522,7 @@ where
 }
 
 enum Admission {
-    Ready(u8),
+    Ready(usize),
     Idle(Deadline),
     Backoff(Deadline),
     Stopped(Option<MessagingError>),
@@ -525,6 +551,8 @@ impl Admission {
     ) -> Option<OutboxClaimBatch<T>> {
         tokio::pin!(request);
         let before = active.len();
+        let full_slice =
+            matches!(*self, Self::Ready(n) if n == config.wait.empty_pages_per_slice.get() - 1);
         let claims = loop {
             tokio::select! {
                 biased;
@@ -537,28 +565,46 @@ impl Admission {
         };
         match claims {
             Ok(batch) => {
-                if let Self::Ready(empty_pages) = *self {
-                    *self = match (batch.is_empty(), batch.scan_progress()) {
-                        (true, OutboxScanProgress::Continue)
-                            if empty_pages + 1 < EMPTY_PAGES_PER_SLICE =>
-                        {
-                            Self::Ready(empty_pages + 1)
-                        }
-                        (true, OutboxScanProgress::Continue | OutboxScanProgress::RetryLater) => {
-                            Self::delay(clock, emitter, MIN_SCAN_DELAY, Self::Backoff)
-                        }
-                        (true, OutboxScanProgress::Complete) if active.len() == before => {
-                            Self::delay(clock, emitter, config.idle_scan_interval, Self::Idle)
-                        }
-                        _ => Self::Ready(0),
-                    };
-                }
+                self.scanned(
+                    batch.is_empty().then(|| batch.scan_progress()),
+                    full_slice,
+                    active.len() != before,
+                    config.wait,
+                    clock,
+                    emitter,
+                );
                 Some(batch)
             }
             Err(error) => {
                 self.failed(error, config, clock, emitter);
                 None
             }
+        }
+    }
+
+    fn scanned(
+        &mut self,
+        empty: Option<OutboxScanProgress>,
+        full_slice: bool,
+        completed: bool,
+        policy: RelayWaitPolicy,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+    ) {
+        match (empty, &mut *self) {
+            (_, Self::Stopped(_)) => {}
+            (Some(OutboxScanProgress::Continue), _) if full_slice => {
+                self.backoff(clock, emitter, policy.continuation_delay)
+            }
+            (Some(OutboxScanProgress::RetryLater), _) => {
+                self.backoff(clock, emitter, policy.contention_delay)
+            }
+            (Some(OutboxScanProgress::Continue), Self::Ready(n)) => *n += 1,
+            (Some(OutboxScanProgress::Complete), Self::Ready(_)) if !completed => {
+                *self = Self::delay(clock, emitter, policy.idle_scan_interval, Self::Idle);
+            }
+            (_, Self::Ready(n)) => *n = 0,
+            _ => {}
         }
     }
 
@@ -593,6 +639,21 @@ impl Admission {
     ) -> Self {
         absolute_deadline(clock, duration, emitter)
             .map_or_else(|error| Self::Stopped(Some(error)), state)
+    }
+
+    // Independent scan and in-flight errors can arrive in either order.
+    fn backoff(
+        &mut self,
+        clock: &impl ExecutionTimer,
+        emitter: &impl TransactionalMessagingEmitter,
+        duration: Duration,
+    ) {
+        let next = Self::delay(clock, emitter, duration, Self::Backoff);
+        if matches!((&*self, &next), (Self::Backoff(old), Self::Backoff(new)) if old.instant() >= new.instant())
+        {
+            return;
+        }
+        *self = next;
     }
 
     async fn wait(&self, clock: &impl ExecutionTimer) {
@@ -636,7 +697,7 @@ impl Admission {
                 error_kind = error.kind().as_label(),
                 "relay admission backing off"
             );
-            *self = Self::delay(clock, emitter, config.error_backoff, Self::Backoff);
+            self.backoff(clock, emitter, config.wait.error_backoff);
         } else {
             *self = Self::Stopped(Some(error));
         }
