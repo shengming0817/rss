@@ -201,7 +201,7 @@ async fn private_keycloak_login() -> anyhow::Result<()> {
         .exchange(
             probe,
             ProtocolMaterial::new(random_secret()?.to_string())?,
-            "unused-fixture-code".into(),
+            random_secret()?,
             deadline(),
         )
         .await;
