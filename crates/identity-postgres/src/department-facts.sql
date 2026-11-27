@@ -15,7 +15,7 @@ department_facts AS MATERIALIZED (
   WHERE tenant_id=$1::uuid AND provider_id=$2
  ) owners
  CROSS JOIN LATERAL (
-  SELECT s.session_id,s.auth_facts,s.provider_config_version,s.auth_epoch,s.membership_epoch,s.provider_epoch
+  SELECT s.session_id,s.department_metadata,s.provider_config_version,s.auth_epoch,s.membership_epoch,s.provider_epoch
   FROM identity_authority.sessions s
   WHERE s.tenant_id=owners.tenant_id AND s.principal_id=owners.principal_id AND s.source_provider_id=$2
   ORDER BY s.facts_sequence DESC,s.auth_epoch DESC,s.membership_epoch DESC,s.session_id LIMIT 1
@@ -26,6 +26,6 @@ department_facts AS MATERIALIZED (
  CROSS JOIN LATERAL (SELECT a.enabled AND m.active AND p.enabled
   AND p.config_version=latest.provider_config_version AND p.revocation_epoch=latest.provider_epoch
   AND a.auth_epoch=latest.auth_epoch AND m.epoch=latest.membership_epoch AS eligible) eligibility
- CROSS JOIN LATERAL jsonb_to_record(latest.auth_facts->'department_snapshot')
+ CROSS JOIN LATERAL jsonb_to_record(latest.department_metadata)
   AS fact(status text,reason text,observed_at bigint,expires_at bigint)
 ),
