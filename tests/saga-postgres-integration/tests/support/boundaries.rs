@@ -53,20 +53,19 @@ pub(super) async fn fair_arrival(
         .register(high, &d, history_capacity()?, control)
         .await?;
     let arrival = async {
-        entered.notified().await;
-        let result = executor
+        executor
             .register(low, &d, history_capacity()?, control)
-            .await;
-        released.notify_one();
-        result
+            .await?;
+        Ok(())
     };
     let budget = SweepBudget::new(2, 8)?;
-    let (page, registered) = tokio::join!(
+    let (page, ()) = at_gate(
         executor.run_once(tenant, Some(low), budget, control),
-        arrival
-    );
-    registered?;
-    let page = page?;
+        &entered,
+        &released,
+        arrival,
+    )
+    .await?;
     assert_eq!(page.next_cursor, Some(high));
     assert_eq!(turns(&page)?, [(high, 2, Status::Running)]);
     let end = executor
@@ -93,6 +92,27 @@ pub(super) async fn fair_arrival(
     );
     Ok(())
 }
+// Poll the sweep (including its lease renewal) throughout the coordination. A premature
+// result should report the actual error or progress immediately, even if no step signalled.
+async fn at_gate<R>(
+    sweep: impl Future<Output = Result<SweepReport, Error>>,
+    entered: &Notify,
+    released: &Notify,
+    operation: impl Future<Output = anyhow::Result<R>>,
+) -> anyhow::Result<(SweepReport, R)> {
+    let mut sweep = std::pin::pin!(sweep);
+    let change = async {
+        entered.notified().await;
+        operation.await
+    };
+    let observed = tokio::select! {
+        early = &mut sweep => anyhow::bail!("sweep finished before gate operation: {:?}", early?),
+        changed = tokio::time::timeout(Duration::from_secs(20), change) => changed.map_err(|_| anyhow::anyhow!("timed out waiting for gated Saga step"))??,
+    };
+    released.notify_one();
+    Ok((sweep.await?, observed))
+}
+
 fn arrival_registry(d: Definition, gate: Gated) -> Result<Registry, Error> {
     let effects = Arc::new(Effects::default());
     let mut builder = DefinitionBuilder::new(d)?
@@ -132,15 +152,15 @@ pub(super) async fn fence_during_effect(
     let released = Arc::new(Notify::new());
     let effects = Arc::new(Effects::default());
     let builder = DefinitionBuilder::new(d.clone())?
-        .step(Gated {
-            name: "one",
-            entered: entered.clone(),
-            released: released.clone(),
-        })?
         .step(Action {
-            name: "two",
+            name: "one",
             fail: false,
             effects: effects.clone(),
+        })?
+        .step(Gated {
+            name: "two",
+            entered: entered.clone(),
+            released: released.clone(),
         })?
         .step(Action {
             name: "three",
@@ -156,38 +176,39 @@ pub(super) async fn fence_during_effect(
     let e = e.with_lease_policy(LeasePolicy::new(Duration::from_millis(300))?);
     e.register(scope, d, history_capacity()?, control).await?;
     let takeover = async {
-        entered.notified().await;
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert_active_claim_rejected(store, scope, control).await?;
         expire(owner, scope).await?;
         let fresh = store.claim(scope, Duration::from_secs(30), control).await?;
-        released.notify_one();
         Ok::<_, anyhow::Error>(fresh)
     };
-    let (old, fresh) = tokio::join!(
+    let (page, fresh) = at_gate(
         e.run_once(scope.tenant(), None, SweepBudget::new(1, 30)?, control),
-        takeover
-    );
-    let page = old?;
+        &entered,
+        &released,
+        takeover,
+    )
+    .await?;
     let failure = page.items[0]
         .result
         .as_ref()
         .err()
         .ok_or_else(|| anyhow::anyhow!("expected fenced instance"))?;
     assert_eq!(failure.error.kind(), ErrorKind::Fenced);
-    assert_eq!(failure.head().map(HistoryHead::revision), Some(1));
-    assert_eq!(failure.advances, 0);
-    let fresh = fresh?;
+    assert_eq!(failure.head().map(HistoryHead::revision), Some(3));
+    assert_eq!(failure.advances, 1);
     let snapshot = store.snapshot(&fresh, read_budget()?, control).await?;
-    assert_eq!(snapshot.revision(), 1);
-    assert_eq!(snapshot.events()[0].kind, EventKind::ForwardIntent);
+    assert_eq!(snapshot.revision(), 3);
+    assert_eq!(snapshot.events()[2].kind, EventKind::ForwardIntent);
+    assert_eq!(snapshot.events()[2].step, 1);
+    assert_eq!(snapshot.receipt(0)?.seq, 1);
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM rss_saga.journal WHERE protected IS NOT NULL AND saga_id=$1",
     )
     .bind(scope.id())
     .fetch_one(owner)
     .await?;
-    assert_eq!(count, 0);
+    assert_eq!(count, 1);
     store.release(&fresh, control).await?;
     Ok(())
 }
