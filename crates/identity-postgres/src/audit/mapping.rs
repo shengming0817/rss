@@ -241,7 +241,7 @@ pub(super) fn map_event(
                     ),
             )?;
             require(e.principal.is_some() || action == "provider_updated")?;
-            require(e.diagnostic.is_some() == (action == "provider_test_failed"))?;
+            require(e.diagnostic.is_none() || action == "provider_test_failed")?;
             let (kind, actor) = e.principal.map_or(("system", instance.to_string()), |p| {
                 ("principal", p.to_string())
             });
@@ -253,6 +253,11 @@ pub(super) fn map_event(
                     e.principal.ok_or(InvalidEvent)?.to_string(),
                 )
             };
+            let mut payload =
+                json!({"provider_id":e.provider_id,"config_version":e.config_version});
+            if let Some(diagnostic) = e.diagnostic {
+                payload["diagnostic"] = json!(diagnostic);
+            }
             (
                 &FEDERATION,
                 format!("identity.federation.{}", action),
@@ -265,7 +270,7 @@ pub(super) fn map_event(
                 } else {
                     Outcome::Succeeded
                 },
-                json!({"provider_id":e.provider_id,"config_version":e.config_version,"diagnostic":e.diagnostic}),
+                payload,
             )
         }
     };

@@ -90,8 +90,9 @@ impl Federation {
         budget.cutoff = budget.cutoff.shortened_to(actor.expires);
         let return_url = self.target(&target)?;
         let max_auth_facts_bytes = self.authority.max_auth_facts_bytes;
+        let checks = self.authority.session_checks.clone();
         let (actor,account,source_identity,login)=self.authority.read_sql(binding,budget.cutoff,move |c| { Box::pin(async move {
-                    let loaded = session_storage::recheck_collection(c, &actor).await?;
+                    let loaded = session_storage::recheck_collection(&checks, c, &actor).await?;
                     let login: Option<String> = sqlx::query_scalar(concat!(
                         "SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::u",
                         "uid AND principal_id=$2::uuid"
@@ -175,8 +176,9 @@ impl Federation {
                 ),
             )
             .await?;
+        let checks = self.authority.session_checks.clone();
         self.authority.read_sql(binding,budget.cutoff,move |c| { Box::pin(async move {
-                    let loaded = session_storage::recheck_collection(c, &actor).await?;
+                    let loaded = session_storage::recheck_collection(&checks, c, &actor).await?;
                     if !loaded.state.matches_verification(account) {
                         return Err(reject().into());
                     }

@@ -18,24 +18,25 @@ pub struct ScriptedOidc {
     revisions: ProviderRevisions,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
-    pub trusted: std::sync::atomic::AtomicBool,
+    pub probe_error: Mutex<Option<FederationError>>,
+    trusted: bool,
 }
 impl ScriptedOidc {
-    pub fn new() -> Arc<Self> {
+    pub fn new(trusted: bool) -> Arc<Self> {
         Arc::new(Self {
             revisions: ProviderRevisions::new(16),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
-            trusted: std::sync::atomic::AtomicBool::new(true),
+            probe_error: Mutex::new(None),
+            trusted,
         })
     }
 }
 impl UpstreamOidc for ScriptedOidc {
     fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> AssuranceProfile {
-        let trusted = self.trusted.load(Ordering::SeqCst);
         AssuranceProfile {
-            fingerprint: [u8::from(trusted); 32],
-            supports_step_up: trusted,
+            fingerprint: [u8::from(self.trusted); 32],
+            supports_step_up: self.trusted,
         }
     }
     fn validate(
@@ -108,6 +109,9 @@ impl UpstreamOidc for ScriptedOidc {
         _deadline: rss_request_context::Deadline,
     ) -> UpstreamFuture<'a, ConnectionReport> {
         Box::pin(async move {
+            if let Some(error) = *self.probe_error.lock().unwrap() {
+                return Err(error);
+            }
             Ok(ConnectionReport {
                 checks: vec![
                     ProviderStage::Binding,

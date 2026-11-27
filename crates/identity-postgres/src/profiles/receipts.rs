@@ -97,8 +97,9 @@ impl Authority {
         let instance = self.instance;
         let mut budget = self.budget(deadline)?;
         budget.cutoff = budget.cutoff.shortened_to(actor.expires);
+        let checks = self.session_checks.clone();
         self.conditional_write_sql(actor.binding, budget.cutoff, move |c| Box::pin(async move {
-            let loaded = crate::session_storage::recheck_for(c, &actor, crate::session_storage::SessionAccess::ProfileWrite(target)).await?;
+            let loaded = crate::session_storage::recheck_for(&checks, c, &actor, crate::session_storage::SessionAccess::ProfileWrite(target)).await?;
             crate::management::authorize(policy.as_ref(), instance, &loaded,
                 ManagementOperation::UpdateLocalProfile, Some(target), c).await?;
             if !account_state_locked(c, target).await?.active() {
@@ -162,7 +163,7 @@ impl Authority {
         deadline: Deadline,
     ) -> Result<Option<ProfileReceipt>, AuthorityError> {
         self.require_runtime()?;
-        let reader = Reader::new(actor)?;
+        let reader = Reader::new(actor, &self.session_checks)?;
         let policy = self.policy.clone();
         let instance = self.instance;
         if target.tenant != reader.key.tenant {

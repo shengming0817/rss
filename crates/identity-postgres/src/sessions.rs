@@ -13,20 +13,23 @@ use serde::Serialize;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-/// Recheck the current credential in the host's tenant-bound READ COMMITTED transaction.
-/// Call after Audit/Ledger locks and before host authorization/business locks. Tenant admission,
-/// source, account/membership, session and platform verifier locks last until host settlement.
-/// Platform source writers must honor the verifier's authoritative locks on this same connection.
-/// On any error the host MUST roll back. The host supplies the original execution coordinates, budgets, resource authorization
-/// and commit/rollback outcomes; successful admission is not a successful business commit.
-/// The original transaction locks and checks the current lineage and tenant epoch.
-/// Does not renew the session, consume step-up, or extend the actor's original lifetime.
-/// Natural expiry still applies: do not cache this result or treat it as a transferable permit.
-pub async fn recheck_authenticated_session_on(
-    connection: &mut sqlx::PgConnection,
-    actor: &AuthenticatedSession,
-) -> Result<(), rss_transactional_messaging_postgres::PgError> {
-    db::recheck_on(connection, actor).await.map(|_| ())
+impl Authority {
+    /// Recheck the current credential in the host's tenant-bound READ COMMITTED transaction.
+    /// Call after Audit/Ledger locks and before host authorization/business locks. Tenant admission,
+    /// source, account/membership, session and platform verifier locks last until host settlement.
+    /// Platform source writers must honor the verifier's authoritative locks on this same connection.
+    /// On any error the host MUST roll back. The host supplies the original execution coordinates, budgets, resource authorization
+    /// and commit/rollback outcomes; successful admission is not a successful business commit.
+    /// The original transaction locks and checks the current lineage and tenant epoch.
+    /// Does not renew the session, consume step-up, or extend the actor's original lifetime.
+    /// Natural expiry still applies: do not cache this result or treat it as a transferable permit.
+    pub async fn recheck_authenticated_session_on(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        actor: &AuthenticatedSession,
+    ) -> Result<(), rss_transactional_messaging_postgres::PgError> {
+        db::recheck_on(self, connection, actor).await.map(|_| ())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +112,7 @@ impl IssuedSession {
 /// ```
 pub struct AuthenticatedSession {
     pub(crate) binding: rss_transactional_messaging::fence::ExecutionBinding,
-    pub(crate) session_checks: crate::session_checks::SessionChecks,
+    pub(crate) timer: rss_request_context::SharedExecutionTimer,
     pub(crate) key: AccountKey,
     pub(crate) digest: [u8; 32],
     pub(crate) authority: rss_identity_core::InstanceId,
@@ -136,7 +139,7 @@ impl AuthenticatedSession {
         Ok(&self.assurance)
     }
     fn check_live(&self) -> Result<(), AuthorityError> {
-        if self.session_checks.timer.now() >= self.expires {
+        if self.timer.now() >= self.expires {
             return Err(AuthorityError::Rejected);
         }
         Ok(())
@@ -144,15 +147,11 @@ impl AuthenticatedSession {
     pub fn department_snapshot(
         &self,
     ) -> Result<VerifiedDepartmentSnapshot<'_>, DepartmentAccessError> {
-        self.department_snapshot.view(
-            self.instance(),
-            self.account(),
-            self.expires,
-            &self.session_checks.timer,
-        )
+        self.department_snapshot
+            .view(self.instance(), self.account(), self.expires, &self.timer)
     }
     pub fn groups(&self) -> Result<VerifiedGroups<'_>, GroupAccessError> {
-        self.groups.view(self.expires, &self.session_checks.timer)
+        self.groups.view(self.expires, &self.timer)
     }
     pub fn identity(&self) -> &SessionIdentity {
         &self.identity
@@ -385,13 +384,14 @@ impl Authority {
         let max_auth_facts_bytes = self.max_auth_facts_bytes;
         let limits = self.profile_limits;
         let key = candidate.state.key();
+        let checks = self.session_checks.clone();
         self.mutate_events(candidate.binding, budget.cutoff, move |tx| {
             Box::pin(async move {
                 connection(tx, move |c| {
                     Box::pin(async move {
                         let replaced = match replacement {
                             Some(proof) => Some(
-                                db::recheck_for(c, &proof, db::SessionAccess::Revoke)
+                                db::recheck_for(&checks, c, &proof, db::SessionAccess::Revoke)
                                     .await?
                                     .view
                                     .id,
@@ -512,7 +512,7 @@ impl Authority {
                         let expires = checked_expiry(&loaded, budget.cutoff.instant())?;
                         Ok(AuthenticatedSession {
                             binding,
-                            session_checks,
+                            timer: session_checks.timer,
                             identity: SessionIdentity::from_state(loaded.state),
                             assurance: loaded.assurance,
                             source: loaded.source,
@@ -604,10 +604,11 @@ impl Authority {
         self.require_runtime()?;
         let mut budget = self.budget(deadline)?;
         budget.cutoff = budget.cutoff.shortened_to(actor.expires);
+        let checks = self.session_checks.clone();
         self.mutate(actor.binding,budget.cutoff,move|tx|Box::pin(async move {
             connection(tx,move|c|Box::pin(async move {
                 let access = if all { db::SessionAccess::RevokeAll } else { db::SessionAccess::Revoke };
-                let loaded = db::recheck_for(c,&actor,access).await?;
+                let loaded = db::recheck_for(&checks, c,&actor,access).await?;
                 let state = if all {
                     let next = loaded.state.revoke_sessions()?;
                     sqlx::query(concat!("UPDATE identity_authority.accounts SET auth_epoch=$3 WHERE tenant_id=$1::uuid AN","D principal_id=$2::uuid"))
@@ -637,12 +638,14 @@ impl Authority {
         if actor.authority != self.instance {
             return Err(AuthorityError::Rejected);
         }
+        let checks = self.session_checks.clone();
         self.read_sql(actor.binding, budget.cutoff, move |c| {
             Box::pin(async move {
                 // read_sql has just verified this instance and entered the actor's exact fenced binding.
                 lock_tenant_collection(c, actor.key.tenant).await?;
-                let loaded = db::recheck_locked(c, &actor).await?;
-                let page = crate::session_page::read(c, &actor, &loaded, cursor, limit).await?;
+                let loaded = db::recheck_locked(&checks, c, &actor).await?;
+                let page =
+                    crate::session_page::read(c, &actor, &checks, &loaded, cursor, limit).await?;
                 checked_expiry(&loaded, budget.cutoff.instant())?;
                 Ok(page)
             })

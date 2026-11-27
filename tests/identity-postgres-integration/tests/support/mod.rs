@@ -120,7 +120,7 @@ impl Fixture {
         let provider = pg.params().clone();
         let ca = pg.ca_pem().to_owned();
         let audit_budget = rss_audit_postgres::WriteBudget::new(8, 1024 * 1024, 1024 * 1024)?;
-        let oidc = crate::federation_support::ScriptedOidc::new();
+        let oidc = crate::federation_support::ScriptedOidc::new(true);
         let config = AuthorityConfig::new(
             instance,
             SessionPolicy::new(900, 14400)?,

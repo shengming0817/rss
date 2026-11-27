@@ -78,11 +78,12 @@ async fn current_platform(
     c: &mut PgConnection,
     actor: &AuthenticatedSession,
     row: &PgRow,
+    checks: &crate::session_checks::SessionChecks,
     checked: &mut HashMap<PlatformBinding, bool>,
 ) -> Result<bool, PgError> {
     let stored: PlatformAuthentication =
         serde_json::from_value(row.try_get("platform_authentication")?).map_err(|_| corrupt())?;
-    let verifier = stored.verifier(actor.key, actor.authority.as_uuid(), &actor.session_checks)?;
+    let verifier = stored.verifier(actor.key, actor.authority.as_uuid(), checks)?;
     let valid = match checked.entry(stored.binding.clone()) {
         std::collections::hash_map::Entry::Occupied(hit) => *hit.get(),
         std::collections::hash_map::Entry::Vacant(slot) => {
@@ -103,6 +104,7 @@ async fn current_platform(
 pub(crate) async fn read(
     c: &mut PgConnection,
     actor: &AuthenticatedSession,
+    checks: &crate::session_checks::SessionChecks,
     loaded: &Loaded,
     cursor: Option<SessionId>,
     limit: u16,
@@ -130,13 +132,13 @@ pub(crate) async fn read(
         scanned = Some(id);
         let lifetime = session_storage::lifetime(&row)?;
         let expires = loaded.sample.deadline(lifetime.idle_expires_at())?;
-        if actor.session_checks.timer.now() >= expires {
+        if checks.timer.now() >= expires {
             continue;
         }
         let valid = match row.try_get::<&str, _>("authentication_source")? {
             "local_password" => true,
             "oidc" => current_oidc(&row, &origins)?,
-            "platform" => match current_platform(c, actor, &row, &mut platforms).await {
+            "platform" => match current_platform(c, actor, &row, checks, &mut platforms).await {
                 Err(e) if e.kind() == MessagingErrorKind::Conflict => false,
                 result => result?,
             },
@@ -150,7 +152,7 @@ pub(crate) async fn read(
         }
     }
     // A later verifier may have waited on an authoritative host lock.
-    let finished = actor.session_checks.timer.now();
+    let finished = checks.timer.now();
     let sessions = accepted
         .into_iter()
         .filter_map(|(view, expires)| (finished < expires).then_some(view))

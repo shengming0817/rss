@@ -103,52 +103,55 @@ pub(crate) async fn issue(
         .bind(key.tenant.to_string()).bind(digest(&secret).as_slice()).bind(key.principal.as_uuid()).bind(loaded.view.id.as_uuid()).bind(loaded.state.epoch()).bind(loaded.state.membership_epoch()).bind(serde_json::to_value(context).map_err(|_|corrupt())?).bind(serde_json::to_value(source).map_err(|_|corrupt())?).bind(authenticated_at).bind(expires_at).execute(c).await?;
     Ok(StepUpGrant { secret, expires_at })
 }
-/// Borrow the host's READ COMMITTED transaction, already bound to the actor's tenant.
-/// Call before host business locks. On error the caller MUST roll back the transaction.
-/// The host checks product authorization and commits its operation with this consumption.
-pub async fn consume_step_up_on(
-    c: &mut PgConnection,
-    actor: &AuthenticatedSession,
-    expected: &StepUpContext,
-    handle: &str,
-) -> Result<ConsumedStepUp, rss_transactional_messaging_postgres::PgError> {
-    if handle.len() != 43 {
-        return Err(reject());
-    }
-    let loaded = session_storage::recheck_on(c, actor).await?;
-    let row=sqlx::query("SELECT * FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND token_hash=$2 FOR UPDATE").bind(actor.key.tenant.to_string()).bind(digest(handle).as_slice()).fetch_optional(&mut *c).await?.ok_or_else(reject)?;
-    let context: StepUpContext =
-        serde_json::from_value(row.try_get("context")?).map_err(|_| corrupt())?;
-    let now = session_storage::now(c).await?;
-    if context != *expected
-        || row.try_get::<Uuid, _>("principal_id")? != actor.key.principal.as_uuid()
-        || row.try_get::<Uuid, _>("session_id")? != loaded.view.id.as_uuid()
-        || row.try_get::<i64, _>("auth_epoch")? != loaded.state.epoch()
-        || row.try_get::<i64, _>("membership_epoch")? != loaded.state.membership_epoch()
-        || now >= row.try_get::<i64, _>("expires_at")?
-        || now < row.try_get::<i64, _>("authenticated_at")?
-    {
-        return Err(reject());
-    }
-    let source: GrantSource =
-        serde_json::from_value(row.try_get("source")?).map_err(|_| corrupt())?;
-    validate_source(c, actor.key, &source, &actor.session_checks).await?;
-    session_storage::recheck_locked(c, actor).await?;
-    if session_storage::now(c).await? >= row.try_get::<i64, _>("expires_at")? {
-        return Err(reject());
-    }
-    sqlx::query(
+impl Authority {
+    /// Borrow the host's READ COMMITTED transaction, already bound to the actor's tenant.
+    /// Call before host business locks. On error the caller MUST roll back the transaction.
+    /// The host checks product authorization and commits its operation with this consumption.
+    pub async fn consume_step_up_on(
+        &self,
+        c: &mut PgConnection,
+        actor: &AuthenticatedSession,
+        expected: &StepUpContext,
+        handle: &str,
+    ) -> Result<ConsumedStepUp, rss_transactional_messaging_postgres::PgError> {
+        if handle.len() != 43 {
+            return Err(reject());
+        }
+        let loaded = session_storage::recheck_on(self, c, actor).await?;
+        let row=sqlx::query("SELECT * FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND token_hash=$2 FOR UPDATE").bind(actor.key.tenant.to_string()).bind(digest(handle).as_slice()).fetch_optional(&mut *c).await?.ok_or_else(reject)?;
+        let context: StepUpContext =
+            serde_json::from_value(row.try_get("context")?).map_err(|_| corrupt())?;
+        let now = session_storage::now(c).await?;
+        if context != *expected
+            || row.try_get::<Uuid, _>("principal_id")? != actor.key.principal.as_uuid()
+            || row.try_get::<Uuid, _>("session_id")? != loaded.view.id.as_uuid()
+            || row.try_get::<i64, _>("auth_epoch")? != loaded.state.epoch()
+            || row.try_get::<i64, _>("membership_epoch")? != loaded.state.membership_epoch()
+            || now >= row.try_get::<i64, _>("expires_at")?
+            || now < row.try_get::<i64, _>("authenticated_at")?
+        {
+            return Err(reject());
+        }
+        let source: GrantSource =
+            serde_json::from_value(row.try_get("source")?).map_err(|_| corrupt())?;
+        validate_source(c, actor.key, &source, &self.session_checks).await?;
+        session_storage::recheck_locked(&self.session_checks, c, actor).await?;
+        if session_storage::now(c).await? >= row.try_get::<i64, _>("expires_at")? {
+            return Err(reject());
+        }
+        sqlx::query(
         "DELETE FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND token_hash=$2",
     )
     .bind(actor.key.tenant.to_string())
     .bind(digest(handle).as_slice())
     .execute(c)
     .await?;
-    Ok(ConsumedStepUp {
-        authenticated_at: row.try_get("authenticated_at")?,
-        expires_at: row.try_get("expires_at")?,
-        source,
-    })
+        Ok(ConsumedStepUp {
+            authenticated_at: row.try_get("authenticated_at")?,
+            expires_at: row.try_get("expires_at")?,
+            source,
+        })
+    }
 }
 
 pub(crate) async fn validate_source(
@@ -183,8 +186,9 @@ impl Authority {
         if handle.len() != 43 {
             return Err(AuthorityError::InvalidInput);
         }
+        let checks = self.session_checks.clone();
         self.read_sql(actor.binding,deadline,move|c|Box::pin(async move{
-            session_storage::recheck_collection(c,&actor).await?;
+            session_storage::recheck_collection(&checks, c,&actor).await?;
             sqlx::query("DELETE FROM identity_authority.step_up_grants WHERE tenant_id=$1::uuid AND principal_id=$2 AND session_id=$3 AND token_hash=$4")
                 .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(actor.view.id.as_uuid()).bind(digest(&handle).as_slice()).execute(c).await?;
             Ok(())

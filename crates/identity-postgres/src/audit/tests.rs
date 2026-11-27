@@ -123,7 +123,7 @@ impl Case {
     }
 }
 
-// The canonical records were captured with the original mapper and these fixed inputs.
+// These fixed inputs pin each event contract and its canonical Audit projection.
 #[test]
 #[allow(clippy::unwrap_used, reason = "test fixture")]
 fn static_contracts_match_schema_bytes_and_canonical_records_across_batches() {

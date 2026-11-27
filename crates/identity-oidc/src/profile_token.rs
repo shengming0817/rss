@@ -12,6 +12,11 @@ pub(super) struct Claims {
     pub aud: Audiences,
     pub iat: i64,
     pub exp: i64,
+    #[serde(
+        default,
+        deserialize_with = "numeric_date",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub nbf: Option<u64>,
     pub nonce: String,
     pub azp: Option<String>,
@@ -143,6 +148,21 @@ pub(super) fn verify(
         return Err(FederationError::Claims);
     }
     Ok(claims)
+}
+
+// jsonwebtoken 11.1 rounds representable nonnegative fractional NumericDates to seconds.
+// Serde's field default handles absence. A present value must be a JSON number.
+fn numeric_date<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let number = serde_json::Number::deserialize(d)?;
+    let value = number.as_u64().or_else(|| {
+        number
+            .as_f64()
+            .filter(|n| *n >= 0.0 && *n < u64::MAX as f64)
+            .map(|n| n.round() as u64)
+    });
+    value
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("invalid NumericDate"))
 }
 
 pub(super) fn unix_seconds(observed: SystemTime) -> Result<i64, FederationError> {

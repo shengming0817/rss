@@ -127,7 +127,7 @@ impl Authority {
             + 'static,
     {
         self.require_runtime()?;
-        let reader = Reader::new(actor)?;
+        let reader = Reader::new(actor, &self.session_checks)?;
         let policy = self.policy.clone();
         let instance = self.instance;
         let max_age = self.profile_limits.max_age_seconds();

@@ -64,7 +64,6 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
     let upstream = &f.oidc;
     let s = service(f);
     let p = enabled(f, &s).await?;
-    let old = issued(finish(&s, begin(f, &s, &p).await?, "alice").await?);
     let now: i64 =
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
             .fetch_one(&f.owner)
@@ -74,6 +73,7 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
         rss_identity_core::assurance::Acr::Mfa,
         vec![],
     )?);
+    let old = issued(finish(&s, begin(f, &s, &p).await?, "alice").await?);
     let token = step_begin(f, &s, &p, &old).await?;
     let FederatedOutcome::StepUp { grant, .. } =
         step_finish(&s, token.clone(), &old, "alice").await?
@@ -91,31 +91,16 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     let context =
         rss_identity_core::step_up::StepUpContext::new("test.operation".into(), [7; 32]).unwrap();
-    upstream.trusted.store(false, Ordering::SeqCst);
-    assert!(
-        f.store
-            .inspect_session(binding(f.key.tenant), secret(&old), deadline())
-            .await
-            .is_err()
-    );
-    let mut denied = f.owner.begin().await?;
-    crate::support::fence(&mut denied, binding(f.key.tenant)).await?;
-    sqlx::query("SET LOCAL ROLE identity_runtime")
-        .execute(&mut *denied)
-        .await?;
-    assert!(
-        consume_step_up_on(&mut denied, &proof, &context, grant.expose())
-            .await
-            .is_err()
-    );
-    denied.rollback().await?;
-    upstream.trusted.store(true, Ordering::SeqCst);
+    let withdrawn = withdrawn_authority(f).await?;
+    denied_after_replacement(f, &withdrawn, &old, &proof, &context, grant.expose()).await?;
     let mut tx = f.owner.begin().await?;
     crate::support::fence(&mut tx, crate::support::binding(f.key.tenant)).await?;
     sqlx::query("SET LOCAL ROLE identity_runtime")
         .execute(&mut *tx)
         .await?;
-    rss_identity_postgres::consume_step_up_on(&mut tx, &proof, &context, grant.expose()).await?;
+    f.store
+        .consume_step_up_on(&mut tx, &proof, &context, grant.expose())
+        .await?;
     tx.commit().await?;
     let mut replay = f.owner.begin().await?;
     crate::support::fence(&mut replay, binding(f.key.tenant)).await?;
@@ -123,7 +108,8 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
         .execute(&mut *replay)
         .await?;
     assert!(
-        rss_identity_postgres::consume_step_up_on(&mut replay, &proof, &context, grant.expose())
+        f.store
+            .consume_step_up_on(&mut replay, &proof, &context, grant.expose())
             .await
             .is_err()
     );
@@ -134,6 +120,7 @@ pub async fn state_once(f: &Fixture) -> anyhow::Result<()> {
     let upstream = &f.oidc;
     let s = service(f);
     let p = enabled(f, &s).await?;
+    probe_audit(f, &s, &p).await?;
     let token = begin(f, &s, &p).await?;
     assert!(
         s.complete(
@@ -158,5 +145,113 @@ pub async fn state_once(f: &Fixture) -> anyhow::Result<()> {
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     assert_eq!(upstream.calls.load(Ordering::SeqCst), 1);
     assert!(finish(&s, token, "alice").await.is_err());
+    Ok(())
+}
+
+#[allow(clippy::unwrap_used, reason = "isolated provider fixture")]
+async fn probe_audit(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Result<()> {
+    use rss_identity_core::federation::{FederationError, ProviderReason, ProviderStage};
+    for error in [
+        FederationError::Unavailable,
+        FederationError::provider(ProviderStage::Jwks, ProviderReason::Timeout),
+    ] {
+        let actor = actor(f).await?;
+        let before = f.events().await?;
+        *f.oidc.probe_error.lock().unwrap() = Some(error);
+        assert!(matches!(s.test_provider(actor, p.id, deadline()).await,
+            Err(AuthorityError::Federation(actual)) if actual == error));
+        assert_eq!(f.events().await?, before + 1);
+        let bytes: Vec<u8> = sqlx::query_scalar("SELECT canonical FROM rss_audit.records WHERE tenant_id=$1::uuid ORDER BY position DESC LIMIT 1")
+            .bind(f.key.tenant.to_string()).fetch_one(&f.owner).await?;
+        let record = rss_audit_core::decode_untrusted(&bytes)?;
+        assert_eq!(
+            record.event().facts().action().as_str(),
+            "identity.federation.provider_test_failed"
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(record.event().context().payload().as_bytes())?;
+        assert_eq!(
+            payload.get("diagnostic").cloned(),
+            error.diagnostic().map(|d| serde_json::json!(d))
+        );
+    }
+    *f.oidc.probe_error.lock().unwrap() = None;
+    Ok(())
+}
+
+#[allow(clippy::unwrap_used, reason = "isolated PG fixtures")]
+async fn withdrawn_authority(f: &Fixture) -> anyhow::Result<Authority> {
+    let kdf = rss_identity_core::account::PasswordKdf::new(
+        std::num::NonZeroUsize::MIN,
+        std::num::NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+    )?;
+    Ok(Authority::connect_runtime(
+        f.runtime.clone(),
+        std::sync::Arc::new(kdf),
+        f.config().with_oidc(ScriptedOidc::new(false)),
+        binding(f.key.tenant),
+        f.policy.clone(),
+        deadline(),
+    )
+    .await?)
+}
+#[allow(
+    clippy::unwrap_used,
+    clippy::cognitive_complexity,
+    reason = "ordered trust replacement assertions"
+)]
+async fn denied_after_replacement(
+    f: &Fixture,
+    withdrawn: &Authority,
+    session: &IssuedSession,
+    proof: &AuthenticatedSession,
+    context: &rss_identity_core::step_up::StepUpContext,
+    grant: &str,
+) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    f.policy.managers.write().unwrap().push(proof.account());
+    *f.policy.recent.write().unwrap() =
+        ReauthenticationRequirement::RecentMfa(std::time::Duration::from_secs(300));
+    let actor = f
+        .store
+        .inspect_session(scope, secret(session), deadline())
+        .await?;
+    f.store
+        .create_local_account(actor, login("before-withdrawal"), password(), deadline())
+        .await?;
+    let retained = f
+        .store
+        .inspect_session(scope, secret(session), deadline())
+        .await?;
+    assert!(
+        withdrawn
+            .create_local_account(retained, login("after-withdrawal"), password(), deadline())
+            .await
+            .is_err()
+    );
+    assert!(
+        withdrawn
+            .inspect_session(scope, secret(session), deadline())
+            .await
+            .is_err()
+    );
+    let mut denied = f.owner.begin().await?;
+    crate::support::fence(&mut denied, scope).await?;
+    sqlx::query("SET LOCAL ROLE identity_runtime")
+        .execute(&mut *denied)
+        .await?;
+    assert!(
+        withdrawn
+            .consume_step_up_on(&mut denied, proof, context, grant)
+            .await
+            .is_err()
+    );
+    denied.rollback().await?;
+    *f.policy.recent.write().unwrap() = ReauthenticationRequirement::None;
+    f.policy
+        .managers
+        .write()
+        .unwrap()
+        .retain(|key| *key != proof.account());
     Ok(())
 }

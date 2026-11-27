@@ -10,7 +10,7 @@
 
 ## 会话与事务
 
-Authority 接收可信 ExecutionBinding，签发后在原 scope 下复核会话。宿主借用事务用 recheck_authenticated_session_on 和 consume_step_up_on 完成当前会话与用途验证。业务写入和 Audit 共用原 PgTransaction 与截止时间。Ledger 先锁链头，再取业务锁。准备好的审计批次通过共享预算即时准入；容量不足或追加失败会传播给原事务 owner。只有提交已确认后才交付凭据，提交不确定时调用方须处理该结算结果。
+Authority 接收可信 ExecutionBinding，签发后在原 scope 下复核会话。宿主在当前装配的 Authority 上调用 `recheck_authenticated_session_on` 或 `consume_step_up_on`，在借用事务内复验会话与操作用途。旧请求持有的证明只保留原时钟和期限，受理操作的 Authority 提供当前信任配置。业务写入和 Audit 共用原 PgTransaction 与截止时间。Ledger 先锁链头，再取业务锁。准备好的审计批次通过共享预算即时准入；容量不足或追加失败会传播给原事务 owner。只有提交已确认后才交付凭据，提交不确定时调用方须处理该结算结果。
 
 联邦宿主通过 `AuthorityConfig::with_oidc` 一次装配上游适配器。会话恢复、管理授权和操作证明消费都会按该宿主当前的 MFA 信任指纹复核持久化来源。切换策略后，指纹不匹配的来源立即拒绝；`reconcile_assurance_profiles` 负责将新策略写入租户配置并轮换代际。所有服务进程须使用宿主当前的配置。
 

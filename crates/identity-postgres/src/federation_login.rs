@@ -60,6 +60,7 @@ impl Federation {
         let budget = self.authority.budget(deadline)?;
         let return_url = self.target(&target)?;
         let (view, replacement) = if mode == AuthenticationMode::StepUp {
+            let checks = self.authority.session_checks.clone();
             let actor = replacement.ok_or(FederationError::Rejected)?;
             let oidc = self.oidc.clone();
             self.authority
@@ -69,7 +70,7 @@ impl Federation {
                         if actor.key.tenant != tenant {
                             return Err(reject().into());
                         }
-                        session_storage::recheck_collection(c, &actor).await?;
+                        session_storage::recheck_collection(&checks, c, &actor).await?;
                         let view = db::provider(c, tenant, provider).await?;
                         crate::federation::check_step_up(c, actor.key, &view, oidc.as_ref())
                             .await?;
@@ -109,6 +110,7 @@ impl Federation {
                 self.oidc.prepare(installed, &material, mode, budget.cutoff),
             )
             .await?;
+        let checks = self.authority.session_checks.clone();
         let oidc = self.oidc.clone();
         self.authority
             .read_sql(binding, budget.cutoff, move |c| {
@@ -119,7 +121,8 @@ impl Federation {
                             if proof.key.tenant != tenant {
                                 return Err(reject().into());
                             }
-                            let loaded = session_storage::recheck_collection(c, &proof).await?;
+                            let loaded =
+                                session_storage::recheck_collection(&checks, c, &proof).await?;
                             if mode == AuthenticationMode::StepUp {
                                 let current = db::provider(c, tenant, provider).await?;
                                 db::exact(&current, view.version)?;

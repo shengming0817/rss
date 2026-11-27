@@ -308,7 +308,10 @@ pub(crate) struct Reader {
     checks: crate::session_checks::SessionChecks,
 }
 impl Reader {
-    pub(crate) fn new(actor: &AuthenticatedSession) -> Result<Self, AuthorityError> {
+    pub(crate) fn new(
+        actor: &AuthenticatedSession,
+        checks: &crate::session_checks::SessionChecks,
+    ) -> Result<Self, AuthorityError> {
         actor.assurance()?;
         Ok(Self {
             binding: actor.binding,
@@ -318,7 +321,7 @@ impl Reader {
             kind: actor.view.credential_kind,
             instance: actor.authority.as_uuid(),
             expires: actor.expires,
-            checks: actor.session_checks.clone(),
+            checks: checks.clone(),
         })
     }
     pub(crate) async fn recheck(
@@ -394,7 +397,7 @@ impl Authority {
         if !(1..=rss_identity_core::directory::MAX_PAGE_SIZE).contains(&limit) {
             return Err(AuthorityError::InvalidInput);
         }
-        let reader = Reader::new(actor)?;
+        let reader = Reader::new(actor, &self.session_checks)?;
         if target.tenant != reader.key.tenant {
             return Err(AuthorityError::Rejected);
         }
@@ -419,7 +422,7 @@ impl Authority {
         deadline: Deadline,
     ) -> Result<TrustedProfile, AuthorityError> {
         self.require_runtime()?;
-        let reader = Reader::new(actor)?;
+        let reader = Reader::new(actor, &self.session_checks)?;
         let instance = self.instance;
         let policy = self.policy.clone();
         let budget = self.budget(deadline)?;
@@ -483,7 +486,7 @@ impl Authority {
         deadline: Deadline,
     ) -> Result<LocalProfileView, AuthorityError> {
         self.require_runtime()?;
-        let reader = Reader::new(actor)?;
+        let reader = Reader::new(actor, &self.session_checks)?;
         let policy = self.policy.clone();
         let instance = self.instance;
         if target.tenant != reader.key.tenant {
@@ -558,7 +561,7 @@ impl Authority {
         deadline: Deadline,
     ) -> Result<Vec<ProfileSourceView>, AuthorityError> {
         self.require_runtime()?;
-        let reader = Reader::new(actor)?;
+        let reader = Reader::new(actor, &self.session_checks)?;
         let policy = self.policy.clone();
         let instance = self.instance;
         self.read_sql(reader.binding,deadline,move|c|Box::pin(async move{

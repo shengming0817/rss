@@ -113,13 +113,15 @@ impl AccountProvisioner {
         let source = actor.binding;
         let instance = self.authority.instance;
         let policy = self.authority.policy.clone();
+        let checks = self.authority.session_checks.clone();
         tx.with_tenant_connection(source, move |c| {
             Box::pin(async move {
                 Ok(async {
                     if authority_id(c).await? != instance.as_uuid() {
                         return Err(ProvisioningError::Rejected);
                     }
-                    let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
+                    let loaded =
+                        crate::session_storage::recheck_collection(&checks, c, &actor).await?;
                     crate::management::authorize(
                         policy.as_ref(),
                         instance,

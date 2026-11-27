@@ -40,7 +40,9 @@ async fn actor(f: &Fixture, issued: &IssuedSession) -> anyhow::Result<Authentica
 async fn accepted(f: &Fixture, actor: &AuthenticatedSession) -> anyhow::Result<bool> {
     let mut c = f.owner.acquire().await?;
     let mut tx = transaction(&mut c, A).await?;
-    let result = recheck_authenticated_session_on(&mut tx, actor)
+    let result = f
+        .store
+        .recheck_authenticated_session_on(&mut tx, actor)
         .await
         .is_ok();
     tx.rollback().await?;
@@ -75,7 +77,9 @@ pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *tx)
             .await?;
-        recheck_authenticated_session_on(&mut tx, &admission).await?;
+        f.store
+            .recheck_authenticated_session_on(&mut tx, &admission)
+            .await?;
         sqlx::query("INSERT INTO public.host_binding VALUES($1)")
             .bind(i32::from(commit))
             .execute(&mut *tx)
@@ -117,10 +121,12 @@ pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
             tokio::spawn(async move { store.revoke_current_session(revoker, deadline()).await });
         let writer_pid = wait_for_blocked_backend(f, controller_pid).await?;
         let pool = f.owner.clone();
+        let receiver = f.store.clone();
         let reader = tokio::spawn(async move {
             let mut c = pool.acquire().await?;
             let mut tx = transaction(&mut c, A).await?;
-            let admitted = recheck_authenticated_session_on(&mut tx, &admission)
+            let admitted = receiver
+                .recheck_authenticated_session_on(&mut tx, &admission)
                 .await
                 .is_ok();
             if admitted {

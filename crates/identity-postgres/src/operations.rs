@@ -116,9 +116,10 @@ impl Authority {
         };
         let policy = self.policy.clone();
         let instance = self.instance;
+        let checks = self.session_checks.clone();
         self.write_sql(actor.binding, budget.cutoff, move |c| {
             Box::pin(async move {
-                let loaded = crate::session_storage::recheck_collection(c, &actor).await?;
+                let loaded = crate::session_storage::recheck_collection(&checks, c, &actor).await?;
                 crate::management::authorize(
                     policy.as_ref(),
                     instance,
@@ -261,8 +262,9 @@ impl Authority {
         deadline: Deadline,
     ) -> Result<(AuthenticatedSession, LoginKey), AuthorityError> {
         let key = actor.key;
+        let checks = self.session_checks.clone();
         let (actor, name) = self.read_sql(actor.binding, deadline, move |c|Box::pin(async move {
-            crate::session_storage::recheck_for(c,&actor,crate::session_storage::SessionAccess::Inspect).await?;
+            crate::session_storage::recheck_for(&checks, c,&actor,crate::session_storage::SessionAccess::Inspect).await?;
             let name:Option<String> = sqlx::query_scalar("SELECT login_key FROM identity_authority.local_credentials WHERE tenant_id=$1::uuid AND principal_id=$2")
                 .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).fetch_optional(c).await?;
             Ok((actor,name))
@@ -305,8 +307,9 @@ impl Authority {
             LocalChange::Enabled(v) => ManagementOperation::SetAccountEnabled(v),
             LocalChange::Membership(v) => ManagementOperation::SetMembership(v),
         };
+        let checks = self.session_checks.clone();
         self.write_sql(actor.binding, budget.cutoff, move |c| Box::pin(async move {
-            let loaded = crate::session_storage::recheck_for(c, &actor, crate::session_storage::SessionAccess::Account(target)).await?;
+            let loaded = crate::session_storage::recheck_for(&checks, c, &actor, crate::session_storage::SessionAccess::Account(target)).await?;
             if let Some(proof) = reauthentication {
                 if proof.account() != actor.key || target != actor.key { return Err(crate::transaction::reject().into()); }
                 current(c, &proof).await?;

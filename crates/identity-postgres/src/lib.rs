@@ -73,7 +73,6 @@ pub use schema::{
 pub use session_reference::{RevalidatedSession, SessionReference};
 pub use sessions::{
     AuthenticatedSession, IssuedSession, SessionIdentity, SessionPage, SessionView,
-    recheck_authenticated_session_on,
 };
 use std::sync::Arc;
 pub use types::*;
@@ -389,7 +388,7 @@ mod profile_admission;
 pub use profile_admission::{ProfileSourceAdmissionError, admit_profile_source_on};
 
 mod step_up;
-pub use step_up::{ConsumedStepUp, StepUpGrant, consume_step_up_on};
+pub use step_up::{ConsumedStepUp, StepUpGrant};
 mod webauthn;
 pub use webauthn::{
     RegistrationAuthorization, RpGeneration, WebauthnAuthority, WebauthnChallenge,

@@ -327,11 +327,15 @@ async fn restore(
 /// Borrowed host transaction admission shared by live-session and step-up operations.
 /// ref: sqlx v0.9.0 sqlx-core/src/connection.rs (transaction detection).
 pub(crate) async fn recheck_on(
+    authority: &crate::Authority,
     c: &mut PgConnection,
     actor: &AuthenticatedSession,
 ) -> Result<Loaded, PgError> {
     use sqlx::Connection;
-    if !c.is_in_transaction() {
+    if authority.profile != crate::AuthorityProfile::Runtime
+        || actor.authority != authority.instance
+        || !c.is_in_transaction()
+    {
         return Err(reject());
     }
     let (scope, isolation): (Option<String>, String) = sqlx::query_as(
@@ -347,28 +351,28 @@ pub(crate) async fn recheck_on(
     sqlx::query("SELECT rss_transactional_messaging.check_execution()")
         .execute(&mut *c)
         .await?;
-    recheck_for(c, actor, SessionAccess::Host).await
+    recheck_for(&authority.session_checks, c, actor, SessionAccess::Host).await
 }
 
 pub(crate) async fn recheck_collection(
+    checks: &crate::session_checks::SessionChecks,
     c: &mut PgConnection,
     proof: &AuthenticatedSession,
 ) -> Result<Loaded, PgError> {
     validate_proof(c, proof).await?;
     lock_tenant_collection(c, proof.key.tenant).await?;
-    recheck_locked(c, proof).await
+    recheck_locked(checks, c, proof).await
 }
 
 async fn validate_proof(c: &mut PgConnection, proof: &AuthenticatedSession) -> Result<(), PgError> {
-    if proof.session_checks.timer.now() >= proof.expires
-        || authority_id(c).await? != proof.authority.as_uuid()
-    {
+    if proof.timer.now() >= proof.expires || authority_id(c).await? != proof.authority.as_uuid() {
         return Err(reject());
     }
     crate::transaction::check_binding(c, proof.binding).await?;
     Ok(())
 }
 pub(crate) async fn recheck_for(
+    checks: &crate::session_checks::SessionChecks,
     c: &mut PgConnection,
     proof: &AuthenticatedSession,
     access: SessionAccess,
@@ -382,11 +386,12 @@ pub(crate) async fn recheck_for(
         access,
     )
     .await?;
-    recheck_locked(c, proof).await
+    recheck_locked(checks, c, proof).await
 }
 
 /// The caller has established the proof's exact deployment and execution binding in this transaction.
 pub(crate) async fn recheck_locked(
+    checks: &crate::session_checks::SessionChecks,
     c: &mut PgConnection,
     proof: &AuthenticatedSession,
 ) -> Result<Loaded, PgError> {
@@ -396,7 +401,7 @@ pub(crate) async fn recheck_locked(
         &proof.digest,
         proof.view.credential_kind,
         proof.authority.as_uuid(),
-        &proof.session_checks,
+        checks,
     )
     .await?;
     loaded.expires = loaded.expires.min(proof.expires);

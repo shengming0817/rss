@@ -62,6 +62,9 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
         ("exp", json!(1), false),
         ("exp", json!(101), true),
         ("nbf", json!(100), true),
+        ("nbf", json!(null), false),
+        ("nbf", json!(100.25), true),
+        ("nbf", json!(100.75), false),
         ("nbf", json!(101), false),
         ("iat", json!(4102444800_i64), false),
     ] {
@@ -167,6 +170,9 @@ fn signed_snapshot_withholds_invalid_fact_but_never_bypasses_token_verification(
             ("exp", json!(1), false),
             ("exp", json!(101), true),
             ("nbf", json!(100), true),
+            ("nbf", json!(null), false),
+            ("nbf", json!(100.25), true),
+            ("nbf", json!(100.75), false),
             ("nbf", json!(101), false),
         ] {
             let mut raw = json!({"iss":"https://issuer.test","sub":"subject","aud":["client"],"iat":1,"exp":4102444800_i64,"nonce":"nonce","organization_snapshot":value});
