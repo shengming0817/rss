@@ -20,11 +20,11 @@ make ci CI_PART=tests CI_FILTER='package(=amqp-integration) and test(=shared_amq
 ```
 
 普通运行选择受影响 package。已识别文档不贡献 package；混合提交仍选择代码的反向依赖闭包。
-文档是否被识别以选择器为准，不能仅凭 Markdown 后缀判断。未知路径、rename/copy 或分析异常会
-保守扩大范围。显式 `CI_FILTER` 独立于 affected 选择，零匹配失败。
+文档是否被识别以选择器为准，不能仅凭 Markdown 后缀判断。文件移动和共享 fixture 按受影响的包选择，
+全局输入和无法判定的影响按[验证范围](../rules/verification-scope.md)回退全工作区。显式 `CI_FILTER` 独立于 affected 选择，零匹配失败。
 
 按需使用 `CI_PART=checks` 运行静态检查、`tests` 构建归档并执行测试与适用覆盖率、`docs` 运行 doctest；
-默认 `all` 包含这些阶段与适用的 SemVer 检查。纯文档空选择仍运行 CI 脚本检查，不表示所有验证都跳过。
+默认 `all` 包含这些阶段与适用的 SemVer 检查。仅改选包器及其回归测试，或仅改已识别文档时，仍运行 CI 脚本检查。
 分阶段消费归档时，先用 `CI_PART=select` 生成 plan，后续通过 `CI_PLAN` 指向同一产物；不要混用不同 SHA 的结果。
 
 本地产物默认位于 `.local-ci-runs/current`，可通过 `CI_ARTIFACTS` 指定其它目录。

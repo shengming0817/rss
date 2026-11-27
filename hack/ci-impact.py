@@ -3,15 +3,20 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
+import tempfile
+import tomllib
 
 
+SELECTOR_FILES = {"hack/ci-impact.py", "hack/tests/test_ci_impact.py"}
 GLOBAL_FILES = {
-    "Cargo.lock",
     "Makefile",
     "clippy.toml",
     "deny.toml",
@@ -23,7 +28,6 @@ GLOBAL_PREFIXES = (
     ".github/actions/",
     ".github/scripts/",
     ".github/workflows/",
-    "tests/fixtures/",  # Shared source includes have no single Cargo package owner.
 )
 ROOT_DOCS = {
     "AGENTS.md",
@@ -88,9 +92,7 @@ def changed_paths(root: Path, base: str, head: str) -> list[tuple[str, str]]:
             "diff",
             "--name-status",
             "-z",
-            "--find-renames",
-            "--find-copies",
-            "--find-copies-harder",
+            "--no-renames",
             base,
             head,
             "--",
@@ -111,27 +113,18 @@ def changed_paths(root: Path, base: str, head: str) -> list[tuple[str, str]]:
     while cursor < len(fields):
         status = fields[cursor]
         cursor += 1
-        if not status or status[0] not in "ADMRC":
+        if not status or status not in ("A", "D", "M"):
             raise SelectionError("diff-invalid")
-        path_count = 2 if status[0] in "RC" else 1
-        if cursor + path_count > len(fields):
+        if cursor == len(fields) or not valid_path(fields[cursor]):
             raise SelectionError("diff-invalid")
-        paths = fields[cursor : cursor + path_count]
-        cursor += path_count
-        if not all(valid_path(path) for path in paths):
-            raise SelectionError("invalid-path")
-        if status[0] in "RC":
-            raise SelectionError("rename-or-copy")
-        changes.append((status[0], paths[0]))
+        changes.append((status, fields[cursor]))
+        cursor += 1
     return changes
 
 
 def is_global(path: str) -> bool:
     return (
         path in GLOBAL_FILES
-        or path.endswith("/Cargo.toml")
-        or path == "Cargo.toml"
-        or path == "hack/ci-impact.py"
         or any(path.startswith(prefix) for prefix in GLOBAL_PREFIXES)
     )
 
@@ -241,26 +234,185 @@ def reverse_closure(seeds: set[str], reverse: dict[str, set[str]]) -> set[str]:
     return selected
 
 
+def git(root: Path, *arguments: str) -> bytes:
+    result = run(["/usr/bin/git", *arguments], cwd=root)
+    if result.returncode:
+        raise SelectionError("diff-unavailable")
+    return result.stdout
+
+
+@contextmanager
+def checkout(root: Path, revision: str):
+    """Read Cargo inputs from this revision without changing the caller's checkout."""
+    sha = git(root, "rev-parse", "--verify", revision + "^{commit}").decode().strip()
+    if git(root, "rev-parse", "HEAD").decode().strip() == sha and not git(
+        root, "status", "--porcelain", "--untracked-files=normal"
+    ):
+        yield root
+        return
+    with tempfile.TemporaryDirectory(prefix="rss-impact-") as directory:
+        snapshot = Path(directory).resolve() / "repo"
+        git(root, "clone", "--quiet", "--shared", "--no-checkout", "--", str(root), str(snapshot))
+        git(snapshot, "checkout", "--quiet", "--detach", sha)
+        yield snapshot
+
+
+def read_toml(path: Path) -> dict:
+    with path.open("rb") as source:
+        return tomllib.load(source)
+
+
+def workspace_inputs(root: Path) -> tuple[dict, dict]:
+    manifest = read_toml(root / "Cargo.toml")
+    workspace = manifest["workspace"]
+    workspace.pop("members", None)
+    dependencies = workspace.pop("dependencies", {})
+    return manifest, dependencies
+
+
+def inherited_dependencies(manifest: dict) -> set[str]:
+    names = set()
+    for table in (manifest, *manifest.get("target", {}).values()):
+        for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
+            for name, spec in table.get(kind, {}).items():
+                if isinstance(spec, dict) and spec.get("workspace"):
+                    names.add(name)
+    return names
+
+
+def lock_packages(root: Path) -> dict:
+    return {(p["name"], p["version"], p.get("source")): p
+            for p in read_toml(root / "Cargo.lock")["package"]}
+
+
+def package_tree(root: Path, package: str) -> str:
+    # Cargo resolves features for the selected consumer. A workspace-wide union
+    # would make a new, unrelated member's provider features look like changes.
+    result = run(["cargo", "tree", "--locked", "--all-features", "--target", "all",
+                  "--package", package, "--prefix", "depth", "--format", "{p} {f}"], cwd=root)
+    if result.returncode:
+        raise SelectionError("metadata-unavailable")
+    return result.stdout.decode().replace("(" + str(root) + "/", "(./")
+
+
+def graph_changes(before: Path, after: Path, old_roots, new_roots) -> set[str]:
+    old_config, old_deps = workspace_inputs(before)
+    new_config, new_deps = workspace_inputs(after)
+    if old_config != new_config:
+        raise SelectionError("global-input")
+    changed_deps = {key for key in old_deps.keys() | new_deps.keys()
+                    if old_deps.get(key) != new_deps.get(key)}
+    old = {name: path for path, name in old_roots}
+    new = {name: path for path, name in new_roots}
+    affected = old.keys() ^ new.keys()
+    old_lock, new_lock = lock_packages(before), lock_packages(after)
+    # Adding only new lock records cannot alter an existing resolution.
+    check_trees = any(new_lock.get(key) != data for key, data in old_lock.items())
+    # Cargo tree abbreviates Git revisions and omits registry checksums. Match
+    # complete lock identities for packages whose printed name/version collides.
+    identities = {}
+    for key in old_lock.keys() | new_lock.keys():
+        identities.setdefault(key[:2], set()).add(key[2])
+    sensitive = {key[:2] for key in old_lock.keys() | new_lock.keys()
+                 if old_lock.get(key) != new_lock.get(key) and (
+                     len(identities[key[:2]]) > 1 or
+                     (key in old_lock and key in new_lock and
+                      old_lock[key].get("checksum") != new_lock[key].get("checksum")))}
+    for name in old.keys() & new.keys():
+        if changed_deps and changed_deps & inherited_dependencies(
+            read_toml(after / new[name] / "Cargo.toml")
+        ):
+            affected.add(name)
+        elif check_trees:
+            previous = package_tree(before, name)
+            current = package_tree(after, name)
+            if previous != current or sensitive.intersection(
+                re.findall(r"^\d+([\w-]+) v(\S+)", previous + current, re.MULTILINE)
+            ):
+                affected.add(name)
+    return affected
+
+
+def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
+    # Shared fixture imports use literal paths. Include unresolved directory
+    # references conservatively (e.g. a build script constructing a filename).
+    basename = PurePosixPath(path).name
+    result = run(["/usr/bin/git", "grep", "-I", "-z", "-F", "-e", basename,
+                  "-e", "fixtures/", "-e", '/fixtures"', revision, "--"], cwd=root)
+    if result.returncode not in (0, 1):
+        raise SelectionError("diff-unavailable")
+    packages = set()
+    for row in result.stdout.decode().splitlines():
+        filename, line = row.split("\0", 1)
+        filename = filename.split(":", 1)[1]
+        if is_docs(filename):
+            continue
+        package = owner(filename, roots)
+        if package is None:
+            # Tooling may discuss the fixture directory; a reference to this
+            # particular file outside a package has no attributable consumer.
+            if basename in line:
+                raise SelectionError("unknown-fixture-owner")
+            continue
+        literals = re.findall(r"""["']([^"'\\]*)["']""", line)
+        references = [value for value in literals if "fixtures" in value or basename in value]
+        package_root = next(directory for directory, name in roots if name == package)
+        if re.search(r'(?:#\[path\s*=|include(?:_bytes|_str)?!\s*\()\s*"', line):
+            origins = (posixpath.dirname(filename),)
+        else:
+            origins = ("", posixpath.dirname(filename), str(package_root))
+        targets = {posixpath.normpath(posixpath.join(origin, value.lstrip("/")))
+                   for origin in origins for value in references}
+        if any(target == path or path.startswith(target + "/") for target in targets):
+            packages.add(package)
+        elif basename in line and not references:
+            packages.add(package)  # A nonliteral reference still names the fixture.
+    if not packages:
+        raise SelectionError("unknown-fixture-owner")
+    return packages
+
+
 def select(root: Path, base: str, head: str) -> tuple[bool, set[str], set[str]]:
     changes = changed_paths(root, base, head)
     if not changes:
         return False, set(), {"no-changes"}
+    # CI's Python contract tests always run, including when no Cargo package is selected.
+    selector_changed = any(path in SELECTOR_FILES for _, path in changes)
+    changes = [(status, path) for status, path in changes if path not in SELECTOR_FILES]
     if any(is_global(path) for _, path in changes):
         return True, set(), {"global-input"}
     if all(is_docs(path) for _, path in changes):
-        return False, set(), {"docs-only"}
+        return False, set(), {"selector-only" if selector_changed else "docs-only"}
 
-    roots, reverse = workspace_graph(root, metadata(root))
-    seeds: set[str] = set()
-    for status, path in changes:
-        if is_docs(path):
-            continue
-        package = owner(path, roots)
-        if package is None:
-            reason = "unowned-deletion" if status == "D" else "unknown-path"
-            return True, set(), {reason}
-        seeds.add(package)
-    return False, reverse_closure(seeds, reverse), {"package-change"}
+    with checkout(root, head) as current:
+        roots, reverse = workspace_graph(current, metadata(current))
+        cargo_changed = any(path in ("Cargo.toml", "Cargo.lock") or path.endswith("/Cargo.toml")
+                            for _, path in changes)
+        affected = set()
+        old_roots, old_reverse = roots, reverse
+        if cargo_changed:
+            with checkout(root, base) as previous:
+                old_roots, old_reverse = workspace_graph(previous, metadata(previous))
+                affected = graph_changes(previous, current, old_roots, roots)
+
+        before, after = set(affected), set(affected)
+        for status, path in changes:
+            if is_docs(path) or path in ("Cargo.toml", "Cargo.lock"):
+                continue
+            if path.startswith("tests/fixtures/"):
+                if status != "A":
+                    before.update(fixture_owners(root, base, path, old_roots))
+                if status != "D":
+                    after.update(fixture_owners(root, head, path, roots))
+            else:
+                package = owner(path, old_roots if status == "D" else roots)
+                if package is None:
+                    reason = "unowned-deletion" if status == "D" else "unknown-path"
+                    return True, set(), {reason}
+                (before if status == "D" else after).add(package)
+        # Removed members can affect surviving callers. Only HEAD packages run.
+        surviving = reverse_closure(before, old_reverse).intersection(reverse)
+        return False, reverse_closure(after | surviving, reverse).intersection(reverse), {"package-change"}
 
 
 def main() -> None:
