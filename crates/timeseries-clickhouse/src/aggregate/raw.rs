@@ -108,15 +108,11 @@ impl<'a> Run<'a> {
         store: &Operation<'_, C>,
         window: Interval,
         bounds: Lookahead,
+        boundaries: &Boundaries,
         budget: &mut ReadBudget,
         dependency: &mut i64,
     ) -> Result<Summary, Error> {
-        if self.fences.iter().any(|f| {
-            f.kind == "pruned"
-                && control::overlaps(&f.selection, &self.spec.selection())
-                && f.window.start() < window.end()
-                && f.window.end() > window.start()
-        }) {
+        if boundaries.pruned(window.start().micros(), window.end().micros()) {
             return Err(Error::HistoryExpired);
         }
         if !self.seeded {
@@ -134,30 +130,25 @@ impl<'a> Run<'a> {
         }
         let limit = store.limits.max_points.get() as usize;
         let (mut builder, start) =
-            seeded_builder(self.spec, window, self.fences, self.prior.as_ref(), limit)?;
+            seeded_builder(self.spec, window, boundaries, self.prior.as_ref(), limit)?;
         *dependency = start;
         if self.complete_until < window.end() {
             self.refill(store, window, bounds, budget).await?;
         }
+        let mut cuts = boundaries.cuts(&builder, window);
         while self
             .rows
             .front()
             .is_some_and(|r| r.sample.input().observed_at < window.end())
         {
             let sample = self.rows.pop_front().ok_or(Error::Invariant)?.sample;
-            mask(
-                &mut builder,
-                self.fences,
-                self.spec,
-                window,
-                sample.input().observed_at,
-            )?;
+            cuts.apply(&mut builder, sample.input().observed_at)?;
             if needs_prior(self.spec) {
                 self.prior = Some(sample.clone());
             }
             builder.push(sample, limit)?;
         }
-        mask_end(&mut builder, self.fences, self.spec, window)?;
+        cuts.finish(&mut builder, window)?;
         builder.finish(limit)
     }
 }

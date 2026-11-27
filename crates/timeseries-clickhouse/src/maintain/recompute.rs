@@ -60,13 +60,24 @@ pub(super) async fn step<C: Clock>(
     if state.publish.is_some() {
         return publish(store, c, r, state, revision, deadline).await;
     }
-    let fences = control::fences(c, r.scope(), store.limits.max_fences.get()).await?;
-    if fences.iter().any(|f| {
-        f.kind == "pruned"
-            && control::overlaps(&f.selection, &spec.selection())
-            && f.window.start() < window.end()
-            && f.window.end() > window.start()
-    }) {
+    let max = store.limits.max_fences.get();
+    let fences = if control::namespace_has_fences(c, r.scope(), max).await? {
+        // Include the predecessor halo and check pruning across the entire registered plan.
+        let start = Timestamp::new(aggregate::dependency_start(spec, window.start()))?;
+        control::visible_fences(
+            c,
+            &spec.selection(),
+            Interval::new(start, window.end())?,
+            max,
+            None,
+            false,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    let bounds = aggregate::Boundaries::new(&fences);
+    if bounds.pruned(window.start().micros(), window.end().micros()) {
         return Err(Error::HistoryExpired);
     }
     if state.fold.as_ref().is_none_or(|f| f.revision != revision) {
@@ -85,7 +96,7 @@ pub(super) async fn step<C: Clock>(
     let bucket = spec.bucket(fold.at)?;
     if fold.builder.is_none() {
         let (builder, max_input_revision, dependency_start) = store
-            .builder(spec, bucket, boundary, &fences, deadline)
+            .builder(spec, bucket, boundary, &fences, &bounds, deadline)
             .await?;
         fold.builder = Some(builder);
         fold.max_input_revision = max_input_revision;
@@ -114,6 +125,8 @@ pub(super) async fn step<C: Clock>(
         )
         .await?;
     let more = rows.len() > r.budget().rows.get() as usize;
+    let builder = fold.builder.as_mut().ok_or(Error::Invariant)?;
+    let mut cuts = bounds.cuts(builder, bucket);
     let mut processed = 0;
     for row in rows.into_iter().take(r.budget().rows.get() as usize) {
         fold.max_input_revision = fold.max_input_revision.max(row.revision);
@@ -124,14 +137,13 @@ pub(super) async fn step<C: Clock>(
             input.sequence,
             input.id.as_str().to_owned(),
         ));
-        let builder = fold.builder.as_mut().ok_or(Error::Invariant)?;
-        aggregate::mask(builder, &fences, spec, bucket, sample.input().observed_at)?;
+        cuts.apply(builder, input.observed_at)?;
         builder.push(sample, store.limits.max_points.get() as usize)?;
         processed += 1;
     }
     if !more {
         let mut builder = fold.builder.take().ok_or(Error::Invariant)?;
-        aggregate::mask_end(&mut builder, &fences, spec, bucket)?;
+        cuts.finish(&mut builder, bucket)?;
         let summary = builder.finish(store.limits.max_points.get() as usize)?;
         let payload = bytes(&summary)?;
         if payload.len() > store.limits.max_bytes.get() as usize {

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const MAX_DIMENSIONS: u16 = 1024;
 
 /// Tenant and namespace are mandatory scope, not authentication evidence.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "ScopeDto")]
 pub struct Scope {
     #[serde(serialize_with = "serialize_tenant")]
@@ -46,7 +46,7 @@ impl Scope {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Temporality {
     Cumulative,
@@ -54,7 +54,7 @@ pub enum Temporality {
 }
 
 /// Open metric names share these closed, provider-neutral operations.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Metric {
     Gauge {
@@ -90,7 +90,7 @@ impl Metric {
 }
 
 /// Per-definition admission budgets; limits can only widen in a new version.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DimensionRules {
     pub allowed: BTreeSet<Id>,
@@ -146,7 +146,7 @@ impl DimensionRules {
 }
 
 /// An input DTO, not a validated definition. The unit is exact, not implicitly converted.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DefinitionSpec {
     pub scope: Scope,
@@ -156,7 +156,7 @@ pub struct DefinitionSpec {
     pub metric: Metric,
     pub dimensions: DimensionRules,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "DefinitionSpec")]
 pub struct Definition(Box<DefinitionSpec>);
 impl TryFrom<DefinitionSpec> for Definition {

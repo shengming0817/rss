@@ -37,7 +37,7 @@ pub struct PreparationWait {
 
 #[derive(Debug, Default)]
 pub struct Report {
-    pub sort_inputs: usize,
+    pub definition_bindings: usize,
     pub index_peak_bytes: usize,
     pub probe_stages: BTreeMap<(&'static str, &'static str), Total>,
     pub pre_submit_bytes: usize,

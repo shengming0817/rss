@@ -82,13 +82,20 @@ async fn preparation_by_order() -> anyhow::Result<()> {
         {
             let r = rss_timeseries::measurement::finish();
             println!(
-                "detail load={load} sha={} sort={} index_peak={} peak_bytes={} reserved={}",
+                "detail load={load} sha={} bindings={} sort=0 index_peak={} peak_bytes={} reserved={}",
                 r.stages["series_sha"].calls / 61,
-                r.sort_inputs / 61,
+                r.definition_bindings / 61,
                 r.index_peak_bytes,
                 r.peak_live_bytes,
                 r.peak_reserved_bytes
             );
+            let unique = if load == "distinct" {
+                distribution::COUNT
+            } else {
+                2
+            };
+            assert_eq!(r.stages["series_sha"].calls, (61 * unique) as u64);
+            assert_eq!(r.definition_bindings, 61 * unique);
             assert!(r.peak_live_bytes <= r.peak_reserved_bytes);
         }
     }

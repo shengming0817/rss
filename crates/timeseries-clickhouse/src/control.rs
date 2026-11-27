@@ -93,6 +93,20 @@ pub(crate) fn has_fences(count: i64, max: u32) -> Result<bool, Error> {
     }
     Ok(count > 0)
 }
+pub(crate) async fn namespace_has_fences(
+    c: &mut PgConnection,
+    s: &Scope,
+    max: u32,
+) -> Result<bool, Error> {
+    let count = sqlx::query_scalar(include_str!("fence_count.sql"))
+        .bind(s.tenant().to_string())
+        .bind(s.namespace().as_str())
+        .bind(i64::from(max) + 1)
+        .fetch_one(c)
+        .await
+        .map_err(sql_error)?;
+    has_fences(count, max)
+}
 pub(crate) async fn fences(c: &mut PgConnection, s: &Scope, max: u32) -> Result<Vec<Fence>, Error> {
     let rows=sqlx::query("SELECT id,kind,selection::text,lo,hi,restore_until,restored FROM rss_ts_ch.fences WHERE tenant_id=$1::text::uuid AND namespace=$2 ORDER BY lo,id LIMIT $3")
         .bind(s.tenant().to_string()).bind(s.namespace().as_str()).bind(i64::from(max)+1).fetch_all(c).await.map_err(sql_error)?;
@@ -123,13 +137,13 @@ fn fence(r: sqlx::postgres::PgRow) -> Result<Fence, Error> {
 /// Both selector shapes denormalize to the same subject/resource index expressions.
 pub(crate) async fn visible_fences(
     c: &mut PgConnection,
-    q: &Query,
-    start: i64,
-    limits: &crate::Limits,
+    sel: &Selection,
+    window: Interval,
+    max_fences: u32,
+    byte_budget: Option<usize>,
     include_restored: bool,
 ) -> Result<Vec<Fence>, Error> {
     use futures::TryStreamExt;
-    let sel = q.selection();
     let (subject, resource) = match sel {
         Selection::Exact { series, .. } => (series.subject(), series.resource()),
         Selection::Resource {
@@ -142,16 +156,16 @@ pub(crate) async fn visible_fences(
         .bind(sel.scope().namespace().as_str())
         .bind(subject.as_str())
         .bind(resource.as_str())
-        .bind(start)
-        .bind(q.window().end().micros())
+        .bind(window.start().micros())
+        .bind(window.end().micros())
         .bind(doc)
-        .bind(i64::from(limits.max_fences.get()) + 1)
+        .bind(i64::from(max_fences) + 1)
         .bind(include_restored)
         .fetch(c);
     let mut result = Vec::new();
-    let mut remaining = limits.max_bytes.get() as usize;
+    let mut remaining = byte_budget.unwrap_or(usize::MAX);
     while let Some(row) = rows.try_next().await.map_err(sql_error)? {
-        if result.len() >= limits.max_fences.get() as usize {
+        if result.len() >= max_fences as usize {
             return Err(Error::BudgetExceeded);
         }
         let size = row
@@ -197,14 +211,7 @@ pub(crate) async fn put_fence(
     sqlx::query("INSERT INTO rss_ts_ch.fences(tenant_id,namespace,id,kind,selection,lo,hi,restore_until) VALUES($1::text::uuid,$2,$3,$4,$5::text::jsonb,$6,$7,$8)")
         .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(r.id().as_str()).bind(kind).bind(String::from_utf8(bytes(selection)?).map_err(|_|Error::Invariant)?).bind(window.start().micros()).bind(window.end().micros()).bind(until).execute(&mut *c).await.map_err(sql_error)?;
     // Reject new distinct frontiers atomically, before poisoning future reads.
-    let count = sqlx::query_scalar(include_str!("fence_count.sql"))
-        .bind(r.scope().tenant().to_string())
-        .bind(r.scope().namespace().as_str())
-        .bind(i64::from(max) + 1)
-        .fetch_one(&mut *c)
-        .await
-        .map_err(sql_error)?;
-    has_fences(count, max)?;
+    namespace_has_fences(c, r.scope(), max).await?;
     if kind == "pruned" {
         fence_changed(c, r.scope()).await?;
     }

@@ -27,6 +27,21 @@ impl Default for Buffers {
     }
 }
 impl Buffers {
+    pub(super) fn index_growth(&self, old: (usize, usize), new: (usize, usize), scratch: usize) {
+        if old == new {
+            return;
+        }
+        // Series grows first, bindings second. Old and replacement allocations
+        // coexist only for the table currently rehashing.
+        let series_growth = old.1 + new.0 + usize::from(old.0 != new.0) * old.0;
+        let binding_growth = new.0 + new.1 + usize::from(old.1 != new.1) * old.1;
+        let peak = series_growth.max(binding_growth);
+        self.set(scratch + peak);
+        self.session
+            .update(|r| r.index_peak_bytes = r.index_peak_bytes.max(peak));
+        self.set(scratch + new.0 + new.1);
+    }
+
     pub(super) fn set(&self, bytes: usize) {
         let old = self.live.replace(bytes);
         self.session.update(|r| {

@@ -4005,6 +4005,7 @@ dependencies = [
  "anyhow",
  "base64",
  "futures",
+ "hashbrown 0.17.1",
  "hmac 0.12.1",
  "rss-contract",
  "rss-request-context",
