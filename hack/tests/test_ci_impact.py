@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
 import re
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 RSS_ROOT = Path(__file__).resolve().parents[2]
@@ -516,6 +518,61 @@ class CiImpactContract(unittest.TestCase):
         _, decision = self.repo.select(base=base, head=head)
         self.assert_decision(decision, full=False, packages=["leaf-integration", "other", "other-integration"],
                              reason="package-change")
+
+    def test_inline_module_path_selects_reader_with_different_base_directory(self):
+        fixture = "tests/fixtures/shared.rs"
+        self.repo._write("tests/leaf-integration/src/lib.rs", 'include!("../../fixtures/shared.rs");\n')
+        self.repo._write("tests/other-integration/src/inline/.keep", "")
+        self.repo._write("tests/other-integration/src/lib.rs", """
+mod inline {
+    #[path = "../../../fixtures/shared.rs"] mod shared;
+    pub use shared::Shared;
+}
+pub use inline::Shared;
+""")
+        base = self.repo.change(fixture, "pub struct Shared;\n")
+        command = ["cargo", "check", "-q", "--locked", "-p", "other-integration"]
+        subprocess.run(command, cwd=self.repo.root, check=True)
+        head = self.repo.change(fixture, "pub struct Replaced;\n")
+        _, decision = self.repo.select(base=base, head=head)
+        self.assert_decision(decision, full=False, packages=["leaf-integration", "other-integration"],
+                             reason="package-change")
+        failure = subprocess.run(command, cwd=self.repo.root, capture_output=True, text=True)
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn("unresolved import", failure.stderr)
+
+    def test_blocked_cargo_tree_returns_full_plan_and_releases_child_lock(self):
+        member = self.repo.root / "crates/leaf/Cargo.toml"
+        member.write_text(member.read_text().replace('version = "0.1.0"', 'version = "0.1.1"'))
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=self.repo.root, check=True)
+        head = self.repo.commit("change a locked member")
+        with tempfile.TemporaryDirectory() as temp:
+            tools = Path(temp)
+            lock = tools / "child.lock"
+            cargo = tools / "cargo"
+            waiter = tools / "wait.py"
+            waiter.write_text("import fcntl, sys, time\n"
+                              "with open(sys.argv[1], 'w') as f:\n"
+                              "    fcntl.flock(f, fcntl.LOCK_EX)\n    time.sleep(60)\n")
+            # The direct process and its child share the selector query's process group.
+            cargo.write_text(f"#!{sys.executable}\nimport os, subprocess, sys\n"
+                             "if sys.argv[1] == 'tree':\n"
+                             f"    subprocess.run([sys.executable, {str(waiter)!r}, {str(lock)!r}])\n"
+                             "else:\n"
+                             f"    os.execv({shutil.which('cargo')!r}, sys.argv)\n")
+            cargo.chmod(0o755)
+            wrapper = tools / "select.py"
+            wrapper.write_text("import importlib.util\n"
+                               f"spec = importlib.util.spec_from_file_location('impact', {DEFAULT_SELECTOR[1]!r})\n"
+                               "impact = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(impact)\n"
+                               "impact.QUERY_TIMEOUT_SECONDS = 2\nimpact.main()\n")
+            with patch.dict(os.environ, CI_IMPACT_COMMAND=shlex.join([sys.executable, str(wrapper)])):
+                _, decision = self.repo.select(head=head, environment={"PATH": str(tools) + os.pathsep + os.environ["PATH"]})
+            self.assertTrue(decision["full"])
+            self.assertEqual(decision["packages"], [])
+            self.assertRegex(decision["reasons"][0], r"^cargo-tree-[\w-]+-timeout$")
+            with lock.open() as f:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_snapshot_preserves_caller_head_index_and_files_under_git_hook_environment(self):
         member = self.repo.root / "crates/leaf/Cargo.toml"

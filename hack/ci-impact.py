@@ -10,12 +10,14 @@ import os
 import posixpath
 from pathlib import Path, PurePosixPath
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import tomllib
 
 
+QUERY_TIMEOUT_SECONDS = 120
 SELECTOR_FILES = {"hack/ci-impact.py", "hack/tests/test_ci_impact.py"}
 GLOBAL_FILES = {
     "Makefile",
@@ -60,11 +62,32 @@ def emit(full: bool, packages: set[str] | None, reasons: set[str]) -> None:
     print(json.dumps(decision, separators=(",", ":"), ensure_ascii=False))
 
 
+def query(command: list[str], *, phase: str, cwd=None, env=None) -> subprocess.CompletedProcess[bytes]:
+    """Bound one selector query, including children holding its output pipes or locks."""
+    try:
+        with subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+            try:
+                stdout, stderr = child.communicate(timeout=QUERY_TIMEOUT_SECONDS)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if isinstance(error, KeyboardInterrupt):
+                    raise
+                raise SelectionError(f"{phase}-timeout") from error
+            return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+    except OSError as error:
+        raise SelectionError(f"{phase}-unavailable") from error
+
+
 @cache
 def local_git_variables() -> set[str]:
-    result = subprocess.run(["/usr/bin/git", "rev-parse", "--local-env-vars"],
-                            check=True, capture_output=True, text=True)
-    return set(result.stdout.splitlines())
+    result = query(["/usr/bin/git", "rev-parse", "--local-env-vars"], phase="git-environment")
+    if result.returncode:
+        raise SelectionError("git-environment-unavailable")
+    return set(result.stdout.decode().splitlines())
 
 
 def repository_env() -> dict[str, str]:
@@ -74,18 +97,8 @@ def repository_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key not in local}
 
 
-def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[bytes]:
-    try:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            env=repository_env(),
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError as error:
-        raise SelectionError("diff-unavailable") from error
+def run(command: list[str], *, cwd: Path, phase: str = "diff") -> subprocess.CompletedProcess[bytes]:
+    return query(command, phase=phase, cwd=cwd, env=repository_env())
 
 
 def parse_args(arguments: list[str]) -> tuple[str, str]:
@@ -155,17 +168,8 @@ def is_docs(path: str) -> bool:
 
 
 def metadata(root: Path) -> dict:
-    try:
-        result = subprocess.run(
-            ["cargo", "metadata", "--locked", "--all-features", "--format-version", "1"],
-            cwd=root,
-            env=repository_env(),
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError as error:
-        raise SelectionError("metadata-unavailable") from error
+    result = run(["cargo", "metadata", "--locked", "--all-features", "--format-version", "1"],
+                 cwd=root, phase="metadata")
     if result.returncode != 0:
         raise SelectionError("metadata-unavailable")
     try:
@@ -251,10 +255,10 @@ def reverse_closure(seeds: set[str], reverse: dict[str, set[str]]) -> set[str]:
     return selected
 
 
-def git(root: Path, *arguments: str) -> bytes:
-    result = run(["/usr/bin/git", *arguments], cwd=root)
+def git(root: Path, *arguments: str, phase: str = "diff") -> bytes:
+    result = run(["/usr/bin/git", *arguments], cwd=root, phase=phase)
     if result.returncode:
-        raise SelectionError("diff-unavailable")
+        raise SelectionError(f"{phase}-unavailable")
     return result.stdout
 
 
@@ -269,8 +273,8 @@ def checkout(root: Path, revision: str):
         return
     with tempfile.TemporaryDirectory(prefix="rss-impact-") as directory:
         snapshot = Path(directory).resolve() / "repo"
-        git(root, "clone", "--quiet", "--shared", "--no-checkout", "--", str(root), str(snapshot))
-        git(snapshot, "-c", "core.hooksPath=" + os.devnull, "checkout", "--quiet", "--detach", sha)
+        git(root, "clone", "--quiet", "--shared", "--no-checkout", "--", str(root), str(snapshot), phase="git-clone")
+        git(snapshot, "-c", "core.hooksPath=" + os.devnull, "checkout", "--quiet", "--detach", sha, phase="git-checkout")
         yield snapshot
 
 
@@ -306,9 +310,10 @@ def package_tree(root: Path, package: str) -> str:
     # Cargo resolves features for the selected consumer. A workspace-wide union
     # would make a new, unrelated member's provider features look like changes.
     result = run(["cargo", "tree", "--locked", "--all-features", "--target", "all",
-                  "--package", package, "--prefix", "depth", "--format", "{p} {f}"], cwd=root)
+                  "--package", package, "--prefix", "depth", "--format", "{p} {f}"], cwd=root,
+                 phase=f"cargo-tree-{package}")
     if result.returncode:
-        raise SelectionError("metadata-unavailable")
+        raise SelectionError(f"cargo-tree-{package}-unavailable")
     return result.stdout.decode().replace("(" + str(root) + "/", "(./")
 
 
@@ -358,7 +363,8 @@ def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
                   "-e", "fixtures", revision, "--"], cwd=root)
     if result.returncode not in (0, 1):
         raise SelectionError("diff-unavailable")
-    direct = re.compile(r'(?:#\[\s*path\s*=|include(?:_bytes|_str)?!\s*\()\s*"([^"\\]+)"')
+    direct = re.compile(r'include(?:_bytes|_str)?!\s*\(\s*"([^"\\]+)"')
+    module_path = re.compile(r'#\[\s*path\s*=\s*"([^"\\]+)"')
     directory = re.compile(r"""(?:["'/])fixtures(?:[/{"']|$)""")
     packages = set()
     for row in result.stdout.decode().splitlines():
@@ -374,9 +380,15 @@ def fixture_owners(root: Path, revision: str, path: str, roots) -> set[str]:
         # Only direct literal Rust includes have a known source-relative base.
         # Any remaining constructed filename or directory could read this fixture.
         imports = direct.findall(line)
-        remainder = direct.sub("", line)
+        # Inline Rust modules can change the base directory of a #[path].
+        # Its last component remains known even when its directory does not.
+        attrs = module_path.findall(line)
+        remainder = module_path.sub("", direct.sub("", line))
         if (any(posixpath.normpath(posixpath.join(posixpath.dirname(filename), value)) == path
-                for value in imports) or basename in remainder or directory.search(remainder)):
+                for value in imports) or any(
+                    posixpath.basename(value) == basename or not PurePosixPath(value).suffix
+                    for value in attrs
+                ) or basename in remainder or directory.search(remainder)):
             packages.add(package)
     if not packages:
         raise SelectionError("unknown-fixture-owner")
@@ -430,8 +442,7 @@ def main() -> None:
     try:
         base, head = parse_args(sys.argv[1:])
         # Locate the caller first, then isolate all repository-bound children.
-        root_result = subprocess.run(["/usr/bin/git", "rev-parse", "--show-toplevel"],
-                                     capture_output=True)
+        root_result = query(["/usr/bin/git", "rev-parse", "--show-toplevel"], phase="diff")
         if root_result.returncode != 0:
             raise SelectionError("diff-unavailable")
         try:
