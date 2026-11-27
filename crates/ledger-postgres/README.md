@@ -38,7 +38,8 @@ async fn business<T: Timer>(store: &PgLedger, request: AppendRequest, c: &Contro
 结果直接使用 canonical `rss_transactional_messaging::transaction::LocalTxAttempt`，无第二套公开 outcome。
 独立 PG 仅依赖该核心契约（关闭其默认 features），不需要消息 runtime 或 schema。
 执行 race 超时/取消返回 `CommitUnknown` 并隔离连接；`Deadline/Cancelled` 携带 canonical 阶段。
-只有实际尝试回滚但未获 ACK 才报告 `RollbackFailed`，其错误保留 operation 和 settlement。
+业务回调已返回错误时，`Error::Rollback` 同时保留业务错误和结算诊断。调用方按外层 `LocalTxAttempt` 判断结算：
+取消或到期使回滚无法开始时返回 `CommitUnknown`；已尝试回滚但未获 ACK 时返回 `RollbackFailed`。
 业务 `with_connection` 原样返回调用方错误类型；调用方可检查 SQLSTATE/constraint 后再决定 operation 错误，
 不会把业务唯一键冲突推断为账本稳定 ID 冲突。通用 SQL 错误转为 `Error` 时仅保留脱敏 Storage 原因。
 

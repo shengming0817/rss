@@ -23,12 +23,15 @@ pub enum Error {
     /// Live admission contract violation, without provider or tenant data.
     #[error("ledger admission violation: {0:?}")]
     Admission(AdmissionViolation),
-    /// Both the operation error and an actually attempted rollback failure.
+    /// Original operation failure and the reason rollback could not be confirmed.
+    /// Use the enclosing `LocalTxAttempt` to determine settlement: `CommitUnknown`
+    /// if cancellation or expiry prevented starting rollback, or `RollbackFailed`
+    /// if rollback was attempted and its acknowledgement could not be established.
     #[error("ledger rollback unconfirmed")]
     Rollback {
         /// Failure triggering rollback.
         operation: Box<Error>,
-        /// Failure to acknowledge rollback.
+        /// Cause that prevented starting rollback or confirming its acknowledgement.
         settlement: Box<Error>,
     },
     /// Protocol rejection.
