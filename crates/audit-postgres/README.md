@@ -140,7 +140,7 @@ can call it once per verification transaction, including a read-only snapshot. T
 caller owns the connection, deadline and outer commit or rollback. Catalog probes render
 definitions under a local catalog search path with identifier quoting set to its default.
 They restore the caller’s settings before returning, including on admission failure. If a
-probe on a manually opened transaction is interrupted before cleanup is acknowledged,
+probe on a borrowed transaction is interrupted before cleanup is acknowledged,
 roll back that transaction or retire the connection. Role and RLS admission
 run on the actual runtime connection at startup.
 

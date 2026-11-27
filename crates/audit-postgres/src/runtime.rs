@@ -466,6 +466,18 @@ pub(crate) async fn validate_storage<T: ExecutionTimer>(
     control: &Control<'_, T>,
     append: bool,
 ) -> Result<(), Error> {
+    let mut scope = probe::CatalogScope::open(connection).await?;
+    let result = inspect_storage(scope.connection(), integrity, control, append).await;
+    scope.restore().await?;
+    result
+}
+
+async fn inspect_storage<T: ExecutionTimer>(
+    connection: &mut PgConnection,
+    integrity: &Integrity,
+    control: &Control<'_, T>,
+    append: bool,
+) -> Result<(), Error> {
     if append {
         probe::validate(connection).await?;
     } else {

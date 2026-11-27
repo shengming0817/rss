@@ -127,6 +127,13 @@ async fn foreign_role(
         plain.validate_connection(&mut foreign, control).await,
         Err(Error::Admission(_))
     ));
+    let ledger = PgAudit::new(
+        pool.clone(),
+        Integrity::Ledger(auth()?),
+        write_budget()?,
+        control,
+    )
+    .await?;
     let mut actual = pool.begin().await?;
     sqlx::raw_sql(
         "SET LOCAL search_path=public,pg_temp,pg_catalog; SET LOCAL quote_all_identifiers=on",
@@ -134,6 +141,7 @@ async fn foreign_role(
     .execute(&mut *actual)
     .await?;
     plain.validate_connection(&mut actual, control).await?;
+    ledger.validate_connection(&mut actual, control).await?;
     let quoted: String = sqlx::query_scalar("SHOW quote_all_identifiers")
         .fetch_one(&mut *actual)
         .await?;

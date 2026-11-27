@@ -1,7 +1,7 @@
 use crate::{AdmissionViolation as Violation, Error, MIGRATION_SQL};
 use rss_request_context::TenantId;
 use sqlx::{
-    Connection, PgConnection, Postgres, Row,
+    Connection, PgConnection, Postgres, Row, Transaction,
     postgres::{PgArguments, PgRow},
     query::Query,
 };
@@ -30,7 +30,10 @@ pub async fn validate_structure(connection: &mut PgConnection) -> Result<(), Err
         include_str!("structure.sql"),
         "SELECT * FROM structure"
     ))?;
-    let row = catalog_row(connection, query).await?;
+    let mut scope = CatalogScope::open(connection).await?;
+    let row = query.fetch_one(scope.connection()).await;
+    scope.restore().await?;
+    let row = row?;
     check(
         &row,
         &[
@@ -67,7 +70,7 @@ async fn inspect(connection: &mut PgConnection, require_append: bool) -> Result<
     ))?
     .bind("(tenant_id = (NULLIF(current_setting('rss.tenant_id'::text, true), ''::text))::uuid)")
     .bind(require_append);
-    let row = catalog_row(connection, query).await?;
+    let row = query.fetch_one(connection).await?;
     check(
         &row,
         &[
@@ -84,26 +87,49 @@ async fn inspect(connection: &mut PgConnection, require_append: bool) -> Result<
     )
 }
 
-/// SQLx tracks its own transaction depth. A PgConnection may also have a
-/// transaction opened with SQL BEGIN. Never roll back that caller's work.
-async fn catalog_row(
-    connection: &mut PgConnection,
-    query: Query<'static, Postgres, PgArguments>,
-) -> Result<PgRow, Error> {
-    if !connection.is_in_transaction() && has_external_transaction(connection).await? {
-        sqlx::raw_sql("SAVEPOINT rss_audit_probe")
-            .execute(&mut *connection)
-            .await?;
-        let row = pinned_row(connection, query).await;
-        sqlx::raw_sql("ROLLBACK TO SAVEPOINT rss_audit_probe; RELEASE SAVEPOINT rss_audit_probe")
-            .execute(connection)
-            .await?;
-        return row;
+pub(super) const PIN: &str =
+    "SET LOCAL search_path=pg_catalog,pg_temp; SET LOCAL quote_all_identifiers=off";
+pub(super) const SAVE: &str = "SAVEPOINT rss_audit_probe";
+pub(super) const RESTORE: &str =
+    "ROLLBACK TO SAVEPOINT rss_audit_probe; RELEASE SAVEPOINT rss_audit_probe";
+
+/// A caller can have opened BEGIN through SQL or through SQLx. Only SQLx-managed
+/// transactions have driver depth; rolling back a new SQLx root inside raw BEGIN
+/// would discard the caller's work.
+pub(super) enum CatalogScope<'a> {
+    Owned(Transaction<'a, Postgres>),
+    Borrowed(&'a mut PgConnection),
+}
+impl<'a> CatalogScope<'a> {
+    pub(super) async fn open(connection: &'a mut PgConnection) -> Result<Self, Error> {
+        let mut scope =
+            if connection.is_in_transaction() || has_external_transaction(connection).await? {
+                sqlx::raw_sql(SAVE).execute(&mut *connection).await?;
+                Self::Borrowed(connection)
+            } else {
+                Self::Owned(connection.begin().await?)
+            };
+        if let Err(error) = sqlx::raw_sql(PIN).execute(scope.connection()).await {
+            scope.restore().await?;
+            return Err(error.into());
+        }
+        Ok(scope)
     }
-    let mut scope = connection.begin().await?;
-    let row = pinned_row(&mut scope, query).await;
-    scope.rollback().await?;
-    row
+    pub(super) fn connection(&mut self) -> &mut PgConnection {
+        match self {
+            Self::Owned(tx) => tx,
+            Self::Borrowed(c) => c,
+        }
+    }
+    pub(super) async fn restore(self) -> Result<(), Error> {
+        match self {
+            Self::Owned(tx) => tx.rollback().await?,
+            Self::Borrowed(c) => {
+                sqlx::raw_sql(RESTORE).execute(c).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 // A virtual transaction ID is stable inside a transaction (including read-only
@@ -117,16 +143,6 @@ async fn has_external_transaction(connection: &mut PgConnection) -> Result<bool,
     let first: String = sqlx::query_scalar(VXID).fetch_one(&mut *connection).await?;
     let second: String = sqlx::query_scalar(VXID).fetch_one(connection).await?;
     Ok(first == second)
-}
-
-async fn pinned_row(
-    connection: &mut PgConnection,
-    query: Query<'static, Postgres, PgArguments>,
-) -> Result<PgRow, Error> {
-    sqlx::raw_sql("SET LOCAL search_path=pg_catalog,pg_temp; SET LOCAL quote_all_identifiers=off")
-        .execute(&mut *connection)
-        .await?;
-    Ok(query.fetch_one(connection).await?)
 }
 
 fn check(row: &PgRow, flags: &[(&str, Violation)]) -> Result<(), Error> {
