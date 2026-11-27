@@ -245,7 +245,6 @@ fn entra_browser_requires_canonical_subject_without_fallback() {
     }
 }
 
-// Every fixture serves discovery under a realm path, catching accidental URL::join truncation.
 
 #[test]
 fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
