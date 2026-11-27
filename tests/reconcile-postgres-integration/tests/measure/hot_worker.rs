@@ -1,3 +1,9 @@
+//! Run on the candidate and on a detached worktree at the issue baseline.
+//! From the candidate checkout, apply only the measurement harness to the baseline:
+//! `git diff 15380c399 HEAD -- tests/reconcile-postgres-integration/tests/measure | git -C "$baseline" apply`.
+//! In each checkout, with Docker and Python 3 + psycopg 3, run
+//! `cargo test --locked -p reconcile-postgres-integration --test suite hot_scan_profile -- --ignored --nocapture`.
+//! Each run compiles that checkout's worker and embedded DDL and emits five untraced samples per layout.
 use super::*;
 use std::sync::{
     OnceLock,

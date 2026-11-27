@@ -43,6 +43,7 @@ def notice_counts(diag, counts):
             counts["target_rows_examined"] += examined
             if "LIMIT probe_limit" in sql or "LIMIT page_limit" in sql:
                 counts["candidate_reads"] += examined
+        # Completed LockRows events include repeated locks on one row; NOWAIT attempts are measured separately.
         if node["Node Type"] == "LockRows" and "FROM rss_reconcile.resources WHERE tenant_id=t AND resource=ANY(required_keys)" in sql:
             counts["resource_locks"] += loops * node["Actual Rows"]
         if node["Node Type"] == "LockRows" and "entity=candidate.entity FOR UPDATE NOWAIT" in sql:
