@@ -30,8 +30,7 @@ pub(super) struct Jwks {
     pub keys: Vec<Candidate>,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(from = "serde_json::Value")]
+#[cfg_attr(test, derive(Clone))]
 pub(super) struct Candidate {
     pub kid: Option<Box<str>>,
     family: Option<AlgorithmFamily>,
@@ -102,13 +101,32 @@ pub(super) struct Metadata {
     pub authorization_endpoint: Url,
     pub token_endpoint: Option<TokenEndpoint>,
     pub jwks_uri: Url,
-    #[serde(rename = "response_types_supported")]
-    _response_types_supported: Vec<String>,
-    #[serde(rename = "subject_types_supported")]
-    _subject_types_supported: Vec<String>,
-    pub id_token_signing_alg_values_supported: Vec<String>,
+    #[serde(
+        rename = "response_types_supported",
+        deserialize_with = "validate_strings"
+    )]
+    _response_types_supported: (),
+    #[serde(
+        rename = "subject_types_supported",
+        deserialize_with = "validate_strings"
+    )]
+    _subject_types_supported: (),
+    #[serde(deserialize_with = "signing_algorithms")]
+    pub id_token_signing_alg_values_supported: Box<[Algorithm]>,
     #[serde(default)]
     pub authorization_response_iss_parameter_supported: bool,
+}
+
+fn validate_strings<'de, D: serde::Deserializer<'de>>(de: D) -> Result<(), D::Error> {
+    Vec::<String>::deserialize(de).map(drop)
+}
+fn signing_algorithms<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> Result<Box<[Algorithm]>, D::Error> {
+    Ok(Vec::<String>::deserialize(de)?
+        .iter()
+        .filter_map(|value| value.parse().ok())
+        .collect())
 }
 
 impl Metadata {
@@ -208,7 +226,7 @@ impl Kind {
                 metadata.authorization_endpoint = metadata.authorization_endpoint.clone();
                 metadata.jwks_uri = metadata.jwks_uri.clone();
                 token.url = token.url.clone();
-                Ok(PublicDocument::Metadata(metadata))
+                Ok(PublicDocument::Metadata(Box::new(metadata)))
             }
             Self::Keys { .. } => {
                 let keys: WireKeys = decode(bytes, self.stage())?;
@@ -221,6 +239,16 @@ impl Kind {
             }
         }
     }
+}
+// Detach a retained validator from the potentially much larger transport header buffer.
+fn copy_validator(
+    headers: &HeaderMap,
+    name: header::HeaderName,
+) -> Result<Option<HeaderValue>, FederationError> {
+    headers
+        .get(name)
+        .map(|h| HeaderValue::from_bytes(h.as_bytes()).map_err(|_| FederationError::Unavailable))
+        .transpose()
 }
 fn invalid(stage: ProviderStage) -> FederationError {
     failure(stage, ProviderReason::InvalidResponse)
@@ -247,7 +275,7 @@ struct Cached {
     freshness: crate::freshness::Freshness,
 }
 pub(super) enum PublicDocument {
-    Metadata(Metadata),
+    Metadata(Box<Metadata>),
     Keys(Jwks),
 }
 impl PublicDocument {
@@ -258,21 +286,16 @@ impl PublicDocument {
         }
     }
     fn heap_bytes(&self) -> usize {
-        fn strings(values: &Vec<String>) -> usize {
-            values.capacity() * size_of::<String>()
-                + values.iter().map(String::capacity).sum::<usize>()
-        }
         match self {
             Self::Metadata(m) => {
-                m.issuer.capacity()
+                size_of::<Metadata>()
+                    + m.issuer.capacity()
                     + m.authorization_endpoint.as_str().len()
                     + m.jwks_uri.as_str().len()
                     + m.token_endpoint
                         .as_ref()
                         .map_or(0, |v| v.url.as_str().len() + v.advertised.capacity())
-                    + strings(&m._response_types_supported)
-                    + strings(&m._subject_types_supported)
-                    + strings(&m.id_token_signing_alg_values_supported)
+                    + size_of_val(m.id_token_signing_alg_values_supported.as_ref())
             }
             Self::Keys(j) => {
                 j.keys.capacity() * size_of::<Candidate>()
@@ -475,6 +498,17 @@ impl Document {
             Kind::Discovery { .. } => resources.policy.discovery_ttl,
             Kind::Keys { .. } => resources.policy.jwks_ttl,
         };
+        // Decode and prepare public keys outside the publication lock. Recheck retirement under it.
+        let decoded = if parts.status != http::StatusCode::NOT_MODIFIED {
+            if parts.status != http::StatusCode::OK || !valid_media(&parts.headers, stage) {
+                return Err(invalid(stage));
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            resources.decodes.fetch_add(1, Ordering::Relaxed);
+            Some(kind.validate(&bytes, channel)?)
+        } else {
+            None
+        };
         let mut state = self
             .state
             .lock()
@@ -502,18 +536,13 @@ impl Document {
             }
             old.clone()
         } else {
-            if parts.status != http::StatusCode::OK || !valid_media(&parts.headers, stage) {
-                return Err(invalid(stage));
-            }
-            #[cfg(any(test, feature = "test-support"))]
-            resources.decodes.fetch_add(1, Ordering::Relaxed);
-            let document = kind.validate(&bytes, channel)?;
+            let document = decoded.ok_or_else(|| invalid(stage))?;
             let keys_uri = match &document {
                 PublicDocument::Metadata(m) => Some(m.jwks_uri.clone()),
                 PublicDocument::Keys(_) => None,
             };
-            let etag = parts.headers.get(header::ETAG).cloned();
-            let modified = parts.headers.get(header::LAST_MODIFIED).cloned();
+            let etag = copy_validator(&parts.headers, header::ETAG)?;
+            let modified = copy_validator(&parts.headers, header::LAST_MODIFIED)?;
             let keys = keys_uri.map(|uri| {
                 let doc = previous
                     .as_ref()

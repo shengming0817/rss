@@ -151,6 +151,11 @@ impl Resources {
             return Err(FederationError::Configuration);
         }
         let id = key(revision);
+        let ca = provider
+            .credentials()
+            .ca_pem()
+            .map(rss_identity_core::federation::digest);
+
         let mut entries = self
             .entries
             .lock()
@@ -187,10 +192,6 @@ impl Resources {
         // The adapter owns the immutable CIDR policy indexed by (tenant, exact issuer, client).
         let issuer = provider.settings().issuer().as_str();
         let client = provider.settings().client_id().as_str();
-        let ca = provider
-            .credentials()
-            .ca_pem()
-            .map(rss_identity_core::federation::digest);
         if let Some(resources) = &entry.resources {
             if resources.trust.issuer != issuer
                 || resources.trust.client != client
@@ -220,17 +221,17 @@ impl Resources {
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        loop {
-            if let Ok(permit) = self.clients.clone().try_acquire_owned() {
-                return Ok(permit);
-            }
-            if !evict_idle(&mut entries) {
-                return Err(crate::failure(
-                    crate::ProviderStage::Binding,
-                    crate::ProviderReason::Unavailable,
-                ));
-            }
-        }
+        #[cfg(test)]
+        let _sample = pressure::Locked::start();
+        admit(&mut entries, || {
+            self.clients.clone().try_acquire_owned().ok()
+        })
+        .ok_or_else(|| {
+            crate::failure(
+                crate::ProviderStage::Binding,
+                crate::ProviderReason::Unavailable,
+            )
+        })
     }
     pub fn reserve(
         &self,
@@ -245,19 +246,16 @@ impl Resources {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let credit = replaced.as_ref().map_or(0, |lease| lease.bytes);
-        while self
-            .bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_sub(credit)?
-                    .checked_add(bytes)
-                    .filter(|total| *total <= self.policy.max_resident_bytes)
-            })
-            .is_err()
-        {
-            if !evict_idle(&mut entries) {
-                return Err(FederationError::Unavailable);
-            }
-        }
+        admit(&mut entries, || {
+            self.bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    used.checked_sub(credit)?
+                        .checked_add(bytes)
+                        .filter(|total| *total <= self.policy.max_resident_bytes)
+                })
+                .ok()
+        })
+        .ok_or(FederationError::Unavailable)?;
         if let Some(lease) = replaced {
             lease.bytes = 0;
         }
@@ -267,15 +265,58 @@ impl Resources {
         })
     }
 }
+fn idle(entry: &Entry) -> bool {
+    entry
+        .resources
+        .as_ref()
+        .is_none_or(|resources| Arc::strong_count(resources) == 1)
+}
+
+fn admit<T>(
+    entries: &mut HashMap<ProviderKey, Entry>,
+    mut acquire: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    if let Some(value) = acquire() {
+        return Some(value);
+    }
+    // A single or double eviction costs less than sorting the idle set (pressure fixture).
+    for _ in 0..2 {
+        if !evict_idle(entries) {
+            return None;
+        }
+        if let Some(value) = acquire() {
+            return Some(value);
+        }
+    }
+    // All new bindings take this lock. An idle resource cannot acquire a new external owner here.
+    #[cfg(test)]
+    pressure::scan(entries.len());
+    let mut idle_entries: Vec<_> = entries
+        .iter()
+        .filter(|(_, entry)| idle(entry))
+        .map(|(key, entry)| (entry.last_used, *key))
+        .collect();
+    idle_entries.sort_unstable_by_key(|(last_used, _)| *last_used);
+    for (_, key) in idle_entries {
+        entries.remove(&key);
+        if let Some(value) = acquire() {
+            return Some(value);
+        }
+    }
+    // A holder may have released its resource while we were traversing the original idle set.
+    while evict_idle(entries) {
+        if let Some(value) = acquire() {
+            return Some(value);
+        }
+    }
+    None
+}
 fn evict_idle(entries: &mut HashMap<ProviderKey, Entry>) -> bool {
+    #[cfg(test)]
+    pressure::scan(entries.len());
     let oldest = entries
         .iter()
-        .filter(|(_, entry)| {
-            entry
-                .resources
-                .as_ref()
-                .is_none_or(|r| Arc::strong_count(r) == 1)
-        })
+        .filter(|(_, entry)| idle(entry))
         .min_by_key(|(_, entry)| entry.last_used)
         .map(|(k, _)| *k);
     if let Some(key) = oldest {
@@ -294,3 +335,6 @@ impl Drop for ByteLease {
         self.counter.fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
+
+#[cfg(test)]
+mod pressure;

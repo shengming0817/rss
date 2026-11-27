@@ -83,8 +83,7 @@ pub(super) fn approved_header(
     }
     if !metadata
         .id_token_signing_alg_values_supported
-        .iter()
-        .any(|value| value.parse::<Algorithm>() == Ok(header.alg))
+        .contains(&header.alg)
     {
         return Err(FederationError::Claims);
     }

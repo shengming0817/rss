@@ -263,7 +263,7 @@ async fn reference_visible(
 ) -> anyhow::Result<bool> {
     use sqlx::{Arguments, Row};
     let mut args = sqlx::postgres::PgArguments::default();
-    args.add(id)?;
+    args.add(id).map_err(anyhow::Error::from_boxed)?;
     Ok(authority.with_session_references_read(binding(f.key.tenant), deadline(), move |mut read| Box::pin(async move {
         let rows = read.query("SELECT EXISTS(SELECT FROM identity_session_references WHERE session_id=$1) AS visible", args, 1).await?;
         rows[0].try_get("visible").map_err(|_|AuthorityError::Unavailable)
@@ -286,12 +286,18 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.owner)
     .await?;
     let oidc = issued(finish(&s, begin(f, &s, &p).await?, "manager").await?);
+    let first = uuid::Uuid::from_u128(1);
+    sqlx::query("UPDATE identity_authority.sessions SET session_id=$2 WHERE session_id=$1")
+        .bind(oidc.view().id.as_uuid())
+        .bind(first)
+        .execute(&f.owner)
+        .await?;
     let oidc_actor = f
         .store
         .inspect_session(scope, secret(&oidc), deadline())
         .await?;
     let reference = oidc_actor.reference()?;
-    let id = oidc.view().id;
+    let id = oidc_actor.view().id;
     assert!(reference_visible(&f.store, f, id.as_uuid()).await?);
     f.store
         .recheck_session_reference(scope, &reference, deadline())
@@ -303,6 +309,37 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert!(approved.sessions.iter().any(|v| v.id == id));
     assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - checks, 1);
+    let before = f.oidc.checks.load(Ordering::SeqCst);
+    let actor = f
+        .store
+        .inspect_session(scope, secret(&oidc), deadline())
+        .await?;
+    let after_inspect = f.oidc.checks.load(Ordering::SeqCst);
+    assert_eq!(after_inspect - before, 1);
+    let security = s.current_session_security(actor, deadline()).await?;
+    assert_eq!(security.eligible_step_up_providers.len(), 1);
+    assert_eq!(
+        security.eligible_step_up_providers[0]
+            .provider_id
+            .to_string(),
+        p.id.to_string()
+    );
+    let n = s.list_providers(f.actor().await?, deadline()).await?.len();
+    assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - after_inspect, n);
+    sqlx::query("UPDATE identity_authority.external_identities SET issuer='malformed' WHERE provider_id=$1::uuid").bind(p.id.to_string()).execute(&f.owner).await?;
+    assert!(matches!(
+        f.store
+            .list_sessions(f.actor().await?, None, 100, deadline())
+            .await,
+        Err(AuthorityError::RolledBack(_))
+    ));
+    sqlx::query(
+        "UPDATE identity_authority.external_identities SET issuer=$2 WHERE provider_id=$1::uuid",
+    )
+    .bind(p.id.to_string())
+    .bind(p.settings.issuer().as_str())
+    .execute(&f.owner)
+    .await?;
     let withdrawn = withdrawn_authority(f).await?;
     let local = f.actor().await?;
     let local_id = local.view().id;
@@ -311,6 +348,15 @@ pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert!(page.sessions.iter().any(|v| v.id == local_id));
     assert!(!page.sessions.iter().any(|v| v.id == id));
+    let empty = withdrawn
+        .list_sessions(f.actor().await?, None, 1, deadline())
+        .await?;
+    assert!(empty.sessions.is_empty());
+    assert_eq!(empty.next_cursor, Some(id));
+    let next = withdrawn
+        .list_sessions(f.actor().await?, empty.next_cursor, 100, deadline())
+        .await?;
+    assert!(next.sessions.iter().any(|v| v.id == local_id));
     assert!(reference_visible(&withdrawn, f, id.as_uuid()).await?);
     assert!(matches!(
         withdrawn
