@@ -86,7 +86,12 @@ pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> 
     let template:serde_json::Value=sqlx::query_scalar("SELECT to_jsonb(t) FROM identity_authority.oidc_transactions t WHERE link_intent IS NULL AND NOT claimed LIMIT 1").fetch_one(&f.owner).await?;
     for n in [0, 5000, 9999, 10000] {
         inventory(f, n, &template).await?;
-        enrollment(f, s, p, &local, &external, n == 10000).await?;
+        if n < 10000 {
+            enrollment(f, s, p, &local, &external, Outcome::Expire).await?;
+            enrollment(f, s, p, &local, &external, Outcome::Cancel).await?;
+        } else {
+            enrollment(f, s, p, &local, &external, Outcome::Full).await?;
+        }
         assert_eq!(amount(f).await?, i64::from(n));
     }
     inventory(f, 9999, &template).await?;
@@ -96,13 +101,21 @@ pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> 
     failed(f, s, p).await
 }
 
+#[derive(Clone, Copy)]
+enum Outcome {
+    Full,
+    Expire,
+    Cancel,
+}
+
 async fn check_start(
+    f: &Fixture,
     s: &Federation,
     result: Result<FederatedRedirect, AuthorityError>,
     actor: Option<&IssuedSession>,
-    full: bool,
+    outcome: Outcome,
 ) -> anyhow::Result<()> {
-    if full {
+    if matches!(outcome, Outcome::Full) {
         anyhow::ensure!(
             matches!(result, Err(AuthorityError::Rejected)),
             "full store admitted a request"
@@ -110,7 +123,15 @@ async fn check_start(
         return Ok(());
     }
     let token = oidc::state(result?);
-    cancel(s, &token, actor.map(oidc::secret)).await?;
+    if matches!(outcome, Outcome::Expire) {
+        let changed=sqlx::query("UPDATE identity_authority.oidc_transactions SET created_at=1,expires_at=2
+            WHERE tenant_id=$1::uuid AND state_hash=$2 AND expires_at>floor(extract(epoch FROM now()))::bigint
+            AND expires_at-created_at<=120")
+            .bind(A).bind(rss_identity_core::federation::digest(&token).as_slice()).execute(&f.owner).await?;
+        assert_eq!(changed.rows_affected(), 1);
+    } else {
+        cancel(s, &token, actor.map(oidc::secret)).await?;
+    }
     assert!(cancel(s, &token, actor.map(oidc::secret)).await.is_err());
     Ok(())
 }
@@ -120,10 +141,10 @@ async fn enrollment(
     p: &ProviderView,
     local: &IssuedSession,
     external: &IssuedSession,
-    full: bool,
+    outcome: Outcome,
 ) -> anyhow::Result<()> {
     let login = s.begin_login(request(f, p.id, "test")?, deadline()).await;
-    check_start(s, login, None, full).await?;
+    check_start(f, s, login, None, outcome).await?;
     let linked = s
         .begin_link(
             LinkRequest {
@@ -137,7 +158,7 @@ async fn enrollment(
             deadline(),
         )
         .await;
-    check_start(s, linked, Some(local), full).await?;
+    check_start(f, s, linked, Some(local), outcome).await?;
     let mut req = request(f, p.id, "test")?;
     req.replacement = Some(actor(f, external).await?);
     let step = s
@@ -147,7 +168,7 @@ async fn enrollment(
             deadline(),
         )
         .await;
-    check_start(s, step, Some(external), full).await
+    check_start(f, s, step, Some(external), outcome).await
 }
 async fn last_slot(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Result<()> {
     let (a, b) = tokio::join!(
