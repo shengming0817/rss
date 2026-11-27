@@ -73,12 +73,13 @@ CREATE TABLE identity_authority.password_attempts (
  window_until timestamptz,
  claim_token uuid CHECK(claim_token <> '00000000-0000-0000-0000-000000000000'),
  claim_until timestamptz,
+ reclaim_at timestamptz GENERATED ALWAYS AS
+  (coalesce(greatest(window_until,claim_until), '-infinity'::timestamptz)) STORED,
  PRIMARY KEY(tenant_id,login_digest),
  CHECK((failures=0) = (window_until IS NULL)),
  CHECK((claim_token IS NULL) = (claim_until IS NULL))
 );
-CREATE INDEX password_attempts_expiry ON identity_authority.password_attempts
- (tenant_id, (coalesce(greatest(window_until,claim_until), '-infinity'::timestamptz)));
+CREATE INDEX password_attempts_expiry ON identity_authority.password_attempts(tenant_id,reclaim_at);
 CREATE TABLE identity_authority.providers (
  tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
  provider_id uuid NOT NULL CHECK(provider_id <> '00000000-0000-0000-0000-000000000000'),

@@ -72,6 +72,10 @@ async fn inventory(f: &Fixture, n: i32, template: &serde_json::Value) -> anyhow:
     assert_eq!(amount(f).await?, i64::from(n));
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "run the same enrollment assertions at each specified inventory"
+)]
 pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Result<()> {
     let local = f.login().await?;
     let state = oidc::state(s.begin_login(request(f, p.id, "test")?, deadline()).await?);
@@ -82,10 +86,48 @@ pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> 
     let template:serde_json::Value=sqlx::query_scalar("SELECT to_jsonb(t) FROM identity_authority.oidc_transactions t WHERE link_intent IS NULL AND NOT claimed LIMIT 1").fetch_one(&f.owner).await?;
     for n in [0, 5000, 9999, 10000] {
         inventory(f, n, &template).await?;
-        let login = s.begin_login(request(f, p.id, "test")?, deadline()).await;
-        let linked = s.begin_link(
+        enrollment(f, s, p, &local, &external, n == 10000).await?;
+        assert_eq!(amount(f).await?, i64::from(n));
+    }
+    inventory(f, 9999, &template).await?;
+    last_slot(f, s, p).await?;
+    replace_at_capacity(f, s, p, &external).await?;
+    expiry(f, s, p, &local, &template).await?;
+    failed(f, s, p).await
+}
+
+async fn check_start(
+    s: &Federation,
+    result: Result<FederatedRedirect, AuthorityError>,
+    actor: Option<&IssuedSession>,
+    full: bool,
+) -> anyhow::Result<()> {
+    if full {
+        anyhow::ensure!(
+            matches!(result, Err(AuthorityError::Rejected)),
+            "full store admitted a request"
+        );
+        return Ok(());
+    }
+    let token = oidc::state(result?);
+    cancel(s, &token, actor.map(oidc::secret)).await?;
+    assert!(cancel(s, &token, actor.map(oidc::secret)).await.is_err());
+    Ok(())
+}
+async fn enrollment(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+    local: &IssuedSession,
+    external: &IssuedSession,
+    full: bool,
+) -> anyhow::Result<()> {
+    let login = s.begin_login(request(f, p.id, "test")?, deadline()).await;
+    check_start(s, login, None, full).await?;
+    let linked = s
+        .begin_link(
             LinkRequest {
-                actor: actor(f, &local).await?,
+                actor: actor(f, local).await?,
                 target_provider: p.id,
                 password: Some(password()),
                 browser: oidc::BROWSER.into(),
@@ -93,41 +135,21 @@ pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> 
                 source: source(),
             },
             deadline(),
-        );
-        if n == 10000 {
-            assert!(matches!(login, Err(AuthorityError::Rejected)));
-            assert!(matches!(linked.await, Err(AuthorityError::Rejected)));
-        } else {
-            let token = oidc::state(login?);
-            cancel(s, &token, None).await?;
-            assert!(cancel(s, &token, None).await.is_err());
-            let token = oidc::state(linked.await?);
-            cancel(s, &token, Some(oidc::secret(&local))).await?;
-            assert!(cancel(s, &token, Some(oidc::secret(&local))).await.is_err());
-        }
-        let mut step = request(f, p.id, "test")?;
-        step.replacement = Some(actor(f, &external).await?);
-        let step = s
-            .begin_step_up(
-                step,
-                StepUpContext::new("test.operation".into(), [7; 32]).map_err(anyhow::Error::msg)?,
-                deadline(),
-            )
-            .await;
-        if n == 10000 {
-            assert!(matches!(step, Err(AuthorityError::Rejected)));
-        } else {
-            let token = oidc::state(step?);
-            cancel(s, &token, Some(oidc::secret(&external))).await?;
-            assert!(
-                cancel(s, &token, Some(oidc::secret(&external)))
-                    .await
-                    .is_err()
-            );
-        }
-        assert_eq!(amount(f).await?, i64::from(n));
-    }
-    inventory(f, 9999, &template).await?;
+        )
+        .await;
+    check_start(s, linked, Some(local), full).await?;
+    let mut req = request(f, p.id, "test")?;
+    req.replacement = Some(actor(f, external).await?);
+    let step = s
+        .begin_step_up(
+            req,
+            StepUpContext::new("test.operation".into(), [7; 32]).map_err(anyhow::Error::msg)?,
+            deadline(),
+        )
+        .await;
+    check_start(s, step, Some(external), full).await
+}
+async fn last_slot(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Result<()> {
     let (a, b) = tokio::join!(
         s.begin_login(request(f, p.id, "first")?, deadline()),
         s.begin_login(request(f, p.id, "second")?, deadline())
@@ -141,11 +163,23 @@ pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> 
     assert_eq!(amount(f).await?, 10000);
     other_tenant(f, s).await?;
     cancel(s, &winner, None).await?;
-    let token = link(f, s, p.id, &external, false).await?;
+    Ok(())
+}
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "ordered assertions on one federation transaction history"
+)]
+async fn replace_at_capacity(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+    external: &IssuedSession,
+) -> anyhow::Result<()> {
+    let token = link(f, s, p.id, external, false).await?;
     sqlx::query("UPDATE identity_authority.link_intents SET expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+45
         WHERE intent_id=(SELECT link_intent FROM identity_authority.oidc_transactions WHERE tenant_id=$1::uuid AND link_intent IS NOT NULL)")
         .bind(A).execute(&f.owner).await?;
-    let FederatedOutcome::Redirect(next) = consume(s, token, "external", &external).await? else {
+    let FederatedOutcome::Redirect(next) = consume(s, token, "external", external).await? else {
         anyhow::bail!("expected link target")
     };
     assert_eq!(amount(f).await?, 10000);
@@ -154,18 +188,20 @@ pub(super) async fn lifecycle(f: &Fixture, s: &Federation, p: &ProviderView) -> 
     assert!(shortened);
     let token = oidc::state(next);
     assert!(matches!(
-        consume(s, token.clone(), "external", &external).await?,
+        consume(s, token.clone(), "external", external).await?,
         FederatedOutcome::Session {
             link_result: Some(LinkResult::AlreadyLinked),
             ..
         }
     ));
-    assert!(consume(s, token, "external", &external).await.is_err());
+    assert!(consume(s, token, "external", external).await.is_err());
     assert_eq!(amount(f).await?, 9999);
-    expiry(f, s, p, &local, &template).await?;
-    failed(f, s, p).await
+    Ok(())
 }
-
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "ordered assertions on one federation transaction history"
+)]
 async fn expiry(
     f: &Fixture,
     s: &Federation,
@@ -205,6 +241,10 @@ async fn expiry(
     }
     Ok(())
 }
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "ordered assertions on one federation transaction history"
+)]
 async fn failed(f: &Fixture, s: &Federation, p: &ProviderView) -> anyhow::Result<()> {
     let before = amount(f).await?;
     let token = oidc::state(

@@ -192,7 +192,11 @@ async fn clock_us(f: &Fixture) -> anyhow::Result<i64> {
     )
 }
 
-#[allow(clippy::unwrap_used, reason = "fixed positive experiment budgets")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::cognitive_complexity,
+    reason = "ordered preparation and shutdown of the paired PG fixture"
+)]
 async fn run_fixture(
     pg: &testkit::PgTlsFixture,
     ledger: bool,
@@ -274,19 +278,41 @@ async fn run_fixture(
     .await?;
     let federation = oidc::service_for(store.clone(), oidc::settings().redirect_uri());
     let subjects = subjects(&f, &store, &federation, multi).await?;
+    matrix(&f, &store, &federation, &subjects, ledger, multi, trace).await?;
+    let controls = if trace && !ledger && !multi {
+        controls::collect(&f, &federation, subjects[0].provider).await?
+    } else {
+        vec![]
+    };
+    drop(store);
+    drop(federation);
+    runtime.close().await;
+    f.close().await;
+    Ok(controls)
+}
+
+async fn matrix(
+    f: &Fixture,
+    store: &Authority,
+    federation: &Federation,
+    subjects: &[Subject],
+    ledger: bool,
+    multi: bool,
+    trace: bool,
+) -> anyhow::Result<()> {
     for lanes in [1, 8, 16] {
-        run_group(&store, &federation, &subjects, lanes, 16).await?;
+        run_group(store, federation, subjects, lanes, 16).await?;
         for round in 0..if trace { 1 } else { 3 } {
-            let start = clock_us(&f).await?;
+            let start = clock_us(f).await?;
             let samples = run_group(
-                &store,
-                &federation,
-                &subjects,
+                store,
+                federation,
+                subjects,
                 lanes,
                 if trace { 32 } else { 160 },
             )
             .await?;
-            let end = clock_us(&f).await?;
+            let end = clock_us(f).await?;
             let times: Vec<_> = samples
                 .iter()
                 .map(|s| {
@@ -306,16 +332,7 @@ async fn run_fixture(
             );
         }
     }
-    let controls = if trace && !ledger && !multi {
-        controls::collect(&f, &federation, subjects[0].provider).await?
-    } else {
-        vec![]
-    };
-    drop(store);
-    drop(federation);
-    runtime.close().await;
-    f.close().await;
-    Ok(controls)
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

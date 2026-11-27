@@ -37,6 +37,23 @@ async fn plans() -> anyhow::Result<()> {
     )
     .fetch_one(&f.owner)
     .await?;
+    initial
+        .begin_link(
+            LinkRequest {
+                actor: f.actor().await?,
+                target_provider: p.id,
+                password: Some(password()),
+                browser: BROWSER.into(),
+                target: "home".into(),
+                source: source(),
+            },
+            deadline(),
+        )
+        .await?;
+    let intent: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(i) FROM identity_authority.link_intents i LIMIT 1")
+            .fetch_one(&f.owner)
+            .await?;
     f.reset_attempts().await?;
     sqlx::query("ALTER SYSTEM SET log_line_prefix='%n|%p|%d| '")
         .execute(&f.owner)
@@ -92,8 +109,7 @@ async fn plans() -> anyhow::Result<()> {
     let fed = oidc::service_for(store.clone(), oidc::settings().redirect_uri());
     for n in [0, 5000, 9997] {
         f.reset_attempts().await?;
-        sqlx::query("INSERT INTO identity_authority.attempts SELECT $1::uuid,'warm:'||i,1,now()+interval '1 hour' FROM generate_series(1,$2) i").bind(A).bind(n).execute(&f.owner).await?;
-        seed_inventory(&f, n, &template).await?;
+        seed_work(&f, n, &template, &intent).await?;
         sqlx::raw_sql("ANALYZE identity_authority.attempts; ANALYZE identity_authority.password_attempts; ANALYZE identity_authority.oidc_transactions; ANALYZE identity_authority.link_intents").execute(&f.owner).await?;
         let request = || LoginRequest {
             binding: binding(f.key.tenant),
@@ -111,7 +127,11 @@ async fn plans() -> anyhow::Result<()> {
             "expired-batch",
         ] {
             if case == "expired-batch" {
-                sqlx::query("UPDATE identity_authority.attempts SET expires_at=now()-interval '1 minute' WHERE key LIKE 'warm:%'").execute(&f.owner).await?;
+                sqlx::query("UPDATE identity_authority.attempts SET expires_at=now()-interval '1 minute' WHERE key IN (SELECT 'warm:'||i FROM generate_series(1,20) i)").execute(&f.owner).await?;
+                sqlx::query("UPDATE identity_authority.password_attempts SET window_until=now()-interval '1 minute' WHERE failures>0").execute(&f.owner).await?;
+                sqlx::query("UPDATE identity_authority.link_intents SET created_at=1,expires_at=2")
+                    .execute(&f.owner)
+                    .await?;
                 sqlx::query(
                     "UPDATE identity_authority.oidc_transactions SET created_at=1,expires_at=2",
                 )
@@ -155,5 +175,29 @@ async fn plans() -> anyhow::Result<()> {
         .arg("--plans")
         .status()?;
     anyhow::ensure!(status.success(), "plan extraction failed");
+    Ok(())
+}
+
+async fn seed_work(
+    f: &Fixture,
+    n: i32,
+    template: &serde_json::Value,
+    intent: &serde_json::Value,
+) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO identity_authority.attempts SELECT $1::uuid,'warm:'||i,1,now()+interval '1 hour' FROM generate_series(1,$2) i").bind(A).bind(n-n/4).execute(&f.owner).await?;
+    sqlx::query("INSERT INTO identity_authority.password_attempts(tenant_id,login_digest,failures,window_until)
+       SELECT $1::uuid,sha256(int4send(i)),1,now()+interval '1 hour' FROM generate_series(1,$2) i").bind(A).bind(n/4).execute(&f.owner).await?;
+    seed_inventory(f, n, template).await?;
+    sqlx::query("DELETE FROM identity_authority.link_intents WHERE tenant_id=$1::uuid")
+        .bind(A)
+        .execute(&f.owner)
+        .await?;
+    sqlx::query("INSERT INTO identity_authority.link_intents SELECT r.* FROM generate_series(1,$2) i
+        CROSS JOIN LATERAL jsonb_populate_record(NULL::identity_authority.link_intents,$1::jsonb ||
+        jsonb_build_object('intent_id',md5(i::text)::uuid,'created_at',extract(epoch FROM now())::bigint,'expires_at',extract(epoch FROM now())::bigint+300)) r")
+        .bind(intent).bind(n).execute(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.oidc_transactions t SET purpose=2,link_intent=md5(i::text)::uuid
+        FROM generate_series(1,$2) i WHERE t.tenant_id=$1::uuid AND t.attempt_id=sha256(int4send(i))")
+        .bind(A).bind(n/2).execute(&f.owner).await?;
     Ok(())
 }

@@ -8,8 +8,8 @@ WITH ordinary AS (
  DELETE FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND ctid=ANY(ARRAY(
   SELECT ctid FROM identity_authority.password_attempts
   WHERE tenant_id=$1::uuid
-    AND coalesce(greatest(window_until,claim_until),'-infinity'::timestamptz)<=statement_timestamp()
-  ORDER BY coalesce(greatest(window_until,claim_until),'-infinity'::timestamptz)
+    AND reclaim_at<=statement_timestamp()
+  ORDER BY reclaim_at
   LIMIT ($2-(SELECT count(*) FROM ordinary))
  )) RETURNING 1
 )

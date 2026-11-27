@@ -93,6 +93,18 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
     f.reset_attempts().await?;
     let narrow = configured(f, 2, 2).await?;
     let limited = oidc::service_for(narrow.clone(), oidc::settings().redirect_uri());
+    last_slot(f, &narrow, &limited, p.id).await?;
+    reset_passwords(f, &broad, &narrow, target).await?;
+    cleanup(f, &narrow, &limited, p.id).await?;
+    federation::lifecycle(f, &fed, &p).await
+}
+
+async fn last_slot(
+    f: &Fixture,
+    narrow: &Authority,
+    limited: &Federation,
+    p: ProviderId,
+) -> anyhow::Result<()> {
     // An acknowledged login leaves just the source key.
     narrow
         .login_local(
@@ -106,8 +118,8 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert_eq!(occupied(f, A, "attempt_capacity").await?, 1);
     let (ordinary, pwd) = tokio::join!(
-        limited.begin_login(request(f, p.id, "local-test")?, deadline()),
-        bad(f, &narrow, "missing")
+        limited.begin_login(request(f, p, "local-test")?, deadline()),
+        bad(f, narrow, "missing")
     );
     match (ordinary, pwd) {
         (Ok(_), Err(AuthorityError::Busy))
@@ -115,11 +127,23 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
         _ => anyhow::bail!("ordinary and password admission must grant exactly one slot"),
     }
     assert_eq!(occupied(f, A, "attempt_capacity").await?, 2);
+    Ok(())
+}
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "verify each committed change in password occupancy"
+)]
+async fn reset_passwords(
+    f: &Fixture,
+    broad: &Authority,
+    narrow: &Authority,
+    target: rss_identity_core::account::AccountKey,
+) -> anyhow::Result<()> {
     // Repeated credential failures retain one row. Both password change owners release it.
     f.reset_attempts().await?;
     for _ in 0..2 {
         assert!(matches!(
-            bad(f, &narrow, "reset-target").await,
+            bad(f, narrow, "reset-target").await,
             Err(AuthorityError::Rejected)
         ));
     }
@@ -129,17 +153,19 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
         .await?;
     assert_eq!(occupied(f, A, "attempt_capacity").await?, 1);
     assert!(matches!(
-        bad(f, &narrow, "reset-target").await,
+        bad(f, narrow, "reset-target").await,
         Err(AuthorityError::Rejected)
     ));
     f.maintenance
         .recover_local_password(binding(f.key.tenant), target, password(), deadline())
         .await?;
     assert_eq!(occupied(f, A, "attempt_capacity").await?, 1);
-    cleanup(f, &narrow, &limited, p.id).await?;
-    federation::lifecycle(f, &fed, &p).await
+    Ok(())
 }
-
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "observe consecutive bounded sweeps and domain error precedence"
+)]
 async fn cleanup(
     f: &Fixture,
     store: &Authority,
@@ -179,6 +205,15 @@ async fn cleanup(
     assert!(
         matches!(strict.begin_login(request(f,p,"local-test")?,deadline()).await,Err(AuthorityError::RateLimited{retry_after_seconds}) if retry_after_seconds.get()>0)
     );
+    recheck_keys(f, store, fed, p).await?;
+    rollback_claim(f, store).await
+}
+async fn recheck_keys(
+    f: &Fixture,
+    store: &Authority,
+    fed: &Federation,
+    p: ProviderId,
+) -> anyhow::Result<()> {
     for ordinary in [true, false] {
         f.reset_attempts().await?;
         sqlx::query("INSERT INTO identity_authority.attempts VALUES
@@ -198,6 +233,9 @@ async fn cleanup(
         }
         assert_eq!(occupied(f, A, "attempt_capacity").await?, 1);
     }
+    Ok(())
+}
+async fn rollback_claim(f: &Fixture, store: &Authority) -> anyhow::Result<()> {
     // Force the second insertion to fail after the source and its charge have been written.
     f.reset_attempts().await?;
     sqlx::raw_sql("CREATE FUNCTION public.reject_claim() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'claim fixture'; END $$;
