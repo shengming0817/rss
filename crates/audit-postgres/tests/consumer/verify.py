@@ -75,20 +75,31 @@ def verify_mode(directory, features, rev, env, *, ledger_only=False):
         if pkg["name"].startswith("rss-"):
             require(pkg["source"] == f"git+{REPOSITORY}?rev={rev}#{rev}", f"unexpected source: {pkg['id']}")
     direct = {resolved[dep["pkg"]] for dep in selected[adapter]["deps"]}
+    # Metadata can list a weakly forwarded optional dependency even when Cargo
+    # does not build it. Artifact messages identify the actual compilation units.
+    output = subprocess.check_output(["cargo", "build", "--locked", "--offline", "--quiet",
+                                      "--message-format=json-render-diagnostics", *flags],
+                                     cwd=directory, env=env, timeout=900, text=True)
+    artifacts = {}
+    for line in output.splitlines():
+        event = json.loads(line)
+        if event["reason"] == "compiler-artifact" and event["package_id"] in resolved:
+            name = resolved[event["package_id"]]
+            artifacts.setdefault(name, set()).update(event["features"])
     messaging = "messaging" in features
-    require((PG in direct) == messaging and (PG in selected) == messaging, f"messaging closure: {direct}")
+    require(adapter in artifacts, f"missing {adapter} artifact")
+    require((PG in artifacts) == messaging and (not messaging or PG in direct), f"messaging closure: {direct}")
     if ledger_only:
         require(not {"rss-audit-core", "rss-audit-postgres"}.intersection(selected), "Ledger depends on Audit")
     else:
         ledger = "ledger" in features
-        require(("rss-ledger-postgres" in direct) == ledger and ("rss-ledger" in direct) == ledger
-                and ("rss-ledger" in selected) == ledger, f"Ledger closure: {direct}")
+        require(("rss-ledger-postgres" in artifacts) == ledger and ("rss-ledger" in artifacts) == ledger,
+                "unexpected Ledger artifacts")
         if ledger:
-            require(("messaging" in selected["rss-ledger-postgres"]["features"]) == messaging,
+            require({"rss-ledger", "rss-ledger-postgres"} <= direct, f"missing Ledger dependencies: {direct}")
+            require(("messaging" in artifacts["rss-ledger-postgres"]) == messaging,
                     "Ledger messaging feature forwarding")
     require("rss-audit-http-axum" not in selected, "HTTP adapter in library closure")
-    subprocess.run(["cargo", "build", "--locked", "--offline", "--quiet", *flags],
-                   cwd=directory, env=env, timeout=900, check=True)
     binary = directory / "target/debug" / package
     output = subprocess.check_output([binary], cwd=directory, env=env, timeout=30, text=True)
     require(output.strip() == package.replace("-", " ") + " passed", f"unexpected output: {output}")
