@@ -1,24 +1,33 @@
-"""Run from a pushed RSS checkout: python3 crates/audit-postgres/tests/consumer/verify.py."""
+"""Verify a pushed RSS HEAD against four isolated consumer workspaces."""
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
+sys.path.insert(0, str(ROOT / "hack"))
+from package_proof import cargo_environment, require_candidate_revision, validate_cargo_config
+
 REPOSITORY = "https://dev.azure.com/shengming0923/rss/_git/rss"
 LIBRARIES = {"rss-audit-core", "rss-audit-postgres", "rss-ledger", "rss-ledger-postgres"}
 SUITES = {"audit-postgres-integration", "ledger-postgres-integration"}
 PG = "rss-transactional-messaging-postgres"
 
 
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
 def graph(metadata, names):
     packages = {p["id"]: p for p in metadata["packages"]}
     nodes = {n["id"]: n for n in metadata["resolve"]["nodes"]}
     pending = [i for i in metadata["workspace_members"] if packages[i]["name"] in names]
-    assert {packages[i]["name"] for i in pending} == names
+    require({packages[i]["name"] for i in pending} == names, f"missing workspace roots: {names}")
     seen = set()
     while pending:
         item = pending.pop()
@@ -33,65 +42,86 @@ def metadata(cwd, env, *flags):
         ["cargo", "metadata", "--format-version", "1", *flags], cwd=cwd, env=env, timeout=300))
 
 
-def verify_mode(directory, features, rev, env):
-    directory.mkdir()
-    manifest = ["[workspace]", 'resolver = "2"', "[package]", 'name = "audit-consumer"',
+def verify_mode(directory, features, rev, env, *, ledger_only=False):
+    package = "ledger-consumer" if ledger_only else "audit-consumer"
+    adapter = "rss-ledger-postgres" if ledger_only else "rss-audit-postgres"
+    dependencies = {"rss-ledger", adapter} if ledger_only else {"rss-audit-core", adapter}
+    manifest = ["[workspace]", 'resolver = "2"', "[package]", f'name = "{package}"',
                 'version = "0.0.0"', 'edition = "2024"', "[features]",
-                'ledger = ["rss-audit-postgres/ledger"]', 'messaging = ["rss-audit-postgres/messaging"]',
-                "[dependencies]"]
-    dependencies = {"rss-audit-core", "rss-audit-postgres"}
-    if "ledger" in features:
-        dependencies.add("rss-ledger")
+                f'messaging = ["{adapter}/messaging"]']
+    if not ledger_only:
+        manifest.append('ledger = ["rss-audit-postgres/ledger"]')
+        if "ledger" in features:
+            dependencies.add("rss-ledger")
     if "messaging" in features:
         dependencies.update({PG, "rss-transactional-messaging"})
+    manifest.append("[dependencies]")
     for name in sorted(dependencies):
         manifest.append(f'{name} = {{ git = "{REPOSITORY}", rev = "{rev}", default-features = false }}')
     (directory / "Cargo.toml").write_text("\n".join(manifest) + "\n")
-    (directory / "src").mkdir()
-    shutil.copyfile(HERE / "main.rs", directory / "src/main.rs")
+    shutil.copyfile(HERE / ("ledger_main.rs" if ledger_only else "main.rs"), directory / "src/main.rs")
     shutil.copyfile(ROOT / "Cargo.lock", directory / "Cargo.lock")
     flags = ["--features", ",".join(features)] if features else []
     env = env | {"CARGO_TARGET_DIR": str(directory / "target")}
-    # Seed registry versions from RSS, then bind this standalone consumer and git sources in its own lock.
+    # Seed registry versions, then bind this consumer and its pinned Git packages in its own lock.
     metadata(directory, env, *flags)
     doc = metadata(directory, env, "--locked", *flags)
-    assert Path(doc["workspace_root"]) == directory and len(doc["workspace_members"]) == 1
-    closure = graph(doc, {"audit-consumer"})
+    require(Path(doc["workspace_root"]) == directory and len(doc["workspace_members"]) == 1,
+            f"unexpected workspace: {doc['workspace_root']}")
+    closure = graph(doc, {package})
     resolved = {p["id"]: p["name"] for p, _ in closure}
     selected = {p["name"]: node for p, node in closure}
     for pkg, _ in closure:
         if pkg["name"].startswith("rss-"):
-            assert pkg["source"] == f"git+{REPOSITORY}?rev={rev}#{rev}", pkg["id"]
-    audit = selected["rss-audit-postgres"]
-    direct = {resolved[dep["pkg"]] for dep in audit["deps"]}
-    ledger = "ledger" in features
+            require(pkg["source"] == f"git+{REPOSITORY}?rev={rev}#{rev}", f"unexpected source: {pkg['id']}")
+    direct = {resolved[dep["pkg"]] for dep in selected[adapter]["deps"]}
     messaging = "messaging" in features
-    assert ("rss-ledger-postgres" in direct) == ledger and ("rss-ledger" in direct) == ledger
-    assert (PG in direct) == messaging
-    assert ("rss-ledger" in selected) == ledger and (PG in selected) == messaging
-    if ledger:
-        assert ("messaging" in selected["rss-ledger-postgres"]["features"]) == messaging
-    assert "rss-audit-http-axum" not in selected
-    subprocess.run(["cargo", "run", "--locked", "--offline", "--quiet", *flags],
+    require((PG in direct) == messaging and (PG in selected) == messaging, f"messaging closure: {direct}")
+    if ledger_only:
+        require(not {"rss-audit-core", "rss-audit-postgres"}.intersection(selected), "Ledger depends on Audit")
+    else:
+        ledger = "ledger" in features
+        require(("rss-ledger-postgres" in direct) == ledger and ("rss-ledger" in direct) == ledger
+                and ("rss-ledger" in selected) == ledger, f"Ledger closure: {direct}")
+        if ledger:
+            require(("messaging" in selected["rss-ledger-postgres"]["features"]) == messaging,
+                    "Ledger messaging feature forwarding")
+    require("rss-audit-http-axum" not in selected, "HTTP adapter in library closure")
+    subprocess.run(["cargo", "build", "--locked", "--offline", "--quiet", *flags],
                    cwd=directory, env=env, timeout=900, check=True)
-    print(f"{directory.name}: passed", flush=True)
+    binary = directory / "target/debug" / package
+    output = subprocess.check_output([binary], cwd=directory, env=env, timeout=30, text=True)
+    require(output.strip() == package.replace("-", " ") + " passed", f"unexpected output: {output}")
+    shutil.copyfile(directory / "Cargo.lock", directory / f"{package}.lock")
+    print(f"{directory.name}/{package}: passed", flush=True)
 
 
 def main():
     rev = subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    env = os.environ | {"CARGO_NET_GIT_FETCH_WITH_CLI": "true"}
+    require_candidate_revision(rev)
+    env = cargo_environment(os.environ) | {"CARGO_NET_GIT_FETCH_WITH_CLI": "true",
+                                          "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_INCREMENTAL": "0"}
+    validate_cargo_config(ROOT, env)
     doc = metadata(ROOT, env, "--locked", "--all-features")
     for pkg, _ in graph(doc, LIBRARIES | SUITES):
-        assert pkg["name"] != "rss-audit-http-axum" and "rss-audit" not in (pkg["source"] or "")
+        require(pkg["name"] != "rss-audit-http-axum" and "rss-audit" not in (pkg["source"] or ""),
+                f"unexpected HTTP adapter or old Audit source: {pkg['id']}")
         if pkg["name"] in LIBRARIES:
-            assert pkg["publish"] == [] and pkg["version"] == "0.1.0" and pkg["source"] is None
+            require(pkg["publish"] == [] and pkg["version"] == "0.1.0" and pkg["source"] is None,
+                    f"unexpected library identity: {pkg['id']}")
     parent = ROOT / "rss-external-check"
     parent.mkdir(exist_ok=True)
-    directory = Path(tempfile.mkdtemp(dir=parent, prefix="audit-consumer-"))
-    print(f"Verified six-package closure. Testing {REPOSITORY} @ {rev} in {directory}", flush=True)
+    run_dir = Path(tempfile.mkdtemp(dir=parent, prefix="audit-consumer-"))
+    print(f"Verified six-package closure. Testing {REPOSITORY} @ {rev} in {run_dir}", flush=True)
     for mode, features in [("plain", []), ("ledger", ["ledger"]), ("messaging", ["messaging"]),
                            ("combined", ["ledger", "messaging"])]:
-        verify_mode(directory / mode, features, rev, env)
+        directory = run_dir / mode
+        (directory / "src").mkdir(parents=True)
+        validate_cargo_config(directory, env)
+        if "ledger" in features:
+            verify_mode(directory, [f for f in features if f == "messaging"], rev, env, ledger_only=True)
+        verify_mode(directory, features, rev, env)
+        shutil.rmtree(directory / "target")
 
 
 if __name__ == "__main__":

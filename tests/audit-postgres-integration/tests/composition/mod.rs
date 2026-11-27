@@ -126,5 +126,20 @@ pub(super) async fn single_connection(pool: &PgPool) -> anyhow::Result<()> {
         |e| matches!(e, TransactionError::Operation(Error::ScopeMismatch)),
     );
     one.close().await;
+    let attempt = store
+        .read_page(
+            Cursor::start(tenant()?),
+            ReadLimit::new(1, 131072)?,
+            &control,
+        )
+        .await;
+    assert!(attempt.fold(
+        |_| false,
+        |e| matches!(e, Error::Storage { .. }),
+        |_| false,
+        |_| false,
+        |_| false,
+        |_| false,
+    ));
     Ok(())
 }

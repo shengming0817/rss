@@ -29,5 +29,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rss_transactional_messaging::error::MessagingErrorKind::Conflict
         );
     }
+    println!("audit consumer passed");
     Ok(())
 }

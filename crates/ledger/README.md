@@ -1,6 +1,6 @@
 # rss-ledger
 
-rss-audit 仓内的可选可校验追加账本协议，不独立发布。核心不依赖 PG、消息执行器或身份产品模型。
+RSS 工作区的可校验追加账本协议。外部消费者可固定 RSS Git 提交直接使用此库。四库均保留 `publish = false`。核心不依赖 PG、消息执行器或身份产品模型。
 
 ```rust
 use rss_ledger::{Authenticator, AppendRequest, ChainId, KeyId, LedgerId, RecordId};

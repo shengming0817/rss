@@ -36,7 +36,18 @@ impl PgLedger {
         auth: Authenticator,
         control: &Control<'_, T>,
     ) -> Result<Self, Error> {
-        control.run(crate::probe::validate(&pool)).await?;
+        control
+            .run(async {
+                let connection = pool.acquire().await.map_err(crate::error::sql_error)?;
+                let mut lease = Lease {
+                    connection,
+                    quarantine: true,
+                };
+                crate::probe::inspect(&mut lease.connection).await?;
+                lease.quarantine = false;
+                Ok(())
+            })
+            .await?;
         Ok(Self {
             pool,
             auth: Arc::new(auth),

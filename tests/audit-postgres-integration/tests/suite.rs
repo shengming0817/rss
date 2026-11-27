@@ -120,7 +120,7 @@ fn rolled_back<R, E>(attempt: LocalTxAttempt<Committed<R>, E>, expected: fn(&E) 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn audit_postgres_suite() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(180), run(Workload::Acceptance)).await??;
+    tokio::time::timeout(Duration::from_secs(110), run(Workload::Acceptance)).await??;
     Ok(())
 }
 #[tokio::test]
@@ -153,7 +153,7 @@ async fn run(workload: Workload) -> anyhow::Result<()> {
     let (admin, pool) = install_pools(&fixture).await?;
     let clock = TestClock;
     let cancel = CancellationToken::new();
-    let cutoff = Deadline::from_timeout(&clock, Duration::from_secs(150))?;
+    let cutoff = Deadline::from_timeout(&clock, Duration::from_secs(100))?;
     let control = Control::new(&clock, cutoff, cutoff, &cancel);
     let shared = write_budget()?;
     let plain = PgAudit::new(pool.clone(), Integrity::Plain, shared.clone(), &control)

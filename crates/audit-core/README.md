@@ -55,15 +55,14 @@ assert_eq!(decoded.event().facts().action().as_str(), "read");
 `PreparedAuditV1` shares immutable exact bytes and validated identity, action, outcome and occurrence/recording times without Ledger types.
 The default build does not depend on Ledger. Enable `ledger` for `append_request`, authenticated
 windows and Ledger errors. Mapping is fallible and returns an owned request; it never persists data.
-The two Ledger crates live in this workspace and are not independently published. Public RSS
-contract and tenant types still use this repository's single pinned RSS commit.
+The two Ledger crates live in this workspace and are not independently published. Contract and tenant types come from the same RSS workspace. Git consumers should pin their direct RSS dependencies to the same URL and revision.
 
 Source/event IDs, actor/resource kinds, actions and operation IDs accept up to 255 bytes with
 their existing token grammars. Actor/resource references accept up to 512 UTF-8 bytes.
 Payload has no separate 64 KiB limit: the complete canonical record, including identities,
 headers and length prefixes, must fit within `MAX_RECORD_BYTES` (128 KiB). `AuditPayload::new`
 only performs a bounded preliminary check; successful construction is not record admission.
-Correlation IDs follow the pinned RSS owner (255 bytes); request IDs retain their own 128-byte bound.
+Correlation IDs follow rss-diag-context (255 bytes); request IDs retain their own 128-byte bound.
 
 Use `decode_untrusted` for structural decoding. With the `ledger` feature, offline readers
 authenticate the range once and project its authenticated entries into Audit records:

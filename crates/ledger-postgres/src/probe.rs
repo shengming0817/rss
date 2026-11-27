@@ -1,9 +1,5 @@
 use crate::{AdmissionViolation, Control, Error, MIGRATION_SQL, Timer, error::sql_error};
-use sqlx::{PgConnection, PgPool, Row};
-pub(crate) async fn validate(pool: &PgPool) -> Result<(), Error> {
-    let mut connection = pool.acquire().await.map_err(sql_error)?;
-    inspect(&mut connection).await
-}
+use sqlx::{PgConnection, Row};
 /// Validate the actual runtime role and Ledger schema at installation or startup.
 ///
 /// Uses the host's connection and absolute budget; does not acquire another connection,

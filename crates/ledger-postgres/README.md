@@ -1,6 +1,6 @@
 # rss-ledger-postgres
 
-rss-audit 仓内 `rss-ledger` 的 PostgreSQL 原子持久化，不独立发布。可选 `messaging` feature
+RSS 工作区中 `rss-ledger` 的 PostgreSQL 原子持久化适配器。四库均保留 `publish = false`。可选 `messaging` feature
 使用既有消息 PG 事务借用能力，实现账本、业务状态和 inbox 完成同事务提交或回滚。
 
 ## 独立追加及业务事务

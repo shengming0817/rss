@@ -92,7 +92,7 @@ fn observe<T>(attempt: LocalTxAttempt<Committed<T>, Error>) -> Observed<T> {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ledger_postgres_suite() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(180), run()).await??;
+    tokio::time::timeout(Duration::from_secs(110), run()).await??;
     Ok(())
 }
 #[allow(clippy::cognitive_complexity)]
@@ -133,7 +133,7 @@ async fn run() -> anyhow::Result<()> {
         .await?;
     let clock = Clock::new();
     let cancel = CancellationToken::new();
-    let control = Control::new(&clock, Duration::from_secs(150), &cancel);
+    let control = Control::new(&clock, Duration::from_secs(100), &cancel);
     let store = PgLedger::new(pool.clone(), auth()?, &control).await?;
     scenarios::run(&store, &pool, &owner, &control).await?;
     window::run(&store, &pool, &owner, &control).await?;
