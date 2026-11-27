@@ -160,8 +160,9 @@ fn filter(sql: &mut QueryBuilder<Postgres>, expression: &Expression) -> Result<(
             values,
         } => {
             if *field == Field::Department {
-                sql.push("\"departmentStatus\"='available' AND (\"departmentSnapshot\"->'memberships') ? ")
-                    .push_bind(values[0].clone());
+                sql.push("CASE WHEN \"departmentStatus\"='available' THEN (\"departmentSnapshot\"->'memberships') ? ")
+                    .push_bind(values[0].clone())
+                    .push(" ELSE false END");
             } else if *field == Field::DepartmentSubtree {
                 subtree(sql, values.clone(), true);
             } else if matches!(operator.as_str(), "=isnull=" | "=isnotnull=") {
