@@ -262,20 +262,26 @@ async fn intersecting_deadlines(
       SELECT $1::uuid,sha256(int4send(i)),1,now()+i*interval '10 minutes',gen_random_uuid(),now()-i*interval '10 minutes'
       FROM (VALUES(-1),(1)) keys(i)").bind(A).execute(&f.owner).await?;
     // One live failure window, one live claim. Both records must survive the first sweep.
-    let start = || request(f, provider, "crossed");
-    assert!(matches!(
-        fed.begin_login(start()?, deadline()).await,
-        Err(AuthorityError::Busy)
-    ));
-    assert_eq!(occupied(f, A, "attempt_capacity").await?, 2);
+    assert_denied_occupancy(f, fed, provider, 2).await?;
     sqlx::query("UPDATE identity_authority.password_attempts SET window_until=now()-interval '1 minute' WHERE tenant_id=$1::uuid").bind(A).execute(&f.owner).await?;
-    assert!(matches!(
-        fed.begin_login(start()?, deadline()).await,
-        Err(AuthorityError::Busy)
-    ));
-    assert_eq!(occupied(f, A, "attempt_capacity").await?, 1);
+    assert_denied_occupancy(f, fed, provider, 1).await?;
     sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=now()-interval '1 minute' WHERE tenant_id=$1::uuid").bind(A).execute(&f.owner).await?;
-    fed.begin_login(start()?, deadline()).await?;
+    fed.begin_login(request(f, provider, "crossed")?, deadline())
+        .await?;
     assert_eq!(occupied(f, A, "attempt_capacity").await?, 2);
+    Ok(())
+}
+
+async fn assert_denied_occupancy(
+    f: &Fixture,
+    fed: &Federation,
+    provider: ProviderId,
+    expected: i64,
+) -> anyhow::Result<()> {
+    let result = fed
+        .begin_login(request(f, provider, "crossed")?, deadline())
+        .await;
+    assert_eq!(result.err(), Some(AuthorityError::Busy));
+    assert_eq!(occupied(f, A, "attempt_capacity").await?, expected);
     Ok(())
 }
