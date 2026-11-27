@@ -3,6 +3,8 @@
 [workspace]
 resolver = "2"
 members = [
+  "tests/identity-postgres-integration",
+  "tests/identity-oidc-integration",
   "crates/identity-core",
   "crates/identity-postgres",
   "crates/identity-oidc",

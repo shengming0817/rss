@@ -1,0 +1,16 @@
+{
+  "realm": "identity",
+  "enabled": true,
+  "sslRequired": "all",
+  "clients": [{
+    "clientId": "identity-test", "secret": "fixture-secret", "publicClient": false,
+    "standardFlowEnabled": true, "directAccessGrantsEnabled": false,
+    "redirectUris": ["https://host.example.test/callback"],
+    "attributes": {"pkce.code.challenge.method": "S256"}
+  }],
+  "users": [{
+    "username": "alice", "enabled": true, "emailVerified": true, "email": "alice@example.test",
+    "firstName": "Alice", "lastName": "Fixture",
+    "credentials": [{"type": "password", "value": "fixture-password", "temporary": false}]
+  }]
+}
