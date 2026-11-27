@@ -217,7 +217,9 @@ BEGIN
  FROM (SELECT entity,queue_ticket FROM rss_reconcile.targets
        WHERE tenant_id=t AND reconciler=r AND next_run IS NOT NULL AND GREATEST(next_run,lease_until)<=cutoff
        ORDER BY GREATEST(next_run,lease_until) LIMIT probe_limit) AS due_sample;
- can_probe_wait:=try_hints AND cardinality(sampled_tickets)=probe_limit;
+ -- The last ticket of a full sample is its upper bound. Once the ordinary
+ -- cursor has passed it, there is no remote hint to prepare on this page.
+ can_probe_wait:=try_hints AND coalesce(sampled_tickets[probe_limit]>scan.cursor_ticket,false);
  IF cardinality(sampled_tickets)=probe_limit THEN
   -- Seek directly from the persisted cursor. Filtering after the ticket LIMIT
   -- bounds both future prefixes and already-passed hot waiters on every page.
