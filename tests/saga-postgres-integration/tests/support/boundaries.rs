@@ -60,7 +60,7 @@ pub(super) async fn fair_arrival(
     };
     let budget = SweepBudget::new(2, 8)?;
     let (page, ()) = at_gate(
-        executor.run_once(tenant, Some(low), budget, control),
+        Box::pin(executor.run_once(tenant, Some(low), budget, control)),
         &entered,
         &released,
         arrival,
@@ -95,19 +95,19 @@ pub(super) async fn fair_arrival(
 // Poll the sweep (including its lease renewal) throughout the coordination. A premature
 // result should report the actual error or progress immediately, even if no step signalled.
 async fn at_gate<R>(
-    sweep: impl Future<Output = Result<SweepReport, Error>>,
+    mut sweep: impl Future<Output = Result<SweepReport, Error>> + Unpin,
     entered: &Notify,
     released: &Notify,
     operation: impl Future<Output = anyhow::Result<R>>,
 ) -> anyhow::Result<(SweepReport, R)> {
-    let mut sweep = std::pin::pin!(sweep);
     let change = async {
         entered.notified().await;
         operation.await
     };
+    let change = Box::pin(tokio::time::timeout(Duration::from_secs(20), change));
     let observed = tokio::select! {
         early = &mut sweep => anyhow::bail!("sweep finished before gate operation: {:?}", early?),
-        changed = tokio::time::timeout(Duration::from_secs(20), change) => changed.map_err(|_| anyhow::anyhow!("timed out waiting for gated Saga step"))??,
+        changed = change => changed.map_err(|_| anyhow::anyhow!("timed out waiting for gated Saga step"))??,
     };
     released.notify_one();
     Ok((sweep.await?, observed))
@@ -183,7 +183,7 @@ pub(super) async fn fence_during_effect(
         Ok::<_, anyhow::Error>(fresh)
     };
     let (page, fresh) = at_gate(
-        e.run_once(scope.tenant(), None, SweepBudget::new(1, 30)?, control),
+        Box::pin(e.run_once(scope.tenant(), None, SweepBudget::new(1, 30)?, control)),
         &entered,
         &released,
         takeover,

@@ -36,7 +36,7 @@ pub async fn verify(
     completion(&proxy, &store, direct, owner, d, control, true).await?;
     pending(&proxy, &store, direct, owner, d, control).await?;
     aborted_commit(&proxy, &store, direct, owner, d, control).await?;
-    discovery_ack(&proxy, &store, &pool, direct, d, control).await?;
+    Box::pin(discovery_ack(&proxy, &store, &pool, direct, d, control)).await?;
     assert_eq!(store.close(control).await, CloseOutcome::Drained);
     Ok(())
 }
@@ -69,6 +69,19 @@ async fn discovery_ack(
     let page = executor
         .run_once(s.tenant(), None, SweepBudget::new(1, 30)?, c)
         .await?;
+    assert_read_failure(&page)?;
+    assert_eq!(proxy.lost.load(Ordering::SeqCst), lost + 1);
+    assert_ne!(backend(pool).await?, pid);
+    let lease = direct.claim(s, Duration::from_secs(5), c).await?;
+    assert_eq!(direct.history_head(&lease, c).await?.revision(), 2);
+    direct.release(&lease, c).await?;
+    assert_eq!(
+        *effects.calls.lock().map_err(|_| ErrorKind::Store)?,
+        ["execute:one"]
+    );
+    Ok(())
+}
+fn assert_read_failure(page: &SweepReport) -> anyhow::Result<()> {
     let failure = page.items[0]
         .result
         .as_ref()
@@ -82,15 +95,6 @@ async fn discovery_ack(
     assert_eq!(failure.advances, 1);
     assert_eq!(failure.head().map(HistoryHead::revision), Some(2));
     assert!(failure.release_error.is_none());
-    assert_eq!(proxy.lost.load(Ordering::SeqCst), lost + 1);
-    assert_ne!(backend(pool).await?, pid);
-    let lease = direct.claim(s, Duration::from_secs(5), c).await?;
-    assert_eq!(direct.history_head(&lease, c).await?.revision(), 2);
-    direct.release(&lease, c).await?;
-    assert_eq!(
-        *effects.calls.lock().map_err(|_| ErrorKind::Store)?,
-        ["execute:one"]
-    );
     Ok(())
 }
 async fn pending(

@@ -43,7 +43,7 @@ async fn expire(owner: &PgPool, s: Scope) -> anyhow::Result<()> {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn saga_postgres_suite() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(240), suite()).await??;
+    tokio::time::timeout(Duration::from_secs(240), Box::pin(suite())).await??;
     Ok(())
 }
 async fn suite() -> anyhow::Result<()> {
