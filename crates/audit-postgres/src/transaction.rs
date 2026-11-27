@@ -83,8 +83,7 @@ impl<T: ExecutionTimer> ReadAuditTransaction<'_, '_, '_, T> {
         };
         crate::probe::tenant(self.tx, self.tenant).await?;
         let id = crate::runtime::ledger_id(self.tenant)?;
-        let clock = crate::control::LedgerClock(self.control.timer, self.control.timer.now());
-        let budget = clock.budget(self.control, Stage::Operation);
+        let budget = self.control.ledger_control(Stage::Operation);
         let window = rss_ledger_postgres::read_window_in_transaction(
             self.tx, auth, &id, start, limit, &budget,
         )
@@ -121,9 +120,7 @@ impl<T: ExecutionTimer> WriteAuditTransaction<'_, '_, '_, T> {
         crate::probe::tenant(self.read.tx, self.read.tenant).await?;
         #[cfg(feature = "ledger")]
         if let Integrity::Ledger(auth) = self.read.integrity {
-            let clock =
-                crate::control::LedgerClock(self.read.control.timer, self.read.control.timer.now());
-            let budget = clock.budget(self.read.control, Stage::Operation);
+            let budget = self.read.control.ledger_control(Stage::Operation);
             rss_ledger_postgres::lock_head_in_transaction(
                 self.read.tx,
                 auth,
