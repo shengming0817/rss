@@ -40,7 +40,7 @@ caller-selected `Scope` (tenant + UUID), then call `run(scope, budget, control)`
 `budget` bounds driver advances, including probes and retry decisions; phases do not reset time. Budget exhaustion returns `RunStop::Yielded`, not a failure or successful Saga result.
 `run_once(tenant, cursor, SweepBudget::new(instance_limit, advance_limit)?, control)` runs one bounded page. Candidates receive one turn each in order.
 Before each extra advance the last candidate checks the whole tenant for other runnable instances while holding its lease.
-A waiting peer causes an early `RunStop::Yielded`.
+A waiting peer or an exhausted attempt ordinal ends the turn with `RunStop::Yielded`. Exhausted ordinals drop out of discovery.
 If none are waiting the instance may spend the remaining advance budget using the same verified snapshot and authentication allowance.
 A new claim always reloads and authenticates history.
 On error, `InstanceFailure::head()` includes the last verified or acknowledged state (possibly a pending intent), and `advances` counts only complete advances.

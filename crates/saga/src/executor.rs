@@ -18,7 +18,7 @@ pub enum RunStop {
     Completed,
     /// A compensation requires an explicit revision-checked resume.
     Paused,
-    /// The advance budget was spent or a fair sweep yielded to another runnable instance.
+    /// The advance budget was spent, or the fair sweep stopped at a peer or exhausted attempt ordinal.
     Yielded,
 }
 /// Closed cause associated with a failed step.
@@ -419,6 +419,11 @@ impl<S: Store, P: SagaReceiptProtector> Executor<S, P> {
                 break;
             }
             if progress.advances > 0 && matches!(invocation, Invocation::Fair) {
+                // Negative probes may consume the last attempt ordinal. Discovery then
+                // excludes this state even though the Saga is neither terminal nor paused.
+                if snapshot.next_event()?.is_none() {
+                    break;
+                }
                 // The live claim excludes this scope. Start from the tenant's beginning so
                 // peers before the page cursor (including new arrivals) also get a turn.
                 let peers = self
