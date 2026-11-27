@@ -533,7 +533,9 @@ async fn sweep_cursor_and_total_budget_prevent_unknown_instance_starvation() -> 
         .run_once(tenant, None, SweepBudget::new(2, 1)?, &control)
         .await?;
     assert_eq!(first.items.len(), 1);
-    assert!(matches!(&first.items[0].result,Err(error) if error.kind()==ErrorKind::EffectUnknown));
+    assert!(
+        matches!(&first.items[0].result,Err(failure) if failure.error.kind()==ErrorKind::EffectUnknown)
+    );
     let second = e
         .run_once(tenant, first.next_cursor, SweepBudget::new(2, 1)?, &control)
         .await?;

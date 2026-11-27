@@ -62,6 +62,6 @@ pub use receipt::{
 pub use store::{CandidateFilter, Lease, Mutation, Store};
 mod executor;
 pub use executor::{
-    Executor, Failure, FailureKind, InstanceResult, Report, RunStop, SuccessReference, SweepBudget,
-    SweepReport, SweepStop,
+    Executor, Failure, FailureKind, InstanceFailure, InstanceResult, Report, RunStop,
+    SuccessReference, SweepBudget, SweepReport, SweepStop,
 };
