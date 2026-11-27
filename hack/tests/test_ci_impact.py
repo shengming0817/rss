@@ -561,7 +561,7 @@ pub use inline::Shared;
                              "else:\n"
                              f"    os.execv({shutil.which('cargo')!r}, sys.argv)\n")
             cargo.chmod(0o755)
-            wrapper = tools / "select.py"
+            wrapper = tools / "run_selector.py"
             wrapper.write_text("import importlib.util\n"
                                f"spec = importlib.util.spec_from_file_location('impact', {DEFAULT_SELECTOR[1]!r})\n"
                                "impact = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(impact)\n"
