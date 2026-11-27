@@ -1,9 +1,8 @@
 use super::*;
+use crate::fixture_clock;
 use crate::{ProviderClock, ReusePolicy, test_support::reuse_policy};
 use rss_request_context::SharedExecutionTimer;
 use std::{sync::atomic::Ordering, time::SystemTime};
-#[path = "../../../../tests/fixtures/pg_clock.rs"]
-mod fixture_clock;
 
 fn resources(cap: usize) -> anyhow::Result<Arc<Resources>> {
     Ok(Resources::new(

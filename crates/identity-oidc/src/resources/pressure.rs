@@ -1,11 +1,10 @@
 //! Measure the actual entry lock during pool admission. Keep instrumentation outside release builds.
 use super::*;
+use crate::fixture_clock;
 use crate::test_support::reuse_policy;
 use rss_identity_core::{InstanceId, federation::*};
 use rss_request_context::SharedExecutionTimer;
 use std::{cell::Cell, time::SystemTime};
-#[path = "../../../../tests/fixtures/pg_clock.rs"]
-mod fixture_clock;
 
 thread_local! {
     static VISITED: Cell<usize> = const {Cell::new(0)};

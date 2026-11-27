@@ -242,6 +242,10 @@ async fn concurrent_edit(f: &Fixture, s: &rss_identity_postgres::Federation) -> 
     Ok(())
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "compare persisted state before, during and after one intentionally interrupted multi-batch pass"
+)]
 async fn partial_batch(f: &Fixture, s: &rss_identity_postgres::Federation) -> anyhow::Result<()> {
     let scope = binding(f.key.tenant);
     let ids:Vec<uuid::Uuid>=sqlx::query_scalar("SELECT provider_id FROM identity_authority.providers WHERE tenant_id=$1::uuid ORDER BY provider_id LIMIT 9").bind(f.key.tenant.to_string()).fetch_all(&f.owner).await?;

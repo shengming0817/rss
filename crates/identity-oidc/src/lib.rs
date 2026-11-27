@@ -831,6 +831,9 @@ fn mapped_department(
 }
 
 #[cfg(test)]
+#[path = "../../../tests/fixtures/pg_clock.rs"]
+mod fixture_clock;
+#[cfg(test)]
 mod tests;
 
 fn mapped_subject(
