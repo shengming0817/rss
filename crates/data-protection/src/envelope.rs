@@ -1,4 +1,4 @@
-//! AEAD v2 密文 envelope + alg/mode 元数据。设计单源 **ADR-011 §D3/§D4**。
+//! AEAD v1 密文 envelope + alg/mode 元数据。设计单源 **ADR-011 §D3/§D4**。
 //!
 //! envelope 自描述其 `version/alg/mode/kid/key_version/nonce/ciphertext/tag` + 存储的标识 AAD 坐标。
 //! Debug 经 `#[derive(Redact)]`：密码字节材料（nonce/ciphertext/tag）脱敏为 `<redacted>`，结构化元数据明示。
@@ -30,8 +30,8 @@ pub enum EncryptionMode {
     Deterministic,
 }
 
-/// envelope 当前格式版本（AEAD v2，对标 Vault `vault:vN:` 密文版本前缀）。
-pub const ENVELOPE_VERSION: u8 = 2;
+/// envelope 当前格式版本（AEAD v1，对标 Vault `vault:vN:` 密文版本前缀）。
+pub const ENVELOPE_VERSION: u8 = 1;
 
 /// envelope 构造错误（message const literal，no PII，fail-closed）。
 #[derive(Debug, thiserror::Error)]
@@ -57,7 +57,7 @@ fn alg_mode_consistent(alg: CipherAlg, mode: EncryptionMode) -> bool {
     )
 }
 
-/// AEAD v2 密文 envelope。
+/// AEAD v1 密文 envelope。
 ///
 /// Debug 经 `#[derive(Redact)]`：`nonce`/`ciphertext`/`tag` 为密码字节材料 → `#[redact(sensitivity = secret)]`
 /// （`<redacted>`，nonce 密码学非机密但 Debug 字节 dump 无审计价值，统一脱敏 = 防御纵深，对齐 v1 `Ciphertext`
@@ -197,7 +197,7 @@ mod tests {
     fn new_sets_version_and_round_trips_accessors() {
         let env = sample_envelope();
         assert_eq!(env.version(), ENVELOPE_VERSION);
-        assert_eq!(env.version(), 2);
+        assert_eq!(env.version(), 1);
         assert_eq!(env.alg(), CipherAlg::Aes256Gcm);
         assert_eq!(env.mode(), EncryptionMode::Randomized);
         assert_eq!(env.kid(), "kid-7");

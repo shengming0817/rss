@@ -1,7 +1,7 @@
--- Fresh schema v24 only. The host installs RSS messaging and admits its tenants separately.
+-- Fresh schema v1 only. The host installs RSS messaging and admits its tenants separately.
 CREATE SCHEMA identity_authority;
-CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=24));
-INSERT INTO identity_authority.schema_version VALUES(24);
+CREATE TABLE identity_authority.schema_version(version integer PRIMARY KEY CHECK(version=1));
+INSERT INTO identity_authority.schema_version VALUES(1);
 CREATE TABLE identity_authority.deployment (
  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
  authority_id uuid NOT NULL CHECK(authority_id <> '00000000-0000-0000-0000-000000000000'),
@@ -131,7 +131,7 @@ CREATE TABLE identity_authority.sessions (
  CONSTRAINT authentication_kind CHECK (((authentication_source='local_password' AND local_authenticated_at>0 AND local_authenticated_at<=issued_at AND platform_authentication IS NULL AND external_identity_id IS NULL)
  OR (authentication_source='oidc' AND local_authenticated_at IS NULL AND platform_authentication IS NULL AND external_identity_id IS NOT NULL)
  OR (authentication_source='platform' AND local_authenticated_at IS NULL AND external_identity_id IS NULL AND jsonb_typeof(platform_authentication)='object' AND octet_length(platform_authentication::text)<=4096)) IS TRUE),
- CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND provider_config_version IS NOT NULL AND provider_config_version>0 AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND (auth_facts->'format_version'='3'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
+ CONSTRAINT session_source CHECK((external_identity_id IS NULL AND provider_epoch IS NULL AND auth_facts IS NULL AND facts_sequence IS NULL) OR (external_identity_id IS NOT NULL AND provider_config_version IS NOT NULL AND provider_config_version>0 AND facts_sequence IS NOT NULL AND provider_epoch IS NOT NULL AND provider_epoch>0 AND auth_facts IS NOT NULL AND jsonb_typeof(auth_facts)='object' AND (auth_facts->'format_version'='1'::jsonb AND jsonb_typeof(auth_facts->'department_snapshot')='object') IS TRUE)),
  FOREIGN KEY(tenant_id,principal_id,source_provider_id,external_identity_id) REFERENCES identity_authority.external_identities(tenant_id,principal_id,provider_id,identity_id),
  PRIMARY KEY(tenant_id,session_id),
  UNIQUE(tenant_id,token_hash), UNIQUE(tenant_id,principal_id,session_id),
@@ -155,7 +155,7 @@ CREATE TABLE identity_authority.link_intents (
  FOREIGN KEY(tenant_id,session_id) REFERENCES identity_authority.sessions,
  FOREIGN KEY(tenant_id,target_provider) REFERENCES identity_authority.providers,
  FOREIGN KEY(tenant_id,source_identity) REFERENCES identity_authority.external_identities,
- CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL AND source_facts_sequence IS NULL) OR (source_identity IS NOT NULL AND source_facts_sequence IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND (source_facts->'format_version'='3'::jsonb AND jsonb_typeof(source_facts->'department_snapshot')='object') IS TRUE))
+ CHECK((source_identity IS NULL AND source_epoch IS NULL AND source_facts IS NULL AND source_facts_sequence IS NULL) OR (source_identity IS NOT NULL AND source_facts_sequence IS NOT NULL AND source_epoch IS NOT NULL AND source_epoch>0 AND source_facts IS NOT NULL AND jsonb_typeof(source_facts)='object' AND (source_facts->'format_version'='1'::jsonb AND jsonb_typeof(source_facts->'department_snapshot')='object') IS TRUE))
 );
 CREATE TABLE identity_authority.oidc_transactions (
  operation_context jsonb,

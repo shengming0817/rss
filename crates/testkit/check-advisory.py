@@ -66,7 +66,7 @@ def check(root, *, audit=False, today=None):
                 (version, REGISTRY, checksum), f'{name}: version/source/checksum exceeds approved acceptance')
         selected[name] = package
     roots = [p for p in packages if p['name'] == 'testkit']
-    require(len(roots) == 1 and roots[0]['version'] == '0.0.0', 'expected the single RSS testkit root')
+    require(len(roots) == 1 and roots[0]['version'] == '0.1.0', 'expected the single RSS testkit root')
     source = roots[0].get('source')
     if root.resolve() == Path(__file__).resolve().parents[2]:
         require(source is None, 'RSS testkit must be the local workspace package')

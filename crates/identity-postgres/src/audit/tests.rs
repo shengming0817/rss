@@ -43,8 +43,8 @@ fn cases() -> [Case; 6] {
         Case {
             event: SecurityEvent::Account(account()),
             id: "identity.account.security",
-            major: 3,
-            schema: include_bytes!("../security-event-v3.json"),
+            major: 1,
+            schema: include_bytes!("../security-event-v1.json"),
         },
         Case {
             event: SecurityEvent::Provisioned(ProvisioningEvent {
@@ -105,8 +105,8 @@ fn cases() -> [Case; 6] {
                 diagnostic: None,
             }),
             id: "identity.federation.security",
-            major: 2,
-            schema: include_bytes!("../federation-security-event-v2.json"),
+            major: 1,
+            schema: include_bytes!("../federation-security-event-v1.json"),
         },
     ]
 }

@@ -1,6 +1,6 @@
 //! Canonical field-protection AAD derived from caller-supplied coordinates.
 use rss_request_context::TenantId;
-const AAD_DOMAIN_LABEL: &[u8] = b"rss-field-protection-aad-v2";
+const AAD_DOMAIN_LABEL: &[u8] = b"rss-field-protection-aad-v1";
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AadError {

@@ -81,7 +81,7 @@ impl StateSigner {
         let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_ref())
             .map_err(|_| FederationError::Configuration)?;
 
-        mac.update(b"rss-identity.oidc.state.v2\0");
+        mac.update(b"rss-identity.oidc.state.v1\0");
 
         mac.update(&(self.origin.len() as u32).to_be_bytes());
 
@@ -99,7 +99,7 @@ impl StateSigner {
         binding: ExecutionBinding,
         purpose: Purpose,
     ) -> Result<String, FederationError> {
-        let mut payload = vec![2, purpose.code()];
+        let mut payload = vec![1, purpose.code()];
 
         let tenant = Uuid::parse_str(&binding.tenant().to_string())
             .map_err(|_| FederationError::Rejected)?;
@@ -135,7 +135,7 @@ impl StateSigner {
 
         let bytes = B64.decode(state).map_err(|_| FederationError::Rejected)?;
 
-        if bytes.len() != 122 || B64.encode(&bytes) != state || bytes[0] != 2 {
+        if bytes.len() != 122 || B64.encode(&bytes) != state || bytes[0] != 1 {
             return Err(FederationError::Rejected);
         }
 

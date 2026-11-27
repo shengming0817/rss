@@ -39,7 +39,7 @@ producer = [
 rss-request-context.workspace = true
 futures = { workspace = true, optional = true, features = ["std", "async-await", "executor"] }
 rss-runtime = { workspace = true, optional = true }
-rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, optional = true }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.1.0", default-features = false, optional = true }
 thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "rt-multi-thread", "macros"], optional = true }
 tokio-util = { workspace = true, optional = true }

@@ -685,7 +685,7 @@ mod contract_tests {
     #[allow(clippy::unwrap_used, reason = "test fixture")]
     fn action_vocabulary_and_payload_match_schema() {
         let schema: serde_json::Value =
-            serde_json::from_str(include_str!("federation-security-event-v2.json")).unwrap();
+            serde_json::from_str(include_str!("federation-security-event-v1.json")).unwrap();
         let actions = [
             Action::ProviderCreated,
             Action::ProviderUpdated,

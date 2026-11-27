@@ -13,7 +13,7 @@ description = "Bounded, authorized HTTPS Standard Webhooks publication for RSS t
 workspace = true
 
 [dependencies]
-rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, features = ["producer"] }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.1.0", default-features = false, features = ["producer"] }
 rss-request-context.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0" }
 rss-contract.workspace = true

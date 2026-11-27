@@ -230,7 +230,7 @@ impl Plan {
     fn calculate_digest(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         for bytes in [
-            b"rss.message-dr.v2".as_slice(),
+            b"rss.message-dr.v1".as_slice(),
             self.tenant.to_string().as_bytes(),
             self.operation.to_string().as_bytes(),
             &self.storage.target(),

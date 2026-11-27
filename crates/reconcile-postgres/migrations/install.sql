@@ -1,7 +1,7 @@
 -- Fresh installation by a dedicated NOSUPERUSER NOBYPASSRLS owner.
 -- ref: tokio-rs/tokio tokio/src/sync/batch_semaphore.rs@tokio-1.48.0 (old waiter first).
 CREATE SCHEMA rss_reconcile;
-COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:4';
+COMMENT ON SCHEMA rss_reconcile IS 'rss-reconcile-postgres:1';
 
 CREATE TABLE rss_reconcile.targets (
     tenant_id uuid NOT NULL,

@@ -1,7 +1,7 @@
 -- Fresh install only, by a dedicated NOSUPERUSER NOBYPASSRLS owner.
 -- Extraction: baseline 5b63e10 migrations 0082, 0087, 0103; no product identity schema.
 CREATE SCHEMA rss_device_command;
-COMMENT ON SCHEMA rss_device_command IS 'rss-device-command-postgres:2';
+COMMENT ON SCHEMA rss_device_command IS 'rss-device-command-postgres:1';
 CREATE TABLE rss_device_command.authorities (
     tenant_id uuid NOT NULL, device_id uuid NOT NULL,
     generation bigint NOT NULL CHECK(generation>0),

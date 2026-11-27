@@ -117,7 +117,7 @@ class PlatformExecution(unittest.TestCase):
 
     def test_platform_manifest_supports_real_run_without_axum(self):
         import tomllib
-        versions = {"rss-contract": "0.1.0", "rss-platform": "0.3.0", "rss-request-context": "0.1.0"}
+        versions = {"rss-contract": "0.1.0", "rss-platform": "0.1.0", "rss-request-context": "0.1.0"}
         manifest = tomllib.loads(PROOF.consumer_manifest("platform", versions, []))
         self.assertEqual(set(manifest["dependencies"]), {*versions, "tokio", "serde_json"})
         self.assertTrue({"rt", "macros", "time"} <= set(manifest["dependencies"]["tokio"]["features"]))

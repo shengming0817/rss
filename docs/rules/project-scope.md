@@ -5,7 +5,7 @@ RSS 是面向 Rust 社区的一致性与持久化执行 library workspace。主�
 ## 主仓拥有
 
 - 公共契约、事务消息及其恢复基础库、Saga、事件投影、状态收敛，以及明确接纳的设备命令与 Observation 基础库。
-- 上述能力的模型、公共接口、执行与恢复算法、独立 provider adapter、组件专属 schema 和必要升级定义。
+- 上述能力的模型、公共接口、执行与恢复算法、独立 provider adapter、组件专属 schema 和全新安装定义。
 - 组件验证、独立消费与发布所需的最小代码和文档。
 
 rss-reconcile 拥有独立 target 的持久调度、claim/epoch fencing 与租户内不透明排他资源集合的

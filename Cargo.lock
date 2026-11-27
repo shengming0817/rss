@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "amqp-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "lapin",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "archive-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-sdk-s3",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "axum-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "futures",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "device-command-postgres-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "rss-contract",
@@ -2769,7 +2769,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "rdkafka",
@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3544,7 +3544,7 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "postgres-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3634,7 +3634,7 @@ dependencies = [
 
 [[package]]
 name = "projection-postgres-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3895,7 +3895,7 @@ dependencies = [
 
 [[package]]
 name = "reconcile-postgres-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -4199,7 +4199,7 @@ dependencies = [
 
 [[package]]
 name = "rss-examples"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-sdk-s3",
@@ -4428,7 +4428,7 @@ dependencies = [
 
 [[package]]
 name = "rss-platform"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "rss-contract",
  "rss-request-context",
@@ -4666,7 +4666,7 @@ dependencies = [
 
 [[package]]
 name = "rss-transactional-messaging"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "futures",
  "rss-contract",
@@ -5026,7 +5026,7 @@ checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
 name = "saga-postgres-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "deadpool-redis",
@@ -5893,7 +5893,7 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-sdk-s3",
@@ -5988,7 +5988,7 @@ dependencies = [
 
 [[package]]
 name = "timeseries-clickhouse-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6016,7 +6016,7 @@ dependencies = [
 
 [[package]]
 name = "timeseries-postgres-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "rss-contract",
@@ -6755,7 +6755,7 @@ dependencies = [
 
 [[package]]
 name = "webhook-integration"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

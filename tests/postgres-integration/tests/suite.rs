@@ -59,7 +59,7 @@ async fn postgres_transactional_messaging_suite() -> anyhow::Result<()> {
             .connect_with(PgConnectOptions::new().host(&params.host).port(params.port).database(&params.database)
                 .username(&params.username).options([("rss.tenant_id","f47ac10b-58cc-4372-a567-0e02b2c3d479"),("rss.storage_target","01010101010101010101010101010101"),("rss.storage_lineage","02020202020202020202020202020202"),("rss.execution_epoch","1")]).password(&params.password).ssl_mode(PgSslMode::VerifyFull)
                 .ssl_root_cert_from_pem(fixture.ca_pem().as_bytes().to_vec())).await?;
-        sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE tmsg_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS; CREATE TABLE public.outbox (legacy boolean); CREATE TABLE public.rss_fences (legacy boolean);")
+        sqlx::raw_sql("CREATE ROLE rss_tmsg_relay NOLOGIN NOBYPASSRLS; CREATE ROLE tmsg_runtime LOGIN PASSWORD 'fixture-only' NOBYPASSRLS;")
             .execute(&owner).await?;
         // A migrator may retry a rolled-back custom install on the same connection.
         let mut installer = owner.acquire().await?;

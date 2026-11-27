@@ -16,7 +16,7 @@ const fn contract(id: &'static str, major: u32, digest: &'static str) -> SourceC
 
 static ACCOUNT: SourceContract = contract(
     "identity.account.security",
-    3,
+    1,
     "sha256:47f5e210bc21eb91e79ad51b6edc6892caee4766c61cbb68e022fe39e8cd4c0b",
 );
 static PROVISIONING: SourceContract = contract(
@@ -41,7 +41,7 @@ static SESSION: SourceContract = contract(
 );
 static FEDERATION: SourceContract = contract(
     "identity.federation.security",
-    2,
+    1,
     "sha256:618633921c9b816c89b0de6bd78fc1548b9288e3b8b77cd22f29269a5492579d",
 );
 

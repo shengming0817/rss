@@ -12,7 +12,7 @@ rss-audit-core.workspace = true
 rss-contract.workspace = true
 rss-request-context.workspace = true
 rss-redact.workspace = true
-rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.1.0", default-features = false }
 rss-ledger = { workspace = true, optional = true }
 rss-ledger-postgres = { workspace = true, optional = true }
 rss-transactional-messaging-postgres = { workspace = true, optional = true }

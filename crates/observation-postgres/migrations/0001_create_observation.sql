@@ -2,7 +2,7 @@
 -- Runtime role provisioning and grants are consumer-owned.
 -- ref: postgres/postgres doc/src/sgml/mvcc.sgml@c13dd7d50f21268dc64b4b3edbce31993985ab12
 CREATE SCHEMA rss_observation;
-COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:5';
+COMMENT ON SCHEMA rss_observation IS 'rss-observation-postgres:1';
 CREATE TABLE rss_observation.objects (
  tenant_id uuid NOT NULL, object_id text NOT NULL,
  registration_id text, revision numeric(20,0) NOT NULL CHECK (revision BETWEEN 0 AND 18446744073709551615),

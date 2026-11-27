@@ -23,7 +23,7 @@ rss-request-context.workspace = true
 rss-diag-context = { path = "../diagctx", version = "0.1.0", optional = true }
 backon.workspace = true
 rumqttc-v5-next.workspace = true
-rss-transactional-messaging = { path = "../transactional-messaging", version = "0.2.0", default-features = false, features = ["producer"] }
+rss-transactional-messaging = { path = "../transactional-messaging", version = "0.1.0", default-features = false, features = ["producer"] }
 bytes.workspace = true
 rustls.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

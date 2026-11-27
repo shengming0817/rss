@@ -111,7 +111,7 @@ SELECT
         JOIN pg_proc helper ON helper.oid=d.refobjid
         WHERE p.pronamespace=to_regnamespace('rss_projection') AND p.proname IN ('lock_batch','finish_batch')
           AND helper.oid=to_regprocedure('rss_projection.process_batch(uuid,text,text,text,bigint,uuid,bigint,bigint[],text[],bytea[],bytea,boolean)'))
-    AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:5'
+    AND (SELECT obj_description(oid,'pg_namespace')='rss-projection-postgres:1'
          FROM pg_namespace WHERE nspname='rss_projection')
 "#).fetch_one(connection).await.map_err(|e| sql_error(e, rss_projection::Phase::Admission))?;
     if safe == Some(true) {

@@ -307,7 +307,7 @@ def consumer(directory, features, dependencies, allowed):
     directory.mkdir()
     shutil.copytree(ROOT / "crates/examples/src", directory / "src")
     shutil.copytree(ROOT / "crates/examples/fixtures", directory / "fixtures")
-    lines = ['[package]', 'name = "rss-examples"', 'version = "0.0.0"', 'edition = "2024"', 'autobins = false', 'default-run = "rss-examples"', '[workspace]', 'resolver = "2"', '[features]', 'default = ' + json.dumps(sorted(features))]
+    lines = ['[package]', 'name = "rss-examples"', 'version = "0.1.0"', 'edition = "2024"', 'autobins = false', 'default-run = "rss-examples"', '[workspace]', 'resolver = "2"', '[features]', 'default = ' + json.dumps(sorted(features))]
     declared = tomllib.loads((ROOT / "crates/examples/Cargo.toml").read_text())["features"]
     lines += [f'{json.dumps(feature)} = []' for feature in sorted(set(declared) - {"default"})]
     lines += ['[dependencies]']
