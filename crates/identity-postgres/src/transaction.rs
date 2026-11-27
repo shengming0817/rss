@@ -329,7 +329,15 @@ impl Authority {
                 if (require_event && events.is_empty()) || events.len() > MAX_MUTATION_EVENTS {
                     return Err(corrupt());
                 }
-                crate::audit::append_events(tx, &audit, &audit_budget, instance, binding.tenant(), events).await?;
+                crate::audit::append_events(
+                    tx,
+                    &audit,
+                    &audit_budget,
+                    instance,
+                    binding.tenant(),
+                    events,
+                )
+                .await?;
                 Ok(result)
             })
         })

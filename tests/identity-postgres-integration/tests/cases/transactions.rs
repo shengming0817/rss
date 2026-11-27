@@ -142,4 +142,3 @@ pub async fn borrowed(f: &Fixture) -> anyhow::Result<()> {
     }
     Ok(())
 }
-

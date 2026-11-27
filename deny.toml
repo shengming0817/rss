@@ -62,9 +62,9 @@ deny = [
   { crate = "rsa" },
   # #3351: Identity OIDC consumes the verified ES/RS/PS/EdDSA implementation.
   # Its integration fixture signs test tokens. Other consumers select no JWT backend.
-  { crate = "jsonwebtoken@=11.1.0", wrappers = ["rss-identity-oidc", "identity-oidc-integration"] },
-  { crate = "jsonwebtoken@<11.1.0" },
-  { crate = "jsonwebtoken@>11.1.0" },
+  { crate = "jsonwebtoken:=11.1.0", wrappers = ["rss-identity-oidc", "identity-oidc-integration"] },
+  { crate = "jsonwebtoken:<11.1.0" },
+  { crate = "jsonwebtoken:>11.1.0" },
   # Adapter 厚薄纪律（ADR-023 / #1494）：禁 FSM 框架 `statig` 进入依赖图——业务生命周期状态机只属
   # 能力核心，adapters 仅持有 provider 实现。图外时本 ban 为 no-op；一旦 adapters
   # （或其它 crate）引入即 `deny check bans` 失败。INVARIANT: ADAPTER-THIN-FSM-01 { level = "Medium",
@@ -76,22 +76,22 @@ deny = [
   { crate = "async-native-tls", use-instead = "rustls" },
   # #3351: WebAuthn verification uses OpenSSL; SoftPasskey is dev-only.
   # The Kafka adapter retains its existing native SSL path.
-  { crate = "openssl@=0.10.81", wrappers = ["webauthn-rs-core", "webauthn-attestation-ca", "webauthn-authenticator-rs"] },
-  { crate = "openssl@<0.10.81" },
-  { crate = "openssl@>0.10.81" },
-  { crate = "openssl-sys@=0.9.117", wrappers = ["rdkafka-sys", "openssl", "webauthn-rs-core", "webauthn-attestation-ca", "webauthn-authenticator-rs"] },
-  { crate = "openssl-sys@<0.9.117" },
-  { crate = "openssl-sys@>0.9.117" },
+  { crate = "openssl:=0.10.81", wrappers = ["webauthn-rs-core", "webauthn-attestation-ca", "webauthn-authenticator-rs"] },
+  { crate = "openssl:<0.10.81" },
+  { crate = "openssl:>0.10.81" },
+  { crate = "openssl-sys:=0.9.117", wrappers = ["rdkafka-sys", "openssl", "webauthn-rs-core", "webauthn-attestation-ca", "webauthn-authenticator-rs"] },
+  { crate = "openssl-sys:<0.9.117" },
+  { crate = "openssl-sys:>0.9.117" },
   { crate = "openssl-src", wrappers = ["openssl-sys"] },
   { crate = "rdkafka-sys", wrappers = ["rdkafka"] },
   { crate = "rdkafka", wrappers = ["rss-transactional-messaging-kafka", "kafka-integration"] },
   { crate = "async-openssl", use-instead = "rustls" },
-  { crate = "aws-lc-rs@=1.18.1", wrappers = ["jsonwebtoken"] },
-  { crate = "aws-lc-rs@<1.18.1" },
-  { crate = "aws-lc-rs@>1.18.1" },
-  { crate = "aws-lc-sys@=0.45.0", wrappers = ["aws-lc-rs"] },
-  { crate = "aws-lc-sys@<0.45.0" },
-  { crate = "aws-lc-sys@>0.45.0" },
+  { crate = "aws-lc-rs:=1.18.1", wrappers = ["jsonwebtoken"] },
+  { crate = "aws-lc-rs:<1.18.1" },
+  { crate = "aws-lc-rs:>1.18.1" },
+  { crate = "aws-lc-sys:=0.45.0", wrappers = ["aws-lc-rs"] },
+  { crate = "aws-lc-sys:<0.45.0" },
+  { crate = "aws-lc-sys:>0.45.0" },
   # INVARIANT: DIPORT-MACRO-CONFINE-02 { level = "Medium", exec = "check", source = "config" }.
   # rss-runtime owns the remaining async dispatch macros. This constrains dependency parents,
   # not Rust impl sites or macro-generated unsafe code.

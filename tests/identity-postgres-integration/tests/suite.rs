@@ -2,9 +2,9 @@
 use rss_audit_postgres::Integrity;
 use rss_ledger::{Authenticator, KeyId};
 use std::sync::Arc;
-mod support;
 #[path = "support/federation.rs"]
 mod federation_support;
+mod support;
 mod cases {
     pub mod federation;
     pub mod one_time;
@@ -17,7 +17,14 @@ mod cases {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn identity_postgres() -> anyhow::Result<()> {
     let network = testkit::bridge_network("identity-postgres").await?;
-    let pg = testkit::postgres_tls(testkit::NetworkAttachment {network:network.name(),dns_name:"identity-pg"},testkit::PgTlsServerIdentity::MatchingHost).await?;
+    let pg = testkit::postgres_tls(
+        testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: "identity-pg",
+        },
+        testkit::PgTlsServerIdentity::MatchingHost,
+    )
+    .await?;
     let f = support::Fixture::new(&pg, Integrity::Plain).await?;
     f.bootstrap().await?;
     cases::roles::roles(&f).await?;
@@ -32,8 +39,11 @@ async fn identity_postgres() -> anyhow::Result<()> {
     cases::federation::step_up(&f).await?;
     cases::provisioning::provisioning(&f).await?;
     f.close().await;
-    let ledger = Integrity::Ledger(Arc::new(Authenticator::new(KeyId::parse("identity-fixture")?, vec![7;32])?));
-    let f = support::Fixture::new(&pg,ledger).await?;
+    let ledger = Integrity::Ledger(Arc::new(Authenticator::new(
+        KeyId::parse("identity-fixture")?,
+        vec![7; 32],
+    )?));
+    let f = support::Fixture::new(&pg, ledger).await?;
     f.bootstrap().await?;
     cases::sessions::audit_settlement(&f).await?;
     f.close().await;

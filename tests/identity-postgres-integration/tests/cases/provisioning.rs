@@ -41,8 +41,7 @@ async fn host_authorization(
     })).await
 }
 
-pub async fn provisioning(f: &Fixture)
--> anyhow::Result<()> {
+pub async fn provisioning(f: &Fixture) -> anyhow::Result<()> {
     // Each fixture gets its own role, avoiding shared role mutations across concurrent tests.
     let role = format!("provision_{}", uuid::Uuid::new_v4().simple());
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(

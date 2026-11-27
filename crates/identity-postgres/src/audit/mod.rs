@@ -40,7 +40,8 @@ pub(crate) async fn append_events(
             rss_audit_core::prepare(event, now).map_err(|_| corrupt())
         })
         .collect::<Result<Vec<_>, PgError>>()?;
-    budget.append_batch_in(tx, integrity, budget.try_admit(&records)?)
+    budget
+        .append_batch_in(tx, integrity, budget.try_admit(&records)?)
         .await
         .map_err(|error| match error {
             rss_audit_postgres::Error::Conflict

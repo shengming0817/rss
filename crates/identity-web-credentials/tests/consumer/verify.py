@@ -15,7 +15,7 @@ from package_proof import cargo_environment, require_candidate_revision, validat
 REPO = "https://dev.azure.com/shengming0923/rss/_git/rss"
 SCENARIOS = {
     "core": [],
-    "postgres": ["rss-audit-postgres", "rss-request-context"],
+    "postgres": ["rss-audit-postgres", "rss-identity-core"],
     "oidc": [],
     "web-credentials": ["http"],
 }

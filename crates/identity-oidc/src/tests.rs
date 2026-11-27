@@ -67,7 +67,6 @@ fn signed_claims_bind_authorized_party_issuer_audience_and_expiry() {
     }
 }
 
-
 #[test]
 fn signed_group_claim_presence_and_exact_values_are_distinct() {
     use rss_identity_core::groups::UpstreamGroups;
@@ -98,7 +97,6 @@ fn signed_group_claim_presence_and_exact_values_are_distinct() {
         assert!(mapped_groups(Some("groups"), &json!({"groups":value})).is_err());
     }
 }
-
 
 fn department_assertion() -> serde_json::Value {
     json!({"version":1,"sourceRevision":"r1","nodes":[{"id":"dept-01","displayName":"Engineering","parentId":null}],"memberships":["dept-01"]})
@@ -245,7 +243,6 @@ fn entra_browser_requires_canonical_subject_without_fallback() {
     }
 }
 
-
 #[test]
 fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
     let claims = json!({"iss":"https://issuer.test","sub":"subject","aud":"client","iat":1,"exp":4102444800_i64,"nonce":"nonce"});
@@ -257,4 +254,3 @@ fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
     metadata.1.keys.push(metadata.1.keys[0].clone());
     assert!(verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
 }
-

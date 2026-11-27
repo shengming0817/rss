@@ -59,15 +59,14 @@ pub async fn webauthn(f: &Fixture) -> anyhow::Result<()> {
         )
         .await?;
     let response = key.do_registration(Url::parse(ORIGIN)?, registration.options)?;
-    w
-        .finish_registration(
-            actor(f, &s).await?,
-            RpGeneration::new(1)?,
-            registration.id,
-            response,
-            deadline(),
-        )
-        .await?;
+    w.finish_registration(
+        actor(f, &s).await?,
+        RpGeneration::new(1)?,
+        registration.id,
+        response,
+        deadline(),
+    )
+    .await?;
     assert_eq!(
         w.list(actor(f, &s).await?, RpGeneration::new(1)?, deadline())
             .await?

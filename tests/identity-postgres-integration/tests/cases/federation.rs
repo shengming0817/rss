@@ -1,8 +1,8 @@
-use crate::{support::*, federation_support::*};
-use rss_identity_postgres::*;
+use crate::{federation_support::*, support::*};
 use rss_identity_core::federation::ProviderView;
-use zeroize::Zeroizing;
+use rss_identity_postgres::*;
 use std::sync::atomic::Ordering;
+use zeroize::Zeroizing;
 async fn step_begin(
     f: &Fixture,
     s: &Federation,
@@ -63,7 +63,11 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
         sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint")
             .fetch_one(&f.owner)
             .await?;
-    *upstream.assurance.lock().unwrap() = Some(Assurance::new(Some(now),rss_identity_core::assurance::Acr::Mfa,vec![])?);
+    *upstream.assurance.lock().unwrap() = Some(Assurance::new(
+        Some(now),
+        rss_identity_core::assurance::Acr::Mfa,
+        vec![],
+    )?);
     let token = step_begin(f, &s, &p, &old).await?;
     let FederatedOutcome::StepUp { grant, .. } =
         step_finish(&s, token.clone(), &old, "alice").await?

@@ -534,9 +534,17 @@ mod fact_ownership_tests {
         let id = rss_identity_core::department::DepartmentId::new("dept".into()).unwrap();
         let department = rss_identity_core::department::DepartmentSnapshot::new(
             "fixture-r1".into(),
-            vec![rss_identity_core::department::DepartmentNode::new(id.clone(), "Department".into(), None).unwrap()],
+            vec![
+                rss_identity_core::department::DepartmentNode::new(
+                    id.clone(),
+                    "Department".into(),
+                    None,
+                )
+                .unwrap(),
+            ],
             vec![id],
-        ).unwrap();
+        )
+        .unwrap();
         let group_buffer = groups.as_ptr();
         let nodes = department.nodes().as_ptr();
         let memberships = department.memberships().as_ptr();

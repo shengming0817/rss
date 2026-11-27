@@ -149,7 +149,7 @@ impl AuthorityConfig {
         instance: InstanceId,
         sessions: SessionPolicy,
         audit: rss_audit_postgres::Integrity,
-    audit_budget: rss_audit_postgres::WriteBudget,
+        audit_budget: rss_audit_postgres::WriteBudget,
     ) -> Result<Self, AuthorityError> {
         Ok(Self {
             instance,

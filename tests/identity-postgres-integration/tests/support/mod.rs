@@ -113,15 +113,26 @@ pub struct Fixture {
     management_cookie: tokio::sync::Mutex<Option<String>>,
 }
 impl Fixture {
-    pub async fn new(pg: &testkit::PgTlsFixture, integrity: rss_audit_postgres::Integrity) -> anyhow::Result<Self> {
+    pub async fn new(
+        pg: &testkit::PgTlsFixture,
+        integrity: rss_audit_postgres::Integrity,
+    ) -> anyhow::Result<Self> {
         let instance = InstanceId::generate();
         let provider = pg.params().clone();
         let ca = pg.ca_pem().to_owned();
-        let config = AuthorityConfig::new(instance, SessionPolicy::new(900, 14400)?, integrity,
-            rss_audit_postgres::WriteBudget::new(8, 1024 * 1024, 4 * 1024 * 1024)?)?;
-        let options = PgConnectOptions::new().host(&provider.host).port(provider.port)
-            .username(&provider.username).password(&provider.password)
-            .ssl_mode(sqlx::postgres::PgSslMode::VerifyFull).ssl_root_cert_from_pem(ca.as_bytes().to_vec());
+        let config = AuthorityConfig::new(
+            instance,
+            SessionPolicy::new(900, 14400)?,
+            integrity,
+            rss_audit_postgres::WriteBudget::new(8, 1024 * 1024, 4 * 1024 * 1024)?,
+        )?;
+        let options = PgConnectOptions::new()
+            .host(&provider.host)
+            .port(provider.port)
+            .username(&provider.username)
+            .password(&provider.password)
+            .ssl_mode(sqlx::postgres::PgSslMode::VerifyFull)
+            .ssl_root_cert_from_pem(ca.as_bytes().to_vec());
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(options.clone().database("postgres"))
@@ -145,7 +156,9 @@ impl Fixture {
         sqlx::raw_sql(rss_audit_postgres::MIGRATION_SQL)
             .execute(&mut *c)
             .await?;
-        sqlx::raw_sql(rss_ledger_postgres::MIGRATION_SQL).execute(&mut *c).await?;
+        sqlx::raw_sql(rss_ledger_postgres::MIGRATION_SQL)
+            .execute(&mut *c)
+            .await?;
         sqlx::raw_sql("RESET ROLE; GRANT USAGE ON SCHEMA rss_ledger TO identity_runtime,identity_maintenance; GRANT SELECT ON ALL TABLES IN SCHEMA rss_ledger TO identity_runtime,identity_maintenance; GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA rss_ledger TO identity_runtime,identity_maintenance;").execute(&mut *c).await?;
 
         grant_profile(&mut c, "identity_runtime", AuthorityProfile::Runtime).await?;
@@ -168,7 +181,8 @@ impl Fixture {
                 .await?;
         }
         let runtime = connect(&provider, &ca, &database, "identity_runtime").await?;
-        let maintenance_runtime = connect(&provider, &ca, &database, "identity_maintenance").await?;
+        let maintenance_runtime =
+            connect(&provider, &ca, &database, "identity_maintenance").await?;
         let key = AccountKey {
             tenant: TenantId::parse(A)?,
             principal: PrincipalId::generate(),
@@ -336,7 +350,12 @@ pub fn binding(tenant: TenantId) -> ExecutionBinding {
         Epoch::new(1).unwrap(),
     )
 }
-async fn connect(provider: &testkit::PgConnParams, ca: &str, database: &str, role: &str) -> anyhow::Result<Arc<PgRuntime>> {
+async fn connect(
+    provider: &testkit::PgConnParams,
+    ca: &str,
+    database: &str,
+    role: &str,
+) -> anyhow::Result<Arc<PgRuntime>> {
     Ok(Arc::new(
         PgRuntime::connect_producer(
             PgConfig::new(
@@ -345,7 +364,9 @@ async fn connect(provider: &testkit::PgConnParams, ca: &str, database: &str, rol
                 database,
                 role,
                 PgPassword::new("fixture-only"),
-                rss_transactional_messaging_postgres::PgPrivateCa::from_pem(ca.as_bytes().to_vec())?,
+                rss_transactional_messaging_postgres::PgPrivateCa::from_pem(
+                    ca.as_bytes().to_vec(),
+                )?,
             ),
             Timer,
             StorageIdentity::new([1; 16], [2; 16])?,
