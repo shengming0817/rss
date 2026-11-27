@@ -263,10 +263,10 @@ pub(crate) async fn insert_attempt(
         .await?;
     // A separate statement sees the AFTER STATEMENT release of expired rows.
     // All creation and consumption paths already hold the tenant collection lock.
-    let count: i64 = sqlx::query_scalar(
-        "SELECT occupied FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='oidc_capacity'",
+    let available: bool = sqlx::query_scalar(
+        "SELECT oidc_remaining>0 FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='oidc_capacity'",
     ).bind(tenant.to_string()).fetch_one(&mut *c).await?;
-    if count >= 10000 {
+    if !available {
         return Err(reject().into());
     }
     let profile_sequence = crate::profiles::sequence(c, tenant).await?;

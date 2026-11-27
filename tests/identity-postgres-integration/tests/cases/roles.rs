@@ -76,3 +76,44 @@ pub async fn check_delegation(f: &Fixture) -> anyhow::Result<()> {
     tx.rollback().await?;
     Ok(())
 }
+
+/// The schema attestation deliberately excludes ownership and ACLs. Exercise both
+/// independently of the structural signature and of the consumer role grants.
+pub async fn capacity_definer(f: &Fixture) -> anyhow::Result<()> {
+    use rss_identity_postgres::{
+        AuthorityError, AuthorityProfile, StorageMismatch, verify_profile,
+    };
+    let mut tx = f.owner.begin().await?;
+    sqlx::raw_sql(
+        "CREATE ROLE capacity_probe_owner NOLOGIN;
+        ALTER FUNCTION identity_authority.account_capacity_delta() OWNER TO capacity_probe_owner;
+        SET LOCAL ROLE identity_runtime",
+    )
+    .execute(&mut *tx)
+    .await?;
+    assert!(matches!(
+        verify_profile(&mut tx, AuthorityProfile::Runtime, f.instance).await,
+        Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges
+        ))
+    ));
+    sqlx::raw_sql("RESET ROLE;
+        ALTER SCHEMA identity_authority OWNER TO capacity_probe_owner;
+        ALTER FUNCTION identity_authority.share_host_tenant() OWNER TO capacity_probe_owner;
+        ALTER FUNCTION identity_authority.share_subject(uuid) OWNER TO capacity_probe_owner;
+        ALTER FUNCTION identity_authority.share_provider(uuid) OWNER TO capacity_probe_owner;
+        ALTER FUNCTION identity_authority.lock_session(bytea,uuid,text,text,uuid) OWNER TO capacity_probe_owner;
+        GRANT SELECT,UPDATE ON identity_authority.tenants,identity_authority.accounts,identity_authority.memberships,identity_authority.providers TO capacity_probe_owner;
+        GRANT SELECT(tenant_id,kind,occupied),UPDATE(occupied) ON identity_authority.tenant_state TO capacity_probe_owner;
+        SET LOCAL ROLE identity_runtime").execute(&mut *tx).await?;
+    verify_profile(&mut tx, AuthorityProfile::Runtime, f.instance).await?;
+    sqlx::raw_sql("RESET ROLE; REVOKE UPDATE(occupied) ON identity_authority.tenant_state FROM capacity_probe_owner; SET LOCAL ROLE identity_runtime").execute(&mut *tx).await?;
+    assert!(matches!(
+        verify_profile(&mut tx, AuthorityProfile::Runtime, f.instance).await,
+        Err(AuthorityError::StorageIncompatible(
+            StorageMismatch::Privileges
+        ))
+    ));
+    tx.rollback().await?;
+    Ok(())
+}

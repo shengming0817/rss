@@ -278,6 +278,9 @@ async fn run_fixture(
     .await?;
     let federation = oidc::service_for(store.clone(), oidc::settings().redirect_uri());
     let subjects = subjects(&f, &store, &federation, multi).await?;
+    if trace {
+        controls::observe_oidc_changes(&f).await?;
+    }
     matrix(&f, &store, &federation, &subjects, ledger, multi, trace).await?;
     let controls = if trace && !ledger && !multi {
         controls::collect(&f, &federation, subjects[0].provider).await?

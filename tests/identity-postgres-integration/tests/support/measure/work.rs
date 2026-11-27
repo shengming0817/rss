@@ -107,6 +107,7 @@ async fn plans() -> anyhow::Result<()> {
     )
     .await?;
     let fed = oidc::service_for(store.clone(), oidc::settings().redirect_uri());
+    controls::observe_oidc_changes(&f).await?;
     for n in [0, 5000, 9997] {
         f.reset_attempts().await?;
         seed_work(&f, n, &template, &intent).await?;

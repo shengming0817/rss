@@ -96,6 +96,7 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
     last_slot(f, &narrow, &limited, p.id).await?;
     reset_passwords(f, &broad, &narrow, target).await?;
     cleanup(f, &narrow, &limited, p.id).await?;
+    intersecting_deadlines(f, &limited, p.id).await?;
     federation::lifecycle(f, &fed, &p).await
 }
 
@@ -248,5 +249,33 @@ async fn rollback_claim(f: &Fixture, store: &Authority) -> anyhow::Result<()> {
     sqlx::query("DROP TRIGGER reject_claim ON identity_authority.password_attempts")
         .execute(&f.owner)
         .await?;
+    Ok(())
+}
+
+async fn intersecting_deadlines(
+    f: &Fixture,
+    fed: &Federation,
+    provider: ProviderId,
+) -> anyhow::Result<()> {
+    f.reset_attempts().await?;
+    sqlx::query("INSERT INTO identity_authority.password_attempts(tenant_id,login_digest,failures,window_until,claim_token,claim_until)
+      SELECT $1::uuid,sha256(int4send(i)),1,now()+i*interval '10 minutes',gen_random_uuid(),now()-i*interval '10 minutes'
+      FROM (VALUES(-1),(1)) keys(i)").bind(A).execute(&f.owner).await?;
+    // One live failure window, one live claim. Both records must survive the first sweep.
+    let start = || request(f, provider, "crossed");
+    assert!(matches!(
+        fed.begin_login(start()?, deadline()).await,
+        Err(AuthorityError::Busy)
+    ));
+    assert_eq!(occupied(f, A, "attempt_capacity").await?, 2);
+    sqlx::query("UPDATE identity_authority.password_attempts SET window_until=now()-interval '1 minute' WHERE tenant_id=$1::uuid").bind(A).execute(&f.owner).await?;
+    assert!(matches!(
+        fed.begin_login(start()?, deadline()).await,
+        Err(AuthorityError::Busy)
+    ));
+    assert_eq!(occupied(f, A, "attempt_capacity").await?, 1);
+    sqlx::query("UPDATE identity_authority.password_attempts SET claim_until=now()-interval '1 minute' WHERE tenant_id=$1::uuid").bind(A).execute(&f.owner).await?;
+    fed.begin_login(start()?, deadline()).await?;
+    assert_eq!(occupied(f, A, "attempt_capacity").await?, 2);
     Ok(())
 }

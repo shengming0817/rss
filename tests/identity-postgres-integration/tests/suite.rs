@@ -30,6 +30,7 @@ async fn identity_postgres() -> anyhow::Result<()> {
     f.bootstrap().await?;
     cases::roles::roles(&f).await?;
     cases::roles::check_delegation(&f).await?;
+    cases::roles::capacity_definer(&f).await?;
     cases::sessions::rotation(&f).await?;
     cases::web_credentials::run(&f).await?;
     cases::transactions::borrowed(&f).await?;

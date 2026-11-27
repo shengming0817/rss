@@ -19,8 +19,10 @@ CREATE TABLE identity_authority.tenant_state (
  -- Clock writers may update value. Only physical DML triggers may update occupied.
  value bigint NOT NULL DEFAULT 0 CHECK(value>=0),
  occupied bigint NOT NULL DEFAULT 0 CHECK(occupied>=0),
+ oidc_remaining bigint GENERATED ALWAYS AS
+  (CASE WHEN kind='oidc_capacity' THEN 10000-occupied END) STORED,
  CHECK(CASE WHEN kind IN ('attempt_capacity','oidc_capacity') THEN value=0 ELSE occupied=0 END),
- CHECK(kind<>'oidc_capacity' OR occupied<=10000),
+ CHECK(oidc_remaining>=0),
  PRIMARY KEY(tenant_id,kind)
 );
 -- Source counters live as long as the tenant so a replaced source never reuses its old generation.

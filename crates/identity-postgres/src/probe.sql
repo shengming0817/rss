@@ -38,6 +38,14 @@ WITH required_privileges AS (
  AND NOT EXISTS(SELECT FROM reachable u CROSS JOIN pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
    WHERE n.nspname='identity_authority' AND (has_function_privilege(u.oid,p.oid,'EXECUTE WITH GRANT OPTION') OR
      (has_function_privilege(u.oid,p.oid,'EXECUTE') AND NOT EXISTS(SELECT FROM allowed_functions f WHERE f.oid=p.oid))))
+ AND EXISTS (
+   SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+   WHERE p.oid='identity_authority.account_capacity_delta()'::regprocedure AND p.proowner=n.nspowner
+     AND has_schema_privilege(p.proowner,n.oid,'USAGE')
+     AND has_column_privilege(p.proowner,'identity_authority.tenant_state','occupied','UPDATE')
+     AND NOT EXISTS(SELECT FROM unnest(ARRAY['tenant_id','kind','occupied']) col
+         WHERE NOT has_column_privilege(p.proowner,'identity_authority.tenant_state',col,'SELECT'))
+ )
 ) AS privileges_ok
 )
 SELECT CASE

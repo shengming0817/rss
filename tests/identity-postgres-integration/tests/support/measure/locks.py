@@ -78,11 +78,16 @@ def samples(lines, plans, controls):
     for clock, pid, db, level, message in records(lines):
         key = (db, int(pid))
         tx = transactions.get(key)
-        if level == "CONTEXT" and tx and tx["waits"] and "account_capacity_delta()" in message:
+        if level == "CONTEXT" and tx and tx["annotate_wait"] and "account_capacity_delta()" in message:
             tx["waits"][-1]["trigger"] = True
         if level != "LOG":
             continue
         now = round(float(clock) * 1_000_000)
+        if tx:
+            tx["annotate_wait"] = False
+        if tx and message.strip() == "RSS_OIDC_OCCUPANCY_CHANGED":
+            tx["marks"].append(now)
+            continue
         if plans and " plan:" in message and "{" in message:
             item, _ = json.JSONDecoder().raw_decode(message[message.index("{"):])
             sql = " ".join(item["Query Text"].split())
@@ -96,6 +101,7 @@ def samples(lines, plans, controls):
             continue
         wait = ACQUIRED.match(message)
         if wait and tx:
+            tx["annotate_wait"] = True
             tx["waits"].append({"at_us": now, "duration_us": round(float(wait[1]) * 1000)})
         completed = DURATION.match(" ".join(message.split()))
         if not completed:
@@ -103,7 +109,8 @@ def samples(lines, plans, controls):
         duration = round(float(completed[1]) * 1000)
         query = completed[2].lower().strip()
         if query.startswith("begin"):
-            transactions[key] = {"begin_us":now, "waits": [], "op": "other", "events": [], "statements": 0}
+            transactions[key] = {"begin_us":now, "waits": [], "op": "other", "events": [], "statements": 0,
+                                 "annotate_wait": False, "marks": [], "oidc_changes": []}
             continue
         if tx is None:
             continue
@@ -114,9 +121,19 @@ def samples(lines, plans, controls):
         if "kind='oidc_capacity'" in query:
             counter_databases.add(db)
         kind = lock_kind(query)
+        marks, tx["marks"] = tx["marks"], []
         trigger_kind = None
-        if db in counter_databases and op in ("oidc_begin", "oidc_callback"):
-            # Successful insert/consume charges one row under the tenant collection lock.
+        first_oidc = marks and not tx["oidc_changes"]
+        if marks:
+            if op == "oidc_begin":
+                cause = "insert"
+            elif op == "oidc_callback":
+                cause = "consume"
+            elif "delete from identity_authority.oidc_transactions" in query:
+                cause = "reclaim"
+            else:
+                raise RuntimeError("OIDC diagnostic marker has no matching parent DML")
+            tx["oidc_changes"].extend({"cause":cause,"at_us":stamp} for stamp in marks)
             trigger_kind = "oidc_capacity"
         waits, tx["waits"] = tx["waits"], []
         event_kinds = {k for k in (kind, trigger_kind) if k}
@@ -124,21 +141,28 @@ def samples(lines, plans, controls):
             event["kind"] = (trigger_kind if event.pop("trigger", False) else kind) or "other"
             event_kinds.add(event["kind"])
         for name in sorted(event_kinds):
-            tx["events"].append((name,now,duration,[w for w in waits if w["kind"] == name]))
+            if name == "oidc_capacity" and not first_oidc:
+                continue
+            acquired_by = marks[0] if name == "oidc_capacity" else now
+            tx["events"].append((name,now,acquired_by,duration,[w for w in waits if w["kind"] == name]))
         if not query.startswith(("commit", "rollback")):
             continue
         # %n resolves milliseconds. PG acquires inside the lock statement and
         # releases inside settlement. Bracket both endpoints, retaining repeated acquisitions.
-        for name, end, statement_us, waits in tx["events"]:
+        for name, end, acquired_by, statement_us, waits in tx["events"]:
             row = dict(db=db,pid=int(pid),begin_us=tx["begin_us"],end_us=now,operation=tx["op"],
                        lock=name,outcome=query.split()[0],statement_us=statement_us,
-                       statement_end_to_tx_end_us=now-end,hold_min_us=max(0,now-duration-end-1000),
+                       statement_end_to_tx_end_us=now-end,hold_min_us=max(0,now-duration-acquired_by-1000),
                        hold_max_us=now-end+statement_us+1000,sql_statements=tx["statements"],
                        wait_log_threshold_us=1000,observed_waits=waits)
+            if name == "oidc_capacity":
+                row["oidc_changes"] = tx["oidc_changes"]
             observed_kinds.add(name)
             for i, window in enumerate(controls):
                 if within(window, row) and waits and window["lock"] == name:
-                    validated.add(i)
+                    cause = window.get("first_change")
+                    if cause is None or row.get("oidc_changes", [{}])[0].get("cause") == cause:
+                        validated.add(i)
             yield row
         del transactions[key]
     required = {"attempt_capacity", "sequence", "collection"}
