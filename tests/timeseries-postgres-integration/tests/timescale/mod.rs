@@ -5,12 +5,12 @@ use rss_timeseries_postgres::{
     StorageProfile, StoreConnections,
     timescale::{DedicatedTenant, Hypertable, StorageFormat},
 };
-fn shared() -> anyhow::Result<StorageProfile> {
+pub(super) fn shared() -> anyhow::Result<StorageProfile> {
     Ok(StorageProfile::TimescaleSharedRls(Hypertable::new(
         NonZeroU64::new(100).ok_or(Error::InvalidInput)?,
     )?))
 }
-fn dedicated() -> anyhow::Result<StorageProfile> {
+pub(super) fn dedicated() -> anyhow::Result<StorageProfile> {
     Ok(StorageProfile::TimescaleDedicatedTenant(
         DedicatedTenant::new(
             TenantId::parse(TENANT)?,

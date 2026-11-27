@@ -233,7 +233,11 @@ impl Capacity {
             state.closed = true;
             #[cfg(feature = "integration")]
             if !state.waiting.is_empty() {
-                rss_timeseries::measurement::Session::detailed().capacity(state.slots, state.bytes, 0);
+                rss_timeseries::measurement::Session::detailed().capacity(
+                    state.slots,
+                    state.bytes,
+                    0,
+                );
             }
             (
                 std::mem::take(&mut state.waiting),
@@ -303,30 +307,94 @@ mod tests {
     use super::*;
     use std::task::{Context, Poll, Waker};
 
-    #[test]
-    fn close_drains_unpolled_waiters_and_preserves_only_granted_capacity() -> anyhow::Result<()> {
-        let capacity = Capacity(Arc::new(Mutex::new(State {
+    use futures::FutureExt;
+
+    fn capacity(max_waiters: u32) -> Capacity {
+        Capacity(Arc::new(Mutex::new(State {
             slots: 2,
             bytes: 10,
-            max_waiters: 2,
+            max_waiters,
             next: 0,
             closed: false,
             waiting: BTreeMap::new(),
             weights: Weights::default(),
-        })));
-        use futures::FutureExt;
+        })))
+    }
+
+    fn pending(f: std::pin::Pin<&mut dyn Future<Output = Result<Permit, Error>>>) -> bool {
+        matches!(
+            f.poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        )
+    }
+
+    #[test]
+    fn zero_waiters_allows_only_complete_immediate_grants() -> anyhow::Result<()> {
+        let capacity = capacity(0);
+        let active = capacity
+            .acquire_weight(8)
+            .now_or_never()
+            .ok_or(Error::Invariant)??;
+        assert_eq!(
+            capacity
+                .acquire_weight(3)
+                .now_or_never()
+                .ok_or(Error::Invariant)?
+                .err(),
+            Some(Error::Overloaded)
+        );
+        let fitting = capacity
+            .acquire_weight(2)
+            .now_or_never()
+            .ok_or(Error::Invariant)??;
+        drop((active, fitting));
+        assert_eq!(capacity.lock().slots, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn full_queue_allows_one_bypass_and_grants_its_head_before_new_writers() -> anyhow::Result<()> {
+        let capacity = capacity(1);
+        let active = capacity
+            .acquire_weight(8)
+            .now_or_never()
+            .ok_or(Error::Invariant)??;
+        let mut head = Box::pin(capacity.acquire_weight(9));
+        assert!(pending(head.as_mut()));
+        let bypass = capacity
+            .acquire_weight(2)
+            .now_or_never()
+            .ok_or(Error::Invariant)??;
+        drop(bypass);
+        assert_eq!(
+            capacity
+                .acquire_weight(2)
+                .now_or_never()
+                .ok_or(Error::Invariant)?
+                .err(),
+            Some(Error::Overloaded)
+        );
+        drop(active);
+        // The unread grant already owns nine bytes and has vacated its waiting place.
+        let mut next = Box::pin(capacity.acquire_weight(2));
+        assert!(pending(next.as_mut()));
+        drop(head);
+        let next = next.now_or_never().ok_or(Error::Invariant)??;
+        drop(next);
+        let state = capacity.lock();
+        assert_eq!((state.slots, state.bytes, state.waiting.len()), (2, 10, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn close_drains_unpolled_waiters_and_preserves_only_granted_capacity() -> anyhow::Result<()> {
+        let capacity = capacity(2);
         let active = capacity
             .acquire_weight(8)
             .now_or_never()
             .ok_or(Error::Invariant)??;
         let mut head = Box::pin(capacity.acquire_weight(7));
         let mut cancelled = Box::pin(capacity.acquire_weight(9));
-        let pending = |f: std::pin::Pin<&mut dyn Future<Output = Result<Permit, Error>>>| {
-            matches!(
-                f.poll(&mut Context::from_waker(Waker::noop())),
-                Poll::Pending
-            )
-        };
         assert!(pending(head.as_mut()) && pending(cancelled.as_mut()));
         drop(active);
         // The head now owns 7 bytes in its unread notification; the other waiter owns none.

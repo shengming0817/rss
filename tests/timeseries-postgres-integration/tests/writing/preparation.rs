@@ -230,3 +230,93 @@ async fn logical_clock_landing_exactly_on_cutoff_rejects_before_begin() -> anyho
     assert_eq!(f.count().await?, 0);
     Ok(())
 }
+
+async fn overload_and_recovery(
+    name: &str,
+    profile: rss_timeseries_postgres::StorageProfile,
+) -> anyhow::Result<()> {
+    let mut caps = limits()?;
+    caps.max_prepare_batches = NonZeroU32::MIN;
+    caps.max_prepare_waiters = 1;
+    let f = Fixture::with_limits(name, profile, caps).await?;
+    let full = f.store.available_preparation();
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let req = |name: &str| -> anyhow::Result<_> {
+        let b = batch(name, vec![sample(&d, name, 1, 1)?])?;
+        Ok(Authorized::<Batch>::verify(&authority(TENANT)?, b)?)
+    };
+    let original = req("unknown")?;
+    let fresh = req("fresh")?;
+    let queued = req("queued")?;
+    let holder = req("holder")?;
+    f.store.inject_next_fault(Fault::CommitAckLost);
+    assert!(matches!(
+        f.store.write(&original, deadline()?).await?,
+        Outcome::Unknown
+    ));
+    let mut occupied = Vec::new();
+    for _ in 0..f.pool.options().get_max_connections() {
+        occupied.push(f.pool.acquire().await?);
+    }
+    let mut active = Box::pin(f.store.write(&holder, deadline()?));
+    let mut waiting = Box::pin(f.store.write(&queued, deadline()?));
+    pending(active.as_mut()).await?;
+    let phases = f.store.preparation_phases();
+    pending(waiting.as_mut()).await?;
+    for rejected in [&original, &fresh] {
+        assert_eq!(
+            f.store.write(rejected, deadline()?).await.err(),
+            Some(Error::Overloaded)
+        );
+    }
+    assert_eq!(f.store.preparation_phases(), phases);
+    assert_eq!(f.count().await?, 1);
+    drop(active);
+    drop(occupied);
+    assert!(matches!(waiting.await?, Outcome::Accepted(_)));
+    assert_eq!(f.store.available_preparation(), full);
+    let lookup = |r: &Authorized<Batch>| -> anyhow::Result<_> {
+        Ok(Authorized::<ReceiptQuery>::verify(
+            &authority(TENANT)?,
+            receipt_query(r.request())?,
+        )?)
+    };
+    assert!(matches!(
+        f.store.receipt(&lookup(&original)?, deadline()?).await?,
+        Lookup::Found(_)
+    ));
+    assert!(matches!(
+        f.store.receipt(&lookup(&fresh)?, deadline()?).await?,
+        Lookup::NotVisible
+    ));
+    assert!(matches!(
+        f.store.write(&original, deadline()?).await?,
+        Outcome::Replay(_)
+    ));
+    assert!(matches!(
+        f.store.write(&fresh, deadline()?).await?,
+        Outcome::Accepted(_)
+    ));
+    assert_eq!(f.count().await?, 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn postgres_overload_and_recovery() -> anyhow::Result<()> {
+    overload_and_recovery(
+        "ts-pg-queue",
+        rss_timeseries_postgres::StorageProfile::PostgreSQL,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn shared_timescale_overload_and_recovery() -> anyhow::Result<()> {
+    overload_and_recovery("ts-shared-queue", crate::timescale::shared()?).await
+}
+
+#[tokio::test]
+async fn dedicated_timescale_overload_and_recovery() -> anyhow::Result<()> {
+    overload_and_recovery("ts-native-queue", crate::timescale::dedicated()?).await
+}

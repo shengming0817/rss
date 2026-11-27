@@ -159,6 +159,13 @@ impl Fixture {
         name: &str,
         profile: rss_timeseries_postgres::StorageProfile,
     ) -> anyhow::Result<Self> {
+        Self::with_limits(name, profile, limits()?).await
+    }
+    async fn with_limits(
+        name: &str,
+        profile: rss_timeseries_postgres::StorageProfile,
+        limits: Limits,
+    ) -> anyhow::Result<Self> {
         let network = testkit::bridge_network(name).await?;
         let attachment = testkit::NetworkAttachment {
             network: network.name(),
@@ -219,7 +226,7 @@ impl Fixture {
                 None => rss_timeseries_postgres::StoreConnections::Runtime(pool.clone()),
             },
             Timer,
-            limits()?,
+            limits,
             CursorKey::new([17; 32]),
             deadline()?,
         )
