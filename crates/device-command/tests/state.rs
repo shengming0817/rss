@@ -346,7 +346,7 @@ fn direct_claim_is_only_a_server_fact() -> Result<(), Box<dyn std::error::Error>
         1,
     )?;
     let a = c.spec().coordinate();
-    let mut report = DeviceReport {
+    let report = DeviceReport {
         scope: c.spec().scope(),
         command_id: c.spec().id().clone(),
         coordinate: a,
@@ -364,6 +364,23 @@ fn direct_claim_is_only_a_server_fact() -> Result<(), Box<dyn std::error::Error>
         Err(Error::Conflict)
     );
     assert_eq!(c, issued);
+    check_direct_receipts(c, report, id, other)?;
+    let mut expired = issued;
+    assert_eq!(
+        expired.transition(Event::Claim(id), a, 100)?,
+        Outcome::Advanced
+    );
+    assert_eq!(expired.status(), Status::TimedOut);
+    Ok(())
+}
+
+fn check_direct_receipts(
+    mut c: Command,
+    mut report: DeviceReport,
+    id: ClaimId,
+    other: ClaimId,
+) -> Result<(), Error> {
+    let a = c.spec().coordinate();
     for wrong in [ReportSource::Outbox, ReportSource::Direct(other)] {
         report.source = wrong;
         assert_eq!(c.report(&report, a, 4), Err(Error::Fenced));
@@ -380,11 +397,5 @@ fn direct_claim_is_only_a_server_fact() -> Result<(), Box<dyn std::error::Error>
     let mut invalid = c.record().clone();
     invalid.claim_id = None;
     assert_eq!(Command::restore(invalid), Err(Error::InvalidSnapshot));
-    let mut expired = issued;
-    assert_eq!(
-        expired.transition(Event::Claim(id), a, 100)?,
-        Outcome::Advanced
-    );
-    assert_eq!(expired.status(), Status::TimedOut);
     Ok(())
 }

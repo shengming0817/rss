@@ -582,8 +582,9 @@ async fn sql_and_cursor_bounds(f: &Fixture) -> anyhow::Result<()> {
             .is_err()
         );
     }
+    // Keep the capacity fixture outside the tenant whose later relay tests drain all pending dispatches.
     let s = Scope::new(
-        s.tenant(),
+        TenantId::parse(OTHER)?,
         DeviceId::parse("550e8400-e29b-41d4-a716-446655440099")?,
     );
     let c = Coordinate::new(1, 1)?;

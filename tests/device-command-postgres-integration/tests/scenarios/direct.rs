@@ -86,126 +86,7 @@ pub(crate) async fn run(original: &Fixture) -> anyhow::Result<()> {
     let c = Coordinate::new(1, 1)?;
     let id = ClaimId::parse("5da81944-34a9-4be3-a838-1ceafef62bc7")?;
     let other = ClaimId::parse("5da81944-34a9-4be3-a838-1ceafef62bc8")?;
-    f.initialize(s, c).await?;
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
-        .fetch_one(&f.owner)
-        .await?;
-    for name in [
-        "direct-lost",
-        "direct-expiry",
-        "direct-cancel",
-        "direct-rollback",
-    ] {
-        create(&f, name, s, c, 100).await?;
-    }
-    let ids = [
-        CommandId::parse("direct-lost")?,
-        CommandId::parse("direct-expiry")?,
-    ];
-    super::candidates::measured(&f, s, &ids, [1, 1, 0, 0, 0]).await?;
-    let pending = f.load("direct-rollback", s).await?;
-    let store = f.store.clone();
-    let cmd = CommandId::parse("direct-rollback")?;
-    let rolled = f
-        .runtime
-        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-            Box::pin(async move {
-                assert!(matches!(
-                    store.claim_direct(tx, s, &cmd, c, id).await?,
-                    DirectClaim::Eligible(_)
-                ));
-                Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
-            })
-        })
-        .await;
-    assert_eq!(status(rolled), "rolled-back");
-    assert_eq!(pending, f.load("direct-rollback", s).await?);
-    f.runtime
-        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
-    assert_eq!(status(claim(&f, "direct-lost", s, c, id).await?), "unknown");
-    f.runtime.close().await;
-    (f.runtime, f.store, f.outbox) = stores(
-        f.config.clone(),
-        rss_device_command_postgres::CommandClock::Controlled(clock.clone()),
-    )
-    .await?;
-    let durable = f
-        .load("direct-lost", s)
-        .await?
-        .ok_or(Error::InvalidSnapshot)?;
-    assert_eq!(
-        (
-            durable.status(),
-            durable.version(),
-            durable.record().claim_id
-        ),
-        (Status::Claimed, 2, Some(id))
-    );
-    assert_eq!(
-        committed(claim(&f, "direct-lost", s, c, id).await?)?,
-        DirectClaim::Eligible(durable.clone())
-    );
-    assert_eq!(
-        kind(claim(&f, "direct-lost", s, c, other).await?),
-        Some(MessagingErrorKind::Conflict)
-    );
-    for target in [
-        device(336502)?,
-        Scope::new(TenantId::parse(OTHER)?, s.device()),
-    ] {
-        f.initialize(target, c).await?;
-        assert_eq!(
-            kind(claim(&f, "direct-lost", target, c, id).await?),
-            Some(MessagingErrorKind::OwnershipLost)
-        );
-    }
-    for origin in [ReportSource::Outbox, ReportSource::Direct(other)] {
-        assert_eq!(
-            kind(report(&f, "direct-lost", s, c, origin, DeviceEvent::Received).await?),
-            Some(MessagingErrorKind::OwnershipLost)
-        );
-    }
-    let source = ReportSource::Direct(id);
-    let received =
-        committed(report(&f, "direct-lost", s, c, source, DeviceEvent::Received).await?)?;
-    assert_eq!(
-        committed(claim(&f, "direct-lost", s, c, id).await?)?,
-        DirectClaim::Unavailable(received.command)
-    );
-    let applied = committed(
-        report(
-            &f,
-            "direct-lost",
-            s,
-            c,
-            source,
-            DeviceEvent::Reported(StateDigest::from_bytes([7; 32])),
-        )
-        .await?,
-    )?;
-    assert_eq!(applied.command.status(), Status::Applied);
-    let _ = committed(claim(&f, "direct-expiry", s, c, id).await?)?;
-    let cmd = CommandId::parse("direct-cancel")?;
-    let store = f.store.clone();
-    let cancelled = committed(
-        f.runtime
-            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
-                Box::pin(async move { store.cancel(tx, s, &cmd, c).await })
-            })
-            .await,
-    )?;
-    assert_eq!(
-        committed(claim(&f, "direct-cancel", s, c, id).await?)?,
-        DirectClaim::Unavailable(cancelled.command)
-    );
-    clock.advance_to(100)?;
-    assert!(
-        matches!(committed(claim(&f,"direct-expiry",s,c,id).await?)?,DirectClaim::Unavailable(cmd) if cmd.status()==Status::TimedOut && cmd.record().claim_id==Some(id))
-    );
-    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
-        .fetch_one(&f.owner)
-        .await?;
-    assert_eq!(before, after);
+    direct_lifecycle(&mut f, &clock, s, c, id, other).await?;
     concurrent(&f, c, id).await?;
     competing_claims(&f, c, id, other).await?;
     replay_during_claim(&f, c, id).await?;
@@ -416,15 +297,7 @@ async fn ordered(f: &Fixture, c: Coordinate) -> anyhow::Result<()> {
         evidence.await?;
         if rollback {
             assert_eq!(status(result), "rolled-back");
-            assert_eq!(
-                f.load("ordered-old", s)
-                    .await?
-                    .ok_or(Error::InvalidSnapshot)?
-                    .status(),
-                Status::Queued
-            );
-            assert!(f.load("ordered-new", s).await?.is_none());
-            assert_eq!(f.count("outbox", "dispatch.ordered-new").await?, 0);
+            assert_ordered_rollback(f, s).await?;
         } else {
             committed(result)?;
         }
@@ -478,5 +351,196 @@ async fn replay_during_claim(f: &Fixture, c: Coordinate, id: ClaimId) -> anyhow:
     let command = committed(first)?;
     assert_eq!(command.version(), 2);
     assert_eq!(second?, DirectClaim::Eligible(command));
+    Ok(())
+}
+
+async fn confirmed_reconnect(
+    f: &Fixture,
+    s: Scope,
+    c: Coordinate,
+    id: ClaimId,
+    other: ClaimId,
+) -> anyhow::Result<()> {
+    let durable = f
+        .load("direct-lost", s)
+        .await?
+        .ok_or(Error::InvalidSnapshot)?;
+    assert_eq!(
+        (
+            durable.status(),
+            durable.version(),
+            durable.record().claim_id
+        ),
+        (Status::Claimed, 2, Some(id))
+    );
+    assert_eq!(
+        committed(claim(f, "direct-lost", s, c, id).await?)?,
+        DirectClaim::Eligible(durable.clone())
+    );
+    assert_eq!(
+        kind(claim(f, "direct-lost", s, c, other).await?),
+        Some(MessagingErrorKind::Conflict)
+    );
+    denied_sources(f, s, c, id, other).await?;
+    let source = ReportSource::Direct(id);
+    let received = committed(report(f, "direct-lost", s, c, source, DeviceEvent::Received).await?)?;
+    assert_eq!(
+        committed(claim(f, "direct-lost", s, c, id).await?)?,
+        DirectClaim::Unavailable(received.command)
+    );
+    let applied = committed(
+        report(
+            f,
+            "direct-lost",
+            s,
+            c,
+            source,
+            DeviceEvent::Reported(StateDigest::from_bytes([7; 32])),
+        )
+        .await?,
+    )?;
+    assert_eq!(applied.command.status(), Status::Applied);
+    Ok(())
+}
+
+async fn rolled_back_claim(
+    f: &Fixture,
+    s: Scope,
+    c: Coordinate,
+    id: ClaimId,
+) -> anyhow::Result<()> {
+    let pending = f.load("direct-rollback", s).await?;
+    let store = f.store.clone();
+    let cmd = CommandId::parse("direct-rollback")?;
+    let rolled = f
+        .runtime
+        .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+            Box::pin(async move {
+                assert!(matches!(
+                    store.claim_direct(tx, s, &cmd, c, id).await?,
+                    DirectClaim::Eligible(_)
+                ));
+                Err::<(), PgError>(sqlx::Error::PoolTimedOut.into())
+            })
+        })
+        .await;
+    assert_eq!(status(rolled), "rolled-back");
+    assert_eq!(pending, f.load("direct-rollback", s).await?);
+    Ok(())
+}
+
+async fn seed_direct(f: &Fixture, s: Scope, c: Coordinate) -> anyhow::Result<()> {
+    for name in [
+        "direct-lost",
+        "direct-expiry",
+        "direct-cancel",
+        "direct-rollback",
+    ] {
+        create(f, name, s, c, 100).await?;
+    }
+    let ids = [
+        CommandId::parse("direct-lost")?,
+        CommandId::parse("direct-expiry")?,
+    ];
+    super::candidates::measured(f, s, &ids, [1, 1, 0, 0, 0]).await?;
+    Ok(())
+}
+
+async fn stop_delivery(
+    f: &Fixture,
+    s: Scope,
+    c: Coordinate,
+    id: ClaimId,
+    clock: &rss_device_command_postgres::IntegrationClock,
+) -> anyhow::Result<()> {
+    let _ = committed(claim(f, "direct-expiry", s, c, id).await?)?;
+    let cmd = CommandId::parse("direct-cancel")?;
+    let store = f.store.clone();
+    let cancelled = committed(
+        f.runtime
+            .local_tx(crate::execution(s.tenant(), 1), budget()?, move |tx| {
+                Box::pin(async move { store.cancel(tx, s, &cmd, c).await })
+            })
+            .await,
+    )?;
+    assert_eq!(
+        committed(claim(f, "direct-cancel", s, c, id).await?)?,
+        DirectClaim::Unavailable(cancelled.command)
+    );
+    clock.advance_to(100)?;
+    assert!(
+        matches!(committed(claim(f,"direct-expiry",s,c,id).await?)?,DirectClaim::Unavailable(cmd) if cmd.status()==Status::TimedOut && cmd.record().claim_id==Some(id))
+    );
+    Ok(())
+}
+
+async fn denied_sources(
+    f: &Fixture,
+    s: Scope,
+    c: Coordinate,
+    id: ClaimId,
+    other: ClaimId,
+) -> anyhow::Result<()> {
+    for target in [
+        device(336502)?,
+        Scope::new(TenantId::parse(OTHER)?, s.device()),
+    ] {
+        f.initialize(target, c).await?;
+        assert_eq!(
+            kind(claim(f, "direct-lost", target, c, id).await?),
+            Some(MessagingErrorKind::OwnershipLost)
+        );
+    }
+    for origin in [ReportSource::Outbox, ReportSource::Direct(other)] {
+        assert_eq!(
+            kind(report(f, "direct-lost", s, c, origin, DeviceEvent::Received).await?),
+            Some(MessagingErrorKind::OwnershipLost)
+        );
+    }
+    Ok(())
+}
+
+async fn assert_ordered_rollback(f: &Fixture, s: Scope) -> anyhow::Result<()> {
+    assert_eq!(
+        f.load("ordered-old", s)
+            .await?
+            .ok_or(Error::InvalidSnapshot)?
+            .status(),
+        Status::Queued
+    );
+    assert!(f.load("ordered-new", s).await?.is_none());
+    assert_eq!(f.count("outbox", "dispatch.ordered-new").await?, 0);
+    Ok(())
+}
+
+async fn direct_lifecycle(
+    f: &mut Fixture,
+    clock: &Arc<rss_device_command_postgres::IntegrationClock>,
+    s: Scope,
+    c: Coordinate,
+    id: ClaimId,
+    other: ClaimId,
+) -> anyhow::Result<()> {
+    f.initialize(s, c).await?;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
+        .fetch_one(&f.owner)
+        .await?;
+    seed_direct(f, s, c).await?;
+    rolled_back_claim(f, s, c, id).await?;
+    f.runtime
+        .inject_next_transaction_fault(PgTransactionFault::CommitUnknownAfterAck);
+    assert_eq!(status(claim(f, "direct-lost", s, c, id).await?), "unknown");
+    f.runtime.close().await;
+    (f.runtime, f.store, f.outbox) = stores(
+        f.config.clone(),
+        rss_device_command_postgres::CommandClock::Controlled(clock.clone()),
+    )
+    .await?;
+    confirmed_reconnect(f, s, c, id, other).await?;
+    stop_delivery(f, s, c, id, clock).await?;
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM rss_transactional_messaging.outbox")
+        .fetch_one(&f.owner)
+        .await?;
+    assert_eq!(before, after);
     Ok(())
 }
