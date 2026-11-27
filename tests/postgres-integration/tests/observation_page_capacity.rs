@@ -342,13 +342,7 @@ impl CapacityRun {
                     .await
             });
         }
-        let workload = tokio::time::timeout(TIMEOUT, async {
-            tokio::try_join!(self.observe_pages(), finish_pages(&mut workers))
-        })
-        .await;
-        let peak = sampler.finish().await;
-        let (observed, hold_max) = workload.context("capacity workload did not finish")??;
-        let peak = peak?;
+        let (observed, hold_max, peak) = self.finish_workload(&mut workers, sampler).await?;
         let settled = metrics::Memory::sample().await?;
         let after = self.io().await?;
         let calls = metrics::resolver_calls(&self.read_pool, self.pages).await?
@@ -374,6 +368,20 @@ impl CapacityRun {
             pools_closed: metrics::Memory::sample().await?,
             hold_max,
         })
+    }
+
+    async fn finish_workload(
+        &self,
+        workers: &mut JoinSet<anyhow::Result<Duration>>,
+        sampler: metrics::Sampler,
+    ) -> anyhow::Result<(ObservedPages, Duration, metrics::Memory)> {
+        let workload = tokio::time::timeout(TIMEOUT, async {
+            tokio::try_join!(self.observe_pages(), finish_pages(workers))
+        })
+        .await;
+        let peak = sampler.finish().await;
+        let (observed, hold_max) = workload.context("capacity workload did not finish")??;
+        Ok((observed, hold_max, peak?))
     }
 
     async fn observe_pages(&self) -> anyhow::Result<ObservedPages> {
