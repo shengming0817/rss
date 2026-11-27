@@ -6,6 +6,7 @@ use std::sync::Arc;
 mod federation_support;
 mod support;
 mod cases {
+    pub mod capacity;
     pub mod federation;
     pub mod one_time;
     pub mod provisioning;
@@ -39,6 +40,10 @@ async fn identity_postgres() -> anyhow::Result<()> {
     f.bootstrap().await?;
     cases::federation::step_up(&f).await?;
     cases::provisioning::provisioning(&f).await?;
+    f.close().await;
+    let f = support::Fixture::new(&pg, Integrity::Plain).await?;
+    f.bootstrap().await?;
+    Box::pin(cases::capacity::run(&f)).await?;
     f.close().await;
     let ledger = Integrity::Ledger(Arc::new(Authenticator::new(
         KeyId::parse("identity-fixture")?,
