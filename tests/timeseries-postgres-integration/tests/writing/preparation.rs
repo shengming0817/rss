@@ -182,38 +182,35 @@ async fn byte_limit_applies_with_free_slots_and_close_wakes_waiters() -> anyhow:
 
 #[tokio::test]
 async fn logical_clock_landing_exactly_on_cutoff_rejects_before_begin() -> anyhow::Result<()> {
-    struct SwitchClock {
-        start: Instant,
-        cutoff: Instant,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-    impl Clock for SwitchClock {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+
+    // Each read advances the logical clock by one second. The wall watchdog stays live.
+    #[derive(Clone)]
+    struct TickClock(Instant, Arc<AtomicU32>);
+    impl Clock for TickClock {
         fn now(&self) -> Instant {
-            if self
-                .calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                < 2
-            {
-                self.start
-            } else {
-                self.cutoff
-            }
+            self.0 + Duration::from_secs(self.1.fetch_add(1, Ordering::Relaxed).into())
         }
     }
     let f = Fixture::new("ts-exact-cutoff").await?;
-    let start = Timer.now();
-    let cutoff = start + Duration::from_secs(10);
+    let clock = TickClock(Timer.now(), Default::default());
+    let next_cutoff = || {
+        Deadline::at(clock.0 + Duration::from_secs(u64::from(clock.1.load(Ordering::Relaxed)) + 1))
+    };
+    let later = Deadline::at(clock.0 + Duration::from_secs(600));
+    let mut caps = limits()?;
+    caps.max_prepare_batches = NonZeroU32::MIN;
+    caps.max_prepare_waiters = 0;
     let store = PgStore::new(
         f.profile.clone(),
         rss_timeseries_postgres::StoreConnections::Runtime(f.pool.clone()),
-        SwitchClock {
-            start,
-            cutoff,
-            calls: Default::default(),
-        },
-        limits()?,
+        clock.clone(),
+        caps,
         CursorKey::new([23; 32]),
-        Deadline::at(cutoff),
+        later,
     )
     .await?;
     let d = definition(TENANT)?;
@@ -223,10 +220,29 @@ async fn logical_clock_landing_exactly_on_cutoff_rejects_before_begin() -> anyho
         batch("cutoff", vec![sample(&d, "cutoff", 1, 1)?])?,
     )?;
     assert_eq!(
-        store.write(&req, Deadline::at(cutoff)).await.err(),
+        store.write(&req, next_cutoff()).await.err(),
         Some(Error::Deadline)
     );
     assert_eq!(store.preparation_phases(), [0, 0, 0]);
+    let mut occupied = Vec::new();
+    for _ in 0..f.pool.options().get_max_connections() {
+        occupied.push(f.pool.acquire().await?);
+    }
+    let full = store.available_preparation();
+    let mut holder = Box::pin(store.write(&req, later));
+    pending(holder.as_mut()).await?;
+    let phases = store.preparation_phases();
+    assert_eq!(
+        store.write(&req, later).await.err(),
+        Some(Error::Overloaded)
+    );
+    assert_eq!(
+        store.write(&req, next_cutoff()).await.err(),
+        Some(Error::Deadline)
+    );
+    assert_eq!(store.preparation_phases(), phases);
+    drop(holder);
+    assert_eq!(store.available_preparation(), full);
     assert_eq!(f.count().await?, 0);
     Ok(())
 }

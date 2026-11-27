@@ -107,11 +107,7 @@ async fn load() -> anyhow::Result<()> {
         .map(|s| s.queued)
         .max()
         .unwrap_or(0);
-    let observed_rejects = report
-        .stages
-        .get("prepare_queue_full")
-        .map_or(0, |s| s.calls);
-    assert_eq!(observed_rejects, rejected as u64);
+    assert_eq!(report.preparation_rejections, rejected as u64);
     assert_eq!(peak_waiters, waiting);
     assert_eq!(waiting, limit.min(jobs - active));
     assert_eq!(rejected, jobs - active - waiting);

@@ -47,6 +47,8 @@ pub struct Report {
     pub reserved_bytes: usize,
     pub peak_reserved_bytes: usize,
     pub granted_batches: usize,
+    /// Queue-full refusals returned while the caller still had time remaining.
+    pub preparation_rejections: u64,
     pub capacity_samples: Vec<CapacitySample>,
     pub preparation_waits: Vec<PreparationWait>,
     pub encoders: usize,

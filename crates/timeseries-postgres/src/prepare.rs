@@ -182,8 +182,6 @@ impl Capacity {
                 });
             }
             if state.waiting.len() >= state.max_waiters as usize {
-                #[cfg(feature = "integration")]
-                rss_timeseries::measurement::record("prepare_queue_full", start, 0, 0);
                 return Err(Error::Overloaded);
             }
             let id = state.next;

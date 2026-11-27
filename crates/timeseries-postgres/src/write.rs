@@ -98,7 +98,15 @@ impl<C: Clock> Writer for PgStore<C> {
                 deadline,
                 Mode::Write,
                 |budget| async move {
-                    let permit = self.preparation.acquire(request.request()).await?;
+                    let admission = self.preparation.acquire(request.request()).await;
+                    if matches!(admission, Err(Error::Overloaded)) {
+                        // A synchronous refusal can win the outer timeout's last poll.
+                        budget.remaining(&self.clock)?;
+                        #[cfg(feature = "integration")]
+                        rss_timeseries::measurement::Session::current()
+                            .update(|report| report.preparation_rejections += 1);
+                    }
+                    let permit = admission?;
                     #[cfg(feature = "integration")]
                     let start = rss_timeseries::measurement::timer();
                     let prepared =
