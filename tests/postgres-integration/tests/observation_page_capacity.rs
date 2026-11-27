@@ -22,7 +22,7 @@ use rss_observation_postgres::{
 };
 use rss_projection::{
     ApplyOutcome, BatchExecution, Control, DefinitionIdentity, Event, EventWith, GenerationStart,
-    Phase, Position, ProjectionScope, ReplayBound, Source, SourceScope,
+    Phase, Position, ProjectionScope, ReplayBound, Source, SourceScope, Timer,
 };
 use rss_projection_postgres::{
     EffectIsolation, PgEffect, PgEffectOutcome, PgOperationError, PgProjection, PgStore,
@@ -417,10 +417,10 @@ async fn execute_page<R: Resolver>(
             .await?,
     )?;
     assert_eq!(page.len(), reports as usize);
-    let received = rss_observation::Clock::now(&Clock);
+    let received = clock.now();
     gate.ready.pause().await;
     let outcomes = execution.execute_batch(None, page, &control).await?;
-    let owned = rss_observation::Clock::now(&Clock).duration_since(received);
+    let owned = clock.now().saturating_sub(received);
     assert_eq!(outcomes, vec![ApplyOutcome::Filtered; reports as usize]);
     let records = records.lock().unwrap_or_else(PoisonError::into_inner);
     assert_eq!(records.len(), reports as usize);
@@ -497,14 +497,13 @@ impl<R: Resolver> PgEffect for ProbeEffect<R> {
     ) -> Result<PgEffectOutcome, PgOperationError> {
         let control = Control::new(&*self.clock, TIMEOUT, &self.stop);
         let position: Position = item.as_ref().position();
-        let started = rss_observation::Clock::now(&Clock);
+        let started = self.clock.now();
         let record = self
             .source
             .restore(tx, item, &control)
             .await
             .map_err(|e| PgOperationError::rejected(Phase::Restore, None, Some(position), e))?;
-        self.timing
-            .record(rss_observation::Clock::now(&Clock).duration_since(started));
+        self.timing.record(self.clock.now().saturating_sub(started));
         self.records
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
