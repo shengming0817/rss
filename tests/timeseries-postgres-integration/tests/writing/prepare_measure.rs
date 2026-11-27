@@ -31,7 +31,7 @@ async fn wait_for_polls(entered: &Semaphore, count: usize) -> anyhow::Result<()>
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
-fn rss_kib() -> anyhow::Result<usize> {
+pub(super) fn rss_kib() -> anyhow::Result<usize> {
     let out = std::process::Command::new("ps")
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()?;

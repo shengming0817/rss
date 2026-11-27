@@ -25,6 +25,9 @@ pub enum Error {
     InvalidInput,
     #[error("timeseries budget exceeded")]
     BudgetExceeded,
+    /// This attempt was refused before effects because the provider's admission queue was full.
+    #[error("timeseries provider overloaded")]
+    Overloaded,
     #[error("timeseries numeric overflow or precision loss")]
     NumericRange,
     #[error("timeseries identity conflict")]

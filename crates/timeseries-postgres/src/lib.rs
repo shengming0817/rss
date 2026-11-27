@@ -26,7 +26,7 @@ pub(crate) const TABLES_SQL: &str = include_str!("../migrations/tables.sql");
 pub(crate) const SAMPLES_SQL: &str = include_str!("../migrations/samples.sql");
 pub(crate) const FUNCTIONS_SQL: &str = include_str!("../migrations/functions.sql");
 pub(crate) const PARTITIONS_SQL: &str = include_str!("../migrations/partitions.sql");
-/// Positive host caps; request point/series budgets may be lower. Bytes bound encoded output,
+/// Explicit host caps; request point/series budgets may be lower. Bytes bound encoded output,
 /// not exact process memory. A finite replay minimum is persisted on every new batch.
 #[derive(Clone, Debug)]
 pub struct Limits {
@@ -34,6 +34,8 @@ pub struct Limits {
     pub max_prepare_batches: NonZeroU32,
     /// Total charged preparation bytes. Must cover at least MIN_PREPARE_BYTES.
     pub max_prepare_bytes: NonZeroU32,
+    /// Maximum queued writes across tenants. Zero allows immediate grants only.
+    pub max_prepare_waiters: u32,
     pub max_points: NonZeroU32,
     pub max_series: NonZeroU32,
     pub max_bytes: NonZeroU32,

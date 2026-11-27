@@ -33,6 +33,7 @@ fn id(s: &str) -> anyhow::Result<Id> {
 }
 fn limits() -> anyhow::Result<Limits> {
     Ok(Limits {
+        max_prepare_waiters: 256,
         max_prepare_batches: NonZeroU32::new(4).ok_or(Error::InvalidInput)?,
         max_prepare_bytes: NonZeroU32::new(Limits::MIN_PREPARE_BYTES).ok_or(Error::InvalidInput)?,
         max_points: NonZeroU32::new(100).ok_or_else(|| anyhow::anyhow!("positive"))?,
@@ -158,6 +159,13 @@ impl Fixture {
         name: &str,
         profile: rss_timeseries_postgres::StorageProfile,
     ) -> anyhow::Result<Self> {
+        Self::with_limits(name, profile, limits()?).await
+    }
+    async fn with_limits(
+        name: &str,
+        profile: rss_timeseries_postgres::StorageProfile,
+        limits: Limits,
+    ) -> anyhow::Result<Self> {
         let network = testkit::bridge_network(name).await?;
         let attachment = testkit::NetworkAttachment {
             network: network.name(),
@@ -218,7 +226,7 @@ impl Fixture {
                 None => rss_timeseries_postgres::StoreConnections::Runtime(pool.clone()),
             },
             Timer,
-            limits()?,
+            limits,
             CursorKey::new([17; 32]),
             deadline()?,
         )
