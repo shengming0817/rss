@@ -52,6 +52,7 @@ struct Store {
     clock: Clock,
     lost: bool,
     scans: AtomicUsize,
+    initial_empty_pages: usize,
     scan_delay: Option<(usize, Duration)>,
     scan_failure: Option<ErrorKind>,
     scan_failure_after: usize,
@@ -121,6 +122,12 @@ impl DurableStore for Store {
         assert!(scan_budget > 0);
         assert!((1..=1024).contains(&limit));
         let scan = self.scans.fetch_add(1, Ordering::SeqCst);
+        if scan < self.initial_empty_pages {
+            return Ok(ClaimBatch {
+                claims: Vec::new(),
+                more: scan + 1 < self.initial_empty_pages,
+            });
+        }
         if let Some(kind) = self.scan_failure
             && scan >= self.scan_failure_after
         {
@@ -321,6 +328,7 @@ async fn successful_action_requires_another_observation_and_no_notification() ->
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: None,
         scan_failure: None,
         scan_failure_after: 0,
@@ -365,6 +373,7 @@ async fn bounded_concurrency_and_lease_loss_cancel_callbacks() -> anyhow::Result
             clock: Clock::new(),
             lost: true,
             scans: AtomicUsize::new(0),
+            initial_empty_pages: 0,
             scan_delay: None,
             scan_failure: None,
             scan_failure_after: 0,
@@ -421,6 +430,7 @@ async fn newer_wake_survives_completion_and_stale_completion_is_rejected() -> an
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: None,
         scan_failure: None,
         scan_failure_after: 0,
@@ -478,6 +488,7 @@ async fn transient_retry_is_bounded_and_persisted() -> anyhow::Result<()> {
             clock: Clock::new(),
             lost: false,
             scans: AtomicUsize::new(0),
+            initial_empty_pages: 0,
             scan_delay: None,
             scan_failure: None,
             scan_failure_after: 0,
@@ -525,6 +536,7 @@ async fn idle_worker_recovers_a_durable_wake_without_notification() -> anyhow::R
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: None,
         scan_failure: None,
         scan_failure_after: 0,
@@ -575,6 +587,7 @@ async fn delayed_claim_is_renewed_before_any_business_callback() -> anyhow::Resu
         clock: Clock::new(),
         lost: true,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: Some((0, Duration::from_millis(12))),
         scan_failure: None,
         scan_failure_after: 0,
@@ -610,6 +623,7 @@ async fn scan_failures_have_operation_units_not_target_units() -> anyhow::Result
             clock: Clock::new(),
             lost: false,
             scans: AtomicUsize::new(0),
+            initial_empty_pages: 0,
             scan_delay: None,
             scan_failure: Some(kind),
             scan_failure_after: 0,
@@ -687,6 +701,7 @@ async fn slots_freed_during_scan_are_refilled_without_waiting_for_poll_interval(
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: Some((1, Duration::from_millis(30))),
         scan_failure: None,
         scan_failure_after: 0,
@@ -735,6 +750,7 @@ async fn panic_payload_escapes_run_without_settling_claim() -> anyhow::Result<()
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: None,
         scan_failure: None,
         scan_failure_after: 0,
@@ -780,6 +796,7 @@ async fn uncertain_execution_preserves_claim_and_emits_target_failure() -> anyho
             clock: Clock::new(),
             lost: false,
             scans: AtomicUsize::new(0),
+            initial_empty_pages: 0,
             scan_delay: None,
             scan_failure: None,
             scan_failure_after: 0,
@@ -826,6 +843,7 @@ async fn scheduled_retry_retains_typed_redacted_diagnostic() -> anyhow::Result<(
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: None,
         scan_failure: None,
         scan_failure_after: 0,
@@ -867,6 +885,7 @@ async fn explicit_notification_wakes_before_the_periodic_scan() -> anyhow::Resul
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: None,
         scan_failure: None,
         scan_failure_after: 0,
@@ -935,6 +954,7 @@ async fn nontransient_scan_failure_returns_without_retry_or_settlement() -> anyh
             clock: Clock::new(),
             lost: false,
             scans: AtomicUsize::new(0),
+            initial_empty_pages: 0,
             scan_delay: None,
             scan_failure: Some(kind),
             scan_failure_after: 0,
@@ -973,6 +993,7 @@ async fn idle_recovery_does_not_delay_reobservation_or_retry() -> anyhow::Result
             clock: Clock::new(),
             lost: false,
             scans: AtomicUsize::new(0),
+            initial_empty_pages: 0,
             scan_delay: None,
             scan_failure: None,
             scan_failure_after: 0,
@@ -1034,6 +1055,7 @@ fn idle_store() -> Store {
         clock: Clock::new(),
         lost: false,
         scans: AtomicUsize::new(0),
+        initial_empty_pages: 0,
         scan_delay: None,
         scan_failure: None,
         scan_failure_after: 0,
@@ -1526,6 +1548,7 @@ async fn concurrent_failures_persist_separate_bounded_retry_times() -> anyhow::R
             clock: Clock::new(),
             lost: false,
             scans: AtomicUsize::new(0),
+            initial_empty_pages: 0,
             scan_delay: None,
             scan_failure: None,
             scan_failure_after: 0,
@@ -2267,5 +2290,102 @@ async fn worker_caps_absolute_sleeps_at_the_control_deadline() -> anyhow::Result
     )
     .await?;
     assert_eq!(report.converged, 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn wake_between_pages_opens_a_new_window_before_idle() -> anyhow::Result<()> {
+    let clock = Clock::new();
+    let cancel = CancellationToken::new();
+    let stop = CancellationToken::new();
+    let control = Control::new(&clock, Duration::from_secs(2), &cancel);
+    let scope = scope()?;
+    let mut store = idle_store();
+    store.initial_empty_pages = 2;
+    let business = business(0);
+    let notify = tokio::sync::Notify::new();
+    let worker = run_with_notify(
+        &store,
+        &business,
+        &scope,
+        idle_policy(Duration::from_millis(2), Duration::from_secs(1))?,
+        &control,
+        &stop,
+        &notify,
+        |_| {},
+    );
+    tokio::pin!(worker);
+    assert!(futures::poll!(&mut worker).is_pending());
+    assert_eq!(store.scans.load(Ordering::SeqCst), 1);
+    store
+        .wake(
+            &Target::new(scope.clone(), "above-watermark")?,
+            &ResourceSet::empty(scope.tenant()),
+            &control,
+        )
+        .await?;
+    notify.notify_one();
+    for _ in 0..5 {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(futures::poll!(&mut worker).is_pending());
+    }
+    stop.cancel();
+    worker.await?;
+    assert_eq!(
+        business.observed.load(Ordering::SeqCst),
+        1,
+        "wake must open a fresh window before the 1s recovery timer (scans={})",
+        store.scans.load(Ordering::SeqCst),
+    );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn hard_deadline_before_lease_renewal_keeps_the_apply_stage() -> anyhow::Result<()> {
+    let mut renew_errors = 0;
+    let mut apply_errors = 0;
+    for _ in 0..128 {
+        let clock = Clock::new();
+        let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let control = Control::new(&clock, Duration::from_millis(20), &cancel);
+        let scope = scope()?;
+        let mut store = idle_store();
+        store.scan_delay = Some((1, Duration::from_secs(1)));
+        store
+            .wake(
+                &Target::new(scope.clone(), "active")?,
+                &ResourceSet::empty(scope.tenant()),
+                &control,
+            )
+            .await?;
+        let business = business(2);
+        run(
+            &store,
+            &business,
+            &scope,
+            idle_policy(Duration::from_millis(2), Duration::from_millis(1))?,
+            &control,
+            &stop,
+            |obs| match obs {
+                Observation::AttemptFailed {
+                    stage: Stage::Renew,
+                    error,
+                    ..
+                } if error.kind() == ErrorKind::Deadline => renew_errors += 1,
+                Observation::AttemptFailed {
+                    stage: Stage::Apply,
+                    error,
+                    ..
+                } if error.kind() == ErrorKind::Deadline => apply_errors += 1,
+                _ => {}
+            },
+        )
+        .await?;
+        assert_eq!(business.active.load(Ordering::SeqCst), 0);
+        assert_eq!(store.scans.load(Ordering::SeqCst), 2);
+    }
+    assert!(apply_errors > 0, "expected true apply deadline outcomes");
+    assert_eq!(renew_errors, 0, "renewal first becomes due at 30ms");
     Ok(())
 }

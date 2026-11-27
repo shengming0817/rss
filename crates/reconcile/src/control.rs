@@ -50,6 +50,14 @@ impl<'a, T: Timer> Control<'a, T> {
     pub(crate) async fn sleep_until(&self, deadline: Duration) {
         self.timer.sleep_until(deadline.min(self.deadline)).await;
     }
+    /// A scheduled action cannot become due at or beyond the hard deadline.
+    /// Its caller races this wait against the operation that owns interruption.
+    pub(crate) async fn wait_for_due(&self, at: Duration) {
+        if at >= self.deadline {
+            return std::future::pending().await;
+        }
+        self.timer.sleep_until(at).await;
+    }
     /// Sleep on the explicitly injected monotonic clock.
     pub async fn sleep(&self, duration: Duration) {
         self.sleep_until(self.timer.now().saturating_add(duration))
