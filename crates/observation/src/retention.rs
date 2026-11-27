@@ -50,12 +50,12 @@ impl MaintenanceGrant {
 #[derive(Debug, Clone, Copy)]
 pub struct ScanWindow {
     after: Option<u64>,
-    limit: u8,
+    limit: u16,
 }
 impl ScanWindow {
     /// Start at None; resume after the last examined sequence.
-    pub fn new(after: Option<u64>, limit: u8) -> Result<Self, Error> {
-        if !(1..=64).contains(&limit) {
+    pub fn new(after: Option<u64>, limit: u16) -> Result<Self, Error> {
+        if !(1..=1024).contains(&limit) {
             return Err(ErrorKind::InvalidInput.into());
         }
         Ok(Self { after, limit })
@@ -65,7 +65,7 @@ impl ScanWindow {
         self.after
     }
     /// Maximum number of candidate identities to examine.
-    pub const fn limit(self) -> u8 {
+    pub const fn limit(self) -> u16 {
         self.limit
     }
 }

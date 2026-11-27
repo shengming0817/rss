@@ -17,8 +17,9 @@ pub fn source<C: Clock>(
     store: std::sync::Arc<PgStore<C>>,
     grant: rss_observation::JournalReadGrant,
     scope: rss_projection::SourceScope,
+    page_bytes: u32,
 ) -> Result<rss_observation_postgres::PgSource<C>, Error> {
-    rss_observation_postgres::PgSource::new(store, grant, scope)
+    rss_observation_postgres::PgSource::new(store, grant, scope, page_bytes)
 }
 pub async fn reclaim<C: Clock>(
     maintenance: &rss_observation_postgres::PgMaintenance<C>,

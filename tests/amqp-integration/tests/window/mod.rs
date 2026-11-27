@@ -1,4 +1,5 @@
 use super::*;
+use rss_transactional_messaging::policy::RemoteClaimWaitPolicy;
 use std::num::NonZeroU16;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -109,6 +110,7 @@ async fn drain_window(rabbit: &testkit::RabbitFixture, window: NonZeroU16) -> an
         ConsumerExecutionPolicy::new(
             RetryPolicy::STANDARD,
             ExecutionBudget::new(TIMEOUT, Duration::from_secs(3))?,
+            RemoteClaimWaitPolicy::STANDARD,
         ),
         Arc::new(NoopEmitter),
         SubscriptionBackoffPolicy::STANDARD,
@@ -222,6 +224,7 @@ async fn busy_redelivery(rabbit: &testkit::RabbitFixture) -> anyhow::Result<()> 
         ConsumerExecutionPolicy::new(
             RetryPolicy::STANDARD,
             ExecutionBudget::new(Duration::from_secs(2), Duration::from_secs(1))?,
+            RemoteClaimWaitPolicy::STANDARD,
         ),
         &NoopEmitter,
     );

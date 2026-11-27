@@ -4,6 +4,7 @@ mod fixture;
 #[path = "../../../../crates/examples/src/observation/install.rs"]
 mod installer;
 mod journal;
+mod page_plan;
 mod process;
 mod retention;
 mod retention_scale;

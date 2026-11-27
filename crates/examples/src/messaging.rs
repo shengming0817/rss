@@ -117,7 +117,9 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
     {
         use rss_runtime::{ShutdownStack, TotalDrainBudget};
         use rss_transactional_messaging::policy::ShutdownBudget;
-        use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWorker};
+        use rss_transactional_messaging_runtime::relay::{
+            RelayConfig, RelayWaitPolicy, RelayWorker,
+        };
         use std::sync::Arc;
         let store = Arc::new(MemoryOutboxStore::new());
         store
@@ -135,8 +137,11 @@ async fn producer(clock: &FakeClock) -> anyhow::Result<()> {
             RelayConfig::new(
                 NonZeroUsize::MIN,
                 NonZeroUsize::MIN,
-                Duration::from_millis(100),
-                Duration::from_millis(200),
+                RelayWaitPolicy {
+                    idle_scan_interval: Duration::from_millis(100),
+                    error_backoff: Duration::from_millis(200),
+                    ..RelayWaitPolicy::STANDARD
+                },
             )?,
         );
         let (registration, _) = worker.into_registration(
@@ -205,7 +210,10 @@ async fn uncertain_consumer(
         inbox::{ConsumerGroup, ConsumerIdentity},
         message::{MessageEnvelope, SubscriptionIdentity},
         observability::{TransactionalMessagingEmitter, TransactionalMessagingObservation},
-        policy::{ConsumerExecutionPolicy, ExecutionBudget, OperationDeadline, RetryPolicy},
+        policy::{
+            ConsumerExecutionPolicy, ExecutionBudget, OperationDeadline, RemoteClaimWaitPolicy,
+            RetryPolicy,
+        },
         transaction::{
             ConsumerTx, EnvelopeValidationFailure, IngressChallenge, IngressValidator,
             ReceiptIntent, TransactionOutcome, VerifiedIngress,
@@ -266,7 +274,11 @@ async fn uncertain_consumer(
         &validator,
         &subscription,
         clock,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        ConsumerExecutionPolicy::new(
+            RetryPolicy::STANDARD,
+            ExecutionBudget::STANDARD,
+            RemoteClaimWaitPolicy::STANDARD,
+        ),
         &Observations,
     );
     let settlement = RecordingSettlement::new();

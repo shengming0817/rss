@@ -14,9 +14,7 @@ const RECHECK: &str = "SELECT raw IS NULL AS expired, scope,batch_id,fingerprint
  ELSE raw END AS raw FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
 
 /// Same-database source mode. The byte bound applies to canonical reports in one atomic page.
-pub struct LocalPages {
-    bytes: u32,
-}
+pub struct LocalPages;
 
 /// Observation evidence held by a page item. The adapter alone constructs this value;
 /// use the borrowed transaction resolver to access the underlying record.
@@ -26,19 +24,16 @@ pub struct VerifiedObservation {
 }
 
 impl<C: Clock> PgSource<C> {
-    /// Select typed same-database handoff. Allow at least one maximum-size (4 MiB) report.
-    /// `page_bytes` limits canonical report body bytes. Each read also applies the caller's
-    /// [`PageBudget`] to row count and encoded reference payload bytes in the same ordered prefix.
-    pub fn into_local(self, page_bytes: u32) -> Result<PgSource<C, LocalPages>, Error> {
-        if page_bytes < rss_observation::Batch::MAX_ENCODED_BYTES {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-        Ok(PgSource {
+    /// Select typed same-database handoff using this source's canonical report byte budget.
+    /// Each read also applies [`PageBudget`] to row count and encoded reference payload bytes.
+    pub fn into_local(self) -> PgSource<C, LocalPages> {
+        PgSource {
             store: self.store,
             scope: self.scope,
             grant: self.grant,
-            page_mode: LocalPages { bytes: page_bytes },
-        })
+            page_bytes: self.page_bytes,
+            mode: std::marker::PhantomData,
+        }
     }
 }
 
@@ -64,7 +59,6 @@ impl<C: Clock> Source for PgSource<C, LocalPages> {
             after,
             limit,
             control,
-            Some(i64::from(self.page_mode.bytes)),
             |event, record, fingerprint| {
                 event.with_data(VerifiedObservation {
                     fingerprint,

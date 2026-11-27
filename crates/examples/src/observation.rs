@@ -73,8 +73,9 @@ pub async fn run(input: crate::pg::Input) -> anyhow::Result<()> {
             store.clone(),
             JournalReadGrant::verify(&DemoAuthority, tenant)?,
             rss_projection::SourceScope::new(tenant, "rss.observation.v1")?,
+            32 * 1024 * 1024,
         )?
-        .into_local(32 * 1024 * 1024)?,
+        .into_local(),
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(

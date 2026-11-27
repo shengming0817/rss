@@ -26,6 +26,18 @@ impl AdvancingTimer {
         self.wake.send_replace(advanced);
     }
 
+    /// Earliest recorded timer strictly after the current virtual time.
+    pub fn next_sleep(&self) -> Option<Duration> {
+        let now = self.now();
+        self.sleeps
+            .lock()
+            .expect("sleeps")
+            .iter()
+            .filter(|at| **at > now)
+            .min()
+            .map(|at| at.saturating_duration_since(now))
+    }
+
     pub fn registered(&self, deadline: Duration) -> bool {
         self.sleeps
             .lock()

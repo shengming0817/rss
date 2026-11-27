@@ -1,6 +1,7 @@
 //! Real PG outbox → AMQP → PG effect/receipt → ACK, with caller-owned resource shutdown.
 use rss_contract::{ContractId, ContractVersion, SchemaDigest, Timepoint};
 use rss_request_context::{Clock, Deadline, ExecutionTimer, TenantId};
+use rss_transactional_messaging::policy::RemoteClaimWaitPolicy;
 use rss_transactional_messaging::{
     fence::{Epoch, ExecutionBinding, StorageIdentity},
     inbox::ConsumerGroup,
@@ -433,7 +434,11 @@ async fn transfer(
         &validator,
         &subscription,
         timer,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        ConsumerExecutionPolicy::new(
+            RetryPolicy::STANDARD,
+            ExecutionBudget::STANDARD,
+            RemoteClaimWaitPolicy::STANDARD,
+        ),
         &Observations,
     );
     assert_eq!(

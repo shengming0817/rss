@@ -7,14 +7,20 @@ The producer side owns `relay_once(binding, ...)`, which claims one bounded batc
 and returns the first error in claim order. Each publication starts with one fenced lease
 extension that returns both remaining windows. The long-running worker refills free slots
 as individual claims finish settlement, polling active work even while a claim request is pending.
-`RelayConfig::new(claim_limit, max_in_flight, idle_scan_interval, error_backoff)` controls each
-request size, total admitted work, empty-scan interval and recoverable-error delay. Both delays
-must be at least 100ms. A completion can wake an idle scan.
-Each worker can scan eight consecutive empty `Continue` pages before waiting 100ms.
-An empty `RetryLater` waits 100ms immediately. An empty `Complete` uses the configured
-idle interval. Local settlement wakes an idle wait. `relay_once` exposes the same action
-in `RelayReport::scan_progress()` for caller-driven scheduling. A recoverable infrastructure failure
-holds further requests until the error delay elapses. A durably settled Retry follows the store's
+`RelayConfig::new(claim_limit, max_in_flight, wait_policy)` bounds each request and the
+total admitted work. Pass `RelayWaitPolicy::STANDARD` or override its named fields:
+
+| Field | When it applies | Standard |
+| --- | --- | --- |
+| `empty_pages_per_slice` | Consecutive empty `Continue` pages before a timed yield | 8 pages |
+| `continuation_delay` | A full slice of empty `Continue` pages | 100 ms |
+| `contention_delay` | An empty `RetryLater` | 100 ms |
+| `idle_scan_interval` | An empty `Complete` | 100 ms |
+| `error_backoff` | A recoverable infrastructure error | 100 ms |
+
+All delays must be positive and representable on the host clock. Local settlement can wake
+an idle scan early. Each query yields to the executor. `relay_once` exposes the scan action
+in `RelayReport::scan_progress()` for caller-driven scheduling. A durably settled Retry follows the store's
 per-record eligibility delay so other due partitions can progress. Cancellation or a fatal error stops new
 requests. An outstanding claim request runs to its original deadline. The worker drains every
 handle it receives. If the database committed the claim but the reply timed out, the store's
@@ -39,8 +45,8 @@ handler execution and retry backoff. Explicit lease loss cancels the in-flight t
 abandons the provider session without settlement. Renewal errors, rollback failure, commit unknown,
 and fencing never ACK. Every renewal is checked against the provider-reported remaining lease, so
 an unsafe provider report hard-fences execution. The inbox supplies `lease_policy()` for both its
-durable TTL and the runtime renewal schedule; `ConsumerExecutionPolicy` only controls execution
-and retry budgets. A matching durable terminal receipt bypasses
+durable TTL and the runtime renewal schedule. The host supplies handler retry, the execution
+budget and remote claim waits to `ConsumerExecutionPolicy::new(retry, budget, remote_claim_wait)`. A matching durable terminal receipt bypasses
 the handler.
 Claim, lease, transaction, release, settlement and abandon futures share one pair of operation and
 settlement cutoffs minted from one clock observation. A transaction timeout maps to commit outcome
@@ -62,11 +68,27 @@ A rejected terminal head retires that subscription before starting queued succes
 Each new subscription starts with empty partition queues.
 Queued and busy deliveries count toward the same window and keep their original deadlines.
 A delivery waiting for ordinary capacity holds its unsettled handle and wakes when its permit transfers.
-For a live remote claim, the first probe waits 2.5–5 ms. Subsequent randomized intervals double up
-to 1–2 s. A short provider lease estimate can advance the probe by one tier. Each wait ends at the
-original operation cutoff. The final probe also uses per-delivery jitter. It runs at most once, leaving at least
-one quarter of the original operation budget (capped at 250 ms) scheduled for I/O. A lease estimate
-inside the remaining probe window sets its earliest eligible wake. A known busy timeout requeues once. A durable claim error abandons the delivery.
+For a live remote claim, `RemoteClaimWaitPolicy::STANDARD` selects a 2.5 ms initial base,
+a 1 s maximum base and a 250 ms final window cap. Pass those three durations to
+`RemoteClaimWaitPolicy::new` to tune them. Each must be positive and fit in 64-bit nanoseconds,
+and the initial base must fit under or equal the maximum base. Ordinary probe delays include
+per-delivery jitter from the current base up to twice that base (exclusive). A short provider
+lease estimate can advance the probe by one tier, even when the lease keeps renewing.
+
+The final probe runs at most once. Its I/O reserve is one quarter of the original operation
+budget, bounded by the final window cap. Its early jitter uses one quarter of the remaining
+probe window with that same cap. A reachable lease estimate sets the earliest final wake.
+An ordinary retry that actually starts at or after the planned final wake counts as the
+single final probe. Every retry uses the same latest admission time, allowing up to half
+the planned I/O reserve for timer rounding, dispatch and permit transfer. For
+example, a 250 ms reserve still leaves at least 125 ms for I/O at the latest admitted start.
+The planned wake leaves room for Tokio to round up by one millisecond. If a lease
+estimate falls beyond that safe wake, the final check can still observe an early release.
+If less than one timer tick fits, the consumer yields once and uses the remaining budget
+for that single check. Later wakes skip the probe, and all provider calls retain the original operation cutoff.
+A known busy timeout requeues once.
+A durable claim error abandons the delivery. `ExecutionBudget` reserves a separate interval
+for broker settlement and cleanup.
 The runtime reports cumulative capacity wait once per blocked delivery. Graceful cancellation seals admission before draining.
 The same loop
 runs on an application's Tokio host or through the optional RSS lifecycle bridge.

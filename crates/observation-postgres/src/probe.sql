@@ -40,4 +40,4 @@ SELECT session_user=current_user
  AND (SELECT count(*)=5 FROM pg_constraint WHERE conrelid IN (SELECT oid FROM relations) AND contype='p')
  AND (SELECT count(*)=2 FROM pg_constraint WHERE conrelid IN (SELECT oid FROM relations) AND contype='f')
  AND (SELECT count(*)=2 FROM pg_constraint WHERE conrelid IN (SELECT oid FROM relations) AND contype='u')
- AND (SELECT obj_description(oid,'pg_namespace')='rss-observation-postgres:4' FROM pg_namespace WHERE nspname='rss_observation')
+ AND (SELECT obj_description(oid,'pg_namespace')='rss-observation-postgres:5' FROM pg_namespace WHERE nspname='rss_observation')

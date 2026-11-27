@@ -1,4 +1,5 @@
 use super::*;
+use rss_transactional_messaging::policy::RemoteClaimWaitPolicy;
 
 use rss_transactional_messaging_runtime::consumer::{
     ConsumerExecution, ProcessingDisposition, consume_once,
@@ -51,7 +52,11 @@ pub(super) async fn cancel_waiter(
         &Validator,
         &sub,
         &clock,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        ConsumerExecutionPolicy::new(
+            RetryPolicy::STANDARD,
+            ExecutionBudget::STANDARD,
+            RemoteClaimWaitPolicy::STANDARD,
+        ),
         &busy,
     );
     let tx = PgConsumerTx::receipt_only(runtime.clone(), Effect(TerminalDisposition::Succeeded));
@@ -220,18 +225,17 @@ impl Peer {
     async fn on_probe(
         &self,
         action: OwnerAction,
-        probes: usize,
         claim: &mut Option<PgInboxClaim>,
         msg: &MessageEnvelope<Vec<u8>>,
         binding: &VerifiedConsumerBinding,
     ) -> anyhow::Result<()> {
         match action {
-            OwnerAction::Release if probes == 10 => {
+            OwnerAction::Release => {
                 self.inbox
                     .release(claim.take().expect("single release"), deadline())
                     .await?
             }
-            OwnerAction::Commit if probes == 12 => {
+            OwnerAction::Commit => {
                 let committed = self
                     .tx
                     .execute(
@@ -243,7 +247,7 @@ impl Peer {
                     .await;
                 assert_eq!(committed.status(), rss_transactional_messaging::observability::TransactionalMessagingTransactionStatus::Committed);
             }
-            _ => {}
+            OwnerAction::Hold => {}
         }
         Ok(())
     }
@@ -265,14 +269,27 @@ async fn remote_delivery(
     let clock = FakeClock::new();
     let origin = clock.now();
     let emitter = RemoteBusy(Notify::new());
+    let policy = ConsumerExecutionPolicy::new(
+        RetryPolicy::STANDARD,
+        ExecutionBudget::STANDARD,
+        RemoteClaimWaitPolicy::STANDARD,
+    );
     let execution = ConsumerExecution::new(
         ConsumerGroup::parse("suite")?,
         &Validator,
         &sub,
         &clock,
-        ConsumerExecutionPolicy::new(RetryPolicy::STANDARD, ExecutionBudget::STANDARD),
+        policy,
         &emitter,
     );
+    let operation = policy.budget().total() - policy.budget().settlement_reserve();
+    let schedule = probe_schedule(policy.remote_claim_wait(), operation);
+    // Release midway or commit just before the last probe observes the durable result.
+    let change_at = match action {
+        OwnerAction::Hold => None,
+        OwnerAction::Release => Some(schedule.len() / 2),
+        OwnerAction::Commit => Some(schedule.len() - 1),
+    };
     let recorder = RecordingSettlement::new();
     let processing = consume_once(
         &waiting.inbox,
@@ -288,60 +305,49 @@ async fn remote_delivery(
             () = emitter.0.notified() => {}
         }
         probes += 1;
-        assert!(probes <= 16);
-        holder
-            .on_probe(action, probes, &mut claim, &msg, &binding)
-            .await?;
-        // Step to the upper edge of each jitter window. The last SQL always has
-        // 250 ms of provider budget; the final busy sleep consumes only logical time.
-        advance_probe(&clock, origin, probes)?;
+        assert!(probes <= schedule.len());
+        if change_at == Some(probes) {
+            holder.on_probe(action, &mut claim, &msg, &binding).await?;
+        }
+        let next = schedule.get(probes).copied().unwrap_or(operation);
+        clock.advance(next - clock.now().saturating_duration_since(origin))?;
     };
     let claims = claim_count(owner).await? - before;
-    check_result(action, claims, count(owner, id).await, outcome, &recorder);
+    assert_eq!(
+        claims as usize,
+        change_at.map_or(schedule.len(), |busy| busy + 1)
+    );
+    check_result(action, count(owner, id).await, outcome, &recorder);
     Ok(())
 }
 
-fn advance_probe(
-    clock: &FakeClock,
-    origin: std::time::Instant,
-    probes: usize,
-) -> anyhow::Result<()> {
-    let elapsed = clock.now().saturating_duration_since(origin);
-    let last_probe = Duration::from_millis(7750);
-    let next = if elapsed < last_probe {
-        let upper =
-            (Duration::from_millis(5) * (1 << (probes - 1).min(9))).min(Duration::from_secs(2));
-        (elapsed + upper).min(last_probe)
-    } else {
-        Duration::from_secs(8)
-    };
-    clock.advance(next - elapsed)?;
-    Ok(())
+// Step to the upper edge of each jitter interval so SQL counts are deterministic.
+fn probe_schedule(policy: RemoteClaimWaitPolicy, operation: Duration) -> Vec<Duration> {
+    let latest = operation - policy.final_window(operation);
+    let mut schedule = vec![Duration::ZERO];
+    let mut at = Duration::ZERO;
+    let mut base = policy.initial_base();
+    while at < latest {
+        at = (at + base * 2).min(latest);
+        schedule.push(at);
+        base = (base * 2).min(policy.max_base());
+    }
+    schedule
 }
 
 fn check_result(
     action: OwnerAction,
-    claims: i64,
     effects: i64,
     outcome: ProcessingDisposition,
     recorder: &RecordingSettlement,
 ) {
     let expected = match action {
         OwnerAction::Hold => {
-            assert_eq!(claims, 13);
             assert_eq!(effects, 0);
             assert_eq!(recorder.settlements(), [SettlementKind::Requeue]);
             ProcessingDisposition::InProgress
         }
         OwnerAction::Release | OwnerAction::Commit => {
-            assert_eq!(
-                claims,
-                if matches!(action, OwnerAction::Release) {
-                    11
-                } else {
-                    13
-                }
-            );
             assert_eq!(effects, 1);
             assert_eq!(recorder.settlements(), [SettlementKind::Acknowledge]);
             if matches!(action, OwnerAction::Release) {

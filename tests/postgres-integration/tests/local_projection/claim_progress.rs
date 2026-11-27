@@ -6,7 +6,7 @@ use rss_transactional_messaging::observability::{
     TransactionalMessagingRelayPhase,
 };
 use rss_transactional_messaging::outbox::{OutboxRelayStore, OutboxScanProgress};
-use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWorker};
+use rss_transactional_messaging_runtime::relay::{RelayConfig, RelayWaitPolicy, RelayWorker};
 use rss_transactional_messaging_testkit::memory::FakeClock;
 use std::collections::HashSet;
 
@@ -39,8 +39,11 @@ async fn idle_worker(store: Arc<PgOutboxStore<()>>) -> anyhow::Result<()> {
         RelayConfig::new(
             32usize.try_into()?,
             32usize.try_into()?,
-            Duration::from_secs(30),
-            Duration::from_secs(1),
+            RelayWaitPolicy {
+                idle_scan_interval: Duration::from_secs(30),
+                error_backoff: Duration::from_secs(1),
+                ..RelayWaitPolicy::STANDARD
+            },
         )?,
     );
     let stop = tokio_util::sync::CancellationToken::new();

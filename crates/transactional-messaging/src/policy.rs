@@ -483,20 +483,111 @@ impl LeaseRenewalPolicy {
     }
 }
 
+/// Invalid remote claim scheduling parameters.
+#[cfg(feature = "consumer")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum RemoteClaimWaitPolicyError {
+    /// A zero base or final window does not protect forward progress.
+    #[error("remote claim wait durations must be positive")]
+    ZeroDuration,
+    /// The initial exponential tier cannot exceed the saturation tier.
+    #[error("remote claim initial base exceeds its cap")]
+    BaseExceedsCap,
+    /// Nanosecond jitter must fit the per-delivery 64-bit random sample.
+    #[error("remote claim wait caps must fit in u64 nanoseconds")]
+    JitterRange,
+}
+
+/// Host-selected timing for probing an inbox claim held by a remote owner.
+#[cfg(feature = "consumer")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemoteClaimWaitPolicy {
+    initial_base: Duration,
+    max_base: Duration,
+    final_window_cap: Duration,
+}
+
+#[cfg(feature = "consumer")]
+impl RemoteClaimWaitPolicy {
+    /// Start at 2.5 ms, cap the base at 1 s and each final scheduling window at 250 ms.
+    pub const STANDARD: Self = Self {
+        initial_base: Duration::from_micros(2500),
+        max_base: Duration::from_secs(1),
+        final_window_cap: Duration::from_millis(250),
+    };
+
+    /// Require positive durations, an ordered base range and representable nanosecond jitter.
+    pub fn new(
+        initial_base: Duration,
+        max_base: Duration,
+        final_window_cap: Duration,
+    ) -> Result<Self, RemoteClaimWaitPolicyError> {
+        if initial_base.is_zero() || max_base.is_zero() || final_window_cap.is_zero() {
+            return Err(RemoteClaimWaitPolicyError::ZeroDuration);
+        }
+        if initial_base > max_base {
+            return Err(RemoteClaimWaitPolicyError::BaseExceedsCap);
+        }
+        if max_base.max(final_window_cap).as_nanos() > u128::from(u64::MAX) {
+            return Err(RemoteClaimWaitPolicyError::JitterRange);
+        }
+        Ok(Self {
+            initial_base,
+            max_base,
+            final_window_cap,
+        })
+    }
+
+    /// Lower edge of the first ordinary randomized wait.
+    #[must_use]
+    pub const fn initial_base(self) -> Duration {
+        self.initial_base
+    }
+
+    /// Saturation tier before per-delivery jitter is added.
+    #[must_use]
+    pub const fn max_base(self) -> Duration {
+        self.max_base
+    }
+
+    /// Reserve a quarter of the given span, limited by the host's final window cap.
+    /// Apply to the original operation budget for I/O and to the remaining probe window
+    /// for early jitter. Broker settlement has its own protected budget.
+    #[must_use]
+    pub fn final_window(self, span: Duration) -> Duration {
+        (span / 4).min(self.final_window_cap)
+    }
+}
+
 /// Consumer execution budget and bounded retry. Renewal policy belongs to the inbox provider.
 #[cfg(feature = "consumer")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConsumerExecutionPolicy {
     retry: RetryPolicy,
     budget: ExecutionBudget,
+    remote_claim_wait: RemoteClaimWaitPolicy,
 }
 
 #[cfg(feature = "consumer")]
 impl ConsumerExecutionPolicy {
     #[must_use]
     /// Combine validated retry and execution limits without changing the provider's lease policy.
-    pub const fn new(retry: RetryPolicy, budget: ExecutionBudget) -> Self {
-        Self { retry, budget }
+    pub const fn new(
+        retry: RetryPolicy,
+        budget: ExecutionBudget,
+        remote_claim_wait: RemoteClaimWaitPolicy,
+    ) -> Self {
+        Self {
+            retry,
+            budget,
+            remote_claim_wait,
+        }
+    }
+
+    /// Remote claim recheck schedule shared by single-delivery and worker execution.
+    #[must_use]
+    pub const fn remote_claim_wait(self) -> RemoteClaimWaitPolicy {
+        self.remote_claim_wait
     }
 
     #[must_use]

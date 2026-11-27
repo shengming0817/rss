@@ -18,27 +18,9 @@ use serde::Serialize;
 use sqlx::{Row, postgres::PgRow};
 use std::sync::Arc;
 const LOOKUP: &str = "SELECT raw IS NULL AS expired,scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position FROM rss_observation.batches WHERE tenant_id=$1::uuid AND log_position=$2 AND applicable";
-// One MVCC snapshot also returns the floor on an empty or expired page.
-const READ: &str = "SELECT j.expired_through,b.* FROM rss_observation.journals j
- LEFT JOIN LATERAL (
-   SELECT scope,batch_id,raw,fingerprint,received_at,policy,decision,sequence::text AS sequence,applicable,log_position
-   FROM rss_observation.batches WHERE tenant_id=j.tenant_id AND applicable AND log_position>$2
-     AND $2>=j.expired_through ORDER BY log_position LIMIT $3
- ) b ON true WHERE j.tenant_id=$1::uuid ORDER BY b.log_position";
-
 // Window only over the bounded index candidates and their byte lengths. Select bodies
 // for the admitted prefix in the same snapshot as the floor.
-const READ_LOCAL: &str =
-    "SELECT j.expired_through, b.scope,b.batch_id,b.raw,b.fingerprint,b.received_at,
- b.policy,b.decision,b.sequence::text AS sequence,b.applicable,b.log_position
- FROM rss_observation.journals j LEFT JOIN LATERAL (
-   SELECT log_position,sum(n) OVER (ORDER BY log_position ROWS UNBOUNDED PRECEDING) AS bytes
-   FROM (SELECT log_position,coalesce(octet_length(raw),0) AS n FROM rss_observation.batches
-     WHERE tenant_id=j.tenant_id AND applicable AND log_position>$2 AND $2>=j.expired_through
-     ORDER BY log_position LIMIT $3) candidates
- ) p ON p.bytes<=$4::bigint LEFT JOIN rss_observation.batches b
- ON b.tenant_id=j.tenant_id AND b.applicable AND b.log_position=p.log_position
- WHERE j.tenant_id=$1::uuid ORDER BY b.log_position";
+const READ: &str = include_str!("projection/page.sql");
 /// Tenant journal coordinates from one committed snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalBounds {
@@ -50,11 +32,8 @@ pub struct JournalBounds {
 /// Tenant-authorized immutable source. The adopted Observation store owns the pool lifecycle.
 /// Reauthorize a new grant for each host operation; cancel/join workers before revocation.
 pub struct PgSource<C, M = ()> {
-    #[cfg_attr(
-        not(feature = "projection-postgres"),
-        allow(dead_code, reason = "reference-only builds use a zero-sized page mode")
-    )]
-    page_mode: M,
+    mode: std::marker::PhantomData<M>,
+    page_bytes: u32,
     store: Arc<PgStore<C>>,
     scope: SourceScope,
     grant: JournalReadGrant,
@@ -63,16 +42,23 @@ impl<C: Clock> PgSource<C> {
     /// Bind the admitted journal to explicit tenant authority and caller-declared source lineage.
     /// Reuse this source on restart; use a new source after rebuilding the input journal.
     /// This declaration does not authenticate the caller or prove the database's provenance.
+    /// `page_bytes` limits canonical report bytes and must fit one maximum legal report.
+    /// The caller also supplies a [`PageBudget`] for rows and encoded reference bytes on each read.
     pub fn new(
         store: Arc<PgStore<C>>,
         grant: JournalReadGrant,
         scope: SourceScope,
+        page_bytes: u32,
     ) -> Result<Self, Error> {
         if scope.tenant() != grant.tenant() {
             return Err(ErrorKind::Unauthorized.into());
         }
+        if page_bytes < rss_observation::Batch::MAX_ENCODED_BYTES {
+            return Err(ErrorKind::InvalidInput.into());
+        }
         Ok(Self {
-            page_mode: (),
+            mode: std::marker::PhantomData,
+            page_bytes,
             store,
             scope,
             grant,
@@ -178,6 +164,10 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
                     .fetch_optional(connection)
                     .await
                     .map_err(sql_error)?;
+                #[cfg(feature = "integration")]
+                if let Some(row) = &row {
+                    crate::read_profile::row(row);
+                }
                 resolve_row(row, &event)
             })
         })
@@ -201,7 +191,7 @@ impl<C: Clock> Source for PgSource<C> {
         limit: PageBudget,
         control: &Control<'_, T>,
     ) -> Result<ReadPage<Event>, rss_projection::Error> {
-        self.read_page(scope, after, limit, control, None, |event, _, _| event)
+        self.read_page(scope, after, limit, control, |event, _, _| event)
             .await
     }
 }
@@ -212,24 +202,20 @@ impl<C: Clock, M: Send + Sync> PgSource<C, M> {
         after: Option<Position>,
         limit: PageBudget,
         control: &Control<'_, T>,
-        bytes: Option<i64>,
         item: fn(Event, ApplicableRecord, [u8; 32]) -> I,
     ) -> Result<ReadPage<I>, rss_projection::Error> {
         self.check(scope).map_err(source_error)?;
         let tenant = self.grant.tenant();
         let scope = self.scope.clone();
+        let bytes = i64::from(self.page_bytes);
         let operation = self.transact(control, move |connection, budget| {
             Box::pin(async move {
-                let query = sqlx::query(if bytes.is_some() { READ_LOCAL } else { READ })
+                let mut rows = sqlx::query(READ)
                     .bind(tenant.to_string())
                     .bind(after.map_or(0, |p| p.get() as i64))
-                    .bind(i64::from(limit.rows()));
-                let query = if let Some(bytes) = bytes {
-                    query.bind(bytes)
-                } else {
-                    query
-                };
-                let mut rows = query.fetch(connection);
+                    .bind(i64::from(limit.rows()))
+                    .bind(bytes)
+                    .fetch(connection);
                 let mut events = Vec::new();
                 let mut remaining = limit.payload_bytes() as usize;
                 while let Some(row) = rows.try_next().await.map_err(sql_error)? {

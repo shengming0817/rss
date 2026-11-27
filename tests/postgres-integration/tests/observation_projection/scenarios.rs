@@ -112,10 +112,10 @@ pub async fn composition(f: &Fixture) -> anyhow::Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
     let control = Control::new(&clock, Duration::from_secs(60), &cancel);
     let scope = input.source.scope();
-    let reference = rss_observation_postgres::PgSource::new(
+    let reference = f.reference_source(
         input.store.clone(),
-        rss_observation::JournalReadGrant::verify(&Trusted, scope.tenant())?,
-        scope.clone(),
+        TENANT,
+        rss_observation::Batch::MAX_ENCODED_BYTES,
     )?;
     reference_budget(&reference, scope, &control).await?;
     reference_budget(input.source.as_ref(), scope, &control).await?;
@@ -769,16 +769,25 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
         &budget_cancel,
     );
     let tenant = rss_request_context::TenantId::parse(TENANT)?;
-    let grant = rss_observation::JournalReadGrant::verify(&Trusted, tenant)?;
-    let wrong =
-        rss_projection::SourceScope::new(rss_request_context::TenantId::parse(OTHER)?, "rebuilt")?;
-    assert!(
-        matches!(rss_observation_postgres::PgSource::new(input.store.clone(), grant, wrong), Err(e) if e.kind() == rss_observation::ErrorKind::Unauthorized)
-    );
+    let max = rss_observation::Batch::MAX_ENCODED_BYTES;
+    for (scope_tenant, budget, expected) in [
+        (OTHER, max, rss_observation::ErrorKind::Unauthorized),
+        (TENANT, max - 1, rss_observation::ErrorKind::InvalidInput),
+    ] {
+        let scope = rss_projection::SourceScope::new(
+            rss_request_context::TenantId::parse(scope_tenant)?,
+            "rebuilt",
+        )?;
+        let grant = rss_observation::JournalReadGrant::verify(&Trusted, tenant)?;
+        let result =
+            rss_observation_postgres::PgSource::new(input.store.clone(), grant, scope, budget);
+        assert_eq!(result.err().map(|e| e.kind()), Some(expected));
+    }
     let rebuilt = rss_observation_postgres::PgSource::new(
         input.store.clone(),
         rss_observation::JournalReadGrant::verify(&Trusted, tenant)?,
         rss_projection::SourceScope::new(tenant, "rebuilt")?,
+        32 * 1024 * 1024,
     )?;
     let original = expected_events(
         input
@@ -798,7 +807,7 @@ async fn rebuilt_source(input: &Inputs) -> anyhow::Result<ObsSource> {
     assert!(
         matches!(rebuilt.resolve(original[0].as_ref(), &control).await, Err(e) if e.kind() == rss_projection::ErrorKind::ScopeMismatch)
     );
-    Ok(rebuilt.into_local(32 * 1024 * 1024)?)
+    Ok(rebuilt.into_local())
 }
 
 async fn rebuilt_checkpoint(
@@ -862,10 +871,10 @@ pub async fn restore_diagnostics(f: &Fixture) -> anyhow::Result<()> {
     .execute(&f.admin)
     .await?;
     assert_eq!(changed.rows_affected(), 1);
-    let reference = rss_observation_postgres::PgSource::new(
+    let reference = f.reference_source(
         input.store.clone(),
-        rss_observation::JournalReadGrant::verify(&Trusted, input.source.scope().tenant())?,
-        input.source.scope().clone(),
+        TENANT,
+        rss_observation::Batch::MAX_ENCODED_BYTES,
     )?;
     assert_prefix_before_corrupt_body(
         &reference,
