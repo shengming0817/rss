@@ -2240,3 +2240,32 @@ async fn paced_worker_drives_renewal_and_hard_cancellation() -> anyhow::Result<(
     }
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn worker_caps_absolute_sleeps_at_the_control_deadline() -> anyhow::Result<()> {
+    struct BoundedClock(Clock, Duration);
+    impl Timer for BoundedClock {
+        fn now(&self) -> Duration {
+            self.0.now()
+        }
+        async fn sleep_until(&self, at: Duration) {
+            assert!(at <= self.1);
+            self.0.sleep_until(at).await;
+        }
+    }
+    let clock = BoundedClock(Clock::new(), Duration::from_millis(20));
+    let cancel = CancellationToken::new();
+    let control = Control::new(&clock, clock.1, &cancel);
+    let report = run(
+        &idle_store(),
+        &business(0),
+        &scope()?,
+        idle_policy(Duration::from_millis(2), Duration::from_secs(u64::MAX))?,
+        &control,
+        &CancellationToken::new(),
+        |_| {},
+    )
+    .await?;
+    assert_eq!(report.converged, 0);
+    Ok(())
+}
