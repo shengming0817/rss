@@ -3,7 +3,7 @@ use crate::{
     Claim, ClaimBatch, Completion, Control, DriftKind, DurableStore, Error, ErrorKind, Policy,
     ReconcileStep, Reconciler, Scope, Target, Timer,
 };
-use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::{
     collections::{BTreeSet, HashSet},
     time::Duration,
@@ -332,6 +332,7 @@ async fn run_inner<
     observe: F,
 ) -> Result<Report, Error> {
     let mut active = Active::new(policy, observe);
+    let mut scan_after = Duration::ZERO;
     loop {
         if stop.is_cancelled() {
             active.drain(control).await?;
@@ -340,7 +341,12 @@ async fn run_inner<
         if control.check().is_err() {
             return Ok(active.report);
         }
-        if active.tasks.len() < policy.concurrency {
+        let pacing = control.elapsed() < scan_after;
+        if active.tasks.len() < policy.concurrency && !pacing {
+            // This scan covers wake permits delivered before its start.
+            if let Some(notify) = notify {
+                let _ = notify.notified().now_or_never();
+            }
             let before = active.tasks.len();
             let started = control.elapsed();
             let available = (policy.concurrency - before).min(policy.claim_batch_size);
@@ -351,6 +357,9 @@ async fn run_inner<
             match batch {
                 Ok(batch) => {
                     more = batch.more;
+                    if batch.claims.is_empty() {
+                        scan_after = control.elapsed().saturating_add(Duration::from_millis(1));
+                    }
                     if let Err(error) = active.enqueue(
                         store,
                         reconciler,
@@ -394,15 +403,22 @@ async fn run_inner<
                 continue;
             }
         }
-        let delay = active.delay(control.elapsed());
+        // Entering the loop while paced means a continuation is already requested.
+        // A newly returned terminal empty page still waits for a real wake or recovery.
+        let now = control.elapsed();
+        let wake_at = if pacing {
+            scan_after
+        } else {
+            now.saturating_add(active.delay(now))
+        };
         let available = active.tasks.len() < policy.concurrency;
         let event = control
             .run(async {
                 tokio::select! {
                     ()=stop.cancelled()=>Ok(None),
                     result=active.tasks.next(),if !active.tasks.is_empty()=>Ok(result),
-                    ()=wake_hint(notify),if available=>Ok(None),
-                    ()=control.sleep(delay),if available=>Ok(None),
+                    ()=wake_hint(notify),if available && !pacing=>Ok(None),
+                    ()=control.sleep_until(wake_at),if available=>Ok(None),
                 }
             })
             .await;
