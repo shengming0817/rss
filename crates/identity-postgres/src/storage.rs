@@ -41,10 +41,9 @@ pub(crate) async fn lock_tenant_scope(
 pub(crate) async fn lock_attempt_capacity(
     c: &mut PgConnection,
     tenant: TenantId,
-) -> Result<(), PgError> {
-    sqlx::query("SELECT value FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='attempt_capacity' FOR UPDATE")
-        .bind(tenant.to_string()).fetch_optional(c).await?.ok_or_else(reject)?;
-    Ok(())
+) -> Result<i64, PgError> {
+    sqlx::query_scalar("SELECT value FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='attempt_capacity' FOR UPDATE")
+        .bind(tenant.to_string()).fetch_optional(c).await?.ok_or_else(reject)
 }
 
 pub(crate) async fn lock_account(
