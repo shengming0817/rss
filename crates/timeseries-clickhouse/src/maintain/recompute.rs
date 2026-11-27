@@ -6,13 +6,21 @@ use crate::{
 };
 use std::sync::{Arc, Mutex};
 
-/// One immutable entry per tenant material. The namespace transaction has already
-/// checked the live revision and request identity. Eviction or restart simply reloads.
+/// Per admitted tenant material. Each entry is bounded by max_fences, and only
+/// four windows (including empty ones) can be retained. Hits move to the tail.
+const MAX_WINDOWS: usize = 4;
 #[derive(Default)]
-pub(crate) struct BoundaryCache(Mutex<Option<Cached>>);
-struct Cached {
-    request: Digest,
+pub(crate) struct BoundaryCache(Mutex<Vec<Cached>>);
+
+#[derive(PartialEq, Eq)]
+struct WindowKey {
+    stream: Stream,
+    series: Digest,
+    scan: Interval,
     revision: i64,
+}
+struct Cached {
+    key: WindowKey,
     bounds: Arc<aggregate::Boundaries>,
 }
 impl BoundaryCache {
@@ -20,42 +28,41 @@ impl BoundaryCache {
         &self,
         store: &Operation<'_, C>,
         c: &mut PgConnection,
-        r: &MaintenanceRequest,
         spec: &SummarySpec,
         window: Interval,
         revision: i64,
     ) -> Result<Arc<aggregate::Boundaries>, Error> {
-        let request = r.binding()?;
-        if let Some(hit) = self.0.lock().map_err(|_| Error::Invariant)?.as_ref()
-            && hit.revision == revision
-            && hit.request == request
+        // Match the actual query, including the predecessor halo and the namespace.
+        let start = Timestamp::new(aggregate::dependency_start(spec, window.start()))?;
+        let key = WindowKey {
+            stream: spec.stream().clone(),
+            series: spec.series().digest()?,
+            scan: Interval::new(start, window.end())?,
+            revision,
+        };
         {
-            return Ok(hit.bounds.clone());
+            let mut entries = self.0.lock().map_err(|_| Error::Invariant)?;
+            if let Some(i) = entries.iter().position(|e| e.key == key) {
+                let hit = entries[i].bounds.clone();
+                entries[i..].rotate_left(1);
+                return Ok(hit);
+            }
         }
         let max = store.limits.max_fences.get();
-        let fences = if control::namespace_has_fences(c, r.scope(), max).await? {
-            // Include the predecessor halo and check pruning across the entire registered plan.
-            let start = Timestamp::new(aggregate::dependency_start(spec, window.start()))?;
-            control::visible_fences(
-                c,
-                &spec.selection(),
-                Interval::new(start, window.end())?,
-                max,
-                None,
-                false,
-            )
-            .await?
+        let fences = if control::namespace_has_fences(c, key.stream.scope(), max).await? {
+            control::visible_fences(c, &spec.selection(), key.scan, max, None, false).await?
         } else {
             Vec::new()
         };
-        let bounds = aggregate::Boundaries::new(&fences);
-        if bounds.pruned(window.start().micros(), window.end().micros()) {
-            return Err(Error::HistoryExpired);
+        let bounds = Arc::new(aggregate::Boundaries::new(&fences));
+        let mut entries = self.0.lock().map_err(|_| Error::Invariant)?;
+        entries
+            .retain(|e| e.key.revision == revision || e.key.stream.scope() != key.stream.scope());
+        if entries.len() == MAX_WINDOWS {
+            entries.remove(0);
         }
-        let bounds = Arc::new(bounds);
-        *self.0.lock().map_err(|_| Error::Invariant)? = Some(Cached {
-            request,
-            revision,
+        entries.push(Cached {
+            key,
             bounds: bounds.clone(),
         });
         Ok(bounds)
@@ -120,8 +127,12 @@ pub(super) async fn step<C: Clock>(
     let bounds = store
         .material
         .boundaries
-        .for_step(store, c, r, spec, window, revision)
+        .for_step(store, c, spec, window, revision)
         .await?;
+    // Plans can share a scan while checking different requested prune windows.
+    if bounds.pruned(window.start().micros(), window.end().micros()) {
+        return Err(Error::HistoryExpired);
+    }
     if state.fold.as_ref().is_none_or(|f| f.revision != revision) {
         sqlx::query("INSERT INTO rss_ts_ch.ranges(tenant_id,namespace,spec_digest,spec,lo,hi) VALUES($1::text::uuid,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
             .bind(r.scope().tenant().to_string()).bind(r.scope().namespace().as_str()).bind(spec.binding()?.as_bytes().as_slice()).bind(bytes(spec)?).bind(window.start().micros()).bind(window.end().micros()).execute(&mut *c).await.map_err(sql_error)?;

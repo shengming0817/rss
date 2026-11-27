@@ -566,6 +566,11 @@ async fn aggregate_boundaries() -> anyhow::Result<()> {
                 .execute(&f.admin)
                 .await?;
         }
+        // This fixture installs frontiers directly. Advance the same namespace
+        // revision as the public Delete/Restore paths before the next matched run.
+        sqlx::query("UPDATE rss_ts_ch.namespaces SET revision=revision+1")
+            .execute(&f.admin)
+            .await?;
         // Force the raw path on the isolated fixture for the next matched run.
         sqlx::query("DELETE FROM rss_ts_ch.summaries")
             .execute(&f.admin)
@@ -611,5 +616,111 @@ async fn aggregate_boundaries() -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn interleaved_recompute_plans_share_their_actual_scan_windows() -> anyhow::Result<()> {
+    let f = Fixture::new("ch-interleaved-plans").await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let b = batch(
+        "seed",
+        [1, 3, 5, 33, 35, 37]
+            .into_iter()
+            .map(|at| sample(&d, &format!("s{at}"), at, 1))
+            .collect::<anyhow::Result<_>>()?,
+    )?;
+    confirmed(f.write(&b).await?)?;
+    let spec = SummarySpec::new(
+        b.stream().clone(),
+        b.samples()[0].input().series.clone(),
+        NonZeroU64::new(32).ok_or(Error::Invariant)?,
+        CoveragePolicy::ObservedOnly,
+        None,
+    )?;
+    let window = |lo, hi| Interval::new(Timestamp::new(lo)?, Timestamp::new(hi)?);
+    f.maintain(
+        "cut",
+        MaintenanceAction::Delete {
+            selection: spec.selection(),
+            window: window(2, 35)?,
+            restore_until: Timestamp::new(i64::MAX)?,
+        },
+    )
+    .await?;
+    let mut plans = Vec::new();
+    let mut expected = Vec::new();
+    for (name, range) in [
+        ("left", window(0, 32)?),
+        ("right", window(32, 64)?),
+        ("left-again", window(0, 32)?),
+    ] {
+        let q = Authorized::<AggregateQuery>::verify(
+            &authority(TENANT)?,
+            AggregateQuery::new(
+                spec.clone(),
+                range,
+                QueryBudget {
+                    max_points: NonZeroU32::MIN,
+                    max_series: NonZeroU32::MIN,
+                },
+                AggregateOp::Count,
+            )?,
+        )?;
+        let raw = f.store.aggregate(&q, None, deadline()?).await?;
+        assert!(raw.refreshed_through.is_none());
+        expected.push((q, serde_json::to_value(raw.buckets)?));
+        let req = Authorized::<MaintenanceRequest>::verify(
+            &authority(TENANT)?,
+            MaintenanceRequest::new(
+                id(name)?,
+                MaintenanceAction::Recompute {
+                    spec: spec.clone(),
+                    window: range,
+                },
+                MaintenanceBudget {
+                    rows: NonZeroU32::MIN,
+                    buckets: NonZeroU32::MIN,
+                },
+            )?,
+        )?;
+        plans.push((req, None, false));
+    }
+    let (done, cost) = measure(thread_cpu, async {
+        for _ in 0..8 {
+            for (r, after, done) in &mut plans {
+                if *done {
+                    continue;
+                }
+                match confirmed(f.store.step(r, after.as_ref(), deadline()?).await?)? {
+                    MaintenanceProgress::More { next, .. } => *after = Some(next),
+                    MaintenanceProgress::Complete { .. } => *done = true,
+                    MaintenanceProgress::Blocked { .. } => {
+                        anyhow::bail!("unexpected blocked recompute")
+                    }
+                }
+            }
+        }
+        anyhow::Ok(plans.iter().all(|p| p.2))
+    })
+    .await;
+    assert!(done?);
+    assert_eq!((cost.namespace_counts, cost.aggregate_fence_rows), (2, 2));
+    for (q, raw) in expected {
+        let cached = f.store.aggregate(&q, None, deadline()?).await?;
+        assert_eq!(
+            cached.refreshed_through,
+            Some(q.request().query().window().end())
+        );
+        assert_eq!(serde_json::to_value(cached.buckets)?, raw);
+    }
+    // Independently published objects for the same window have identical summaries.
+    let digests: u64 =
+        f.ch.sql("SELECT countDistinct(digest) FROM rss_ts_ch.summaries WHERE lo=0")
+            .await?
+            .trim()
+            .parse()?;
+    assert_eq!(digests, 1);
     Ok(())
 }
