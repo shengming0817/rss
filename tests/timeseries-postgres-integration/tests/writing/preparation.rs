@@ -231,42 +231,32 @@ async fn logical_clock_landing_exactly_on_cutoff_rejects_before_begin() -> anyho
     Ok(())
 }
 
-async fn overload_and_recovery(
-    name: &str,
-    profile: rss_timeseries_postgres::StorageProfile,
+fn single_write(d: &Definition, name: &str) -> anyhow::Result<Authorized<Batch>> {
+    let b = batch(name, vec![sample(d, name, 1, 1)?])?;
+    Ok(Authorized::<Batch>::verify(&authority(TENANT)?, b)?)
+}
+
+async fn saturate_and_drain(
+    f: &Fixture,
+    d: &Definition,
+    rejected: [&Authorized<Batch>; 2],
 ) -> anyhow::Result<()> {
-    let mut caps = limits()?;
-    caps.max_prepare_batches = NonZeroU32::MIN;
-    caps.max_prepare_waiters = 1;
-    let f = Fixture::with_limits(name, profile, caps).await?;
     let full = f.store.available_preparation();
-    let d = definition(TENANT)?;
-    f.register(&d).await?;
-    let req = |name: &str| -> anyhow::Result<_> {
-        let b = batch(name, vec![sample(&d, name, 1, 1)?])?;
-        Ok(Authorized::<Batch>::verify(&authority(TENANT)?, b)?)
-    };
-    let original = req("unknown")?;
-    let fresh = req("fresh")?;
-    let queued = req("queued")?;
-    let holder = req("holder")?;
-    f.store.inject_next_fault(Fault::CommitAckLost);
-    assert!(matches!(
-        f.store.write(&original, deadline()?).await?,
-        Outcome::Unknown
-    ));
+    let cutoff = deadline()?;
+    let holder = single_write(d, "holder")?;
+    let queued = single_write(d, "queued")?;
     let mut occupied = Vec::new();
     for _ in 0..f.pool.options().get_max_connections() {
         occupied.push(f.pool.acquire().await?);
     }
-    let mut active = Box::pin(f.store.write(&holder, deadline()?));
-    let mut waiting = Box::pin(f.store.write(&queued, deadline()?));
+    let mut active = Box::pin(f.store.write(&holder, cutoff));
+    let mut waiting = Box::pin(f.store.write(&queued, cutoff));
     pending(active.as_mut()).await?;
     let phases = f.store.preparation_phases();
     pending(waiting.as_mut()).await?;
-    for rejected in [&original, &fresh] {
+    for req in rejected {
         assert_eq!(
-            f.store.write(rejected, deadline()?).await.err(),
+            f.store.write(req, cutoff).await.err(),
             Some(Error::Overloaded)
         );
     }
@@ -276,26 +266,49 @@ async fn overload_and_recovery(
     drop(occupied);
     assert!(matches!(waiting.await?, Outcome::Accepted(_)));
     assert_eq!(f.store.available_preparation(), full);
-    let lookup = |r: &Authorized<Batch>| -> anyhow::Result<_> {
-        Ok(Authorized::<ReceiptQuery>::verify(
-            &authority(TENANT)?,
-            receipt_query(r.request())?,
-        )?)
-    };
-    assert!(matches!(
-        f.store.receipt(&lookup(&original)?, deadline()?).await?,
-        Lookup::Found(_)
-    ));
-    assert!(matches!(
-        f.store.receipt(&lookup(&fresh)?, deadline()?).await?,
-        Lookup::NotVisible
-    ));
+    Ok(())
+}
+
+async fn lookup(f: &Fixture, r: &Authorized<Batch>) -> anyhow::Result<Lookup<Receipt>> {
+    let q = Authorized::<ReceiptQuery>::verify(&authority(TENANT)?, receipt_query(r.request())?)?;
+    Ok(f.store.receipt(&q, deadline()?).await?)
+}
+
+async fn overload_and_recovery(
+    name: &str,
+    profile: rss_timeseries_postgres::StorageProfile,
+) -> anyhow::Result<()> {
+    let mut caps = limits()?;
+    caps.max_prepare_batches = NonZeroU32::MIN;
+    caps.max_prepare_waiters = 1;
+    let f = Fixture::with_limits(name, profile, caps).await?;
+    let d = definition(TENANT)?;
+    f.register(&d).await?;
+    let original = single_write(&d, "unknown")?;
+    let fresh = single_write(&d, "fresh")?;
+    f.store.inject_next_fault(Fault::CommitAckLost);
     assert!(matches!(
         f.store.write(&original, deadline()?).await?,
+        Outcome::Unknown
+    ));
+    saturate_and_drain(&f, &d, [&original, &fresh]).await?;
+    verify_recovery(&f, &original, &fresh).await
+}
+
+async fn verify_recovery(
+    f: &Fixture,
+    original: &Authorized<Batch>,
+    fresh: &Authorized<Batch>,
+) -> anyhow::Result<()> {
+    assert!(matches!(lookup(f, original).await?, Lookup::Found(_)));
+    assert!(matches!(lookup(f, fresh).await?, Lookup::NotVisible));
+    let cutoff = deadline()?;
+    assert!(matches!(
+        f.store.write(original, cutoff).await?,
         Outcome::Replay(_)
     ));
     assert!(matches!(
-        f.store.write(&fresh, deadline()?).await?,
+        f.store.write(fresh, cutoff).await?,
         Outcome::Accepted(_)
     ));
     assert_eq!(f.count().await?, 3);

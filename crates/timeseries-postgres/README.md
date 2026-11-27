@@ -100,7 +100,8 @@ availability independently of acceptance.
 
 Each store shares its write preparation limits across tenants. Set
 `Limits::max_prepare_waiters` to the number of writes allowed to wait for preparation.
-Zero allows only immediate grants. Each byte-blocked queue head may be bypassed by at most one fitting write. A write that must wait when the queue is full returns `Error::Overloaded`
+Zero allows only immediate grants. Each byte-blocked queue head may be bypassed by at most
+one fitting write. A write that must wait when the queue is full returns `Error::Overloaded`
 before encoding or database access. This rejection only settles the current attempt.
 To settle an earlier unknown outcome, use its original receipt identity.
 

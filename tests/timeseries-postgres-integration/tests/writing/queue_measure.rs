@@ -50,7 +50,7 @@ async fn load() -> anyhow::Result<()> {
     for i in 0..jobs {
         let small = load == "mixed" && i % 3 == 2;
         let samples = items(&d, i, if small { 1 } else { Batch::MAX_SAMPLES }, false)?;
-        let b = batch(&format!("batch-{i:03}"), samples)?;
+        let b = batch(&format!("pressure-{i:03}"), samples)?;
         let size = b.encoded_len();
         let r = Authorized::<Batch>::verify(&authority(TENANT)?, b)?;
         let store = &f.store;
