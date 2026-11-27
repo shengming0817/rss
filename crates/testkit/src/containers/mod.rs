@@ -268,6 +268,8 @@ use tls::*;
 
 mod clickhouse;
 mod kafka;
+mod keycloak;
+pub use keycloak::{KeycloakFixture, keycloak_tls};
 mod postgres;
 pub use clickhouse::{ClickHouseFixture, clickhouse_tls};
 mod rabbitmq;
