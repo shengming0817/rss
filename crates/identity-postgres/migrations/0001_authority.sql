@@ -123,6 +123,10 @@ CREATE TABLE identity_authority.sessions (
  CHECK ((external_identity_id IS NULL) = (source_provider_id IS NULL)),
  provider_epoch bigint,
  auth_facts jsonb,
+ -- Keep the accepted state and clock readable without detoasting the organization tree.
+ department_metadata jsonb GENERATED ALWAYS AS (
+   (auth_facts->'department_snapshot') - 'snapshot' - 'snapshot_id'
+ ) STORED,
  provider_config_version bigint GENERATED ALWAYS AS (
    CASE WHEN jsonb_typeof(auth_facts->'provider_config_version')='number'
      THEN (auth_facts->>'provider_config_version')::bigint END
