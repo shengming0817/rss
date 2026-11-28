@@ -1,5 +1,5 @@
 use crate::support::*;
-use rss_identity_core::federation::*;
+use rss_identity_core::{department::UpstreamDepartmentSnapshot, federation::*};
 use rss_identity_postgres::StateSigner;
 use rss_identity_postgres::*;
 use rss_request_context::TenantId;
@@ -19,6 +19,8 @@ pub struct ScriptedOidc {
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
     pub exchange_error: AtomicBool,
+    pub checks: AtomicUsize,
+    pub department: Mutex<UpstreamDepartmentSnapshot>,
     pub probe_error: Mutex<Option<FederationError>>,
     trusted: bool,
 }
@@ -29,6 +31,8 @@ impl ScriptedOidc {
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
             exchange_error: AtomicBool::new(false),
+            checks: AtomicUsize::new(0),
+            department: Mutex::new(UpstreamDepartmentSnapshot::NotConfigured),
             probe_error: Mutex::new(None),
             trusted,
         })
@@ -36,6 +40,7 @@ impl ScriptedOidc {
 }
 impl UpstreamOidc for ScriptedOidc {
     fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> AssuranceProfile {
+        self.checks.fetch_add(1, Ordering::SeqCst);
         AssuranceProfile {
             fingerprint: [u8::from(self.trusted); 32],
             supports_step_up: self.trusted,
@@ -89,8 +94,7 @@ impl UpstreamOidc for ScriptedOidc {
                 .unwrap()
                 .as_secs() as i64;
             Ok(UpstreamClaims {
-                department_snapshot:
-                    rss_identity_core::department::UpstreamDepartmentSnapshot::NotConfigured,
+                department_snapshot: self.department.lock().unwrap().clone(),
                 issuer: c.issuer().as_str().into(),
                 subject: rss_identity_core::entra::ExternalSubject::Oidc(code.to_string()),
                 profile: rss_identity_core::profile::Profile::missing(),
@@ -135,14 +139,13 @@ pub fn service(f: &Fixture) -> Federation {
 }
 #[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn service_at(f: &Fixture, callback: &str) -> Federation {
-    service_for(f.store.clone(), callback)
+    service_on(f.store.clone(), callback)
 }
-
-#[allow(clippy::unwrap_used, reason = "isolated provider fixture")]
-pub fn service_for(store: Authority, callback: &str) -> Federation {
+#[allow(clippy::unwrap_used, reason = "test fixture")]
+pub fn service_on(authority: Authority, callback: &str) -> Federation {
     Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
-        store,
+        authority,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),
         FederationConfig {
             callback: callback.into(),
@@ -179,7 +182,7 @@ pub async fn enabled(f: &Fixture, s: &Federation) -> anyhow::Result<ProviderView
     enabled_settings(f, s, settings()).await
 }
 #[allow(clippy::unwrap_used, reason = "test fixture and ordered assertions")]
-async fn enabled_settings(
+pub async fn enabled_settings(
     f: &Fixture,
     s: &Federation,
     settings: ProviderSettings,

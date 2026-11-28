@@ -96,6 +96,7 @@ pub(crate) fn session_id(value: &str) -> Result<SessionId, PgError> {
 
 pub(crate) struct Loaded {
     pub(crate) timer: rss_request_context::SharedExecutionTimer,
+    pub checked_provider: Option<std::sync::Arc<crate::federation_storage::CheckedProvider>>,
     pub source_identity: Option<uuid::Uuid>,
     /// Qualified on this transaction's connection, with the host's binding locks held.
     pub verified_platform: Option<Box<crate::platform::PlatformBinding>>,
@@ -252,13 +253,12 @@ async fn restore(
     }
     let origin = crate::federation_storage::decode_origin(row)?;
     let source = match &origin {
-        Some((origin, _)) => Some(
-            crate::federation_storage::check_origin(c, key, origin, session_checks)
-                .await?
-                .0,
-        ),
+        Some((origin, _)) => {
+            Some(crate::federation_storage::check_origin(c, key, origin, session_checks).await?)
+        }
         None => None,
     };
+    let checked_provider = source.as_ref().map(|s| s.provider.clone());
     let lifetime = lifetime(row)?;
     let sample = TimeSample::read(c, &session_checks.timer).await?;
     let now = sample.seconds();
@@ -270,7 +270,7 @@ async fn restore(
     let source_identity = origin.as_ref().map(|(origin, _)| origin.identity);
     let mut verified_platform = None;
     let (assurance, groups, department) = match (source_kind.as_str(), origin, source) {
-        ("oidc", Some((_, facts)), Some(source)) => facts.into_views(source, &sample)?,
+        ("oidc", Some((_, facts)), Some(source)) => facts.into_views(source.source, &sample)?,
         ("local_password", None, None) => (
             Assurance::password(row.try_get("local_authenticated_at")?).map_err(|_| corrupt())?,
             rss_identity_core::groups::Groups::unavailable(
@@ -311,6 +311,7 @@ async fn restore(
     Ok(Loaded {
         timer: session_checks.timer.clone(),
         source_identity,
+        checked_provider,
         verified_platform,
         source,
         assurance,

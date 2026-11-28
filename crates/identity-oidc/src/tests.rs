@@ -4,7 +4,15 @@ use serde_json::json;
 #[allow(clippy::unwrap_used, reason = "test fixture")]
 fn token_metadata() -> (Metadata, discovery::Jwks) {
     let metadata = serde_json::from_value(json!({"issuer":"https://issuer.test","authorization_endpoint":"https://issuer.test/auth","jwks_uri":"https://issuer.test/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
-    let jwks = serde_json::from_value(json!({"keys":[serde_json::from_str::<serde_json::Value>(include_str!("../tests/fixtures/entra-a.json")).unwrap()]})).unwrap();
+    let jwks = discovery::Jwks {
+        keys: vec![
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../tests/fixtures/entra-a.json"
+            ))
+            .unwrap()
+            .into(),
+        ],
+    };
     (metadata, jwks)
 }
 #[allow(
@@ -279,7 +287,7 @@ fn id_token_rejects_unadvertised_algorithm_and_ambiguous_key() {
     let claims = json!({"iss":"https://issuer.test","sub":"subject","aud":"client","iat":1,"exp":4102444800_i64,"nonce":"nonce"});
     let raw = signed_token(&claims, true);
     let mut metadata = token_metadata();
-    metadata.0.id_token_signing_alg_values_supported = vec!["HS256".into()];
+    metadata.0.id_token_signing_alg_values_supported = Box::new([jsonwebtoken::Algorithm::HS256]);
     assert!(verify(&raw, &metadata, "nonce", "client", "fixture-secret", 30).is_err());
     let mut metadata = token_metadata();
     metadata.1.keys.push(metadata.1.keys[0].clone());
@@ -298,5 +306,25 @@ fn near_maximum_duration_is_unrepresentable() -> anyhow::Result<()> {
         policy.validate_at(std::time::Instant::now()),
         Err(FederationError::Configuration)
     );
+    Ok(())
+}
+
+#[test]
+fn projections_use_verified_numeric_date_and_standard_group_claims() -> anyhow::Result<()> {
+    let mut claims: profile_token::Claims = serde_json::from_value(
+        json!({"iss":"https://issuer.test","sub":"u","aud":"client","nonce":"n","iat":100,"exp":110,"nbf":100.75,"amr":["otp"],"name":"Display"}),
+    )?;
+    let mapping = ClaimMapping {
+        subject: rss_identity_core::entra::SubjectMapping::Oidc,
+        groups: Some("amr".into()),
+        department_snapshot: None,
+        profile: rss_identity_core::profile::ProfileSettings {
+            extensions_claim: Some("nbf".into()),
+            ..Default::default()
+        },
+    };
+    let mapped = claims.mapping_fields(&mapping)?;
+    assert_eq!(mapped, json!({"name":"Display","amr":["otp"],"nbf":101}));
+    assert_eq!(claims.amr.as_deref(), Some(["otp".to_owned()].as_slice()));
     Ok(())
 }

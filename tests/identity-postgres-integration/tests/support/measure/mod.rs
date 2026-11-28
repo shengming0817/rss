@@ -276,7 +276,7 @@ async fn run_fixture(
         deadline(),
     )
     .await?;
-    let federation = oidc::service_for(store.clone(), oidc::settings().redirect_uri());
+    let federation = oidc::service_on(store.clone(), oidc::settings().redirect_uri());
     let subjects = subjects(&f, &store, &federation, multi).await?;
     if trace {
         controls::observe_oidc_changes(&f).await?;

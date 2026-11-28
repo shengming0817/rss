@@ -260,3 +260,249 @@ async fn denied_after_replacement(
         .retain(|key| *key != proof.account());
     Ok(())
 }
+
+async fn reference_visible(
+    authority: &Authority,
+    f: &Fixture,
+    id: uuid::Uuid,
+) -> anyhow::Result<bool> {
+    use sqlx::{Arguments, Row};
+    let mut args = sqlx::postgres::PgArguments::default();
+    args.add(id).map_err(anyhow::Error::from_boxed)?;
+    Ok(authority.with_session_references_read(binding(f.key.tenant), deadline(), move |mut read| Box::pin(async move {
+        let rows = read.query("SELECT EXISTS(SELECT FROM identity_session_references WHERE session_id=$1) AS visible", args, 1).await?;
+        rows[0].try_get("visible").map_err(|_|AuthorityError::Unavailable)
+    })).await?)
+}
+
+async fn link_fixture(f: &Fixture, p: &ProviderView, subject: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO identity_authority.external_identities VALUES ($1::uuid,$2,$3,$4::uuid,$5,$6)",
+    )
+    .bind(f.key.tenant.to_string())
+    .bind(uuid::Uuid::new_v4())
+    .bind(f.key.principal.as_uuid())
+    .bind(p.id.to_string())
+    .bind(p.settings.issuer().as_str())
+    .bind(format!("oidc:{subject}"))
+    .execute(&f.owner)
+    .await?;
+    Ok(())
+}
+/// Put a real OIDC session at the start of the first candidate window.
+async fn first_oidc_session(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+) -> anyhow::Result<IssuedSession> {
+    link_fixture(f, p, "manager").await?;
+    let oidc = issued(finish(s, begin(f, s, p).await?, "manager").await?);
+    let first = uuid::Uuid::from_u128(1);
+    sqlx::query("UPDATE identity_authority.sessions SET session_id=$2 WHERE session_id=$1")
+        .bind(oidc.view().id.as_uuid())
+        .bind(first)
+        .execute(&f.owner)
+        .await?;
+    Ok(oidc)
+}
+
+pub async fn session_summary(f: &Fixture) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    let s = service(f);
+    let p = enabled(f, &s).await?;
+    let oidc = first_oidc_session(f, &s, &p).await?;
+    let oidc_actor = f
+        .store
+        .inspect_session(scope, secret(&oidc), deadline())
+        .await?;
+    let reference = oidc_actor.reference()?;
+    let id = oidc_actor.view().id;
+    assert!(reference_visible(&f.store, f, id.as_uuid()).await?);
+    f.store
+        .recheck_session_reference(scope, &reference, deadline())
+        .await?;
+    let checks = f.oidc.checks.load(Ordering::SeqCst);
+    let approved = f
+        .store
+        .list_sessions(oidc_actor, None, 100, deadline())
+        .await?;
+    assert!(approved.sessions.iter().any(|v| v.id == id));
+    assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - checks, 1);
+    security_options(f, &s, &p, &oidc).await?;
+    damaged_origin(f, &p).await?;
+    mixed_origins(f, &s, &p, id).await?;
+    expired_damaged_origin(f, &p, id).await?;
+    after_withdrawal(f, id, &reference).await
+}
+
+async fn security_options(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+    oidc: &IssuedSession,
+) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    let before = f.oidc.checks.load(Ordering::SeqCst);
+    let actor = f
+        .store
+        .inspect_session(scope, secret(oidc), deadline())
+        .await?;
+    let after_inspect = f.oidc.checks.load(Ordering::SeqCst);
+    assert_eq!(after_inspect - before, 1);
+    let security = s.current_session_security(actor, deadline()).await?;
+    assert_eq!(security.eligible_step_up_providers.len(), 1);
+    assert_eq!(
+        security.eligible_step_up_providers[0]
+            .provider_id
+            .to_string(),
+        p.id.to_string()
+    );
+    let n = s.list_providers(f.actor().await?, deadline()).await?.len();
+    assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - after_inspect, n);
+    Ok(())
+}
+async fn damaged_origin(f: &Fixture, p: &ProviderView) -> anyhow::Result<()> {
+    sqlx::query("UPDATE identity_authority.external_identities SET issuer='malformed' WHERE provider_id=$1::uuid").bind(p.id.to_string()).execute(&f.owner).await?;
+    assert!(matches!(
+        f.store
+            .list_sessions(f.actor().await?, None, 100, deadline())
+            .await,
+        Err(AuthorityError::RolledBack(_))
+    ));
+    sqlx::query(
+        "UPDATE identity_authority.external_identities SET issuer=$2 WHERE provider_id=$1::uuid",
+    )
+    .bind(p.id.to_string())
+    .bind(p.settings.issuer().as_str())
+    .execute(&f.owner)
+    .await?;
+    Ok(())
+}
+async fn mixed_origins(
+    f: &Fixture,
+    s: &Federation,
+    p: &ProviderView,
+    id: rss_identity_core::SessionId,
+) -> anyhow::Result<()> {
+    let second = issued(finish(s, begin(f, s, p).await?, "manager").await?);
+    let other = enabled(f, s).await?;
+    link_fixture(f, &other, "other-manager").await?;
+    let third = issued(finish(s, begin(f, s, &other).await?, "other-manager").await?);
+    let local_actor = f.actor().await?;
+    let start = f.oidc.checks.load(Ordering::SeqCst);
+    let mixed = f
+        .store
+        .list_sessions(local_actor, None, 100, deadline())
+        .await?;
+    for id in [id, second.view().id, third.view().id] {
+        assert!(mixed.sessions.iter().any(|v| v.id == id));
+    }
+    assert_eq!(f.oidc.checks.load(Ordering::SeqCst) - start, 2);
+    Ok(())
+}
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one staged trust withdrawal followed through pagination, proof and reconciliation"
+)]
+async fn after_withdrawal(
+    f: &Fixture,
+    id: rss_identity_core::SessionId,
+    reference: &SessionReference,
+) -> anyhow::Result<()> {
+    let scope = binding(f.key.tenant);
+    let withdrawn = withdrawn_authority(f).await?;
+    let local = f.actor().await?;
+    let local_id = local.view().id;
+    let page = withdrawn
+        .list_sessions(local, None, 100, deadline())
+        .await?;
+    assert!(page.sessions.iter().any(|v| v.id == local_id));
+    assert!(!page.sessions.iter().any(|v| v.id == id));
+    let empty = withdrawn
+        .list_sessions(f.actor().await?, None, 1, deadline())
+        .await?;
+    assert!(empty.sessions.is_empty());
+    assert_eq!(empty.next_cursor, Some(id));
+    let next = withdrawn
+        .list_sessions(f.actor().await?, empty.next_cursor, 100, deadline())
+        .await?;
+    assert!(next.sessions.iter().any(|v| v.id == local_id));
+    assert!(reference_visible(&withdrawn, f, id.as_uuid()).await?);
+    assert!(matches!(
+        withdrawn
+            .recheck_session_reference(scope, reference, deadline())
+            .await,
+        Err(AuthorityError::Rejected)
+    ));
+    service_on(withdrawn.clone(), settings().redirect_uri())
+        .reconcile_assurance_profiles(scope, deadline())
+        .await?;
+    assert!(!reference_visible(&withdrawn, f, id.as_uuid()).await?);
+    assert!(
+        withdrawn
+            .recheck_session_reference(scope, reference, deadline())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "hold the origin read until the selected candidate expires, then follow its page cursor"
+)]
+async fn expired_damaged_origin(
+    f: &Fixture,
+    p: &ProviderView,
+    id: rss_identity_core::SessionId,
+) -> anyhow::Result<()> {
+    let local = f.actor().await?;
+    let local_id = local.view().id;
+    let prior: i64 = sqlx::query_scalar(
+        "SELECT idle_expires_at FROM identity_authority.sessions WHERE session_id=$1",
+    )
+    .bind(id.as_uuid())
+    .fetch_one(&f.owner)
+    .await?;
+    let cutoff:i64=sqlx::query_scalar("UPDATE identity_authority.sessions SET idle_expires_at=floor(extract(epoch FROM clock_timestamp()))::bigint+4 WHERE session_id=$1 RETURNING idle_expires_at").bind(id.as_uuid()).fetch_one(&f.owner).await?;
+    sqlx::query("UPDATE identity_authority.external_identities SET issuer='malformed' WHERE provider_id=$1::uuid").bind(p.id.to_string()).execute(&f.owner).await?;
+    let mut gate = f.owner.begin().await?;
+    sqlx::query("LOCK TABLE identity_authority.external_identities IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    let store = f.store.clone();
+    let page = tokio::spawn(async move { store.list_sessions(local, None, 1, deadline()).await });
+    wait_for_blocked_backend(f, pid).await?;
+    // Release on the PostgreSQL wall-clock boundary used to select the page.
+    sqlx::query(
+        "SELECT pg_sleep(greatest(0, $1::bigint + 0.1 - extract(epoch FROM clock_timestamp())))",
+    )
+    .bind(cutoff)
+    .execute(&mut *gate)
+    .await?;
+    gate.commit().await?;
+    let page = page.await??;
+    assert!(page.sessions.is_empty());
+    assert_eq!(page.next_cursor, Some(id));
+    sqlx::query(
+        "UPDATE identity_authority.external_identities SET issuer=$2 WHERE provider_id=$1::uuid",
+    )
+    .bind(p.id.to_string())
+    .bind(p.settings.issuer().as_str())
+    .execute(&f.owner)
+    .await?;
+    let next = f
+        .store
+        .list_sessions(f.actor().await?, page.next_cursor, 100, deadline())
+        .await?;
+    assert!(next.sessions.iter().any(|v| v.id == local_id));
+    sqlx::query("UPDATE identity_authority.sessions SET idle_expires_at=$2 WHERE session_id=$1")
+        .bind(id.as_uuid())
+        .bind(prior)
+        .execute(&f.owner)
+        .await?;
+    Ok(())
+}

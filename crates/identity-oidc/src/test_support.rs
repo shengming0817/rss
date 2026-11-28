@@ -85,3 +85,12 @@ impl Resolve for FixtureDns {
         Box::pin(async move { Ok(Box::new(std::iter::once(answer)) as Addrs) })
     }
 }
+
+/// Successful-response decode attempts, browser token verification attempts and charged resident bytes.
+pub fn reuse_counts(adapter: &crate::HttpOidc) -> (usize, usize, usize) {
+    (
+        adapter.resources.decodes.load(Ordering::Relaxed),
+        adapter.resources.verifications.load(Ordering::Relaxed),
+        adapter.resources.bytes.load(Ordering::Relaxed),
+    )
+}

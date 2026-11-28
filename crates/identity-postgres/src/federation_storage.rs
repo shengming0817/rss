@@ -4,24 +4,26 @@ use crate::{
     *,
 };
 use rss_identity_core::assurance::AuthenticationMode;
+use rss_identity_core::facts::FactSource;
 use rss_identity_core::federation::*;
 use rss_request_context::TenantId;
+use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row};
+use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 pub(crate) async fn provider(
     c: &mut PgConnection,
     tenant: TenantId,
     id: ProviderId,
 ) -> Result<ProviderView, rss_transactional_messaging_postgres::PgError> {
-    let r = sqlx::query(concat!(
-        "SELECT config_version,revocation_epoch,enabled,settings,assurance_profile,credential_version FROM identity_authority.",
-        "providers WHERE tenant_id=$1::uuid AND provider_id=$2::uuid FOR UPDATE"
-    ))
-    .bind(tenant.to_string())
-    .bind(id.to_string())
-    .fetch_optional(c)
-    .await?
-    .ok_or_else(reject)?;
+    let r = sqlx::query("SELECT * FROM identity_authority.providers WHERE tenant_id=$1::uuid AND provider_id=$2::uuid FOR UPDATE")
+        .bind(tenant.to_string()).bind(id.to_string()).fetch_optional(c).await?.ok_or_else(reject)?;
+    decode_provider(&r)
+}
+
+pub(crate) fn decode_provider(r: &sqlx::postgres::PgRow) -> Result<ProviderView, PgError> {
+    let id = ProviderId::parse(&r.try_get::<Uuid, _>("provider_id")?.to_string())
+        .map_err(|_| corrupt())?;
     let settings: ProviderSettings =
         serde_json::from_value(r.try_get("settings")?).map_err(|_| corrupt())?;
 
@@ -68,6 +70,7 @@ pub(crate) async fn read_provider(
         })
         .await
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Origin {
     pub identity: Uuid,
     pub(crate) epoch: i64,
@@ -97,39 +100,128 @@ pub(crate) fn decode_origin(
         _ => Err(corrupt()),
     }
 }
+/// Valid only under the enclosing session/collection locks.
+pub(crate) struct CheckedProvider {
+    tenant: TenantId,
+    view: ProviderView,
+    profile: AssuranceProfile,
+}
+impl CheckedProvider {
+    pub(crate) fn view(&self) -> &ProviderView {
+        &self.view
+    }
+    pub(crate) fn profile(&self) -> AssuranceProfile {
+        self.profile
+    }
+    pub(crate) fn matches(
+        &self,
+        tenant: TenantId,
+        id: ProviderId,
+        version: i64,
+        epoch: i64,
+    ) -> bool {
+        self.tenant == tenant
+            && self.view.id == id
+            && self.view.version == version
+            && self.view.revocation_epoch == epoch
+    }
+}
+
+pub(crate) struct CheckedOrigin {
+    pub source: FactSource,
+    pub provider: Arc<CheckedProvider>,
+}
+
+/// A malformed stored value belongs to its own candidate. A page may reach that
+/// candidate after it has expired; postpone surfacing corruption until it is consumed.
+pub(crate) struct InvalidOrigin;
+pub(crate) async fn check_origins(
+    c: &mut PgConnection,
+    key: AccountKey,
+    origins: &[Origin],
+    checks: &crate::session_checks::SessionChecks,
+    known: Option<&Arc<CheckedProvider>>,
+) -> Result<HashMap<Origin, Result<CheckedOrigin, InvalidOrigin>>, PgError> {
+    let mut result = HashMap::new();
+    if origins.is_empty() {
+        return Ok(result);
+    }
+    let ids: Vec<_> = origins.iter().map(|o| o.identity).collect();
+    let epochs: Vec<_> = origins.iter().map(|o| o.epoch).collect();
+    let versions: Vec<_> = origins.iter().map(|o| o.version).collect();
+    // Match the exact stored coordinates before validating data. Return settings once per provider.
+    let rows = sqlx::query("WITH wanted AS (SELECT DISTINCT * FROM unnest($3::uuid[], $4::bigint[], $5::bigint[]) w(identity_id,epoch,version))
+        SELECT p.*,array_agg(e.identity_id ORDER BY e.identity_id) AS ids,array_agg(e.issuer ORDER BY e.identity_id) AS issuers
+        FROM wanted w JOIN identity_authority.external_identities e USING(identity_id)
+        JOIN identity_authority.providers p USING(tenant_id,provider_id)
+        WHERE e.tenant_id=$1::uuid AND e.principal_id=$2 AND p.enabled AND p.revocation_epoch=w.epoch AND p.config_version=w.version
+        GROUP BY p.tenant_id,p.provider_id")
+        .bind(key.tenant.to_string()).bind(key.principal.as_uuid()).bind(ids).bind(epochs).bind(versions).fetch_all(c).await?;
+    for row in rows {
+        let uuid: Uuid = row.try_get("provider_id")?;
+        let version = row.try_get("config_version")?;
+        let epoch = row.try_get("revocation_epoch")?;
+        let provider = if let Some(hit) = known.filter(|p| {
+            ProviderId::parse(&uuid.to_string())
+                .is_ok_and(|id| p.matches(key.tenant, id, version, epoch))
+        }) {
+            Ok(Arc::clone(hit))
+        } else {
+            match decode_provider(&row) {
+                Ok(view) => {
+                    let Some(oidc) = &checks.oidc else {
+                        continue;
+                    };
+                    let profile = oidc.assurance_profile(key.tenant, &view.settings);
+                    if profile.fingerprint != view.assurance_profile {
+                        continue;
+                    }
+                    Ok(Arc::new(CheckedProvider {
+                        tenant: key.tenant,
+                        view,
+                        profile,
+                    }))
+                }
+                Err(_) => Err(InvalidOrigin),
+            }
+        };
+        let ids: Vec<Uuid> = row.try_get("ids")?;
+        let issuers: Vec<String> = row.try_get("issuers")?;
+        for (identity, issuer) in ids.into_iter().zip(issuers) {
+            let checked = provider
+                .as_ref()
+                .map_err(|_| InvalidOrigin)
+                .and_then(|provider| {
+                    let source = FactSource::new(uuid, issuer).map_err(|_| InvalidOrigin)?;
+                    Ok(CheckedOrigin {
+                        source,
+                        provider: provider.clone(),
+                    })
+                });
+            result.insert(
+                Origin {
+                    identity,
+                    epoch,
+                    version,
+                },
+                checked,
+            );
+        }
+    }
+    Ok(result)
+}
+
 pub(crate) async fn check_origin(
     c: &mut PgConnection,
     key: AccountKey,
     origin: &Origin,
     checks: &crate::session_checks::SessionChecks,
-) -> Result<
-    (rss_identity_core::facts::FactSource, AssuranceProfile),
-    rss_transactional_messaging_postgres::PgError,
-> {
-    let row = sqlx::query(concat!(
-        "SELECT e.provider_id,e.issuer,p.settings,p.assurance_profile FROM identity_authority.external_identities e JOIN identity",
-        "_authority.providers p USING(tenant_id,provider_id) WHERE e.tenant_id=$1::uuid A",
-        "ND e.identity_id=$2 AND p.enabled AND p.revocation_epoch=$3 AND p.config_version=$4 AND e.principal_id=$5"
-    ))
-    .bind(key.tenant.to_string()).bind(origin.identity).bind(origin.epoch)
-    .bind(origin.version).bind(key.principal.as_uuid())
-    .fetch_optional(c).await?.ok_or_else(reject)?;
-    let settings: ProviderSettings =
-        serde_json::from_value(row.try_get("settings")?).map_err(|_| corrupt())?;
-    let profile = checks
-        .oidc
-        .as_ref()
+) -> Result<CheckedOrigin, PgError> {
+    check_origins(c, key, std::slice::from_ref(origin), checks, None)
+        .await?
+        .remove(origin)
         .ok_or_else(reject)?
-        .assurance_profile(key.tenant, &settings);
-    if row.try_get::<Vec<u8>, _>("assurance_profile")? != profile.fingerprint {
-        return Err(reject());
-    }
-    let source = rss_identity_core::facts::FactSource::new(
-        row.try_get("provider_id")?,
-        row.try_get("issuer")?,
-    )
-    .map_err(|_| corrupt())?;
-    Ok((source, profile))
+        .map_err(|_| corrupt())
 }
 pub(crate) async fn identity(
     c: &mut PgConnection,

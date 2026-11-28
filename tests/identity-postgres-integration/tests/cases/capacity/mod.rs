@@ -79,7 +79,7 @@ async fn bad(f: &Fixture, store: &Authority, name: &str) -> Result<IssuedSession
 }
 pub async fn run(f: &Fixture) -> anyhow::Result<()> {
     let broad = configured(f, 10000, 2).await?;
-    let fed = oidc::service_for(broad.clone(), oidc::settings().redirect_uri());
+    let fed = oidc::service_on(broad.clone(), oidc::settings().redirect_uri());
     let p = oidc::enabled(f, &fed).await?;
     let target = broad
         .create_local_account(
@@ -92,7 +92,7 @@ pub async fn run(f: &Fixture) -> anyhow::Result<()> {
         .key();
     f.reset_attempts().await?;
     let narrow = configured(f, 2, 2).await?;
-    let limited = oidc::service_for(narrow.clone(), oidc::settings().redirect_uri());
+    let limited = oidc::service_on(narrow.clone(), oidc::settings().redirect_uri());
     last_slot(f, &narrow, &limited, p.id).await?;
     reset_passwords(f, &broad, &narrow, target).await?;
     cleanup(f, &narrow, &limited, p.id).await?;
@@ -195,7 +195,7 @@ async fn cleanup(
         .await?;
     assert_eq!(occupied(f, A, "attempt_capacity").await?, 2);
     let lowered = configured(f, 1, 2).await?;
-    let strict = oidc::service_for(lowered, oidc::settings().redirect_uri());
+    let strict = oidc::service_on(lowered, oidc::settings().redirect_uri());
     assert!(matches!(
         strict
             .begin_login(request(f, p, "local-test")?, deadline())
