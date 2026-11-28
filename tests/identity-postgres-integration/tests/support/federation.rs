@@ -18,6 +18,7 @@ pub struct ScriptedOidc {
     revisions: ProviderRevisions,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
+    pub checks: AtomicUsize,
     pub department: Mutex<UpstreamDepartmentSnapshot>,
     pub probe_error: Mutex<Option<FederationError>>,
     trusted: bool,
@@ -28,6 +29,7 @@ impl ScriptedOidc {
             revisions: ProviderRevisions::new(16),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
+            checks: AtomicUsize::new(0),
             department: Mutex::new(UpstreamDepartmentSnapshot::NotConfigured),
             probe_error: Mutex::new(None),
             trusted,
@@ -36,6 +38,7 @@ impl ScriptedOidc {
 }
 impl UpstreamOidc for ScriptedOidc {
     fn assurance_profile(&self, _tenant: TenantId, _c: &ProviderSettings) -> AssuranceProfile {
+        self.checks.fetch_add(1, Ordering::SeqCst);
         AssuranceProfile {
             fingerprint: [u8::from(self.trusted); 32],
             supports_step_up: self.trusted,
@@ -131,9 +134,13 @@ pub fn service(f: &Fixture) -> Federation {
 }
 #[allow(clippy::unwrap_used, reason = "test fixture")]
 pub fn service_at(f: &Fixture, callback: &str) -> Federation {
+    service_on(f.store.clone(), callback)
+}
+#[allow(clippy::unwrap_used, reason = "test fixture")]
+pub fn service_on(authority: Authority, callback: &str) -> Federation {
     Federation::new(
         rss_identity_core::groups::GroupFactsMaxAge::new(300).unwrap(),
-        f.store.clone(),
+        authority,
         StateSigner::new([7; 32], "https://identity.example.test").unwrap(),
         FederationConfig {
             callback: callback.into(),

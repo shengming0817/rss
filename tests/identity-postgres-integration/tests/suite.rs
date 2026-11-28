@@ -8,7 +8,9 @@ mod support;
 mod cases {
     pub mod account_directory;
     pub mod federation;
+    pub mod federation_cost;
     pub mod one_time;
+    pub mod platform_page;
     pub mod provisioning;
     pub mod roles;
     pub mod sessions;
@@ -35,11 +37,17 @@ async fn identity_postgres() -> anyhow::Result<()> {
     cases::transactions::borrowed(&f).await?;
     cases::one_time::webauthn(&f).await?;
     cases::federation::state_once(&f).await?;
+    cases::federation::session_summary(&f).await?;
+    cases::platform_page::run(&f).await?;
     f.close().await;
     let f = support::Fixture::new(&pg, Integrity::Plain).await?;
     f.bootstrap().await?;
     cases::federation::step_up(&f).await?;
     cases::provisioning::provisioning(&f).await?;
+    f.close().await;
+    let f = support::Fixture::new(&pg, Integrity::Plain).await?;
+    f.bootstrap().await?;
+    cases::federation_cost::run(&f).await?;
     f.close().await;
     let f = support::Fixture::new(&pg, Integrity::Plain).await?;
     f.bootstrap().await?;

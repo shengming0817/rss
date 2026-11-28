@@ -110,7 +110,8 @@ impl crate::HttpOidc {
         {
             return Err(FederationError::Configuration);
         }
-        let (metadata, doc, transport) = self.discover(bound.clone(), deadline).await?;
+        let (doc, transport) = self.discover(bound.clone(), deadline).await?;
+        let metadata = doc.document.metadata()?;
         let endpoint = metadata.bound_token_endpoint(&target.token_endpoint)?;
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
@@ -156,8 +157,11 @@ impl crate::HttpOidc {
             .filter(|v| !v.is_empty())
             .ok_or(FederationError::Claims)?;
         let keys = self.signing_keys(&doc, &transport, Some(kid)).await?;
-        let key =
-            crate::profile_token::signing_key(&header, Some(&keys), credentials.client_secret())?;
+        let key = crate::profile_token::signing_key(
+            &header,
+            Some(keys.jwks()?),
+            credentials.client_secret(),
+        )?;
         let claims = verify_access(
             &token.access_token,
             &key,

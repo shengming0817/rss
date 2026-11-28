@@ -1,77 +1,25 @@
 //! Read one bounded candidate window under the caller's tenant guard.
+use crate::federation_storage::{Origin, check_origins};
 use crate::{
     AuthenticatedSession, SessionPage, SessionView,
     platform::{PlatformAuthentication, PlatformBinding},
     session_storage::{self, Loaded},
     transaction::corrupt,
 };
-use rss_identity_core::{SessionId, facts::FactSource};
+use rss_identity_core::SessionId;
 use rss_request_context::Clock;
 use rss_transactional_messaging::error::MessagingErrorKind;
 use rss_transactional_messaging_postgres::PgError;
 use sqlx::{PgConnection, Row, postgres::PgRow};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
-struct CurrentOrigin {
-    provider: Uuid,
-    epoch: i64,
-    version: i64,
-    valid_source: bool,
-}
-
-/// An external identity has one current provider and generation. Different sessions may
-/// carry different stored generations, including for the very same external identity.
-async fn current_origins(
-    c: &mut PgConnection,
-    actor: &AuthenticatedSession,
-    rows: &[PgRow],
-) -> Result<HashMap<Uuid, CurrentOrigin>, PgError> {
-    let mut ids = HashSet::new();
-    for row in rows {
-        if let Some(id) = row.try_get::<Option<Uuid>, _>("external_identity_id")? {
-            ids.insert(id);
-        }
-    }
-    let mut origins = HashMap::new();
-    if ids.is_empty() {
-        return Ok(origins);
-    }
-    let sources = sqlx::query("SELECT e.identity_id,e.provider_id,e.issuer,p.revocation_epoch,p.config_version
-        FROM identity_authority.external_identities e JOIN identity_authority.providers p USING(tenant_id,provider_id)
-        WHERE e.tenant_id=$1::uuid AND e.principal_id=$2 AND e.identity_id=ANY($3) AND p.enabled")
-        .bind(actor.key.tenant.to_string()).bind(actor.key.principal.as_uuid()).bind(ids.into_iter().collect::<Vec<_>>())
-        .fetch_all(c).await?;
-    for r in sources {
-        let provider = r.try_get("provider_id")?;
-        origins.insert(
-            r.try_get("identity_id")?,
-            CurrentOrigin {
-                provider,
-                epoch: r.try_get("revocation_epoch")?,
-                version: r.try_get("config_version")?,
-                valid_source: FactSource::new(provider, r.try_get("issuer")?).is_ok(),
-            },
-        );
-    }
-    Ok(origins)
-}
-
-fn current_oidc(row: &PgRow, origins: &HashMap<Uuid, CurrentOrigin>) -> Result<bool, PgError> {
-    let id: Uuid = row.try_get("external_identity_id")?;
-    let provider: Uuid = row.try_get("source_provider_id")?;
-    let epoch: i64 = row.try_get("provider_epoch")?;
-    let version: i64 = row.try_get("provider_config_version")?;
-    let Some(origin) = origins.get(&id) else {
-        return Ok(false);
-    };
-    if (origin.provider, origin.epoch, origin.version) != (provider, epoch, version) {
-        return Ok(false);
-    }
-    if !origin.valid_source {
-        return Err(corrupt());
-    }
-    Ok(true)
+fn oidc_origin(row: &PgRow) -> Result<Origin, PgError> {
+    Ok(Origin {
+        identity: row.try_get("external_identity_id")?,
+        epoch: row.try_get("provider_epoch")?,
+        version: row.try_get("provider_config_version")?,
+    })
 }
 
 async fn current_platform(
@@ -120,7 +68,20 @@ pub(crate) async fn read(
         .fetch_all(&mut *c).await?;
     let more = rows.len() > usize::from(limit);
     rows.truncate(usize::from(limit));
-    let origins = current_origins(c, actor, &rows).await?;
+    let mut wanted = Vec::new();
+    for row in &rows {
+        if row.try_get::<&str, _>("authentication_source")? == "oidc" {
+            wanted.push(oidc_origin(row)?);
+        }
+    }
+    let origins = check_origins(
+        c,
+        actor.key,
+        &wanted,
+        checks,
+        loaded.checked_provider.as_ref(),
+    )
+    .await?;
     let mut platforms = HashMap::new();
     if let Some(binding) = loaded.verified_platform.as_deref() {
         platforms.insert(binding.clone(), true);
@@ -137,7 +98,10 @@ pub(crate) async fn read(
         }
         let valid = match row.try_get::<&str, _>("authentication_source")? {
             "local_password" => true,
-            "oidc" => current_oidc(&row, &origins)?,
+            "oidc" => {
+                let provider: Uuid = row.try_get("source_provider_id")?;
+                matches!(origins.get(&oidc_origin(&row)?).map(|result|result.as_ref()).transpose().map_err(|_|corrupt())?,Some(origin) if origin.source.provider_id()==provider)
+            }
             "platform" => match current_platform(c, actor, &row, checks, &mut platforms).await {
                 Err(e) if e.kind() == MessagingErrorKind::Conflict => false,
                 result => result?,

@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish = false
 
 [dev-dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 futures = { workspace = true, features = ["std", "async-await"] }
