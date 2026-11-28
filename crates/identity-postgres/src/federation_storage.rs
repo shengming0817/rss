@@ -344,33 +344,21 @@ pub(crate) async fn insert_attempt(
     if now >= expiry {
         return Err(reject().into());
     }
-    sqlx::query(concat!(
-        "DELETE FROM identity_authority.oidc_transactions WHERE (tenant_id,attempt_id) IN",
-        " (SELECT tenant_id,attempt_id FROM identity_authority.oidc_transactions WHERE te",
-        "nant_id=$1::uuid AND expires_at<=$2 ORDER BY expires_at LIMIT 128)"
-    ))
-    .bind(tenant.to_string())
-    .bind(now)
-    .execute(&mut *c)
-    .await?;
-    sqlx::query(concat!(
-        "DELETE FROM identity_authority.link_intents l WHERE l.tenant_id=$1::uuid AND l.i",
-        "ntent_id IN (SELECT i.intent_id FROM identity_authority.link_intents i WHERE i.t",
-        "enant_id=$1::uuid AND i.expires_at<=$2 AND NOT EXISTS(SELECT FROM identity_autho",
-        "rity.oidc_transactions t WHERE t.tenant_id=i.tenant_id AND t.link_intent=i.inten",
-        "t_id) LIMIT 128)"
-    ))
-    .bind(tenant.to_string())
-    .bind(now)
-    .execute(&mut *c)
-    .await?;
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM identity_authority.oidc_transactions WHERE tenant_id=$1::uuid",
-    )
-    .bind(tenant.to_string())
-    .fetch_one(&mut *c)
-    .await?;
-    if count >= 10000 {
+    sqlx::query("DELETE FROM identity_authority.oidc_transactions WHERE tenant_id=$1::uuid AND ctid=ANY(ARRAY(
+        SELECT ctid FROM identity_authority.oidc_transactions WHERE tenant_id=$1::uuid AND expires_at<=$2
+        ORDER BY expires_at,attempt_id LIMIT 128))")
+        .bind(tenant.to_string()).bind(now).execute(&mut *c).await?;
+    sqlx::query(include_str!("reclaim-link-intents.sql"))
+        .bind(tenant.to_string())
+        .bind(now)
+        .execute(&mut *c)
+        .await?;
+    // A separate statement sees the AFTER STATEMENT release of expired rows.
+    // All creation and consumption paths already hold the tenant collection lock.
+    let available: bool = sqlx::query_scalar(
+        "SELECT oidc_remaining>0 FROM identity_authority.tenant_state WHERE tenant_id=$1::uuid AND kind='oidc_capacity'",
+    ).bind(tenant.to_string()).fetch_one(&mut *c).await?;
+    if !available {
         return Err(reject().into());
     }
     let profile_sequence = crate::profiles::sequence(c, tenant).await?;

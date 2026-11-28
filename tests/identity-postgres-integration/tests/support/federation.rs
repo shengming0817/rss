@@ -7,7 +7,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +18,7 @@ pub struct ScriptedOidc {
     revisions: ProviderRevisions,
     pub assurance: Mutex<Option<rss_identity_core::assurance::Assurance>>,
     pub calls: AtomicUsize,
+    pub exchange_error: AtomicBool,
     pub checks: AtomicUsize,
     pub department: Mutex<UpstreamDepartmentSnapshot>,
     pub probe_error: Mutex<Option<FederationError>>,
@@ -29,6 +30,7 @@ impl ScriptedOidc {
             revisions: ProviderRevisions::new(16),
             assurance: Mutex::new(None),
             calls: AtomicUsize::new(0),
+            exchange_error: AtomicBool::new(false),
             checks: AtomicUsize::new(0),
             department: Mutex::new(UpstreamDepartmentSnapshot::NotConfigured),
             probe_error: Mutex::new(None),
@@ -84,6 +86,9 @@ impl UpstreamOidc for ScriptedOidc {
         Box::pin(async move {
             let c = provider.settings();
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.exchange_error.load(Ordering::SeqCst) {
+                return Err(FederationError::Unavailable);
+            }
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -253,4 +258,22 @@ pub fn issued(outcome: FederatedOutcome) -> IssuedSession {
 #[allow(clippy::unwrap_used, reason = "test fixture and ordered assertions")]
 pub fn secret(s: &IssuedSession) -> rss_identity_core::session::SessionSecret {
     rss_identity_core::session::SessionSecret::parse(s.secret().expose().into()).unwrap()
+}
+
+pub async fn seed_inventory(
+    f: &Fixture,
+    n: i32,
+    template: &serde_json::Value,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM identity_authority.oidc_transactions WHERE tenant_id=$1::uuid")
+        .bind(A)
+        .execute(&f.owner)
+        .await?;
+    sqlx::query("INSERT INTO identity_authority.oidc_transactions SELECT r.* FROM generate_series(1,$2) AS i
+      CROSS JOIN LATERAL jsonb_populate_record(NULL::identity_authority.oidc_transactions,$1::jsonb ||
+       jsonb_build_object('attempt_id',sha256(int4send(i)),'state_hash',sha256(int4send(i)),
+       'created_at',extract(epoch FROM statement_timestamp())::bigint,'expires_at',extract(epoch FROM statement_timestamp())::bigint+120)) r")
+      .bind(template).bind(n).execute(&f.owner).await?;
+
+    Ok(())
 }

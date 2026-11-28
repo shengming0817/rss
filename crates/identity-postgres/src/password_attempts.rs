@@ -7,7 +7,7 @@ use crate::{
 };
 use rss_identity_core::account::LoginKey;
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, Row};
+use sqlx::PgConnection;
 
 /// Private, database-fenced permission to perform one password verification.
 pub(crate) struct PasswordClaim {
@@ -24,34 +24,18 @@ impl Authority {
         source: &AttemptSource,
         deadline: Deadline,
     ) -> Result<PasswordClaim, AuthorityError> {
-        let tenant = binding.tenant();
         let digest = Sha256::digest(login.as_str().as_bytes()).to_vec();
         let source = format!("s:{}", source.value());
         let policy = self.authentication;
-        let seconds = policy.claim_ttl.as_secs_f64();
-        self.read(binding, deadline, move |tx| Box::pin(async move {
-            crate::transaction::connection(tx, move |c| Box::pin(async move {
-                lock_tenant_scope(c, tenant).await?;
-                lock_attempt_capacity(c, tenant).await?;
-                cleanup(c, tenant, policy.cleanup_batch).await?;
-                let source = attempt(c, tenant, source, policy.source).await?;
-                let row = sqlx::query("SELECT CASE WHEN failures>=$3 AND window_until>clock_timestamp() THEN greatest(1,ceil(extract(epoch FROM window_until-clock_timestamp())))::bigint ELSE 0 END AS retry,claim_until>clock_timestamp() AS busy FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND login_digest=$2")
-                    .bind(tenant.to_string()).bind(&digest).bind(policy.password.limit).fetch_optional(&mut *c).await?;
-                let retry = row.as_ref().map(|r| r.try_get::<i64,_>("retry")).transpose()?.unwrap_or(0).max(source.retry);
-                if retry > 0 { return Ok(Err(rate_limited(retry)?)); }
-                if row.as_ref().map(|r| r.try_get::<Option<bool>,_>("busy")).transpose()?.flatten().unwrap_or(false) {
-                    return Ok(Err(AuthorityError::Busy));
-                }
-                if total(c, tenant).await? + i64::from(!source.exists) + i64::from(row.is_none()) > i64::from(policy.record_capacity) {
-                    return Ok(Err(AuthorityError::Busy));
-                }
-                source.consume(c, tenant).await?;
-                let token = uuid::Uuid::new_v4();
-                sqlx::query("INSERT INTO identity_authority.password_attempts(tenant_id,login_digest,claim_token,claim_until) VALUES($1::uuid,$2,$3,clock_timestamp()+make_interval(secs=>$4)) ON CONFLICT(tenant_id,login_digest) DO UPDATE SET failures=CASE WHEN password_attempts.window_until>clock_timestamp() THEN password_attempts.failures ELSE 0 END,window_until=CASE WHEN password_attempts.window_until>clock_timestamp() THEN password_attempts.window_until ELSE NULL END,claim_token=excluded.claim_token,claim_until=excluded.claim_until")
-                    .bind(tenant.to_string()).bind(&digest).bind(token).bind(seconds).execute(c).await?;
-                Ok(Ok(PasswordClaim {binding,login:digest,token}))
-            })).await
-        })).await?
+        self.read(binding, deadline, move |tx| {
+            Box::pin(async move {
+                crate::transaction::connection(tx, move |c| {
+                    Box::pin(claim_on(c, binding, source, digest, policy))
+                })
+                .await
+            })
+        })
+        .await?
     }
 
     /// Return credential outcomes as values so their accounting commits independently.
@@ -89,6 +73,54 @@ impl Authority {
                 }
             })).await
         })).await?
+    }
+}
+
+async fn claim_on(
+    c: &mut PgConnection,
+    binding: ExecutionBinding,
+    source_key: String,
+    digest: Vec<u8>,
+    policy: AuthenticationPolicy,
+) -> Result<Result<PasswordClaim, AuthorityError>, rss_transactional_messaging_postgres::PgError> {
+    let tenant = binding.tenant();
+    lock_tenant_scope(c, tenant).await?;
+    let mut capacity = Capacity::lock(c, tenant, policy).await?;
+    loop {
+        let source = attempt(c, tenant, &source_key, policy.source).await?;
+        let password: Option<(i64,bool)> = sqlx::query_as(
+            "SELECT CASE WHEN failures>=$3 AND window_until>clock_timestamp()
+                THEN greatest(1,ceil(extract(epoch FROM window_until-clock_timestamp())))::bigint ELSE 0 END,
+                coalesce(claim_until>clock_timestamp(), false)
+             FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND login_digest=$2"
+        ).bind(tenant.to_string()).bind(&digest).bind(policy.password.limit).fetch_optional(&mut *c).await?;
+        let missing = i64::from(!source.exists) + i64::from(password.is_none());
+        let room = capacity.room(c, tenant, missing).await?;
+        if matches!(room, Room::RecheckKeys) {
+            continue;
+        }
+        let (retry, busy) = password.unwrap_or_default();
+        let retry = source.retry.max(retry);
+        if retry > 0 {
+            return Ok(Err(rate_limited(retry)?));
+        }
+        if busy || matches!(room, Room::Full) {
+            return Ok(Err(AuthorityError::Busy));
+        }
+        source.consume(c, tenant).await?;
+        let token = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO identity_authority.password_attempts(tenant_id,login_digest,claim_token,claim_until)
+            VALUES($1::uuid,$2,$3,clock_timestamp()+make_interval(secs=>$4))
+            ON CONFLICT(tenant_id,login_digest) DO UPDATE SET
+              failures=CASE WHEN password_attempts.window_until>statement_timestamp() THEN password_attempts.failures ELSE 0 END,
+              window_until=CASE WHEN password_attempts.window_until>statement_timestamp() THEN password_attempts.window_until ELSE NULL END,
+              claim_token=excluded.claim_token,claim_until=excluded.claim_until")
+            .bind(tenant.to_string()).bind(&digest).bind(token).bind(policy.claim_ttl.as_secs_f64()).execute(c).await?;
+        return Ok(Ok(PasswordClaim {
+            binding,
+            login: digest,
+            token,
+        }));
     }
 }
 

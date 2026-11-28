@@ -259,6 +259,7 @@ impl Federation {
             .authority
             .read_sql(binding, budget.cutoff, move |c| {
                 Box::pin(async move {
+                    lock_tenant_scope(c, tenant).await?;
                     let i = intent(c, tenant, intent_id).await?;
                     let target = db::provider(c, tenant, i.target).await?;
                     db::exact(&target, i.version)?;

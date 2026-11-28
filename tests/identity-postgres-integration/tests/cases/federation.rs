@@ -75,11 +75,16 @@ pub async fn step_up(f: &Fixture) -> anyhow::Result<()> {
     )?);
     let old = issued(finish(&s, begin(f, &s, &p).await?, "alice").await?);
     let token = step_begin(f, &s, &p, &old).await?;
+    let charged = super::capacity::occupied(f, A, "oidc_capacity").await?;
     let FederatedOutcome::StepUp { grant, .. } =
         step_finish(&s, token.clone(), &old, "alice").await?
     else {
         anyhow::bail!("expected operation proof")
     };
+    assert_eq!(
+        super::capacity::occupied(f, A, "oidc_capacity").await?,
+        charged - 1
+    );
     assert!(step_finish(&s, token, &old, "alice").await.is_err());
     let proof = f
         .store

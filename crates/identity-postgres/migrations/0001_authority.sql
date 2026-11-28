@@ -15,8 +15,14 @@ CREATE TRIGGER protect_deployment BEFORE UPDATE OR DELETE ON identity_authority.
 CREATE TABLE identity_authority.tenants(tenant_id uuid PRIMARY KEY);
 CREATE TABLE identity_authority.tenant_state (
  tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
- kind text NOT NULL CHECK(kind IN ('profile_sequence','receipt_clock','attempt_capacity')),
+ kind text NOT NULL CHECK(kind IN ('profile_sequence','receipt_clock','attempt_capacity','oidc_capacity')),
+ -- Clock writers may update value. Only physical DML triggers may update occupied.
  value bigint NOT NULL DEFAULT 0 CHECK(value>=0),
+ occupied bigint NOT NULL DEFAULT 0 CHECK(occupied>=0),
+ oidc_remaining bigint GENERATED ALWAYS AS
+  (CASE WHEN kind='oidc_capacity' THEN 10000-occupied END) STORED,
+ CHECK(CASE WHEN kind IN ('attempt_capacity','oidc_capacity') THEN value=0 ELSE occupied=0 END),
+ CHECK(oidc_remaining>=0),
  PRIMARY KEY(tenant_id,kind)
 );
 -- Source counters live as long as the tenant so a replaced source never reuses its old generation.
@@ -30,7 +36,7 @@ CREATE TABLE identity_authority.directory_revisions (
 CREATE FUNCTION identity_authority.initialize_tenant_state() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  INSERT INTO identity_authority.tenant_state(tenant_id,kind) VALUES
-  (NEW.tenant_id,'profile_sequence'),(NEW.tenant_id,'receipt_clock'),(NEW.tenant_id,'attempt_capacity');
+  (NEW.tenant_id,'profile_sequence'),(NEW.tenant_id,'receipt_clock'),(NEW.tenant_id,'attempt_capacity'),(NEW.tenant_id,'oidc_capacity');
  RETURN NEW;
 END $$;
 CREATE TRIGGER initialize_state AFTER INSERT ON identity_authority.tenants
@@ -69,11 +75,13 @@ CREATE TABLE identity_authority.password_attempts (
  window_until timestamptz,
  claim_token uuid CHECK(claim_token <> '00000000-0000-0000-0000-000000000000'),
  claim_until timestamptz,
+ reclaim_at timestamptz GENERATED ALWAYS AS
+  (coalesce(greatest(window_until,claim_until), '-infinity'::timestamptz)) STORED,
  PRIMARY KEY(tenant_id,login_digest),
  CHECK((failures=0) = (window_until IS NULL)),
  CHECK((claim_token IS NULL) = (claim_until IS NULL))
 );
-CREATE INDEX password_attempts_expiry ON identity_authority.password_attempts(tenant_id,window_until,claim_until);
+CREATE INDEX password_attempts_expiry ON identity_authority.password_attempts(tenant_id,reclaim_at);
 CREATE TABLE identity_authority.providers (
  tenant_id uuid NOT NULL REFERENCES identity_authority.tenants,
  provider_id uuid NOT NULL CHECK(provider_id <> '00000000-0000-0000-0000-000000000000'),
@@ -181,8 +189,34 @@ CREATE TABLE identity_authority.oidc_transactions (
  CHECK((purpose=0 AND link_intent IS NULL) OR (purpose IN(1,2) AND link_intent IS NOT NULL)),
  CHECK((claimed AND nonce IS NULL AND verifier IS NULL) OR (NOT claimed AND octet_length(nonce)=43 AND octet_length(verifier)=43))
 );
-CREATE INDEX oidc_expiry ON identity_authority.oidc_transactions(tenant_id,expires_at);
-CREATE INDEX link_expiry ON identity_authority.link_intents(tenant_id,expires_at);
+CREATE INDEX oidc_expiry ON identity_authority.oidc_transactions(tenant_id,expires_at,attempt_id);
+CREATE INDEX oidc_link_intent ON identity_authority.oidc_transactions(tenant_id,link_intent) WHERE link_intent IS NOT NULL;
+CREATE INDEX link_expiry ON identity_authority.link_intents(tenant_id,expires_at,intent_id);
+
+-- Physical rows remain charged until deleted, including expired and claimed rows.
+-- The INSERT transition relation excludes UPSERT updates. Each tenant is touched at
+-- most once per statement, including bulk expiry and multi-tenant fixture deletes.
+CREATE FUNCTION identity_authority.account_capacity_delta() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+DECLARE delta record;
+BEGIN
+ FOR delta IN SELECT tenant_id, count(*) AS n FROM changed GROUP BY tenant_id ORDER BY tenant_id LOOP
+  UPDATE identity_authority.tenant_state
+     SET occupied=occupied + CASE TG_OP WHEN 'INSERT' THEN delta.n ELSE -delta.n END
+   WHERE tenant_id=delta.tenant_id AND kind=TG_ARGV[0];
+  IF NOT FOUND THEN RAISE EXCEPTION 'missing identity capacity state'; END IF;
+ END LOOP;
+ RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION identity_authority.account_capacity_delta() FROM PUBLIC;
+DO $$ DECLARE item record; BEGIN
+ FOR item IN SELECT * FROM (VALUES
+  ('attempts','attempt_capacity'),('password_attempts','attempt_capacity'),('oidc_transactions','oidc_capacity')
+ ) AS counted(tab,kind) LOOP
+  EXECUTE format('CREATE TRIGGER charge_capacity AFTER INSERT ON identity_authority.%I REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION identity_authority.account_capacity_delta(%L)',item.tab,item.kind);
+  EXECUTE format('CREATE TRIGGER release_capacity AFTER DELETE ON identity_authority.%I REFERENCING OLD TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION identity_authority.account_capacity_delta(%L)',item.tab,item.kind);
+ END LOOP;
+END $$;
 CREATE TABLE identity_authority.platform_challenges (
  purpose jsonb NOT NULL CHECK(jsonb_typeof(purpose)='object' AND octet_length(purpose::text)<=512),
  target jsonb CHECK(target IS NULL OR (jsonb_typeof(target)='object' AND octet_length(target::text)<=8192)),

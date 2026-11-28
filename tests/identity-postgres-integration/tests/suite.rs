@@ -7,6 +7,7 @@ mod federation_support;
 mod support;
 mod cases {
     pub mod account_directory;
+    pub mod capacity;
     pub mod federation;
     pub mod federation_cost;
     pub mod one_time;
@@ -32,6 +33,7 @@ async fn identity_postgres() -> anyhow::Result<()> {
     f.bootstrap().await?;
     cases::roles::roles(&f).await?;
     cases::roles::check_delegation(&f).await?;
+    cases::roles::capacity_definer(&f).await?;
     cases::sessions::rotation(&f).await?;
     cases::web_credentials::run(&f).await?;
     cases::transactions::borrowed(&f).await?;
@@ -52,6 +54,10 @@ async fn identity_postgres() -> anyhow::Result<()> {
     let f = support::Fixture::new(&pg, Integrity::Plain).await?;
     f.bootstrap().await?;
     cases::account_directory::run(&f).await?;
+    f.close().await;
+    let f = support::Fixture::new(&pg, Integrity::Plain).await?;
+    f.bootstrap().await?;
+    Box::pin(cases::capacity::run(&f)).await?;
     f.close().await;
     let ledger = Integrity::Ledger(Arc::new(Authenticator::new(
         KeyId::parse("identity-fixture")?,

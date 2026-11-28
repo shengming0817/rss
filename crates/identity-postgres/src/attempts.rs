@@ -73,28 +73,28 @@ impl AuthenticationPolicy {
     }
 }
 
-pub(crate) struct Attempt {
-    key: String,
+pub(crate) struct Attempt<'a> {
+    key: &'a str,
     count: i32,
     seconds: u32,
     pub exists: bool,
     pub retry: i64,
 }
-impl Attempt {
+impl Attempt<'_> {
     pub async fn consume(self, c: &mut PgConnection, tenant: TenantId) -> Result<(), PgError> {
         sqlx::query("INSERT INTO identity_authority.attempts VALUES($1::uuid,$2,1,clock_timestamp()+make_interval(secs=>$3)) ON CONFLICT(tenant_id,key) DO UPDATE SET count=$4,expires_at=CASE WHEN $4=1 THEN excluded.expires_at ELSE attempts.expires_at END")
             .bind(tenant.to_string()).bind(self.key).bind(f64::from(self.seconds)).bind(self.count.checked_add(1).ok_or_else(crate::transaction::corrupt)?).execute(c).await?;
         Ok(())
     }
 }
-pub(crate) async fn attempt(
+pub(crate) async fn attempt<'a>(
     c: &mut PgConnection,
     tenant: TenantId,
-    key: String,
+    key: &'a str,
     window: AttemptWindow,
-) -> Result<Attempt, PgError> {
+) -> Result<Attempt<'a>, PgError> {
     let row = sqlx::query("SELECT CASE WHEN expires_at>clock_timestamp() THEN count ELSE 0 END AS count,CASE WHEN count>=$3 AND expires_at>clock_timestamp() THEN greatest(1,ceil(extract(epoch FROM expires_at-clock_timestamp())))::bigint ELSE 0 END AS retry FROM identity_authority.attempts WHERE tenant_id=$1::uuid AND key=$2")
-        .bind(tenant.to_string()).bind(&key).bind(window.limit).fetch_optional(c).await?;
+        .bind(tenant.to_string()).bind(key).bind(window.limit).fetch_optional(c).await?;
     Ok(Attempt {
         key,
         seconds: window.seconds,
@@ -120,20 +120,55 @@ pub(crate) fn rate_limited(seconds: i64) -> Result<AuthorityError, PgError> {
         retry_after_seconds: seconds,
     })
 }
-pub(crate) async fn total(c: &mut PgConnection, tenant: TenantId) -> Result<i64, PgError> {
-    Ok(sqlx::query_scalar("SELECT (SELECT count(*) FROM identity_authority.attempts WHERE tenant_id=$1::uuid)+(SELECT count(*) FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid)")
-        .bind(tenant.to_string()).fetch_one(c).await?)
+pub(crate) enum Room {
+    Available,
+    RecheckKeys,
+    Full,
 }
-pub(crate) async fn cleanup(
-    c: &mut PgConnection,
-    tenant: TenantId,
-    batch: u16,
-) -> Result<(), PgError> {
-    let removed=sqlx::query("DELETE FROM identity_authority.attempts WHERE (tenant_id,key) IN (SELECT tenant_id,key FROM identity_authority.attempts WHERE tenant_id=$1::uuid AND expires_at<=clock_timestamp() ORDER BY expires_at LIMIT $2)")
-        .bind(tenant.to_string()).bind(i64::from(batch)).execute(&mut *c).await?.rows_affected();
-    sqlx::query("DELETE FROM identity_authority.password_attempts WHERE (tenant_id,login_digest) IN (SELECT tenant_id,login_digest FROM identity_authority.password_attempts WHERE tenant_id=$1::uuid AND (window_until IS NULL OR window_until<=clock_timestamp()) AND (claim_until IS NULL OR claim_until<=clock_timestamp()) ORDER BY window_until NULLS FIRST LIMIT $2)")
-        .bind(tenant.to_string()).bind(i64::from(batch)-i64::try_from(removed).map_err(|_|crate::transaction::corrupt())?).execute(c).await?;
-    Ok(())
+
+/// A single admission under the existing tenant capacity lock. After reclamation
+/// reread the requested keys: the deleted batch may have included an expired one.
+pub(crate) struct Capacity {
+    occupied: i64,
+    limit: i64,
+    cleanup: Option<u16>,
+}
+impl Capacity {
+    pub(crate) async fn lock(
+        c: &mut PgConnection,
+        tenant: TenantId,
+        policy: AuthenticationPolicy,
+    ) -> Result<Self, PgError> {
+        Ok(Self {
+            occupied: lock_attempt_capacity(c, tenant).await?,
+            limit: i64::from(policy.record_capacity),
+            cleanup: Some(policy.cleanup_batch),
+        })
+    }
+    pub(crate) async fn room(
+        &mut self,
+        c: &mut PgConnection,
+        tenant: TenantId,
+        missing: i64,
+    ) -> Result<Room, PgError> {
+        if self.occupied <= self.limit - missing {
+            return Ok(Room::Available);
+        }
+        let Some(batch) = self.cleanup.take() else {
+            return Ok(Room::Full);
+        };
+        let removed: i64 = sqlx::query_scalar(include_str!("reclaim-attempts.sql"))
+            .bind(tenant.to_string())
+            .bind(i64::from(batch))
+            .fetch_one(c)
+            .await?;
+        self.occupied -= removed;
+        Ok(if removed == 0 {
+            Room::Full
+        } else {
+            Room::RecheckKeys
+        })
+    }
 }
 impl Authority {
     /// OIDC/platform reservation commits independently and is never refunded.
@@ -152,24 +187,31 @@ impl Authority {
                 crate::transaction::connection(tx, move |c| {
                     Box::pin(async move {
                         lock_tenant_scope(c, tenant).await?;
-                        lock_attempt_capacity(c, tenant).await?;
-                        cleanup(c, tenant, policy.cleanup_batch).await?;
-                        let source = attempt(c, tenant, source, policy.source).await?;
-                        let scope = attempt(c, tenant, scope, policy.scope).await?;
-                        let retry = source.retry.max(scope.retry);
-                        if retry > 0 {
-                            return Ok(Err(rate_limited(retry)?));
+                        let mut capacity = Capacity::lock(c, tenant, policy).await?;
+                        loop {
+                            let source = attempt(c, tenant, &source, policy.source).await?;
+                            let scope = attempt(c, tenant, &scope, policy.scope).await?;
+                            let room = capacity
+                                .room(
+                                    c,
+                                    tenant,
+                                    i64::from(!source.exists) + i64::from(!scope.exists),
+                                )
+                                .await?;
+                            if matches!(room, Room::RecheckKeys) {
+                                continue;
+                            }
+                            let retry = source.retry.max(scope.retry);
+                            if retry > 0 {
+                                return Ok(Err(rate_limited(retry)?));
+                            }
+                            if matches!(room, Room::Full) {
+                                return Ok(Err(AuthorityError::Busy));
+                            }
+                            source.consume(c, tenant).await?;
+                            scope.consume(c, tenant).await?;
+                            return Ok(Ok(()));
                         }
-                        if total(c, tenant).await?
-                            + i64::from(!source.exists)
-                            + i64::from(!scope.exists)
-                            > i64::from(policy.record_capacity)
-                        {
-                            return Ok(Err(AuthorityError::Busy));
-                        }
-                        source.consume(c, tenant).await?;
-                        scope.consume(c, tenant).await?;
-                        Ok(Ok(()))
                     })
                 })
                 .await
